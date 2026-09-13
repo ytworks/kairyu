@@ -248,7 +248,8 @@
       }
     },
     "requirements_worker": "tier2",
-    "requirements_reasoning_effort": "high",
+    "requirements_reasoning_effort": "inherit",
+    "requirements_min_reasoning_effort": "high",
     "requirements_max_tokens": 8192,
     "requirements_source_pr": 595,
     "requirements_source_commit": "31f1adc1caaacb7b8689a811aa65ea7ff4b74ffb",

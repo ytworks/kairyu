@@ -13,7 +13,8 @@ workloads and record exact evidence for the selected configuration.
 - Keep the existing five-route judge and dual-track DAG. Reduce four policies
   to two, and synthesize two policy answers plus the independently refined draft.
 - DeepSeek defaults to official high; normal thinking roles inherit caller effort.
-  Requirements always uses DeepSeek high. Qwen's non-thinking and medium roles
+  Requirements uses at least DeepSeek high and preserves API max, per the
+  user's later 2026-09-13 amendment (V41E-D10). Qwen's non-thinking and medium roles
   retain their existing settings. Audit remains Qwen with two refinement rounds.
 - Port PR #595 (`31f1adc`) extraction, propagation and audit contracts, not its
   historical measurements or changes to the original example.
@@ -37,7 +38,7 @@ workloads and record exact evidence for the selected configuration.
 
 ## Acceptance
 
-CPU tests exercise actual DAG effort propagation, fixed Requirement effort,
+CPU tests exercise actual DAG effort propagation, the Requirement high floor,
 multimodal forwarding, direct-route bypass, PASS/repair/exhaustion, strict role
 hook matching, deployment inventory, lifecycle isolation and measurement
 provenance. CPU checks alone do not establish model quality or six-GPU serving.

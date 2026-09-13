@@ -95,10 +95,20 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble passes 28 native and 11 public route probes on the pinned child. Low/omitted effort passes; high/max expose Qwen candidate word-count truncation. A scoped prompt correction is pushed but unverified; transfer to the GPU checkout awaits explicit approval after automatic review rejection. Quality/public-performance gates have not run. Prior capacity/context/cancellation evidence retains its recorded revisions; see MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble passes native/public probes and corrected high/max/low candidate replay at their recorded revisions. The user changed Requirement to a high floor that preserves API max; implementation and fresh effort verification are in progress. Quality/public-performance gates remain. Earlier fixed-high, capacity/context/cancellation evidence retains its recorded revisions; see MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] Preserve Requirement effort above high
+- What: per user amendment, inherit the canonical API effort into Requirement and apply a high floor in the native hook: omitted/low/high become high, max remains max. Top-level effort overrides nested template kwargs; token caps and Qwen defaults remain unchanged.
+- Why: the user now wants requests above high to retain that effort during Requirement extraction. Stop the old fixed-high campaign, preserve completed evidence, and rerun the amended native/public effort contract.
+- Refs: V41E-D10, PR #598; example role/hook/smoke regressions and MEASUREMENTS.
+
+### 2026-09-13 — [progress] Resume authorized candidate replay
+- What: explicit user transfer approval resolves the deployment blocker; synchronize PR checkpoint 121bec4f, restart normally, attest the new prompt configuration and preserve private state. Start per-rank native checks followed by high/max replay and remaining gates.
+- Why: the candidate word-count correction needs measured evidence before readiness can be claimed. Preserve the previous two effort failures and use new evidence directories.
+- Refs: PR #598, V41E-D9; verification-results/20260913-wordcount-startup and 20260913-wordcount-gates.
 
 ### 2026-09-13 — [progress] Preserve effort failures and deployment blocker
 - What: finish the four-effort replay: low/omitted pass, high/max fail strict candidate completion despite successful final synthesis/audit. Push the scoped prompt correction and retain healthy services at the last measured source.

@@ -52,12 +52,12 @@ def payload(role, *, model="deepseek-v4.1-flash", effort="low"):
 
 
 @pytest.mark.parametrize("effort", [None, "low", "high", "max"])
-def test_requirements_native_fixed_high_with_json_and_unchanged_images(effort):
+def test_requirements_native_high_floor_with_json_and_unchanged_images(effort):
     middleware, module = hook()
     original = payload("requirements", effort=effort)
     changed, role = middleware.transform(original)
     assert role == "requirements"
-    assert changed["reasoning_effort"] == "high"
+    assert changed["reasoning_effort"] == ("max" if effort == "max" else "high")
     assert changed["chat_template_kwargs"]["thinking"] is True
     assert changed["structured_outputs"] == {"json": module.CHECKLIST_SCHEMA}
     assert changed["thinking_token_budget"] == 4096
@@ -178,7 +178,9 @@ def test_requirements_overrides_nested_effort(effort):
     original = payload("requirements", effort=effort)
     original["chat_template_kwargs"]["reasoning_effort"] = effort
     changed, _ = middleware.transform(original)
-    assert changed["chat_template_kwargs"]["reasoning_effort"] == "high"
+    assert changed["chat_template_kwargs"]["reasoning_effort"] == (
+        "max" if effort == "max" else "high"
+    )
 
 
 @pytest.mark.parametrize("role", ["synthesis", "deepseek_think_answer"])
@@ -193,13 +195,14 @@ def test_native_public_answer_budget_reservation(role, maximum):
     assert changed["reasoning_effort"] == "max"
 
 
+@pytest.mark.parametrize("effort", ["low", "max"])
 @pytest.mark.parametrize("maximum", [None, 0, 1, "8192", True])
-def test_tiny_or_invalid_budget_still_fixes_requirements_effort(maximum):
+def test_tiny_or_invalid_budget_still_fixes_requirements_effort(maximum, effort):
     middleware, _ = hook()
-    original = payload("requirements", effort="low")
+    original = payload("requirements", effort=effort)
     original["max_tokens"] = maximum
     changed, _ = middleware.transform(original)
-    assert changed["reasoning_effort"] == "high"
+    assert changed["reasoning_effort"] == ("max" if effort == "max" else "high")
     assert "thinking_token_budget" not in changed
 
 
@@ -306,3 +309,45 @@ def test_requirement_schema_allows_json_escapes_and_keeps_python_validation():
                 quality.parse_checklist(json.dumps([{**row, name: empty}]))
     with pytest.raises(ValueError, match="nonempty"):
         quality.parse_checklist("[]")
+
+
+@pytest.mark.parametrize("effort", [None, "low", "high", "max"])
+@pytest.mark.parametrize("nested", [None, "low", "high", "max"])
+async def test_requirements_floor_forwards_canonical_effort_over_nested(effort, nested):
+    import json
+
+    middleware, _ = hook()
+    original = payload("requirements", effort=effort)
+    if effort is None:
+        original.pop("reasoning_effort")  # Actual API omission, not JSON null.
+    original["chat_template_kwargs"]["reasoning_effort"] = nested
+    original["chat_template_kwargs"]["thinking"] = False
+    raw = json.dumps(original).encode()
+    incoming = [{"type": "http.request", "body": raw, "more_body": False}]
+    forwarded = []
+
+    async def app(scope, receive, send):
+        forwarded.append(json.loads((await receive())["body"]))
+
+    async def receive():
+        return incoming.pop(0)
+
+    async def send(message):
+        pass
+
+    middleware.app = app
+    await middleware(
+        {"type": "http", "path": "/v1/chat/completions", "method": "POST", "headers": []},
+        receive,
+        send,
+    )
+    assert len(forwarded) == 1
+    wire = forwarded[0]
+    expected = "max" if effort == "max" else "high"
+    assert wire["reasoning_effort"] == expected
+    assert wire["chat_template_kwargs"]["reasoning_effort"] == expected
+    assert wire["chat_template_kwargs"]["thinking"] is True
+    assert wire["chat_template_kwargs"]["enable_thinking"] is True
+    assert wire["max_tokens"] == 8192
+    assert wire["thinking_token_budget"] == 4096
+    assert wire["messages"] == original["messages"]

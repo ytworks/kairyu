@@ -43,7 +43,7 @@ form three peer candidates. All roles use original images directly. Remove
 the image-description bridge and old DeepSeek text scaffolds; vLLM's V4.1
 tokenizer/reasoning/tool parser owns native chat rendering.
 
-## V41E-D3 — Fixed-high DeepSeek requirements
+## V41E-D3 — DeepSeek requirements (effort amended by D10)
 
 Port the example-level mechanism from PR #595 at `31f1adc`, without changing
 the original example or importing its measurements. A requirements root
@@ -51,7 +51,8 @@ extracts stable minimum/optional criteria and passes them to the planner,
 answers, critique, synthesis and audit. Head/draft remain parallel roots and
 direct routes bypass requirements. The original conversation remains authoritative.
 
-Requirement uses native DeepSeek high regardless of request effort. Other
+The initial Requirement policy used native DeepSeek high regardless of request
+effort; V41E-D10 supersedes that effort rule with a high floor. Other
 DeepSeek thinking roles inherit effort, default high; direct is non-thinking.
 Qwen keeps its existing medium alias and non-thinking roles. Example middleware
 matches complete shipped role templates, including refinement forms, and sets
@@ -160,6 +161,24 @@ requests, medium effort, sampling, total caps and thinking reservations. This
 is a prompt correction requiring replay, not a guaranteed bound on model
 deliberation or a serving-time repair mechanism. Retain the failing peer and
 do not relax the candidate-completion check to hide it.
+
+## V41E-D10 — Requirement effort has a high floor
+
+The user amended the contract: when the request's effort exceeds high,
+Requirement must use that higher effort. With the supported canonical modes,
+omitted/low/high use native high and max uses native max. The public API already
+normalizes aliases before orchestration (including xhigh to max).
+
+Change the Requirement role from fixed high to inherit, preserving canonical
+request effort until the example hook applies the floor. The resolved top-level
+role effort is authoritative; nested chat-template kwargs are overwritten to
+the same effective value and thinking remains enabled. Thus max/nested-low
+becomes max, while low-or-omitted/nested-max becomes high. Nested template
+metadata does not select orchestration effort. Keep the 8192 total and 4096
+thinking reservation unchanged; native effort and the safety cap are separate.
+Other DeepSeek and all Qwen effort settings remain unchanged. Preserve older
+fixed-high measurements at their revisions and rerun native/conflicting-input
+and public effort cases before claiming this amended behavior GPU-validated.
 
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

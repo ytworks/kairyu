@@ -1,6 +1,7 @@
 """Exercise the shipped example's checklist flow with scripted model responses."""
 
 import asyncio
+import importlib.util
 import json
 import re
 from dataclasses import fields
@@ -135,9 +136,27 @@ async def test_example_checklist_survives_parallel_roots_and_refinement(
     assert not {"answer_3", "answer_4"} & backend.requests.keys()
     for name in ("requirements",):
         request, _ = backend.requests[name][0]
-        assert (
-            request.reasoning_effort == "high"
-        )  # Fixed native DeepSeek high, independent of caller.
+        # Canonical request effort reaches the example-local native hook;
+        # that hook enforces the high floor while preserving explicit max.
+        assert request.reasoning_effort == (effort or "high")
+        module_spec = importlib.util.spec_from_file_location(
+            "v41_dag_requirements_floor", EXAMPLE / "requirements_budget.py"
+        )
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        middleware = module.RequirementsBudgetMiddleware(None, config_dir=EXAMPLE)
+        changed, matched = middleware.transform(
+            {
+                "model": "deepseek-v4.1-flash",
+                "messages": [{"role": "user", "content": backend.requests[name][0][1]}],
+                "reasoning_effort": request.reasoning_effort,
+                "max_tokens": request.sampling_params.max_tokens,
+            }
+        )
+        assert matched == "requirements"
+        assert changed["reasoning_effort"] == ("max" if effort == "max" else "high")
+        assert changed["chat_template_kwargs"]["reasoning_effort"] == changed["reasoning_effort"]
+        assert changed["thinking_token_budget"] == 4096
         assert request.sampling_params.max_tokens == (8192 if name == "requirements" else 4096)
         if with_image:
             assert request.chat_template_kwargs == {"enable_thinking": True}
@@ -157,6 +176,8 @@ async def test_example_checklist_survives_parallel_roots_and_refinement(
         if with_image:
             assert isinstance(request.prompt, MultimodalPrompt)
             assert request.prompt.items == media.items
+    for name in ("draft", "answer_1", "answer_2", "audit"):
+        assert all(request.reasoning_effort == "high" for request, _ in backend.requests[name])
     assert "{requirements}" not in backend.requests["audit"][0][1]
     if fail_audits:
         assert DEFECT in backend.requests["synthesis"][1][1]

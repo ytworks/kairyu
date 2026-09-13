@@ -152,7 +152,7 @@ def build_cases(directory: Path, model: str) -> list[dict]:
                     "name": f"requirements-{effort or 'omitted'}-nested-{nested or 'omitted'}",
                     "kind": "requirements",
                     "payload": body,
-                    "expected_effective_effort": "high",
+                    "expected_effective_effort": "max" if effort == "max" else "high",
                     "effort_observation": "Requires worker hook log/preamble evidence",
                     "expected_literals": ["Ready."],
                 }
@@ -185,7 +185,7 @@ def build_cases(directory: Path, model: str) -> list[dict]:
                 "name": "requirements-" + name,
                 "kind": "requirements",
                 "payload": body,
-                "expected_effective_effort": "high",
+                "expected_effective_effort": "max",
                 "expected_literals": [literal],
             }
         )
@@ -285,6 +285,7 @@ def build_l2_cases(directory: Path, *, effort_matrix: bool = False) -> list[dict
             "trace": True,
             "expected_profile": "primary",
             "expect_headless": False,
+            "expected_effective_effort": "high",
         }
     )
     if effort_matrix:
@@ -302,7 +303,7 @@ def build_l2_cases(directory: Path, *, effort_matrix: bool = False) -> list[dict
                     "trace": True,
                     "expected_profile": "primary",
                     "expect_headless": False,
-                    "expected_effective_effort": "high",
+                    "expected_effective_effort": "max" if effort == "max" else "high",
                 }
             )
     native = {c["name"]: c for c in build_cases(directory, "kairyu-auto-max")}

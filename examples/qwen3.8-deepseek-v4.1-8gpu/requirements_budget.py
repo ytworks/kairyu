@@ -97,8 +97,10 @@ class RequirementsBudgetMiddleware:
         roles = spec["roles"] + [r for p in spec["profiles"] for r in p["roles"]]
         requirements = next(r for r in roles if r["name"] == "requirements")
         audit = next(r for r in roles if r["name"] == "audit")
-        if requirements["worker"] != "tier2" or requirements["reasoning_effort"] != "high":
-            raise ValueError("requirements must run on DeepSeek at fixed native high")
+        if requirements["worker"] != "tier2" or requirements["reasoning_effort"] != "inherit":
+            raise ValueError(
+                "requirements must inherit canonical effort on DeepSeek for the native high floor"
+            )
         if audit["worker"] != "tier1" or audit["reasoning_effort"] != "high":
             raise ValueError("audit must run on Qwen at fixed medium (spec high)")
         self.qwen_thinking_budgets = {}
@@ -177,8 +179,12 @@ class RequirementsBudgetMiddleware:
             if payload.get("reasoning_effort") in ("low", "high", "max"):
                 changed["chat_template_kwargs"]["reasoning_effort"] = payload["reasoning_effort"]
             if name == "requirements":
-                changed["reasoning_effort"] = "high"
-                changed["chat_template_kwargs"]["reasoning_effort"] = "high"
+                # L3's canonical top-level effort wins over template kwargs.
+                # Preserve explicit max; raise omitted/low/high to the high floor.
+                # Effort is independent of the unchanged output reservation.
+                effort = "max" if payload.get("reasoning_effort") == "max" else "high"
+                changed["reasoning_effort"] = effort
+                changed["chat_template_kwargs"]["reasoning_effort"] = effort
                 maximum = payload.get("max_tokens")
                 if type(maximum) is int and maximum >= 2:
                     changed["thinking_token_budget"] = min(4096, maximum // 2)

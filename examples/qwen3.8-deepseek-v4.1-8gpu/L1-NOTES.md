@@ -112,10 +112,13 @@ prove enforcement. The inspected enforcement chain is:
   raises that token's logit to `1e9`; the selected child also corrects the
   split top-p cutoff at this maximum (V41E-D8 below).
 
-Native GPU probes now confirm completed JSON for all 12 API/nested-effort
+The earlier fixed-high native GPU probes confirm completed JSON for all 12 API/nested-effort
 combinations, with exact request-hash correlation to fixed-high hook records.
 A forced 16-token thinking budget reports exactly 16 reasoning tokens and a
 completed public answer. These probes do not establish arbitrary task quality.
+The later V41E-D10 amendment preserves API max instead of forcing it down to
+high; its native and public effort replay is a new gate. The existing total
+and thinking-token reservations remain independent of native effort selection.
 
 The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
 (protocol lines 231/643). Its reasoning parser uses token IDs 248068/248069

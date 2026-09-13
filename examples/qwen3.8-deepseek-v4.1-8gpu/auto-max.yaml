@@ -78,7 +78,7 @@ roles:
 - name: requirements
   worker: tier2
   role_type: planner
-  reasoning_effort: high
+  reasoning_effort: inherit
   sampling:
     temperature: 1.0
     top_p: 0.95

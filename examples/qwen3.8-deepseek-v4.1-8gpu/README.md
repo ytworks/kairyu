@@ -7,7 +7,8 @@ See [MEASUREMENTS.md](MEASUREMENTS.md) for the current evidence and
 
 This separate example keeps the original five-route L2 judge while assigning
 six GPUs to DeepSeek-V4.1-Flash and two GPUs to Qwen3.8-27B-FP8. It ports
-Requirement extraction from PR #595 (`31f1adc`) onto DeepSeek at fixed high.
+Requirement extraction from PR #595 (`31f1adc`) onto DeepSeek with a high
+minimum effort: API max is preserved, while omitted/low/high use high.
 The original example configuration is preserved. Shared Kairyu changes add an
 opt-in paragraph separator and correct stream cleanup after client disconnects;
 see V41E-D5/D6 in the design and the regression evidence in MEASUREMENTS.
@@ -65,15 +66,17 @@ It is evidence derived from the original request, not a higher-priority instruct
 
 | Role | Effort |
 | --- | --- |
-| DeepSeek Requirement | **Always native high**, regardless of API effort |
+| DeepSeek Requirement | Native high for omitted/low/high; native max for API max |
 | DeepSeek policies, critique, synthesis, thinking-direct | Inherit API effort; omitted means native high |
 | DeepSeek direct | Non-thinking |
 | Qwen draft, answer_1/2, audit, thinking-direct | Existing fixed medium (DSL `high` → Qwen `medium`) |
 | Qwen head, route judge, direct | Existing non-thinking |
 
 The native V4.1 tokenizer/role hook replaces the old inline text scaffold.
-It forces Requirement high at both the top-level and nested template fields;
-the pinned encoder maps this to official high75. Its total allowance is 8192
+It applies the Requirement high floor to the resolved top-level API effort
+and writes the result to both top-level and nested template fields. Nested
+template kwargs cannot override that decision. The pinned encoder maps high
+to official high75 and max to max100. Its total allowance remains 8192
 tokens, with thinking capped at `min(4096, total/2)` to reserve checklist output.
 The generation schema omits string `minLength` because pinned XGrammar 0.2.6
 otherwise rejects quote/backslash/newline escapes. Smoke/quality checks still
@@ -208,7 +211,8 @@ confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
    Qwen replicas and DeepSeek still owns 0–5. Inspect `/routing`; confirm all five
    profiles and only two policy-answer stages. Test JSON/headless/tool requests
    and native images. For API efforts omitted/low/high/max, correlate the
-   Requirement stage with the DeepSeek hook log and verify high in every case.
+   Requirement stage with the DeepSeek hook log and verify high for
+   omitted/low/high and max for API max.
    Verify that other DeepSeek thinking roles inherit effort and Qwen stays medium.
 5. **Protocol and quality diagnostics.** Run the commands below. Requirement
    diagnostics run one three-case pass by default and report protocol contracts
@@ -244,7 +248,10 @@ omitted/low/high/max API effort and omitted/low/max nested effort, plus explicit
 quote/newline and backslash literal cases. Use `--case '^requirements-.*-nested-'`
 for just the effort matrix. Match each
 saved `messages_sha256` to the worker's `Kairyu role hook` log to establish
-the effective high override; a valid JSON response alone cannot establish it.
+the effective high floor and max preservation; a valid JSON response alone
+cannot establish it. A conflicting nested value must match the resolved
+top-level effort after the hook (top-level max wins over nested low, while
+top-level low or omitted uses high even if nested says max).
 The script distinguishes completed answers from output-limit truncation and
 client stream closure from server-side cancellation cleanup.
 

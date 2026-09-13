@@ -448,7 +448,7 @@ def test_escaped_requirement_cases_exercise_the_shipped_hook():
         case = cases[name]
         assert case["expected_literals"] == [literal]
         assert literal in case["payload"]["messages"][0]["content"]
-        assert case["expected_effective_effort"] == "high"
+        assert case["expected_effective_effort"] == "max"
         assert case["payload"]["reasoning_effort"] == "max"
         assert case["payload"]["chat_template_kwargs"] == {
             "reasoning_effort": "low",
@@ -470,3 +470,28 @@ def test_forced_budget_covers_seeded_nucleus_with_and_without_grammar():
             assert body["structured_outputs"] == {"json": {"type": "integer", "enum": [437]}}
         else:
             assert "structured_outputs" not in body
+
+
+@pytest.mark.parametrize(
+    "effort, expected", [(None, "high"), ("low", "high"), ("high", "high"), ("max", "max")]
+)
+@pytest.mark.parametrize("nested", [None, "low", "max"])
+def test_requirement_effort_floor_uses_canonical_top_level(effort, expected, nested):
+    cases = {c["name"]: c for c in harness().build_cases(EXAMPLE, "deepseek-v4.1-flash")}
+    case = cases[f"requirements-{effort or 'omitted'}-nested-{nested or 'omitted'}"]
+    assert case["payload"].get("reasoning_effort") == effort
+    assert (case["payload"].get("chat_template_kwargs") or {}).get("reasoning_effort") == nested
+    assert case["expected_effective_effort"] == expected
+
+
+def test_public_requirement_effort_floor_matrix():
+    cases = {c["name"]: c for c in harness().build_l2_cases(EXAMPLE, effort_matrix=True)}
+    for suffix, effort, expected in [
+        ("", "low", "high"),
+        ("-omitted", None, "high"),
+        ("-high", "high", "high"),
+        ("-max", "max", "max"),
+    ]:
+        case = cases["l2-route-primary" + suffix]
+        assert case["payload"].get("reasoning_effort") == effort
+        assert case["expected_effective_effort"] == expected

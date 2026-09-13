@@ -495,6 +495,74 @@ This is native c1 exact-key retrieval, not public ensemble long-context quality.
 
 ## Remaining gates
 
+**Latest contract amendment (V41E-D10):** the user now requires Requirement
+to retain effort above high. The implementation inherits the canonical
+top-level effort and applies a high floor: omitted/low/high become high,
+max remains max, and nested template effort is overwritten consistently.
+The 8192-token total, 4096-token thinking reservation and Qwen settings remain
+unchanged. The amended CPU suite passes **560 tests**, with Ruff and progress/
+whitespace checks passing. New native/public effort replay is required.
+
+The preceding wordcount campaign completed high, max and low (347.7 seconds)
+under the original fixed-high Requirement policy. The user amendment arrived
+during omitted-effort execution, so that child was interrupted with SIGINT and
+the parent stopped with code -2 before quality/performance/final cleanup.
+`20260913-wordcount-gates/operator-effort-change/` records the operator reason
+and all-worker stable idle afterward. This is an intentional interruption,
+not a model failure, and the completed cases do not validate the new high floor.
+
+The user explicitly approved the transfer on 2026-09-13. The same GPU checkout
+is now clean at `121bec4f`, with the V41E-D9 prompt correction and fail-closed
+paired-baseline verifier. `20260913-wordcount-startup` completes normal restart
+at approximately `2026-09-13T03:06Z`, verifies all pinned worker images and
+preserves the private key fingerprint/mode. Its new configuration hash is
+`9072c5dac44545f68926af9f5826cbeac8b3ed67d101b4cdd8c7ac34247de23f`.
+Fresh serial replay is under `20260913-wordcount-gates`; previous effort
+failures below remain tied to `05042b9b`. The transfer blocker is resolved,
+while the candidate correction still requires the fresh measurements.
+
+Initial restarted-worker checks pass **12/12**: default, nonthinking, sampled
+thinking-budget and structured sampled thinking-budget requests on each DP
+rank 0/1/2. All 546 raw returned logprob values are finite. The six sampled
+budget cases report exactly 16 reasoning tokens, return `437` and finish with
+`stop`; no case is truncated. Independent source/runtime checks agree across
+all ranks. The files below are `independent-review-manifest.json` relative to
+the persistent evidence root:
+
+| Restarted-worker evidence directory | SHA256 |
+| --- | --- |
+| `20260913-wordcount-startup` | `1b75282bcf5c233cbb3af47ef072db5a263abe1b298cc5a400a0565323b580ce` |
+| `20260913-wordcount-gates/native-rank-0` | `24c182d4e1b95c6d6cb70d80e6a5208654fcc6b56ed7a4016ceb4089e6a47905` |
+| `20260913-wordcount-gates/native-rank-1` | `99a2c412eab755f4b652b3c2ec772462c13bfc5a75462b2e8070631d49f6d5b8` |
+| `20260913-wordcount-gates/native-rank-2` | `377de93a2efd1e568b6b58afc26586d9c14ae7e8c7d28246767a5cf99e6ece6e` |
+
+The first corrected public replays pass high and max, clearing the previous
+policy-answer cap failures in these observed runs. Counts below are generated
+tokens except the final conservative whitespace word count:
+
+| API effort | Seconds | Draft | Answer 1 | Answer 2 | Refined draft | Audit | Final words |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| high | 338.9 | 1626/2048 | 2470/4096 | 2609/4096 | 2720/32768 | 5812 | 235 |
+| max | 384.1 | 1626/2048 | 2410/4096 | 2358/4096 | 4938/65536 | 6071 | 252 |
+
+All 16 role executions uniquely match hook records in their trace windows.
+Requirement stays high/8192-total/4096-thinking; other DeepSeek thinking roles
+inherit high/max; Qwen keeps its medium alias and existing reservations.
+Both final answers retain the paragraph separator and exact required ending.
+Each first audit passes; no live repair is exercised. The internal draft still
+contains a short deliberation continuation followed by a second closing-think
+marker and a complete memo. Synthesis removes that spill from the public answer.
+This is a recorded quality limitation, not proof that forced thinking boundaries
+always produce clean candidate bodies. MAX also has awkward wording around a
+conditionally raised latency ceiling; its audit paraphrases the intended bound.
+
+Reports are saved add-only below `20260913-wordcount-gates/l2-high-max/`:
+
+| Independent effort report | SHA256 |
+| --- | --- |
+| `l2-route-primary-high/independent-high-review.json` | `d4614a1aa7ccceb80bd7d63b1ebebdf728216681074962396794dc82d9ca543c` |
+| `l2-route-primary-max/independent-max-review.json` | `8f0c8a7beefa1fbb695dad5cb66e8ed3162f5d6b2453887ca8c59d6fc4f7508b` |
+
 The public effort matrix passes low (301.968 seconds) and omitted (347.8
 seconds), with exact per-stage hook correlation: Requirement stays high,
 other DeepSeek thinking roles follow low/default-high, and Qwen remains at
