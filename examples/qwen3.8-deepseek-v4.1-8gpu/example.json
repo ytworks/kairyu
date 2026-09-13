@@ -34,16 +34,16 @@
         5
       ],
       "replicas": 1,
-      "tensor_parallel_size": 2,
-      "attention_data_parallel_size": 3,
+      "tensor_parallel_size": 1,
+      "attention_data_parallel_size": 6,
       "expert_parallel_size": 6,
-      "topology": "TP2 x attention-DP3, EP6, PP1; one vLLM service on GPUs 0-5",
+      "topology": "TP1 x attention-DP6, EP6, PP1; one vLLM service on GPUs 0-5",
       "dspark_speculative_tokens": 0,
       "engram_cpu_offload": true,
       "gpu_memory_utilization": 0.9,
       "max_num_batched_tokens": 16384,
       "max_num_seqs": 32,
-      "topology_status": "candidate 2 of the L1 selection procedure (candidate 1 failed KV profiling); GPU gates pending (see MEASUREMENTS.md)"
+      "topology_status": "candidate 3 of the L1 selection procedure (candidates 1 and 2 failed); GPU gates pending (see MEASUREMENTS.md)"
     }
   },
   "models": {

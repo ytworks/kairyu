@@ -12,7 +12,7 @@
 | [`deepseek-v4-flash-vision-exp-dp2-8gpu`](deepseek-v4-flash-vision-exp-dp2-8gpu/README.md) | DeepSeek-V4-Flash-Vision-Exp TP4+EP4 x 2 replicas (GPU 0-3, 4-7) | one public text + image model with OpenAI tool calling and a Chat UI reasoning-effort dropdown (default/low/high/max); replica pool only |
 | [`deepseek-v4.1-flash-8gpu`](deepseek-v4.1-flash-8gpu/README.md) | DeepSeek-V4.1-Flash, one TP8 replica (GPU 0-7) | text + image, OpenAI tools, default thinking high; V4 ReplicaPool/API/UI structure |
 | [`qwen3.8-flash-next-dp2-8gpu`](qwen3.8-flash-next-dp2-8gpu/README.md) | Qwen3.8-Flash-Next-FP8 TP4 x 2 replicas (GPU 0-3, 4-7) | one public text + image model with OpenAI tool calling and a Chat UI reasoning-effort dropdown (default/low/medium/xhigh); replica pool only |
-| [`qwen3.8-deepseek-v4.1-8gpu`](qwen3.8-deepseek-v4.1-8gpu/README.md) | DeepSeek-V4.1-Flash on GPU 0-5 (one service, TP2 x DP3, EP6) + Qwen3.8-27B TP1 x 2 (GPU 6, 7) | Qwen-judged five-route Kairyu L2; the ensemble route is DeepSeek-led (requirements, 4 policies, 4 Qwen + 1 DeepSeek candidates, critical synthesis, final, audit); `kairyu-ensemble-max` forces it for verification |
+| [`qwen3.8-deepseek-v4.1-8gpu`](qwen3.8-deepseek-v4.1-8gpu/README.md) | DeepSeek-V4.1-Flash on GPU 0-5 (one service, EP6; topology under selection) + Qwen3.8-27B TP1 x 2 (GPU 6, 7) | Qwen-judged five-route Kairyu L2; the ensemble route is DeepSeek-led (requirements, 4 policies, 4 Qwen + 1 DeepSeek candidates, critical synthesis, final, audit); `kairyu-ensemble-max` forces it for verification |
 
 All of them use Kairyu as L3, vLLM as L1, and Open WebUI as the public chat surface.
 The four `dp` environments add no orchestration: Kairyu L2 only spreads requests

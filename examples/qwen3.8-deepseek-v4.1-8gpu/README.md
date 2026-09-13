@@ -15,14 +15,15 @@ Open WebUI ── API ─────┤
                        │
         ┌──────────────┴──────────────┐
   qwen-0 (GPU 6)  qwen-1 (GPU 7)      deepseek (GPUs 0-5, one vLLM service)
-  Qwen3.8-27B-FP8 TP1 x 2             DeepSeek-V4.1-Flash, TP2 x attention-DP3, EP6
+  Qwen3.8-27B-FP8 TP1 x 2             DeepSeek-V4.1-Flash, TP1 x attention-DP6, EP6 (candidate 3)
 ```
 
 ## Status
 
 CPU contracts only. **No GPU evidence exists for this example yet**; the
-6-GPU DeepSeek topology in `compose.yaml` is the first candidate of the
-selection procedure in `MEASUREMENTS.md`, not a verified configuration. Do
+6-GPU DeepSeek topology in `compose.yaml` is candidate 3 of the selection
+procedure in `MEASUREMENTS.md` (candidates 1 and 2 failed), not a verified
+configuration. Do
 not reuse the sibling examples' measurements for this topology.
 
 ## The five routes (unchanged judge, DTO-D13)
