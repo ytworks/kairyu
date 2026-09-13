@@ -3,11 +3,13 @@ import json
 
 import pytest
 
-from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.backend import GenerationResult, GenerationUsage, UpstreamClientError
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.budget import Budget
+from kairyu.orchestration.conductor import RoleSpec
 from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 from tests.server._legacy_chat import create_legacy_app
 
 COMPLEX = (
@@ -503,6 +505,107 @@ def test_unary_direct_failure_returns_zero_known_usage_and_sanitized_trace(tmp_p
     assert "credential must stay" not in response.text
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+@pytest.mark.parametrize(
+    ("failed_role", "with_head"),
+    [("answer", False), ("check", False), ("check", True)],
+    ids=["final", "verifier", "headed-verifier"],
+)
+def test_conductor_client_failure_preserves_cause_and_usage(
+    tmp_path, stream, failed_role, with_head,
+):
+    """A final payload rejection must not masquerade as retryable empty output."""
+
+    failure = UpstreamClientError(
+        "http://private-replica/ credential=DO_NOT_EXPOSE",
+        status_code=400 if failed_role == "answer" else 422,
+        code="context_length_exceeded",
+        public_message=None if failed_role == "answer" else "input exceeds model context",
+    )
+
+    class RejectedBackend(AccountingBackend):
+        async def generate(self, request):
+            self.calls.append(request.request_id)
+            if f"-{failed_role}-" in request.request_id:
+                raise failure
+            if "-head-" in request.request_id:
+                return self._result(request, "Public opening. ")
+            return self._result(request, "completed draft")
+
+        async def stream(self, request):
+            yield await self.generate(request)
+
+    backend = RejectedBackend()
+    roles = (
+        RoleSpec("draft", "tier1", "Draft: {query}"),
+        RoleSpec(
+            "answer", "tier2", "Answer: {draft}",
+            depends_on=("draft", "head") if with_head else ("draft",),
+        ),
+    )
+    if with_head:
+        roles = (RoleSpec("head", "tier1", "Opening: {query}", role_type="head"), *roles)
+    if failed_role == "check":
+        roles += (
+            RoleSpec(
+                "check", "tier2", "Check: {answer}",
+                role_type="verifier", depends_on=("answer",), verifies="answer",
+            ),
+        )
+    app = create_legacy_app(
+        {"plain": backend},
+        orchestrators={
+            "auto": Orchestrator({"tier1": backend, "tier2": backend}, roles=roles),
+        },
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"X-Kairyu-Trace": "1"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": COMPLEX}],
+                "stream": stream,
+                **({"stream_options": {"include_usage": True}} if stream else {}),
+            },
+        )
+        totals = app.state.usage_ledger.totals()["default"]
+
+    completed = (1 if failed_role == "answer" else 2) + int(with_head)
+    assert len(backend.calls) == completed + 1
+    assert response.status_code == (200 if stream else failure.status_code)
+    if stream:
+        payloads = _sse_payloads(response.text)
+        payload = next(item for item in payloads if "kairyu_trace_v2" in item)
+        error = next(item["error"] for item in payloads if "error" in item)
+        assert response.text.endswith("data: [DONE]\n\n")
+        content = "".join(
+            choice.get("delta", {}).get("content") or ""
+            for item in payloads for choice in item.get("choices", ())
+        )
+        assert content == ("Public opening. " if with_head else "")
+    else:
+        payload = response.json()
+        error = payload["error"]
+    assert error == {
+        "message": failure.public_message or "upstream backend rejected the request",
+        "type": "invalid_request_error",
+        "code": "context_length_exceeded",
+    }
+    assert payload["usage"]["orchestration_input_tokens"] == completed * 10
+    assert payload["usage"]["orchestration_output_tokens"] == completed * 2
+    events = payload["kairyu_trace_v2"]["events"]
+    assert events[-1]["error"]["type"] == "UpstreamClientError"
+    assert not any(event["kind"] == "retry:empty_output" for event in events)
+    assert "DO_NOT_EXPOSE" not in response.text
+    assert "private-replica" not in response.text
+    assert totals["prompt_tokens"] == completed * 10
+    assert totals["completion_tokens"] == completed * 2
+
+
 def test_moa_proposal_failure_returns_completed_call_usage_and_safe_error(tmp_path):
     class ProposalFailureBackend(AccountingBackend):
         async def generate(self, request):
@@ -899,6 +1002,9 @@ def test_profile_judge_usage_settles_when_later_preflight_rejects(tmp_path):
         roles=(final_role,),
         profiles={"general": (final_role,)},
         profile_judge=_judge_policy(),
+        # This fixture needs a small private budget to reach preflight;
+        # caller max_tokens must not determine its internal admission cost.
+        sampling_params=SamplingParams(max_tokens=8),
     )
     token_budget = 100_000
     app = create_legacy_app(

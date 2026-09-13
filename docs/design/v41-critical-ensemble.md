@@ -63,6 +63,12 @@ example's mandatory-stage requirements do not authorize globally disabling it.
 Regressions exercise ordinary one-role AUTO requests and public unary/SSE
 errors, independent of the ensemble's model names and workflow.
 
+Terminal rejection after a committed head follows the existing streamed
+partial-result error contract: retain the published head and known usage,
+then report failure. This also applies to the deferred verifier path; an
+actual backend rejection must not become a successful head-only response.
+Empty continuation without a backend exception retains its existing policy.
+
 ## Open implementation conditions
 
 - Establish a supported six-GPU topology from the pinned main runtime and
@@ -82,6 +88,18 @@ errors, independent of the ensemble's model names and workflow.
 
 ## Validation record
 
-Implementation and measurements will be appended after each tested change.
 The existing running deployment and old branch results are not evidence for
 this branch. No six-GPU startup or performance gate has passed on these bytes.
+
+### Terminal error propagation
+
+- Final and verifier rejection preserve safe status/code through unary and
+  SSE responses, without retrying the rejected request or exposing internal
+  draft content. Tests retain the committed head where present and reconcile
+  the known usage/ledger on failure.
+- 184 related usage/trace, head and Orchestrator tests pass after the headed
+  error correction. The earlier unheaded version passed 554 tests across
+  the related Conductor and public Chat/Responses suites. Ruff is clean.
+- The judge/preflight accounting fixture now explicitly configures its
+  eight-token internal budget; it no longer relies on a public limit to
+  shrink private work. Its tenant burst and accounting assertions remain.

@@ -103,6 +103,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-13 — [progress] V41C: terminal AUTO errors retain their cause
+- What: preserve selected-final/verifier failures through Conductor and unary/SSE APIs; safe upstream 400/422 remain validation errors, including after a committed head. Internal draft text cannot leak as a failed final stream's fallback. Related tests pass; capacity prevention and GPU gates remain pending.
+- Why: a known upstream rejection must not become an unrelated empty-output 502 or successful head-only response; retain partial public output and known usage while preserving optional-role best-so-far policy.
+- Refs: PR #601; issue #599; V41C-D3 in `docs/design/v41-critical-ensemble.md`.
+
 ### 2026-09-13 — [design] V41C: six-plus-two critical ensemble implementation
 - What: accept four Qwen candidates on two replicas plus an independent V4.1 candidate, DeepSeek requirements/review/reconstruction/audit, and incremental draft implementation from main. Admission records cover private-budget separation and terminal error propagation; remaining contracts and GPU gates are open.
 - Why: preserve full input, reasoning budgets and required stages while replacing the legacy V4 topology without restoring closed example-specific infrastructure.

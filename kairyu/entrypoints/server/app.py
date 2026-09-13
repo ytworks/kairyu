@@ -1122,6 +1122,7 @@ async def _stream_orchestrator(
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
+    terminal_error: BaseException | None = None
     prompt = call.prompt
     owner = _stream_usage_owner(
         http_request,
@@ -1275,6 +1276,7 @@ async def _stream_orchestrator(
                         owner.observe(reported_usage, completions)
                     if event.kind == "error":
                         terminal_error_type = event.error_type or "RuntimeError"
+                        terminal_error = event.error
                         break
         except Exception as error:  # surface as an SSE error event, then close
             logger.exception("orchestrator stream error")
@@ -1314,6 +1316,9 @@ async def _stream_orchestrator(
                     "code": "backend_error",
                 }
             }
+            if isinstance(terminal_error, UpstreamClientError):
+                chat_error = chat_error_from_upstream_client_error(terminal_error)
+                payload["error"] = chat_error.payload()
             yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
@@ -2519,8 +2524,17 @@ def create_app(
                     completions=completions,
                     usage_exact=False,
                 )
+                chat_error = (
+                    chat_error_from_upstream_client_error(error.cause)
+                    if isinstance(error.cause, UpstreamClientError)
+                    else None
+                )
                 payload = {
-                    "error": sanitize_backend_error(error.cause),
+                    "error": (
+                        chat_error.payload()
+                        if chat_error is not None
+                        else sanitize_backend_error(error.cause)
+                    ),
                     "usage": usage.model_dump(
                         mode="json",
                         exclude=_unset_orchestration_usage_fields(usage),
@@ -2531,7 +2545,10 @@ def create_app(
                     if result.structured_trace is not None:
                         payload["kairyu_trace_v2"] = result.structured_trace.as_dict()
                     payload["kairyu_route"] = _route_payload(result.route).model_dump(mode="json")
-                return JSONResponse(status_code=502, content=payload)
+                return JSONResponse(
+                    status_code=chat_error.status_code if chat_error is not None else 502,
+                    content=payload,
+                )
             except Exception as error:
                 return upstream_error(error)
             completions = result.completions or (

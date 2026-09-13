@@ -278,6 +278,9 @@ class ConductorResult:
     # (issue #496): the caller must see an explicit error, never an internal
     # stage's text or an empty "stop".
     final_unit_ok: bool = True
+    # Retain the terminal failure for transport-specific error translation.
+    # This is internal state; arbitrary backend diagnostics never enter trace.
+    final_error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -472,6 +475,7 @@ class _RunState:
     final_unit_completion_tokens: int | None = None
     public_budget_exhausted: bool = False
     final_unit_unusable: bool = False
+    final_error: BaseException | None = None
 
 
 class _BudgetRefused(Exception):
@@ -2442,10 +2446,10 @@ class Conductor:
         # result produced so far (O4). Sibling units keep their completed work.
         try:
             await self._run_unit(run, session, query, spec, event_sink=event_sink)
-        except _ObservedGenerationError:
-            self._mark_failed_final_unit(run, spec)
+        except _ObservedGenerationError as error:
+            self._mark_failed_final_unit(run, spec, error.__cause__)
         except Exception as error:
-            self._mark_failed_final_unit(run, spec)
+            self._mark_failed_final_unit(run, spec, error)
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2458,7 +2462,12 @@ class Conductor:
                 )
             )
 
-    def _mark_failed_final_unit(self, run: _RunState, spec: RoleSpec) -> None:
+    def _mark_failed_final_unit(
+        self,
+        run: _RunState,
+        spec: RoleSpec,
+        error: BaseException | None,
+    ) -> None:
         """A failed selected final unit must not fall back to internal stages.
 
         Without this the last completed internal stage would be published as
@@ -2468,6 +2477,7 @@ class Conductor:
 
         if spec.name != self._selected_final_unit().name:
             return
+        run.final_error = error
         if spec.name in self._verifier_for:
             # A verify/refine-loop failure may happen after an earlier attempt
             # was stored in outputs. That attempt is either unverified or was
@@ -3039,6 +3049,7 @@ class Conductor:
             reasoning_content=self._reasoning_content(run),
             public_completion_tokens=self._public_completion_tokens(run),
             final_unit_ok=not run.final_unit_unusable,
+            final_error=run.final_error,
         )
 
     async def stream(
@@ -3109,6 +3120,7 @@ class Conductor:
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
+                final_error=run.final_error,
             )
 
         # Phase A (EO-D7/EO-D8): one producer task runs the pre-final DAG.  The
@@ -3266,6 +3278,7 @@ class Conductor:
                         )
                     )
         except Exception as error:
+            self._mark_failed_final_unit(run, final, error)
             raise ConductorStreamError(
                 error,
                 partial_result(emitted_text if head_active else self._final_text(run)),
@@ -3294,5 +3307,6 @@ class Conductor:
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
+                final_error=run.final_error,
             ),
         )

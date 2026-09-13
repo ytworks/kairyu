@@ -1172,6 +1172,15 @@ def chat_error_from_upstream_client_error(
             "OpenAI-compatible upstream rejected a request",
             exc_info=error,
         )
+        if error.status_code in {400, 422}:
+            # Payload validation remains a client error even when the upstream
+            # diagnostic is private. Do not turn it into a retryable gateway
+            # failure or expose the raw response body to explain it.
+            return ChatRequestError(
+                "upstream backend rejected the request",
+                status_code=error.status_code,
+                code=error.code,
+            )
         return ChatRequestError(
             "upstream backend rejected the request",
             status_code=502,

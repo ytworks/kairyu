@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
@@ -150,6 +150,8 @@ class OrchestratorEvent:
     completions: tuple[CompletionOutput, ...] = ()
     result: OrchestratorResult | None = None
     error_type: str | None = None
+    # Internal cause for safe translation at the interface boundary.
+    error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
 class OrchestratorExecutionError(RuntimeError):
@@ -2293,18 +2295,28 @@ class Orchestrator:
             )
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             trace_events.extend(result.trace)
-            if not result.final_unit_ok and not result.final_text:
+            if result.final_error is not None or (
+                not result.final_unit_ok and not result.final_text
+            ):
                 # The selected final unit failed or produced no public text
                 # after its retry; publishing an internal stage or an empty
                 # "stop" would be a silent lie to the caller (issue #496).
+                # A committed head is retained as partial output, but cannot
+                # turn a terminal backend rejection into a successful answer.
                 raise OrchestratorExecutionError(
-                    RuntimeError("orchestration final unit produced no public output"),
+                    result.final_error
+                    or RuntimeError("orchestration final unit produced no public output"),
                     result_with_trace(
-                        text="",
+                        text=result.final_text,
+                        completions=_public_multistage_completions(
+                            result.completions,
+                            result.reasoning_content,
+                        ),
                         prompt_tokens=result.usage[0],
                         completion_tokens=result.usage[1],
                         cached_tokens=result.cached_tokens,
                         reasoning_content=result.reasoning_content,
+                        public_completion_tokens=result.public_completion_tokens,
                     ),
                 )
             return result_with_trace(
@@ -3178,6 +3190,7 @@ class Orchestrator:
                     reasoning_content=conductor_result.reasoning_content,
                 ),
                 error_type=type(error.cause).__name__,
+                error=error.cause,
             )
             return
         if conductor_result is None:
@@ -3186,19 +3199,31 @@ class Orchestrator:
             f"{event.node}: {event.kind} {event.detail}" for event in conductor_result.trace
         )
         trace_events.extend(conductor_result.trace)
-        if not conductor_result.final_unit_ok and not conductor_result.final_text:
+        if conductor_result.final_error is not None or (
+            not conductor_result.final_unit_ok and not conductor_result.final_text
+        ):
             # Same contract as the unary route (issue #496): an empty final
             # unit becomes an explicit error event, never a silent empty stop.
             yield OrchestratorEvent(
                 kind="error",
                 result=result_with_trace(
-                    text="",
+                    text=conductor_result.final_text,
+                    completions=_public_multistage_completions(
+                        conductor_result.completions,
+                        conductor_result.reasoning_content,
+                    ),
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
                     cached_tokens=conductor_result.cached_tokens,
                     reasoning_content=conductor_result.reasoning_content,
+                    public_completion_tokens=conductor_result.public_completion_tokens,
                 ),
-                error_type="EmptyFinalOutput",
+                error_type=(
+                    type(conductor_result.final_error).__name__
+                    if conductor_result.final_error is not None
+                    else "EmptyFinalOutput"
+                ),
+                error=conductor_result.final_error,
             )
             return
         yield OrchestratorEvent(
