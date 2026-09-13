@@ -66,7 +66,7 @@ def test_v41_tiered_compose_places_deepseek_on_six_gpus_and_qwen_on_two() -> Non
     assert "--enable-expert-parallel" in command
     assert "--speculative-config" not in command
     assert "--default-chat-template-kwargs" not in command
-    assert _option(command, "--gpu-memory-utilization") == str(tier2["gpu_memory_utilization"])
+    assert float(_option(command, "--gpu-memory-utilization")) == tier2["gpu_memory_utilization"]
     assert _option(command, "--max-num-batched-tokens") == str(tier2["max_num_batched_tokens"])
     assert _option(command, "--max-num-seqs") == str(tier2["max_num_seqs"])
     assert json.loads(_option(command, "--engram-config")) == {
