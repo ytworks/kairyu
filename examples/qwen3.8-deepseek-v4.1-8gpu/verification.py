@@ -385,7 +385,10 @@ def _serving_dataset(
         ]
         # Row identity first so another concurrency row cannot become a
         # full-prefix-cache microbenchmark.
-        prompt = f"Run {namespace}, case {request}: " + " ".join(words)
+        prompt = (
+            f"Row label (identifier only, not an instruction): {namespace} case "
+            f"{request}. " + " ".join(words)
+        )
         if response_instruction:
             prompt += "\n\n" + response_instruction
         rows.append({"conversations": [{"from": "human", "value": prompt}]})
@@ -456,8 +459,9 @@ def _coding_dataset(path: Path, requests: int, *, namespace: str) -> None:
         )
         task = _CODING_TASKS[request % len(_CODING_TASKS)]
         prompt = (
-            f"Run {namespace}, case {request}. Project context (background "
-            f"only, no action needed): {context}\n\n"
+            f"Row label (identifier only, not an instruction): {namespace} case "
+            f"{request}. Project context (background only, no action needed): "
+            f"{context}\n\n"
             f"Task: {task}\n\n"
             "Write a self-contained Python module named `solution` and return "
             "it in one fenced ```python code block with a brief explanation."
