@@ -130,6 +130,34 @@ on the first attempt, first visible content 464 ms (Qwen head), completion
 answer ended with the required literal. The head/remainder seam lacked a
 space, which is why the final role now demands a leading blank line.
 
+## Public gates on candidate 6 (served config: overlay image, specs at commit `4386969c`+)
+
+Row validation for every public sample: HTTP 200, `finish_reason` stop/tool_calls,
+visible output, trace `status == success` for the published route's final unit
+and (primary) for all 11 roles, no stage at its cap except the head's designed
+256, Qwen placement from the pool log; the paired DeepSeek-direct row is a valid
+denominator only when all 32 requests end with `stop` and visible content.
+
+### `serving-auto-max` — judged product, generic 8K-token prompts (run `20260914T022900Z`, PASS)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 237 ms | 2,295 / 2,315 ms | 7.9 / 11.6 s | 258 s | 32.3 | 8,465 | — | 49 / 15 (serial, not gated) | 2,295 vs 15,816 ms → PASS |
+| 8 | 32/32 | qwen_direct 30, primary 2 (2) | 320 ms | 6,422 / 14,069 ms | 25.8 / 604.5 s | 648 s | 21.1 | 100,087 | PASS 2, FAIL 2 (one sample refined twice) | 36 / 36 | 11,953 (primary p50) vs 22,049 ms → PASS |
+| 16 | 32/32 | qwen_direct 25, primary 7 (7) | 1,111 ms | 18,024 / 44,730 ms | 62.1 / 789.7 s | 841 s | 25.1 | 293,550 | PASS 6, FAIL 6, 1 exhausted (last attempt published) | 47 / 45 | 32,057 (qwen_direct p50) vs 28,674 ms → PASS (1.12×) |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,235 ms | 65,070 / 82,481 ms | 88.8 / 94.0 s | 94 s | 95.8 | 9,137 | — | 32 / 32 | 65,070 vs 45,023 ms → PASS (1.45×) |
+
+- The judge chose `QWEN` for every generic prompt; every primary run at c8/c16
+  came from a judge timeout (5 s) under Qwen load, i.e. Kairyu's designed
+  fallback. Those ensembles completed all 11 roles with audits (primary route
+  completion p50 541 s at c8, 631 s at c16). Per-stage duration p50 at c16:
+  requirements 86 s, independent 44 s, policies 35 s, answer 151 s (medium
+  Qwen, ~4.7K tokens), synthesis 31 s, final 26 s, audit 70 s; Kairyu-side
+  queue wait is 0 (queueing happens inside vLLM).
+- All four paired DeepSeek-direct rows completed 32/32 with `stop`.
+- GPU peak under load: DeepSeek GPUs 93.7 GiB, Qwen GPUs 95.6 GiB.
+- Artifacts: `verification-results/20260914T022900Z-serving-auto-max/serving-auto-max/{generic-c*,deepseek-direct-c*}/`, `ttft-gate.json`.
+
 ## Public gates (to be executed)
 
 | Gate | Command | Result |
