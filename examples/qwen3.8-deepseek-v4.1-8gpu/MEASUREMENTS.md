@@ -249,11 +249,47 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 
 ## Public gates on served config B (specs at commit `e8d7ba8e`, gateway restarted 2026-09-14 10:43 UTC; gate chain run 6)
 
+### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 241 ms | 2,299 / 2,349 ms | 8.9 / 11.2 s | 291 s | 33.7 | 9,936 | — | 46 / 18 (serial, not gated) | 2,299 vs 14,705 ms → PASS |
+| 8 | 32/32 | qwen_direct 29, primary 3 (3) | 320 ms | 6,458 / 13,926 ms | 27.3 / 895.5 s | 931 s | 21.1 | 148,388 | PASS 2, exhausted 1 | 38 / 38 | 12,187 (primary p50) vs 21,322 ms → PASS |
+| 16 | 2/32 | qwen_direct 2, 30 never answered | 1,106 ms | — | — | 14,587 s (client timeout) | — | — | — | 18 / 18 | row FAIL (30 requests hung) |
+
+- At 11:26:53 UTC, after the first two c16 answers, the gateway stopped
+  serving everything — chat completions, `/readyz`, the compose health
+  probe — while its process stayed alive (state S, 205 threads, 0 % CPU,
+  291 MB RSS, 51 open files, listen socket up). The 30 remaining requests
+  hung until the client's 14,400 s timeout; the chain then moved on and was
+  stopped by hand at 15:31 UTC. The engines were healthy throughout (the
+  paired DeepSeek-direct rows and the Qwen replicas kept answering).
+- Cause (py-spy dump of the live process, `gate-logs-run6/gateway-hang-20260914T1126Z-pyspy.txt`):
+  the event-loop thread is blocked in
+  `kairyu/engine/openai_backend.py` — `_peek_prepared_payload` holds
+  `self._prepared_payloads_lock` (a non-re-entrant `threading.Lock`) when a
+  garbage-collection pass fires the weakref callback `discard` of a dead
+  `GenerationRequest`, and `discard` tries to take the same lock on the
+  same thread: a self-deadlock that freezes the whole gateway. The module-
+  level `_SHARED_PREPARED_PAYLOADS_LOCK` has the same pattern. This is a
+  `main` framework defect independent of this example (the code has been in
+  place since `1fff59db`, 2026-08-06); it depends on GC timing, which is why
+  the identical c16 row passed on config A.
+- Handling: the gateway was restarted (15:33 UTC; served config unchanged),
+  a host-side watchdog (`gate-logs-run7/gateway_watchdog.sh`) now dumps the
+  stacks and restarts the gateway if `/readyz` fails for two minutes, so a
+  recurrence costs minutes instead of hours and is recorded, and every
+  public gate is re-run as chain run 7. The framework fix (re-entrant lock
+  or a callback that never blocks on the lock) needs the owner's
+  authorization as a separate change; nothing in `kairyu/` is modified by
+  this example.
+- Artifacts: `verification-results/20260914T105208Z-serving-auto-max/serving-auto-max/{generic-c*,deepseek-direct-c*}/`, `ttft-gate.json`, `gate-logs-run6/`.
+
 ## Public gate status
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | config A PASS (`20260914T022900Z`); config B re-run in progress |
+| Judged product, generic | `verify.sh serving-auto-max` | config A PASS (`20260914T022900Z`); config B run 6 c1/c8 PASS, c16 lost to the gateway deadlock; run 7 in progress |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | config A rows PASS, gate not applicable (`20260914T031731Z`); config B re-run in progress |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config A generic c1 PASS (`20260914T051628Z`, stopped for diagnosis); config B re-run in progress |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |

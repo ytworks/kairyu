@@ -96,12 +96,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
+- Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
 - `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + D1/D2 amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates and the judged serving matrices passed on the first served config; the audit protocol was amended after the first forced-ensemble row rewarded fabricated execution claims, and every public gate is being re-run on the revised specs
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-14 — [progress] Blocker: gateway self-deadlock in the OpenAI backend's prepared-payload cache
+- What: during the V4.1 tiered example's judged c16 row the gateway froze entirely (no chat, no `/readyz`, process alive, 0 % CPU). py-spy shows the event-loop thread in `openai_backend._peek_prepared_payload` holding `_prepared_payloads_lock` (`threading.Lock`) while the weakref callback `discard`, fired by garbage collection, blocks on the same lock; `_SHARED_PREPARED_PAYLOADS_LOCK` shares the pattern. Timing-dependent (the same row passed earlier). The example restarts the gateway and re-runs its gates; `kairyu/` is untouched.
+- Why: a GC-time weakref callback that takes a non-re-entrant lock can run on the thread that already holds it. Fix candidates (re-entrant lock, or a callback that never blocks) need owner authorization as a framework change.
+- Refs: PR #602; `examples/qwen3.8-deepseek-v4.1-8gpu/MEASUREMENTS.md` (run 6); `kairyu/engine/openai_backend.py` `_retain_prepared_payload` / `_peek_prepared_payload` (since `1fff59db`)
 
 ### 2026-09-14 — [amendment] V41T-D2: the V4.1 tiered audit rejects unbacked execution claims
 - What: the first forced-ensemble row (generic c1, 32 requests) exhausted the audit 8 times; replayed audit texts showed the benchmark row label `Run <id>, case N` extracted as a requirement to execute, honest "not executed" answers FAILed and invented execution results PASSed (25/32 published answers). The audit now accepts run/test/measure/verify claims only with the matching tool call and result, FAILs them as fabrication otherwise, and accepts a plain "cannot be performed this turn" statement; synthesis and final carry the same rule; benchmark rows label their identity as an identifier. The three replayed requests then passed on the first audit without invented results. All public gates are re-run on the revised specs.
