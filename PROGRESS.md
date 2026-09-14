@@ -96,13 +96,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
 - `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + D1/D2 amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates and the judged serving matrices passed on the first served config; the audit protocol was amended after the first forced-ensemble row rewarded fabricated execution claims, and every public gate is being re-run on the revised specs
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-14 — [progress] Gateway self-deadlock fixed: prepared-request caches use re-entrant locks
+- What: `_SHARED_PREPARED_PAYLOADS_LOCK`, `OpenAICompatBackend._prepared_payloads_lock` / `_prepared_image_urls_lock`, `KairyuBackend._prepared_requests_lock` and `ZmqEngineBackend._prepared_requests_lock` are now `threading.RLock` (the vision image cache already was). A regression test drops the last reference to a cached request while holding each cache's lock, which runs the weakref discard callback on the holding thread; it deadlocked on all five caches before and passes now. Resolves the blocker recorded in the preceding entry.
+- Why: the discard callbacks run at garbage-collection time on whichever thread triggers collection, including one inside the guarded region; a non-re-entrant lock then blocks the gateway's event loop forever.
+- Refs: fix PR based on PR #602; `kairyu/engine/{openai_backend,kairyu_backend,zmq_backend}.py`; `tests/unit/test_prepared_cache_discard_reentrancy.py`
 
 ### 2026-09-14 — [progress] Blocker: gateway self-deadlock in the OpenAI backend's prepared-payload cache
 - What: during the V4.1 tiered example's judged c16 row the gateway froze entirely (no chat, no `/readyz`, process alive, 0 % CPU). py-spy shows the event-loop thread in `openai_backend._peek_prepared_payload` holding `_prepared_payloads_lock` (`threading.Lock`) while the weakref callback `discard`, fired by garbage collection, blocks on the same lock; `_SHARED_PREPARED_PAYLOADS_LOCK` shares the pattern. Timing-dependent (the same row passed earlier). The example restarts the gateway and re-runs its gates; `kairyu/` is untouched.

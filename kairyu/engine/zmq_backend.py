@@ -1182,7 +1182,9 @@ class ZmqEngineBackend:
             int,
             tuple[weakref.ReferenceType[GenerationRequest], _PreparedProcPrompt],
         ] = {}
-        self._prepared_requests_lock = threading.Lock()
+        # Re-entrant: the discard weakref callback may run, at garbage
+        # collection time, on the thread that already holds this lock.
+        self._prepared_requests_lock = threading.RLock()
         # Unknown compatibility tokenizers queue on the event loop, leaving
         # prompt executor threads available to other backends while they wait.
         self._prompt_tokenizer_gate = asyncio.Lock()

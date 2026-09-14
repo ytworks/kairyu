@@ -172,7 +172,10 @@ _SHARED_PREPARED_PAYLOADS: dict[
         dict[tuple[object, ...], bytes],
     ],
 ] = {}
-_SHARED_PREPARED_PAYLOADS_LOCK = threading.Lock()
+# Re-entrant: the weakref discard callbacks of these caches run at garbage
+# collection time on whichever thread triggers the collection, including a
+# thread that is inside one of the guarded regions below.
+_SHARED_PREPARED_PAYLOADS_LOCK = threading.RLock()
 
 
 async def _await_task_cancellation_safe(task: asyncio.Task[None]) -> None:
@@ -742,13 +745,14 @@ class OpenAICompatBackend:
             int,
             tuple[weakref.ReferenceType[GenerationRequest], bytes],
         ] = {}
-        self._prepared_payloads_lock = threading.Lock()
+        # Re-entrant for the same reason as _SHARED_PREPARED_PAYLOADS_LOCK.
+        self._prepared_payloads_lock = threading.RLock()
         self._preparing_payloads: dict[int, _PayloadPreparationFlight] = {}
         self._prepared_image_urls: dict[
             int,
             tuple[weakref.ReferenceType[GenerationRequest], tuple[str, ...]],
         ] = {}
-        self._prepared_image_urls_lock = threading.Lock()
+        self._prepared_image_urls_lock = threading.RLock()
         self._preparing_images: dict[int, _ImagePreparationFlight] = {}
 
     @property
