@@ -1,6 +1,6 @@
 # DeepSeek V4.1 (6 GPUs) + Qwen3.8-27B (2 GPUs): judged five routes with a DeepSeek-led critical ensemble
 
-Status: **Accepted; CPU contracts implemented; L1 recipe amended by the owner (V41T-D1 amendment, 2026-09-14); GPU gates in progress.**
+Status: **Accepted; CPU contracts implemented; L1 recipe amended by the owner (V41T-D1 amendment, 2026-09-14); audit evidence rule amended after GPU diagnosis (V41T-D2 amendment, 2026-09-14); GPU gates in progress.**
 Applies to: `examples/qwen3.8-deepseek-v4.1-8gpu/` only. Consumes the L2 DSL,
 Conductor, ReplicaPool, and L3 server exactly as shipped in `main`; no
 framework, sibling-example, or shared-script change. Inherits DTO-D3
@@ -67,6 +67,32 @@ last attempt per the existing Conductor contract).
   route).
 - Images reach every role natively on both pools; there is no description
   stage.
+
+### V41T-D2 amendment (2026-09-14) — the audit does not accept unbacked execution claims
+
+- What: the first forced-ensemble serving row (generic, c1, 32 requests)
+  exhausted the audit on 8 requests and needed refinement on 19. Reading
+  the audit texts (three requests replayed with intermediate outputs
+  exposed) showed the cause: the benchmark row label `Run <id>, case N`
+  was extracted as a minimum requirement to execute a run, an answer that
+  said plainly that no run was performed was FAILed three times, and
+  answers that invented an execution result ("case run accepted as PASS,
+  verified") were PASSed — 25 of the 32 published answers carried such a
+  claim. The audit now treats a statement that something was run,
+  executed, tested, measured, or verified as evidence only when the
+  conversation contains the matching tool call and result, FAILs it as
+  fabrication otherwise, and treats a requirement that demands an action
+  the turn cannot perform as satisfied by an answer that says so plainly
+  and delivers everything else; `synthesis` and `final` (streamed and
+  headless) carry the same rule. The verification datasets label the row
+  identity as an identifier, not an instruction.
+- Why: the audit's purpose is to gate publication on real evidence; a
+  protocol that rewards fabricated execution claims inverts it. The rule is
+  example-owned prompt policy; Kairyu is unchanged. After the change the
+  same three requests passed on the first audit with an explicit "cannot
+  be executed in this turn" statement and no invented result.
+- Consequence: every public gate is re-run on the revised served config;
+  the earlier rows are kept in `MEASUREMENTS.md` as evidence of the defect.
 
 ## V41T-D3 — Requirement extraction on DeepSeek with the PR #595 contract
 

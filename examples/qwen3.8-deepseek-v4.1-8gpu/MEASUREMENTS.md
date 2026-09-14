@@ -130,7 +130,7 @@ on the first attempt, first visible content 464 ms (Qwen head), completion
 answer ended with the required literal. The head/remainder seam lacked a
 space, which is why the final role now demands a leading blank line.
 
-## Public gates on candidate 6 (served config: overlay image, specs at commit `4386969c`+)
+## Public gates on candidate 6, served config A (overlay image; specs at commits `4386969c`–`34104902`, before the audit amendment)
 
 Row validation for every public sample: HTTP 200, `finish_reason` stop/tool_calls,
 visible output, trace `status == success` for the published route's final unit
@@ -191,18 +191,76 @@ denominator only when all 32 requests end with `stop` and visible content.
   ≈233 GiB, Qwen containers ≈6.3 GiB each, gateway ≈0.31 GiB.
 - Artifacts: `verification-results/20260914T031731Z-serving-auto-max-coding/serving-auto-max-coding/{coding-c*,deepseek-direct-c*}/`, `ttft-gate.json`.
 
+### `serving-ensemble` — forced ensemble, generic c1 (run `20260914T051628Z`, gate PASS; chain stopped after this row by owner decision)
+
+| c | ok | routes | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit (first attempt → outcome) | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | primary 32 | 2,031 / 2,059 ms | 520.8 / 746.1 s | 17,069 s | 4.8 | 1,443,246 | PASS 13; FAIL 19 → PASS after 1 refinement 10, PASS after 2 refinements 1, exhausted after three FAILs (last attempt published) 8 | 80 / 80 | 2,031 vs 18,239 ms → PASS (0.11×); baseline 32/32 `stop` |
+
+- All 11 roles `success` on every request; every public answer `stop`; no
+  stage at its cap except the head's designed 256 (8 requests). Per-stage
+  duration p50 / p99 (ms): head 6,259 / 7,686; requirements 53,692 / 99,576;
+  independent 26,983 / 53,013; policies 34,809 / 62,450; answer_1..4
+  ≈104,700–118,000 / 225,000–310,000 (Qwen medium, 4.1–4.9K tokens p50);
+  synthesis 37,160 / 85,608; final 25,232 / 95,882 (60 attempts); audit
+  79,633 / 188,630 (60 attempts). Kairyu-side queue wait 0–1 ms.
+- Memory peaks: DeepSeek GPUs 93,151–93,733 MiB, Qwen GPUs 95,601–95,603
+  MiB; DeepSeek container RSS ≈233 GiB.
+- The warm-up (4 requests at c4) completed 4/4 `stop`, first visible content
+  ≈8.0 s, completion 468–891 s.
+- Artifacts: `verification-results/20260914T051628Z-serving-ensemble/serving-ensemble/generic/{generic-c1,deepseek-direct-c1}/`,
+  `ttft-gate.json` (no top-level `run.json`: the chain was stopped after
+  this row; the served config is the one attested by run
+  `20260914T031731Z`, same container starts and file hashes).
+
+## Audit diagnosis and prompt amendment (V41T-D2 amendment, commit `e8d7ba8e`)
+
+The public API exposes no audit text, so three of the eight exhausted requests
+(cases 2, 7, 12 of the row above) were replayed once on the same served
+config through `kairyu-ensemble-max` with the intermediate outputs read from
+`reasoning_content` (`gate-logs-run5/diag-audit/`). Findings:
+
+- The benchmark row label `Run <run id>, case N` was extracted by
+  `requirements` as minimum requirement R1 "execute the run". The audit then
+  FAILed answers that said no run was performed ("N/A without a fixture";
+  "Status: NOT_EXECUTED_EXTERNALLY") and PASSed answers that invented an
+  execution result ("The case-2 run is accepted as PASS, verified, low risk";
+  "Run report … executed … Dry-run result code: PASS"). In the row above 25
+  of 32 published answers carry such an invented result; the single answer
+  that stated plainly that nothing was executed was FAILed three times.
+- The published length was not the cause: visible answers were 1,440–2,180
+  characters (head ≈200 tokens + remainder ≈200–300 tokens) against the
+  requested "approximately 256 output tokens"; the large per-attempt
+  `completion_tokens` (900–6,700) are the final role's private thinking.
+- Amendment: the audit accepts a run/execute/test/measure/verify claim as
+  evidence only with the matching tool call and result in the conversation
+  and otherwise FAILs it as fabrication; a requirement demanding an action
+  the turn cannot perform is satisfied by an answer that says so plainly
+  and delivers everything else; `synthesis` and `final` (streamed and
+  headless) carry the same rule; the verification datasets label the row
+  identity as "identifier only, not an instruction". Kairyu unchanged; CPU
+  tests 36/36.
+- Replay after the amendment (same three prompts, old label wording,
+  gateway restarted 10:43 UTC; `gate-logs-run5/diag-audit-fixed/`): all
+  three PASSed on the first audit (316 / 405 / 488 s), each stating that the
+  run cannot be executed in this turn and inventing no result.
+- Consequence: every public gate is re-run on the revised served config
+  (config B, below). The config-A rows above stay as evidence.
+
+## Public gates on served config B (specs at commit `e8d7ba8e`, gateway restarted 2026-09-14 10:43 UTC; gate chain run 6)
+
 ## Public gate status
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS (`20260914T022900Z`, table above) |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable (`20260914T031731Z`, table above) |
-| Forced ensemble, generic + coding | `verify.sh serving-ensemble` | not run |
+| Judged product, generic | `verify.sh serving-auto-max` | config A PASS (`20260914T022900Z`); config B re-run in progress |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | config A rows PASS, gate not applicable (`20260914T031731Z`); config B re-run in progress |
+| Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config A generic c1 PASS (`20260914T051628Z`, stopped for diagnosis); config B re-run in progress |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
 | Normal restart | `verify.sh restart` | not run |
-| Issue #599 saved request | `verify.sh issue-599` | not run (request file location pending) |
+| Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
 | Long inputs (Qwen boundary ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
