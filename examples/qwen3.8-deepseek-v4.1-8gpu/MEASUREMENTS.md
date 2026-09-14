@@ -247,7 +247,61 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 - Consequence: every public gate is re-run on the revised served config
   (config B, below). The config-A rows above stay as evidence.
 
-## Public gates on served config B (specs at commit `e8d7ba8e`, gateway restarted 2026-09-14 10:43 UTC; gate chain run 6)
+## Public gates on served config B (specs at commit `e8d7ba8e`)
+
+- Run 6 (gateway from the example branch, restarted 10:43 UTC): aborted by
+  the gateway deadlock (section below).
+- Run 7 (same gateway restarted 15:33 UTC, host watchdog): stopped after
+  about an hour by owner decision so the fix could be served instead.
+- From the run-8 forced-ensemble generic c8 row on, `benchmark.py` also
+  stores each sample's streamed `reasoning_content` (the exposed
+  intermediate outputs, including every audit verdict text) as
+  `reasoning`, so audit outcomes can be read from the artifacts instead of
+  replays; the measurement itself is unchanged.
+- Run 8 (from 15:46 UTC): the `kairyu` container was rebuilt from the
+  deadlock fix (PR #603, commit `e22b545e`, which contains this branch
+  plus the five re-entrant locks) and recreated in place; the L1 engines
+  kept running. The verification tool runs from that checkout, so its
+  `run.json` records `git_commit` `e22b545e`; the example files it serves
+  and executes are byte-identical to `e8d7ba8e`. The watchdog stays armed
+  to record any recurrence.
+
+
+### Run 8 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260914T154637Z`, PASS; served `git_commit` `e22b545e`, served-config SHA `b5efddba…`)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 239 ms | 2,294 / 2,350 ms | 8.2 / 11.9 s | 283 s | 33.4 | 9,588 | — | 47 / 17 (serial, not gated) | 2,294 vs 17,219 ms → PASS |
+| 8 | 32/32 | qwen_direct 31, primary 1 (1) | 321 ms | 6,432 / 13,919 ms | 27.4 / 554.8 s | 582 s | 19.2 | 51,623 | exhausted 1 (three FAILs, last attempt published) | 34 / 34 | 12,293 (primary) vs 22,902 ms → PASS |
+| 16 | 32/32 | qwen_direct 27, primary 5 (5) | 1,258 ms | 18,617 / 38,296 ms | 56.0 / 733.2 s | 803 s | 27.3 | 227,523 | PASS 5 (3 first attempt, 1 after one refinement, 1 after two) | 41 / 43 | 25,487 (primary) vs 31,670 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,369 ms | 51,974 / 74,251 ms | 78.6 / 86.2 s | 86 s | 115.5 | 10,091 | — | 32 / 32 | 51,974 vs 43,871 ms → PASS (1.18×) |
+
+- No gateway hang across the matrix (the watchdog recorded nothing); every
+  paired DeepSeek-direct row completed 32/32 with `stop`.
+- All six judge-fallback ensembles completed all 11 roles; one of the six
+  exhausted its two refinements (published after three FAILs). The audit
+  text is not exposed by the public API; if the forced-ensemble rows show
+  the same rate, a few requests will be replayed with intermediate outputs
+  after the chain.
+- Artifacts: `verification-results/20260914T154637Z-serving-auto-max/`.
+
+### Run 8 — `serving-auto-max-coding`, judged product, coding 2.9K-token prompts (run `20260914T163330Z`, rows PASS, TTFT gate not applicable)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | Qwen placement | DeepSeek-direct denominator (32/32 `stop`) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_think_medium 32 (0) | 292 ms | 19,133 / 194,713 ms | 35.2 / 213.9 s | 1,459 s | 44.9 | 65,735 | 49 / 15 (serial, not gated) | 32,678 ms (thinking route reference: 0.59×) |
+| 8 | 32/32 | qwen_think_medium 32 (0) | 365 ms | 26,589 / 236,056 ms | 39.7 / 257.4 s | 408 s | 166.8 | 68,193 | 34 / 30 | 59,910 ms (0.44×) |
+| 16 | 32/32 | qwen_think_medium 32 (0) | 367 ms | 33,914 / 99,360 ms | 47.1 / 125.3 s | 152 s | 401.1 | 61,223 | 32 / 32 | 51,286 ms (0.66×) |
+| 32 | 32/32 | qwen_think_medium 32 (0) | 2,062 ms | 50,255 / 252,136 ms | 66.2 / 266.2 s | 266 s | 273.6 | 73,028 | 32 / 32 | 84,721 ms (0.59×) |
+
+- As on config A, the judge chose `QWEN_THINK` for all 128 coding prompts
+  with no timeout fallback, so no gated route served a request and the
+  gate has nothing to compare; every public answer ended with `stop` and
+  no stage reached a cap (largest Qwen answer 11,371 tokens). This time
+  all four DeepSeek-direct denominators completed 32/32 with `stop`
+  (the config-A thinking runaway on the RLE task did not recur; sampling
+  at temperature 1.0 is not deterministic across runs).
+- Artifacts: `verification-results/20260914T163330Z-serving-auto-max-coding/`.
 
 ### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
 
@@ -289,8 +343,8 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | config A PASS (`20260914T022900Z`); config B run 6 c1/c8 PASS, c16 lost to the gateway deadlock; run 7 in progress |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | config A rows PASS, gate not applicable (`20260914T031731Z`); config B re-run in progress |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config B, run 8 (`20260914T154637Z`); config A PASS (`20260914T022900Z`) |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config A generic c1 PASS (`20260914T051628Z`, stopped for diagnosis); config B re-run in progress |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
