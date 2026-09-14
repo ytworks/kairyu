@@ -60,15 +60,16 @@ roles:
       {query}
       --- END REQUEST ---
       [head] Begin the final answer to the request above. If the request asks
-      for an exact, fixed, or trivially short output, write exactly that
-      output and nothing else. Otherwise always start with prose — never a
-      code block, list, or heading. Write the opening only: one sentence
-      that states what is being answered, then the natural opening paragraph
-      of a direct answer. Commit only to statements you are certain of; leave
-      detailed claims, numbers, and recommendations to the continuation.
-      Respect any shorter user limit. Do not mention any internal pipeline.
-      Stop after the opening; the answer will be continued directly after
-      your text.
+      for an exact, fixed, or trivially short output (a single word, number,
+      name, or line), write exactly that complete output and nothing else —
+      never start a sentence around it or leave it for later. Otherwise
+      always start with prose — never a code block, list, or heading. Write
+      the opening only: one sentence that states what is being answered,
+      then the natural opening paragraph of a direct answer, committing only
+      to statements you are certain of and leaving detailed claims, numbers,
+      and recommendations to the continuation. Respect any shorter user
+      limit. Do not mention any internal pipeline. Stop after the opening;
+      the answer will be continued directly after your text.
 
   # Requirement extraction (V41T-D3, ported from the PR #595 specification
   # with DeepSeek as the extractor). Thinking at the caller's effort with the
