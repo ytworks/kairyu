@@ -158,12 +158,45 @@ denominator only when all 32 requests end with `stop` and visible content.
 - GPU peak under load: DeepSeek GPUs 93.7 GiB, Qwen GPUs 95.6 GiB.
 - Artifacts: `verification-results/20260914T022900Z-serving-auto-max/serving-auto-max/{generic-c*,deepseek-direct-c*}/`, `ttft-gate.json`.
 
-## Public gates (to be executed)
+### `serving-auto-max-coding` — judged product, coding 2.9K-token prompts (run `20260914T031731Z`, rows PASS, TTFT gate not applicable)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_think_medium 32 (0) | 288 ms | 32,792 / 224,772 ms | 48.8 / 238.8 s | 1,805 s | 45.0 | 81,477 | — | 49 / 15 (serial, not gated) | not applicable (baseline invalid: 31/32) |
+| 8 | 32/32 | qwen_think_medium 32 (0) | 366 ms | 24,772 / 319,235 ms | 38.5 / 324.5 s | 456 s | 203.8 | 93,155 | — | 26 / 38 | not applicable (baseline invalid: 31/32) |
+| 16 | 32/32 | qwen_think_medium 32 (0) | 895 ms | 37,401 / 335,532 ms | 54.2 / 352.0 s | 367 s | 304.5 | 111,798 | — | 36 / 28 | not applicable (58,156 ms baseline valid) |
+| 32 | 32/32 | qwen_think_medium 32 (0) | 1,726 ms | 36,010 / 411,919 ms | 52.6 / 430.6 s | 431 s | 198.6 | 85,707 | — | 32 / 32 | not applicable (82,309 ms baseline valid) |
+
+- The judge chose `QWEN_THINK` for all 128 coding prompts with no timeout
+  fallback, so no ensemble ran in this matrix and the TTFT gate has nothing
+  to compare: `ttft_gated_profiles` (inherited from the V4 tiered example)
+  covers `primary`, `qwen_direct` and `deepseek_direct` only, because a
+  thinking route's first visible text follows the model's own thinking by
+  design. For reference only, the thinking route's first-visible-content
+  p50 is 0.64× (c16) and 0.44× (c32) of the paired DeepSeek-direct value.
+- Every public answer ended with `stop`; no stage reached its cap (largest
+  Qwen answer 17,696 tokens at c32, under the route's user cap 65,536).
+  The p99 tail (225–412 s) is single prompts on which Qwen thinks for
+  10–18K tokens; the c1 wall of 1,805 s is those tails run serially.
+- Paired DeepSeek-direct (default = high effort, `max_tokens 65536`):
+  c1 and c8 each finished 31/32 — one sample per row (index 1, index 9,
+  the same RLE-decoder task) spent the full 65,536 tokens thinking
+  (`length`, ≈201K reasoning characters, no visible text, 946 s / 996 s),
+  so those two denominators are recorded as invalid rather than used;
+  their completed-31 first-visible-content p50 is 35,977 ms / 39,790 ms.
+  c16 and c32 completed 32/32 (`stop`): 58,156 ms / 82,309 ms, completion
+  p50 65.7 s / 87.5 s, 500.9 / 483.9 output tok/s.
+- Memory peaks across the matrix: DeepSeek GPUs 0–3 93,151 MiB, GPUs 4–5
+  93,733 MiB; Qwen GPUs 6–7 95,601–95,603 MiB; DeepSeek container RSS
+  ≈233 GiB, Qwen containers ≈6.3 GiB each, gateway ≈0.31 GiB.
+- Artifacts: `verification-results/20260914T031731Z-serving-auto-max-coding/serving-auto-max-coding/{coding-c*,deepseek-direct-c*}/`, `ttft-gate.json`.
+
+## Public gate status
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | not run |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | not run |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS (`20260914T022900Z`, table above) |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable (`20260914T031731Z`, table above) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | not run |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
