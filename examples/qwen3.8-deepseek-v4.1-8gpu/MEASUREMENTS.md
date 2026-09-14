@@ -253,6 +253,11 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
   the gateway deadlock (section below).
 - Run 7 (same gateway restarted 15:33 UTC, host watchdog): stopped after
   about an hour by owner decision so the fix could be served instead.
+- From the run-8 forced-ensemble generic c8 row on, `benchmark.py` also
+  stores each sample's streamed `reasoning_content` (the exposed
+  intermediate outputs, including every audit verdict text) as
+  `reasoning`, so audit outcomes can be read from the artifacts instead of
+  replays; the measurement itself is unchanged.
 - Run 8 (from 15:46 UTC): the `kairyu` container was rebuilt from the
   deadlock fix (PR #603, commit `e22b545e`, which contains this branch
   plus the five re-entrant locks) and recreated in place; the L1 engines

@@ -27,6 +27,7 @@ TRACE_HEADER = {"X-Kairyu-Trace": "1"}
 async def collect(lines, start: float) -> dict:
     first_model = first_content = None
     content = ""
+    reasoning = ""
     reasoning_chars = 0
     tool_calls: dict[int, dict[str, list[str]]] = {}
     finish = usage = trace = None
@@ -58,6 +59,7 @@ async def collect(lines, start: float) -> dict:
             if text and first_content is None:
                 first_content = now
             content += text
+            reasoning += think
             reasoning_chars += len(think)
             for call in delta.get("tool_calls") or ():
                 slot = tool_calls.setdefault(
@@ -98,6 +100,7 @@ async def collect(lines, start: float) -> dict:
         "finish_reason": finish,
         "content": content,
         "reasoning_chars": reasoning_chars,
+        "reasoning": reasoning,
         "tool_calls": calls,
         "trace": trace,
         "sse_events": for_events,
