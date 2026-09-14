@@ -280,6 +280,24 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
   after the chain.
 - Artifacts: `verification-results/20260914T154637Z-serving-auto-max/`.
 
+### Run 8 — `serving-auto-max-coding`, judged product, coding 2.9K-token prompts (run `20260914T163330Z`, rows PASS, TTFT gate not applicable)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | Qwen placement | DeepSeek-direct denominator (32/32 `stop`) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_think_medium 32 (0) | 292 ms | 19,133 / 194,713 ms | 35.2 / 213.9 s | 1,459 s | 44.9 | 65,735 | 49 / 15 (serial, not gated) | 32,678 ms (thinking route reference: 0.59×) |
+| 8 | 32/32 | qwen_think_medium 32 (0) | 365 ms | 26,589 / 236,056 ms | 39.7 / 257.4 s | 408 s | 166.8 | 68,193 | 34 / 30 | 59,910 ms (0.44×) |
+| 16 | 32/32 | qwen_think_medium 32 (0) | 367 ms | 33,914 / 99,360 ms | 47.1 / 125.3 s | 152 s | 401.1 | 61,223 | 32 / 32 | 51,286 ms (0.66×) |
+| 32 | 32/32 | qwen_think_medium 32 (0) | 2,062 ms | 50,255 / 252,136 ms | 66.2 / 266.2 s | 266 s | 273.6 | 73,028 | 32 / 32 | 84,721 ms (0.59×) |
+
+- As on config A, the judge chose `QWEN_THINK` for all 128 coding prompts
+  with no timeout fallback, so no gated route served a request and the
+  gate has nothing to compare; every public answer ended with `stop` and
+  no stage reached a cap (largest Qwen answer 11,371 tokens). This time
+  all four DeepSeek-direct denominators completed 32/32 with `stop`
+  (the config-A thinking runaway on the RLE task did not recur; sampling
+  at temperature 1.0 is not deterministic across runs).
+- Artifacts: `verification-results/20260914T163330Z-serving-auto-max-coding/`.
+
 ### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
 
 | c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
@@ -321,7 +339,7 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 | Gate | Command | Result |
 |---|---|---|
 | Judged product, generic | `verify.sh serving-auto-max` | PASS on config B, run 8 (`20260914T154637Z`); config A PASS (`20260914T022900Z`) |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | config A rows PASS, gate not applicable (`20260914T031731Z`); config B re-run in progress |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config A generic c1 PASS (`20260914T051628Z`, stopped for diagnosis); config B re-run in progress |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
