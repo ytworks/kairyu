@@ -247,7 +247,20 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 - Consequence: every public gate is re-run on the revised served config
   (config B, below). The config-A rows above stay as evidence.
 
-## Public gates on served config B (specs at commit `e8d7ba8e`, gateway restarted 2026-09-14 10:43 UTC; gate chain run 6)
+## Public gates on served config B (specs at commit `e8d7ba8e`)
+
+- Run 6 (gateway from the example branch, restarted 10:43 UTC): aborted by
+  the gateway deadlock (section below).
+- Run 7 (same gateway restarted 15:33 UTC, host watchdog): stopped after
+  about an hour by owner decision so the fix could be served instead.
+- Run 8 (from 15:46 UTC): the `kairyu` container was rebuilt from the
+  deadlock fix (PR #603, commit `e22b545e`, which contains this branch
+  plus the five re-entrant locks) and recreated in place; the L1 engines
+  kept running. The verification tool runs from that checkout, so its
+  `run.json` records `git_commit` `e22b545e`; the example files it serves
+  and executes are byte-identical to `e8d7ba8e`. The watchdog stays armed
+  to record any recurrence.
+
 
 ### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
 
