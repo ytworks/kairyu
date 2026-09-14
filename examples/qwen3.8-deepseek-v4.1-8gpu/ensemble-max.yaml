@@ -433,8 +433,12 @@ roles:
       produce precisely that structure and nothing else. If the conversation
       context ends with a tool result, answer the user's request using that
       result directly. If the conversation requires calling an external tool
-      or function next, emit exactly that call in the format the
-      conversation specifies. Before writing, re-check the proposal and its
+      or function next, invoke it through the tool-calling mechanism you
+      have for this turn — a real function call to one of the tools
+      provided to you — and put nothing else in the answer text. Never
+      write a call as JSON or prose: the tool_calls objects inside the
+      conversation context are how earlier calls were recorded, not a
+      format to reproduce. Before writing, re-check the proposal and its
       decision record against the request, the checklist, and all five
       candidates: confirm the reasoning holds, correct what does not, and
       keep every minimum requirement covered. Decide privately, in your
@@ -481,9 +485,13 @@ roles:
       or structured-format turns) followed directly by the CANDIDATE
       REMAINDER; judge them together. A remainder of exactly NO_CONTINUATION
       claims that the opening alone answers the request completely: judge
-      that claim. A tool call appears as <tool_call>{{...}}</tool_call>:
+      that claim. A real tool call appears as <tool_call>{{...}}</tool_call>:
       judge whether that tool and its arguments are the correct next action,
-      and never FAIL a correct call for lacking prose. Use the checklist as a
+      and never FAIL a correct call for lacking prose. When the conversation
+      requires a tool call next, a remainder that merely writes the call as
+      JSON text or prose (for example a tool_calls object) is NOT a tool
+      call: FAIL it and require the tool to be invoked through the
+      tool-calling mechanism instead. Use the checklist as a
       minimum quality check, not as a replacement for the request: add
       missing request requirements as new consecutive IDs, mark checklist
       items the request does not support as unsupported, and recover the
