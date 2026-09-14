@@ -571,6 +571,23 @@ def test_v41_tiered_row_validator_requires_every_role_and_flags_cut_offs(verific
         for p in verification.sample_problems(no_head, judged=True, require_head=True, caps=caps)
     )
 
+    judge_timeout = _primary_sample()
+    for event in judge_timeout["trace"]["events"]:
+        if event["node"] == "profile_judge":
+            event["status"] = "failed"
+            event["error"] = {"type": "TimeoutError"}
+    assert (
+        verification.sample_problems(judge_timeout, judged=True, require_head=True, caps=caps) == []
+    )
+    assert verification._route_report([judge_timeout])["judge_fallbacks"] == 1
+    head_at_cap = _primary_sample()
+    for event in head_at_cap["trace"]["events"]:
+        if event["node"] == "head":
+            event["usage"]["completion_tokens"] = 256
+    assert (
+        verification.sample_problems(head_at_cap, judged=True, require_head=True, caps=caps) == []
+    )
+
     unjudged = _primary_sample(judged=False)
     assert verification.sample_problems(unjudged, judged=True, require_head=True, caps=caps)
     assert verification.sample_problems(unjudged, judged=False, require_head=True, caps=caps) == []

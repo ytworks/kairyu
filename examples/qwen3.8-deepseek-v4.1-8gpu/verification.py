@@ -634,7 +634,10 @@ def sample_problems(
     if not events:
         problems.append("missing trace")
         return problems
-    failed = [e for e in events if e.get("status") == "failed"]
+    # A judge timeout / backend error is Kairyu's designed fallback to the
+    # primary profile (recorded in routes.json as judge_fallbacks), not a
+    # failed answer; every other failed stage is.
+    failed = [e for e in events if e.get("status") == "failed" and e.get("node") != JUDGE_NODE]
     if failed:
         problems.append(
             "failed stages: "
@@ -689,7 +692,7 @@ def sample_problems(
             and event.get("kind") in {"generation", "verification"}
             and isinstance(tokens, int)
             and cap is not None
-            and node != "final"
+            and node not in {"final", "head"}  # the head's cap is its designed split point
             and tokens >= cap
         ):
             problems.append(f"{node} ended at its {cap}-token cap (attempt {event.get('attempt')})")
@@ -755,9 +758,14 @@ def _route_report(samples: list[dict]) -> dict:
     judge_ms: list[float] = []
     audit_verdicts: Counter[str] = Counter()
     refinements: list[int] = []
+    judge_fallbacks = 0
     for sample in samples:
         route = _sample_route(sample) or "unresolved"
         counts[route] += 1
+        if any(
+            e.get("node") == JUDGE_NODE and e.get("status") == "failed" for e in _events(sample)
+        ):
+            judge_fallbacks += 1
         row = by_route.setdefault(route, {"content_ttft_ms": [], "total_ms": [], "tokens": []})
         for field in ("content_ttft_ms", "total_ms"):
             if isinstance(sample.get(field), (int, float)):
@@ -808,6 +816,7 @@ def _route_report(samples: list[dict]) -> dict:
         "judge_total_ms_p50": _percentile(judge_ms, 0.5),
         "judge_total_ms_p99": _percentile(judge_ms, 0.99),
         "judged_samples": len(judge_ms),
+        "judge_fallbacks": judge_fallbacks,
         "audit_verdicts": dict(audit_verdicts),
         "primary_refinements": dict(Counter(refinements)),
     }
