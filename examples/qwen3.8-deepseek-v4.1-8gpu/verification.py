@@ -2115,7 +2115,7 @@ def issue_599(run_dir: Path) -> int:
 
 
 def long_input(run_dir: Path) -> int:
-    """Conversations beyond Qwen's context through the judged product (the
+    """Conversations beyond Qwen's context through the forced ensemble (the
     answerers must still succeed on the policies role's bounded output), and
     DeepSeek-direct retrieval up to near 1M tokens."""
 
@@ -2139,11 +2139,13 @@ def long_input(run_dir: Path) -> int:
     filler = " filler"
     prefix = "Read this log and recover its archive key.\n"
     suffix = "\nReturn only the archive key."
-    # Conversations beyond Qwen's 262,144-token context through the judged
-    # product: the judge and the head (both Qwen) cannot read them and fall
-    # back / fail by Kairyu's contract, while the four Qwen answerers read the
-    # policies role's bounded output and must still succeed (V41T-D2
-    # amendment 4). Every DeepSeek role must succeed and the key must be found.
+    # Conversations beyond Qwen's 262,144-token context through the forced
+    # ensemble: the head (Qwen) cannot read them and fails by Kairyu's
+    # contract, while the four Qwen answerers read the policies role's
+    # bounded output and must still succeed (V41T-D2 amendment 4). Every
+    # DeepSeek role must succeed and the key must be found. The judged
+    # product is not used here: its judge sees a 4,000-character view and
+    # may route such a conversation to a Qwen direct route (recorded limit).
     must_succeed = ("requirements", "independent", "policies", "synthesis", "final", "audit")
     must_succeed += tuple(f"answer_{index}" for index in range(1, 5))
     for target in config["qwen_overflow_prompt_tokens"]:
@@ -2160,7 +2162,7 @@ def long_input(run_dir: Path) -> int:
         started = time.monotonic()
         status, body, _ = _post_chat(
             {
-                "model": PRODUCT_MODEL,
+                "model": ENSEMBLE_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 4096,
             },
@@ -2178,7 +2180,7 @@ def long_input(run_dir: Path) -> int:
         }
         reports.append(
             {
-                "case": f"product_qwen_overflow_{target}",
+                "case": f"ensemble_qwen_overflow_{target}",
                 "target_input_tokens": target,
                 "status": status,
                 "usage": body.get("usage") if isinstance(body, dict) else None,

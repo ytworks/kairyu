@@ -228,11 +228,14 @@ row is only a valid denominator when all 32 requests completed with
 ## Known limits (Kairyu `main`, recorded, not hidden)
 
 1. No windowed reading of inputs that exceed a model's context. The
-   ensemble's Qwen answerers are bounded by construction (above); the judge
-   and the head are not (nothing runs before them), so a rendered
-   conversation beyond 262,144 tokens is always served by the ensemble
-   without a streamed opening, and the Qwen direct routes are unreachable
-   for it. DeepSeek roles read up to 1,048,576 tokens.
+   ensemble's Qwen answerers are bounded by construction (above). The head
+   is not (nothing runs before it): beyond 262,144 rendered tokens it fails
+   and the ensemble answers without a streamed opening. The judge sees only
+   a 4,000-character view of the latest user turn (Kairyu's fixed judge
+   envelope), so it cannot tell how long the conversation is and may send
+   such a conversation to a Qwen direct route, which then fails with an
+   upstream 400 (502 to the caller); `kairyu-ensemble-max` and the DeepSeek
+   direct routes serve it (DeepSeek roles read up to 1,048,576 tokens).
 2. The upstream 400 reason is replaced by "orchestration final unit produced
    no public output" (502); the actual reason is in the gateway log.
 3. L3 appends `<image:N>` directly to the user text in the rendered

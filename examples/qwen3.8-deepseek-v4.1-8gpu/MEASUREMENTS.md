@@ -299,7 +299,22 @@ public gate re-runs as chain run 10 on served config D.
 
 ## Public gates on served config E (specs: the Qwen answerers read the policies output alone, V41T-D2 amendment 4; gateway image from PR #603; gate chain run 11)
 
-(Filled in as run 11 progresses.)
+Checks before run 11 (`gate-logs-run11-smoke/`):
+
+- One forced ensemble on the generic 8K-token prompt: the `policies` output
+  carries `=== REQUEST ===` and `=== POLICIES ===` (2,952 characters); the
+  four answerers' prompts were 909 tokens each against the head's 16,891
+  (they no longer scale with the conversation); the audit passed first
+  time; completion 335 s. DeepSeek abbreviated the repetitive keyword text
+  in the REQUEST part although it fit, so the prompt now says the latest
+  user message is never abbreviated while it fits.
+- A 300,002-token conversation through the judged product `kairyu-auto-max`
+  returned 502 in 4 s: the judge reads a 4,000-character view of the latest
+  user turn (Kairyu's fixed envelope, `orchestrator.py` `_bounded_profile_judge_view`),
+  so it cannot see the length and chose `qwen_direct`, whose Qwen call
+  failed with an upstream 400. This is a recorded limit of the judged
+  product (README, known limits 1); the long-input gate therefore proves the
+  ensemble on `kairyu-ensemble-max`.
 
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
@@ -456,7 +471,7 @@ run 10 measure how often this happens.
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
 | Normal restart | `verify.sh restart` | not run |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (300K/600K-token conversations through the judged product; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/600K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish
