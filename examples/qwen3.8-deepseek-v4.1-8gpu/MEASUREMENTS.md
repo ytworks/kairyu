@@ -323,6 +323,31 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   that doubling plus the policies cap of 131,072, the gate's second target
   is 450K tokens rather than 600K (2 × 450K + 131K < 1,048,576).
 
+### Run 11 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T042329Z`, PASS; served `git_commit` `e091fd1a` = this branch at `3d930e50` merged into the PR #603 worktree, served-config SHA `78b6e80d…`)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 239 ms | 2,306 / 2,354 ms | 9.1 / 12.4 s | 302 s | 34.1 | 10,427 | — | 53 / 11 (serial, not gated) | 2,306 vs 14,879 ms → PASS |
+| 8 | 32/32 | qwen_direct 31, primary 1 (1) | 320 ms | 6,433 / 13,823 ms | 26.7 / 526.5 s | 579 s | 21.2 | 56,256 | PASS 1 (after one refinement) | 34 / 34 | 12,327 (primary) vs 23,694 ms → PASS |
+| 16 | 32/32 | qwen_direct 27, primary 5 (5) | 1,168 ms | 20,473 / 44,668 ms | 52.0 / 780.2 s | 826 s | 21.8 | 216,183 | PASS 5 (3 first attempt, 1 after one, 1 after two refinements) | 43 / 41 | 28,262 (primary) vs 36,243 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,235 ms | 58,358 / 75,805 ms | 83.4 / 87.8 s | 88 s | 113.3 | 10,076 | — | 32 / 32 | 58,358 vs 45,101 ms → PASS (1.29×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop`; no gateway hang. In the six
+  judge-fallback ensembles the `policies` role (now writing the REQUEST part
+  too) took 60 s at c8 and 116 s p50 at c16 with 3.7K–5.7K completion
+  tokens; one Qwen answer hit its 16,384 cap at c16 (recorded, non-fatal).
+  With the matrix's caller `max_tokens 65536`, Kairyu clamps every internal
+  role to 65,536, so the effective policies cap in these rows is 65,536
+  (the bound 65,536 + 300 + 16,384 still holds).
+- Fidelity of the REQUEST part on this synthetic prompt: DeepSeek copied
+  the row label and the task sentence but replaced the 8K-token repeated
+  keyword block with an explicit omission note ("[Omitted from this copy:
+  the remaining user-message text is the p…"), although it fit and the
+  prompt forbids abbreviating the latest user message. Recorded as observed
+  behaviour on degenerate input; the synthesis, final and audit read the
+  full conversation.
+- Artifacts: `verification-results/20260915T042329Z-serving-auto-max/`.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
@@ -470,7 +495,7 @@ run 10 measure how often this happens.
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS on config D, run 10 (`20260915T025028Z`); also PASS on configs C, B and A |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config E, run 11 (`20260915T042329Z`); also PASS on configs D, C, B and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
