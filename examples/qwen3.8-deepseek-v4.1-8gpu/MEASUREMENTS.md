@@ -315,6 +315,13 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   failed with an upstream 400. This is a recorded limit of the judged
   product (README, known limits 1); the long-input gate therefore proves the
   ensemble on `kairyu-ensemble-max`.
+- The same 300,002-token conversation through `kairyu-ensemble-max`: HTTP
+  200 in 504 s and the key was returned. The head failed (upstream 400,
+  Kairyu continued without an opening); every DeepSeek role succeeded on
+  ≈600K prompt tokens (the L3 rendering carries the latest user turn
+  twice); the four answerers' prompts were 1,152 tokens each. Because of
+  that doubling plus the policies cap of 131,072, the gate's second target
+  is 450K tokens rather than 600K (2 × 450K + 131K < 1,048,576).
 
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
@@ -471,7 +478,7 @@ run 10 measure how often this happens.
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
 | Normal restart | `verify.sh restart` | not run |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (300K/600K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/450K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish
