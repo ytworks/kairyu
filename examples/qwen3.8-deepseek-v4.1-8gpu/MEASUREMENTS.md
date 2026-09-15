@@ -279,6 +279,20 @@ before the Qwen answerers must be capped so their input fits Qwen's context
 (V41T-D2 amendment 3). The rows below stay as config-C evidence; every
 public gate re-runs as chain run 10 on served config D.
 
+## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
+
+Smoke request on the rewired DAG (`gate-logs-run10-smoke/`, one forced
+ensemble, the generic case 2 prompt): `head`, `independent`, `policies`
+and `requirements` all started at +0 s (policies 32 s, requirements 61 s);
+the four Qwen answers started at +61 s — the Conductor schedules the DAG
+level by level, so the answerers wait for the slowest first-wave role even
+though they depend on `policies` alone; synthesis +144 s, final +188 s,
+first audit +209 s; completion 536 s. The audit FAILed three times on the
+requested "approximately 256 output tokens": the head had already used 235
+of its 256 tokens and the remainder added ≈100 words, and neither
+refinement produced `NO_CONTINUATION`. Recorded as-is; the forced rows of
+run 10 measure how often this happens.
+
 ### Run 9 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T003219Z`, PASS)
 
 | c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
