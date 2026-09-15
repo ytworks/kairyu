@@ -96,7 +96,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + D1/D2 amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates and the judged serving matrices passed on the first served config; the audit protocol was amended after the first forced-ensemble row rewarded fabricated execution claims, and every public gate is being re-run on the revised specs
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after two audit-driven prompt amendments (fabricated execution claims; head preamble + length) every public gate is being re-run as chain run 9
 
 ## Change Log
 
@@ -104,9 +104,14 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-09-14 — [progress] Gateway self-deadlock fixed: prepared-request caches use re-entrant locks
-- What: `_SHARED_PREPARED_PAYLOADS_LOCK`, `OpenAICompatBackend._prepared_payloads_lock` / `_prepared_image_urls_lock`, `KairyuBackend._prepared_requests_lock` and `ZmqEngineBackend._prepared_requests_lock` are now `threading.RLock` (the vision image cache already was). A regression test drops the last reference to a cached request while holding each cache's lock, which runs the weakref discard callback on the holding thread; it deadlocked on all five caches before and passes now. Resolves the blocker recorded in the preceding entry.
+- What: `_SHARED_PREPARED_PAYLOADS_LOCK`, `OpenAICompatBackend._prepared_payloads_lock` / `_prepared_image_urls_lock`, `KairyuBackend._prepared_requests_lock` and `ZmqEngineBackend._prepared_requests_lock` are now `threading.RLock` (the vision image cache already was). A regression test drops the last reference to a cached request while holding each cache's lock, which runs the weakref discard callback on the holding thread; it deadlocked on all five caches before and passes now. Resolves the blocker recorded below.
 - Why: the discard callbacks run at garbage-collection time on whichever thread triggers collection, including one inside the guarded region; a non-re-entrant lock then blocks the gateway's event loop forever.
-- Refs: fix PR based on PR #602; `kairyu/engine/{openai_backend,kairyu_backend,zmq_backend}.py`; `tests/unit/test_prepared_cache_discard_reentrancy.py`
+- Refs: PR #603 (based on PR #602); `kairyu/engine/{openai_backend,kairyu_backend,zmq_backend}.py`; `tests/unit/test_prepared_cache_discard_reentrancy.py`
+
+### 2026-09-14 — [amendment] V41T-D2/D6: the tiered head opens with the answer; candidate cap hits are recorded, not fatal
+- What: recorded audit texts showed the forced ensemble's first-attempt FAILs came from the head's "state what is being answered" opening ("The request asks for…" on 64/64 answers) and a combined length over the requested total. The head now starts with the answer and keeps under half of a stated length; the final sizes the remainder to the requested total. A candidate that spends its budget counts per stage instead of failing the row; `VERIFY_CONCURRENCY` allows partial matrix re-runs. All public gates re-run (chain run 9) on the revised specs.
+- Why: the preamble is user-visible and doubled ensemble completion through refinements; a truncated candidate is one weak input to a critical synthesis whose output the audit still gates.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 2, V41T-D6 amendment); example `MEASUREMENTS.md` (run 8)
 
 ### 2026-09-14 — [progress] Blocker: gateway self-deadlock in the OpenAI backend's prepared-payload cache
 - What: during the V4.1 tiered example's judged c16 row the gateway froze entirely (no chat, no `/readyz`, process alive, 0 % CPU). py-spy shows the event-loop thread in `openai_backend._peek_prepared_payload` holding `_prepared_payloads_lock` (`threading.Lock`) while the weakref callback `discard`, fired by garbage collection, blocks on the same lock; `_SHARED_PREPARED_PAYLOADS_LOCK` shares the pattern. Timing-dependent (the same row passed earlier). The example restarts the gateway and re-runs its gates; `kairyu/` is untouched.
@@ -133,22 +138,3 @@ in `.claude/rules/progress-log.md`).
 - Why: DSpark improves c1 throughput 1.91×; EP-off exhausts KV memory at the same limits, PCIe IPC stalls during autotuning, and 8K batching shows no throughput gain. Keep unmeasured alternatives and broad quality claims outside this evidence.
 - Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md` records exact configuration, run IDs, hashes and limitations.
 
-### 2026-09-11 — [progress] V4.1 full-model API gates pass on TP8
-- What: the SM120 overlay starts all eight GPUs, captures graphs and serves default/low/high/max reasoning, tools, images and cancellation; all initial API gates pass. UI effort selection uses the existing top-level L3 field. Performance selection and final context/restart gates remain pending.
-- Why: the experimental off toggle used template kwargs rejected by the unchanged legacy L3; retaining V4's effort vocabulary keeps the requested L2/L3 structure.
-- Refs: PR #597; example `MEASUREMENTS.md` initial runs `20260911T032048Z` through `20260911T032052Z`.
-
-### 2026-09-11 — [amendment] V4.1 indexer requires 64-token blocks and MXFP4 on SM120
-- What: correct the preceding 128-token manager-block candidate to 64/BLHNC, with SWA=64, C1=64, C2=32. Enable the existing MXFP4 indexer only for V4.1 on SM120. All 16 sparse-attention and four real indexer writer/prefill/decode numerical cases pass; full-model serving remains pending.
-- Why: DeepGEMM rejects C1 pages of 128 and SM120 FP8 C2 pages of 32; its MXFP4 path supports both required sizes. The indexer oracle independently unpacks actual Q/K bytes (max error 2.4e-7), and CPU guards retain rejection for unverified model/device combinations.
-- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md`, `check_sm120_pages.py`, `check_sm120_indexer.py`. Supersedes the block-size choice in the preceding SM120 cache-compatibility entry.
-
-### 2026-09-11 — [progress] V4.1 SM120 cache compatibility
-- What: pin an example-local L1 overlay with 64-token SWA pages and C1 128-token dual-cache prefill instantiations; use manager blocks 128/BLHNC and disable unsupported adaptive verification. All 16 packed-cache GPU numerical cases pass at upstream DSV4 tolerances; full-model serving and tuning remain pending.
-- Why: the official V4.1 image's SWA pages and indexer layout assumptions fail startup on SM120 before serving. Source-anchored adaptations retain the existing kernel arithmetic and keep L2/L3 unchanged.
-- Refs: PR #597; `examples/deepseek-v4.1-flash-8gpu/{patch_runtime.py,check_sm120_pages.py,MEASUREMENTS.md}`; FN-D9 V4.1 amendment.
-
-### 2026-09-11 — [amendment] FN-D9: V4.1 Flash on one eight-GPU replica
-- What: add a separate V4.1 example with the existing V4 vision ReplicaPool/API/UI path; default thinking is the official high (75). Pin the checkpoint manifest and isolate runtime encoder alignment. Fixed-token measurements distinguish model output from visible content; completed-answer gates stay separate. CPU contracts pass; GPU selection is pending.
-- Why: the owner revised the initial two-replica request to one TP8 replica; the initial vLLM encoder maps high differently from the checkpoint, and content-only timing mismeasures all-reasoning output.
-- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/deepseek-v4.1-flash-8gpu/`; implementation plan `2026-09-11-deepseek-v41-flash-example.md`.

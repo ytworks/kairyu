@@ -94,6 +94,20 @@ last attempt per the existing Conductor contract).
 - Consequence: every public gate is re-run on the revised served config;
   the earlier rows are kept in `MEASUREMENTS.md` as evidence of the defect.
 
+### V41T-D2 amendment 2 (2026-09-14) — the head opens with the answer, the final honours the total length
+
+- What: with the audit texts recorded, the remaining first-attempt FAILs
+  (17/32 on the forced generic c8 row) were the head's own instruction
+  "one sentence that states what is being answered" — every published
+  answer opened with "The request asks for…" — and a combined length of
+  ≈300–370 tokens against a requested ≈256. The head now begins with the
+  answer itself, never restates, classifies, or comments on the request,
+  and keeps under half of any stated length; the final counts the opening
+  first so opening plus remainder meet the requested total and does not
+  continue a framing opening. Owner decision; every public gate is re-run.
+- Why: the preamble is a user-visible defect, not only an audit finding,
+  and the refinement rounds it caused doubled ensemble completion time.
+
 ## V41T-D3 — Requirement extraction on DeepSeek with the PR #595 contract
 
 The `requirements` role ports PR #595's specification: a bare JSON array of
@@ -156,6 +170,13 @@ decisions.
   visible content. Invalid baselines fail the gate rather than being skipped.
 - The V4/8-GPU measurements are never reused. Speed is never bought by
   reducing input, thinking, candidates, or stages.
+- Amendment (2026-09-14): a candidate role (`answer_1..4`, `independent`)
+  that ends at its cap is counted per stage (`stages.json` cap hits) and
+  recorded, not a failed row — it is one weak input to a synthesis that
+  reviews all five critically, and the published answer is still gated by
+  the audit. Head, requirements, policies, synthesis, final, and audit cap
+  hits keep failing the row. `VERIFY_CONCURRENCY` re-runs selected rows of
+  a matrix under a new run id.
 - Known `main` limitations are recorded in the README and MEASUREMENTS
   rather than worked around: no windowed long-input reading, 502 masking of
   upstream 400s, `<image:N>` concatenation and the duplicated latest-user
