@@ -392,6 +392,26 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   re-run after the chain under a new run id.
 - Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/generic/generic-c1/`.
 
+### Run 11 — `serving-ensemble`, forced ensemble, coding c1 (run `20260915T062825Z`, row 27/32 under the tool's rule at the time)
+
+| c | ok | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit: first-attempt PASS / after 1 / after 2 / exhausted | cap hits | Qwen placement |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 `stop` | 402 / 446 ms | 655.6 / 1,436.5 s | 22,795 s | 7.7 | 2,041,114 | 28 / 3 / 0 / 1 | head 31 (designed); answer_2 1, answer_3 4, answer_4 1; policies 2; synthesis 3 | 81 / 79 |
+
+- Five requests had a DeepSeek role spend its entire 65,536-token budget on
+  thinking and emit no text: `policies` in samples 9 and 11 (the answerers
+  then received an empty work order), `synthesis` in samples 8, 23 and 24
+  (the final wrote the answer from the request and the candidates). Four of
+  the five still passed the audit (three at the first attempt); sample 11
+  exhausted its refinements and was published. Each such stage took about
+  950 s. The tool's rule at the time failed the row on the policies and
+  synthesis cap hits, so the coding c8/c16/c32 rows were skipped.
+- Per-stage duration p50 / p99 (ms): head 6,007 / 6,047; requirements
+  74,258 / 149,652; independent 43,587 / 161,039; policies 77,194 /
+  950,403; answer_1..4 44,170–102,497 / 327,337–387,628; synthesis 114,235 /
+  941,944; final 70,483 / 144,709 (37 attempts); audit 83,611 / 144,182.
+- Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/coding/coding-c1/`.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
