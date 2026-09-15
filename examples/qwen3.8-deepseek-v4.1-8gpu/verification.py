@@ -36,6 +36,7 @@ QWEN_REPLICAS = int(SPEC["allocation"]["tier1"]["replicas"])
 PRIMARY_ROLES: tuple[str, ...] = tuple(SPEC["orchestration"]["roles"])
 PRIMARY_GENERATION_ROLES = tuple(role for role in PRIMARY_ROLES if role != "audit")
 PRIMARY_VERIFICATION_ROLES = ("audit",)
+CANDIDATE_ROLES = ("independent", "answer_1", "answer_2", "answer_3", "answer_4")
 ROUTE_FINAL_NODES: dict[str, str] = dict(SPEC["orchestration"]["profile_final_roles"])
 TTFT_GATED_PROFILES = tuple(SPEC["orchestration"]["ttft_gated_profiles"])
 JUDGE_NODE = "profile_judge"
@@ -696,7 +697,10 @@ def sample_problems(
             and event.get("kind") in {"generation", "verification"}
             and isinstance(tokens, int)
             and cap is not None
-            and node not in {"final", "head"}  # the head's cap is its designed split point
+            # The head's cap is its designed split point; a candidate that
+            # runs out of budget is one weak input to the critical synthesis,
+            # counted in stages.json (cap_hits) rather than failing the row.
+            and node not in {"final", "head", *CANDIDATE_ROLES}
             and tokens >= cap
         ):
             problems.append(f"{node} ended at its {cap}-token cap (attempt {event.get('attempt')})")
@@ -994,7 +998,14 @@ def _serving_matrix(
     ):
         return 1
     gates: dict[str, dict] = {}
-    for concurrency in config["concurrency"]:
+    rows = [int(value) for value in config["concurrency"]]
+    selected = os.environ.get("VERIFY_CONCURRENCY", "").strip()
+    if selected:
+        # Partial re-run of a matrix (e.g. rows skipped after a failed row);
+        # the run id and artifacts identify it as such.
+        wanted = {int(value) for value in selected.split(",") if value.strip()}
+        rows = [value for value in rows if value in wanted]
+    for concurrency in rows:
         data = run_dir / f"{workload}-c{concurrency}.json"
         dataset(data, requests, f"{run_dir.parent.name}-{run_dir.name}-c{concurrency}")
         row_dir = run_dir / f"{workload}-c{concurrency}"

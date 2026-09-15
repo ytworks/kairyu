@@ -303,6 +303,36 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
   at temperature 1.0 is not deterministic across runs).
 - Artifacts: `verification-results/20260914T163330Z-serving-auto-max-coding/`.
 
+### Run 8 — `serving-ensemble`, forced ensemble, generic (run `20260914T175232Z`; stopped after c8 by owner decision)
+
+| c | ok | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit: first-attempt PASS / PASS after 1 / after 2 / exhausted | cap hits | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | 2,038 / 2,058 ms | 473.6 / 734.0 s | 15,879 s | 4.3 | 1,317,699 | 14 / 10 / 6 / 2 | head 4 (designed) | 82 / 78 | 2,038 vs 19,695 ms → PASS (0.10×) |
+| 8 | 32/32 | 6,095 / 22,448 ms | 579.5 / 957.8 s | 2,845 s | 26.7 | 1,293,869 | 15 / 6 / 7 / 4 | head 2 (designed); answer_4 1 (sample 1, 16,384 tokens, its partial text went to synthesis; the published answer passed the audit) | 87 / 73 | not computed (chain stopped) |
+
+- Every request completed all 11 roles with `stop`; refinements now fix most
+  first-attempt FAILs (exhaustion 2/32 and 4/32 against 8/32 on config A).
+- The audit texts of the c8 row (kept by the benchmark client from this row
+  on) give the first-attempt FAIL reasons — 17 of 32:
+  1. Length: the committed opening (≈150–190 tokens) plus the remainder
+     totals ≈300–370 tokens against the requested "approximately 256"
+     (10 samples cite R1/R2 length).
+  2. Meta-preamble: every published answer (64/64 in the c1 and c8 rows)
+     opens with "The request asks for a synthesized summary…" / "The prompt
+     consists of…" — the head prompt itself asked for "one sentence that
+     states what is being answered"; the audit rejects it as commentary
+     instead of the answer, and users see it too.
+- Decisions (owner, 2026-09-14): the head now starts with the answer
+  itself, never restates or comments on the request, and keeps under half
+  of any stated length; the final counts the opening first so the combined
+  answer meets the requested total and does not continue a framing
+  opening. A candidate (`answer_1..4`, `independent`) that spends its
+  whole budget is counted per stage instead of failing the row (the row
+  validator had skipped the generic c16/c32 rows after sample 1 above);
+  `VERIFY_CONCURRENCY` allows partial matrix re-runs. Every public gate is
+  re-run as chain run 9 on the revised specs.
+- Artifacts: `verification-results/20260914T175232Z-serving-ensemble/serving-ensemble/generic/{generic-c1,generic-c8,deepseek-direct-c1}/`.
+
 ### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
 
 | c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
@@ -345,7 +375,7 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 |---|---|---|
 | Judged product, generic | `verify.sh serving-auto-max` | PASS on config B, run 8 (`20260914T154637Z`); config A PASS (`20260914T022900Z`) |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
-| Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config A generic c1 PASS (`20260914T051628Z`, stopped for diagnosis); config B re-run in progress |
+| Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |

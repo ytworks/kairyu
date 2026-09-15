@@ -97,12 +97,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 - Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + D1/D2 amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates and the judged serving matrices passed on the first served config; the audit protocol was amended after the first forced-ensemble row rewarded fabricated execution claims, and every public gate is being re-run on the revised specs
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after two audit-driven prompt amendments (fabricated execution claims; head preamble + length) every public gate is being re-run as chain run 9
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-14 — [amendment] V41T-D2/D6: the tiered head opens with the answer; candidate cap hits are recorded, not fatal
+- What: recorded audit texts showed the forced ensemble's first-attempt FAILs came from the head's "state what is being answered" opening ("The request asks for…" on 64/64 answers) and a combined length over the requested total. The head now starts with the answer and keeps under half of a stated length; the final sizes the remainder to the requested total. A candidate that spends its budget counts per stage instead of failing the row; `VERIFY_CONCURRENCY` allows partial matrix re-runs. All public gates re-run (chain run 9) on the revised specs.
+- Why: the preamble is user-visible and doubled ensemble completion through refinements; a truncated candidate is one weak input to a critical synthesis whose output the audit still gates.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 2, V41T-D6 amendment); example `MEASUREMENTS.md` (run 8)
 
 ### 2026-09-14 — [progress] Blocker: gateway self-deadlock in the OpenAI backend's prepared-payload cache
 - What: during the V4.1 tiered example's judged c16 row the gateway froze entirely (no chat, no `/readyz`, process alive, 0 % CPU). py-spy shows the event-loop thread in `openai_backend._peek_prepared_payload` holding `_prepared_payloads_lock` (`threading.Lock`) while the weakref callback `discard`, fired by garbage collection, blocks on the same lock; `_SHARED_PREPARED_PAYLOADS_LOCK` shares the pattern. Timing-dependent (the same row passed earlier). The example restarts the gateway and re-runs its gates; `kairyu/` is untouched.
