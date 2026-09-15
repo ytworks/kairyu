@@ -267,6 +267,27 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
   to record any recurrence.
 
 
+## Public gates on served config C (specs at commit `2676016f`: head/final amendment and seam rule; gateway image from PR #603; gate chain run 9 from 2026-09-15 00:32 UTC)
+
+The verification tool runs from the PR #603 worktree merged with this
+branch, so `run.json` records `git_commit` `1100047b`; the served example
+files are byte-identical to `2676016f` (served-config SHA `931a0683…`).
+
+### Run 9 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T003219Z`, PASS)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 239 ms | 2,300 / 2,326 ms | 8.7 / 13.3 s | 287 s | 33.5 | 9,750 | — | 48 / 16 (serial, not gated) | 2,300 vs 15,295 ms → PASS |
+| 8 | 32/32 | qwen_direct 30, primary 2 (2) | 317 ms | 6,430 / 13,924 ms | 27.5 / 511.4 s | 546 s | 23.4 | 77,124 | PASS 2 (1 after one refinement) | 36 / 36 | 12,087 (primary) vs 21,531 ms → PASS |
+| 16 | 32/32 | qwen_direct 30, primary 2 (2) | 1,209 ms | 12,493 / 39,549 ms | 51.5 / 344.3 s | 398 s | 35.0 | 60,736 | PASS 2 (first attempt) | 36 / 36 | 20,456 (primary) vs 34,889 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 4,129 ms | 57,327 / 75,968 ms | 75.6 / 87.1 s | 87 s | 106.8 | 9,437 | — | 32 / 32 | 57,327 vs 51,621 ms → PASS (1.11×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop`; no gateway hang. The four
+  judge-fallback ensembles completed all 11 roles with no head cap hit;
+  none opened with "The request asks…" (on this keyword-only prompt the
+  head describes the text, which the audit accepted as the answer).
+- Artifacts: `verification-results/20260915T003219Z-serving-auto-max/`.
+
 ### Run 8 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260914T154637Z`, PASS; served `git_commit` `e22b545e`, served-config SHA `b5efddba…`)
 
 | c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
@@ -381,7 +402,7 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS on config B, run 8 (`20260914T154637Z`); config A PASS (`20260914T022900Z`) |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config C, run 9 (`20260915T003219Z`); also PASS on configs B (run 8) and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
