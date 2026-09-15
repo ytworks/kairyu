@@ -62,18 +62,30 @@ original requirement on purpose; see V41T-D4 in the design document.
 | 1 | `head` | Qwen | off | conversation | 256, streamed to the user from t=0 |
 | 1 | `requirements` | DeepSeek | caller's effort, default high | conversation | 16384 / 32768 / 65536 by effort |
 | 1 | `independent` | DeepSeek | caller's effort | conversation, tools, images only | 16384 / 32768 / 65536 |
-| 2 | `policies` | DeepSeek | caller's effort | conversation + checklist | 8192 / 32768 / 65536 |
-| 3 | `answer_1..4` | Qwen (2 replicas, 2 + 2) | medium | conversation + checklist + policies, one `POLICY n` each | 16384 |
-| 4 | `synthesis` | DeepSeek | caller's effort | conversation + checklist + all 5 candidates | 16384 / 65536 / 131072 |
-| 5 | `final` | DeepSeek | caller's effort | everything above + committed head | caller's limit minus the head |
-| 5 | `audit` | DeepSeek (verifier) | caller's effort | head + final + checklist | 8192 / 16384 / 32768 |
+| 1 | `policies` | DeepSeek | caller's effort | conversation | 8192 / 8192 / 16384 (bounded so the Qwen answerers' input fits; see below) |
+| 2 | `answer_1..4` | Qwen (2 replicas, 2 + 2) | medium | conversation + policies, one `POLICY n` each | 16384 |
+| 3 | `synthesis` | DeepSeek | caller's effort | conversation + all 5 candidates | 16384 / 65536 / 131072 |
+| 4 | `final` | DeepSeek | caller's effort | conversation + all 5 candidates + proposal + committed head | caller's limit minus the head |
+| 4 | `audit` | DeepSeek (verifier) | caller's effort | head + final + checklist (the only reader of the checklist) | 8192 / 16384 / 32768 |
 
 - `requirements` emits the PR #595 checklist: a bare JSON array of
   `{id, priority, requirement, acceptance_criterion, source}` objects with
   `minimum`/`optional` priorities, literal strings and numbers preserved. It
-  is data for the later roles; the conversation stays authoritative and every
-  consumer is told to recover the requirements from the request when the
-  checklist is empty (a failed upstream call renders its slot empty).
+  is verification data: only the `audit` reads it (owner decision 2026-09-15);
+  no role that produces the answer sees it, so the answer is judged against
+  criteria it was not written to. The audit recovers the requirements from
+  the request when the checklist is empty (a failed upstream call renders its
+  slot empty). `requirements` stays a scheduling dependency of `final` only
+  because Kairyu runs the verifier inline after its target and requires every
+  verifier input to be complete by then.
+- The Qwen answerers' input is bounded by configuration, not by a per-request
+  calculation (Kairyu has none): rendered conversation + policies text +
+  their own 16,384-token budget must fit Qwen's 262,144 context, so the
+  `policies` cap is 8,192 (16,384 at `max` effort; DeepSeek completion tokens
+  include thinking, so the cap also bounds the text). Guaranteed rendered
+  conversation length for the ensemble: about 237,000 tokens at default/low
+  effort and about 229,000 at `max` (the head's 256 and the judge's 8 never
+  bind first).
 - `policies` writes four policies that differ in method, assumptions, and
   evaluation criteria, not wording.
 - `synthesis` checks premises, evidence, methods, and the conditions under
@@ -82,8 +94,8 @@ original requirement on purpose; see V41T-D4 in the design document.
   combines; may take an approach no candidate took; and writes the complete
   proposal followed by an internal `=== DECISION RECORD ===` (reasons and
   references). Agreement among candidates is not evidence.
-- `final` re-checks the proposal against the request, the checklist, and all
-  candidates, continues directly after the committed opening (or writes the
+- `final` re-checks the proposal against the request and all candidates,
+  continues directly after the committed opening (or writes the
   complete answer on tool / structured-format turns, where the head is
   disabled), and keeps its adopt/reject decisions in private reasoning.
 - `audit` outputs `PASS` or `FAIL` on the first line, then one line per
@@ -209,15 +221,16 @@ row is only a valid denominator when all 32 requests completed with
 
 1. No windowed reading of inputs that exceed a model's context: Qwen-involving
    routes fail with an upstream 400 (surfaced as Kairyu's generic 502) once
-   the rendered input approaches 262,144 minus the Qwen role caps (about
-   245,000 tokens for the ensemble); DeepSeek-only routes reach 1,048,576.
+   the rendered input exceeds the bound above (about 237,000 tokens for the
+   ensemble at default effort, 229,000 at `max`); DeepSeek-only routes reach
+   1,048,576.
 2. The upstream 400 reason is replaced by "orchestration final unit produced
    no public output" (502); the actual reason is in the gateway log.
 3. L3 appends `<image:N>` directly to the user text in the rendered
    conversation and repeats the latest user turn as a plain-text view;
    exact-ending requirements next to an image can be misread by extraction.
-   DeepSeek roles also receive the real image and are told the checklist is
-   fallible.
+   DeepSeek roles also receive the real image, and the audit is told the
+   checklist is fallible.
 4. If the final unit ends its thinking span without public text twice in a
    row, Kairyu returns 502 (or the head alone when a head was streamed).
    The DTO-D9 floor is inert for the DeepSeek final until the native-chat

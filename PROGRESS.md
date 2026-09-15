@@ -96,7 +96,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after two audit-driven prompt amendments (fabricated execution claims; head preamble + length) every public gate is being re-run as chain run 9
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) and the checklist-to-audit-only rewiring, every public gate is being re-run as chain run 10
 
 ## Change Log
 
@@ -107,6 +107,11 @@ in `.claude/rules/progress-log.md`).
 - What: `_SHARED_PREPARED_PAYLOADS_LOCK`, `OpenAICompatBackend._prepared_payloads_lock` / `_prepared_image_urls_lock`, `KairyuBackend._prepared_requests_lock` and `ZmqEngineBackend._prepared_requests_lock` are now `threading.RLock` (the vision image cache already was). A regression test drops the last reference to a cached request while holding each cache's lock, which runs the weakref discard callback on the holding thread; it deadlocked on all five caches before and passes now. Resolves the blocker recorded below.
 - Why: the discard callbacks run at garbage-collection time on whichever thread triggers collection, including one inside the guarded region; a non-re-entrant lock then blocks the gateway's event loop forever.
 - Refs: PR #603 (based on PR #602); `kairyu/engine/{openai_backend,kairyu_backend,zmq_backend}.py`; `tests/unit/test_prepared_cache_discard_reentrancy.py`
+
+### 2026-09-15 — [amendment] V41T-D2/D6: the tiered checklist is read by the audit only; policies cap bounds the Qwen answerers' input
+- What: owner instruction — `policies`, `answer_1..4`, `synthesis` and `final` no longer receive or depend on the requirements checklist (the audit alone reads it; `requirements` stays a scheduling-only dependency of `final` because the Conductor runs the verifier inline after its target). `policies` runs in the first wave. Its cap becomes 8192 (16384 at `max`) so rendered conversation + policies text + the answerer's 16384 budget fits Qwen's 262,144 context: guaranteed rendered conversation ≈237K tokens (≈229K at `max`). CPU tests updated; every public gate re-runs as chain run 10.
+- Why: an answer written while reading the extracted criteria is then audited against its own checklist; and Kairyu has no per-request budget calculation, so the Qwen bound must come from static upstream caps.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 3); example README (Qwen input bound)
 
 ### 2026-09-14 — [amendment] V41T-D2/D6: the tiered head opens with the answer; candidate cap hits are recorded, not fatal
 - What: recorded audit texts showed the forced ensemble's first-attempt FAILs came from the head's "state what is being answered" opening ("The request asks for…" on 64/64 answers) and a combined length over the requested total. The head now starts with the answer and keeps under half of a stated length; the final sizes the remainder to the requested total. A candidate that spends its budget counts per stage instead of failing the row; `VERIFY_CONCURRENCY` allows partial matrix re-runs. All public gates re-run (chain run 9) on the revised specs.
