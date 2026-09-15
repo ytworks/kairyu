@@ -332,6 +332,14 @@ config through `kairyu-ensemble-max` with the intermediate outputs read from
   `VERIFY_CONCURRENCY` allows partial matrix re-runs. Every public gate is
   re-run as chain run 9 on the revised specs.
 - Artifacts: `verification-results/20260914T175232Z-serving-ensemble/serving-ensemble/generic/{generic-c1,generic-c8,deepseek-direct-c1}/`.
+- Replay after the head/final amendment (cases 2, 7, 12 of the c1 row,
+  `gate-logs-run9-diag-head/`): no answer opens with "The request asks…";
+  two passed the first audit at ≈227–260 words, the third was FAILed once
+  for an ungrammatical seam — the head had stopped mid-sentence at its
+  256-token cap and the remainder's mandatory blank line broke the
+  sentence — and passed after one refinement. The final now finishes an
+  unfinished opening sentence (single space, no blank line) before going
+  on; the blank line applies only after complete punctuation.
 
 ### Gate chain run 6 (`20260914T105208Z-serving-auto-max`) — aborted by a Kairyu gateway deadlock
 
