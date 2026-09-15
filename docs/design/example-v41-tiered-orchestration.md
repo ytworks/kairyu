@@ -150,7 +150,10 @@ last attempt per the existing Conductor contract).
   `_bounded_profile_judge_view`), so it cannot route by length and may
   choose a Qwen direct route for such a conversation, which then fails
   (recorded limit of the judged product). The long-input gate proves the
-  forced ensemble completes on 300K- and 600K-token conversations.
+  forced ensemble completes on 300K- and 450K-token conversations (the
+  L3 rendering carries the latest user turn twice, so DeepSeek reads about
+  2× the conversation; 450K keeps 2× + the policies cap 131,072 under
+  DeepSeek's 1,048,576).
 - Cost: DeepSeek copies the request into its output (≈65 tokens/s
   single-stream), and the wave scheduler makes the answerers wait for it.
 

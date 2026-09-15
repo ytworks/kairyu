@@ -336,7 +336,7 @@
     "long_input": {
       "qwen_overflow_prompt_tokens": [
         300000,
-        600000
+        450000
       ],
       "deepseek_native_targets": [
         32768,
