@@ -143,11 +143,14 @@ last attempt per the existing Conductor contract).
   configuration; a bound on a DeepSeek output can. DeepSeek reads up to
   1,048,576 tokens, so it can prepare the answerers' input for any
   conversation the product accepts.
-- Not covered: the head and the judge read the conversation and have no
-  role before them; beyond Qwen's context the judge falls back to the
-  ensemble and the head fails without a streamed opening (Kairyu contract,
-  `orchestrator.py:902-927`, `conductor.py:1935-1970`). The long-input gate
-  proves the ensemble completes on 300K- and 600K-token conversations.
+- Not covered: the head reads the conversation and has no role before
+  it; beyond Qwen's context it fails and the ensemble answers without a
+  streamed opening (`conductor.py:1935-1970`). The judge reads only a
+  4,000-character view of the latest user turn (`orchestrator.py`
+  `_bounded_profile_judge_view`), so it cannot route by length and may
+  choose a Qwen direct route for such a conversation, which then fails
+  (recorded limit of the judged product). The long-input gate proves the
+  forced ensemble completes on 300K- and 600K-token conversations.
 - Cost: DeepSeek copies the request into its output (≈65 tokens/s
   single-stream), and the wave scheduler makes the answerers wait for it.
 

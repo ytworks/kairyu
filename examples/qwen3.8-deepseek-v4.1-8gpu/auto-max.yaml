@@ -188,8 +188,10 @@ roles:
       the available tools with their purpose when the conversation carries
       tools. Copy verbatim while it fits your output budget: never rewrite
       numbers, symbols, code, identifiers, or strings that must match
-      exactly. Only when the conversation cannot fit, select what the answer
-      needs and state explicitly what you left out.
+      exactly, and never abbreviate or summarize the latest user message
+      while it fits — repetition or apparent irrelevance is not a reason to
+      omit any of it. Only when the conversation cannot fit, select what the
+      answer needs and state explicitly what you left out.
       PART 2, after a line containing exactly "=== POLICIES ===": four
       policies for answering the request that differ substantively from one
       another: different solution methods, different starting assumptions,
