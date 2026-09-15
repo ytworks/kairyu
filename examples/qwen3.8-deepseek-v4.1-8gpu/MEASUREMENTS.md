@@ -273,11 +273,51 @@ The verification tool runs from the PR #603 worktree merged with this
 branch, so `run.json` records `git_commit` `1100047b`; the served example
 files are byte-identical to `2676016f` (served-config SHA `931a0683…`).
 
+The verification tool runs from the PR #603 worktree merged with this
+branch (`git_commit` `df202a63` in `run.json`); the served example files are
+byte-identical to `17e0233b` (served-config SHA `fd1a4b6d…`).
+
+### Run 10 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T025028Z`, PASS)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 240 ms | 2,308 / 2,334 ms | 8.3 / 12.5 s | 279 s | 33.2 | 9,391 | — | 53 / 11 (serial, not gated) | 2,308 vs 15,284 ms → PASS |
+| 8 | 32/32 | qwen_direct 31, primary 1 (1) | 320 ms | 6,470 / 13,936 ms | 26.4 / 335.7 s | 383 s | 29.1 | 42,344 | PASS 1 (first attempt) | 34 / 34 | 11,974 (primary) vs 21,025 ms → PASS |
+| 16 | 32/32 | qwen_direct 30, primary 2 (2) | 1,253 ms | 20,460 / 33,161 ms | 46.9 / 409.3 s | 475 s | 30.4 | 77,166 | PASS 2 (first attempt) | 37 / 35 | 20,502 (primary) vs 30,116 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,468 ms | 52,215 / 74,297 ms | 72.5 / 85.5 s | 86 s | 110.9 | 9,616 | — | 32 / 32 | 52,215 vs 46,345 ms → PASS (1.13×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop`; no gateway hang. The three
+  judge-fallback ensembles passed their first audit; `policies` used
+  1,942–2,531 completion tokens under its new 8,192 cap.
+- Artifacts: `verification-results/20260915T025028Z-serving-auto-max/`.
+
 Run 9 was stopped during its coding matrix (owner instruction 2026-09-15):
 the requirements checklist must be read by the audit only, and the roles
 before the Qwen answerers must be capped so their input fits Qwen's context
 (V41T-D2 amendment 3). The rows below stay as config-C evidence; every
 public gate re-runs as chain run 10 on served config D.
+
+## Public gates on served config E (specs: the Qwen answerers read the policies output alone, V41T-D2 amendment 4; gateway image from PR #603; gate chain run 11)
+
+(Filled in as run 11 progresses.)
+
+## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
+
+Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
+the static policies cap still left the conversation itself unbounded for
+the Qwen answerers; config E makes the policies output their only input.
+
+Smoke request on the rewired DAG (`gate-logs-run10-smoke/`, one forced
+ensemble, the generic case 2 prompt): `head`, `independent`, `policies`
+and `requirements` all started at +0 s (policies 32 s, requirements 61 s);
+the four Qwen answers started at +61 s — the Conductor schedules the DAG
+level by level, so the answerers wait for the slowest first-wave role even
+though they depend on `policies` alone; synthesis +144 s, final +188 s,
+first audit +209 s; completion 536 s. The audit FAILed three times on the
+requested "approximately 256 output tokens": the head had already used 235
+of its 256 tokens and the remainder added ≈100 words, and neither
+refinement produced `NO_CONTINUATION`. Recorded as-is; the forced rows of
+run 10 measure how often this happens.
 
 ### Run 9 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T003219Z`, PASS)
 
@@ -408,7 +448,7 @@ public gate re-runs as chain run 10 on served config D.
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | run 10 (config D) pending; PASS on config C run 9 (`20260915T003219Z`), B (run 8) and A |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config D, run 10 (`20260915T025028Z`); also PASS on configs C, B and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
@@ -416,7 +456,7 @@ public gate re-runs as chain run 10 on served config D.
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
 | Normal restart | `verify.sh restart` | not run |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (Qwen boundary ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/600K-token conversations through the judged product; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish

@@ -2115,8 +2115,9 @@ def issue_599(run_dir: Path) -> int:
 
 
 def long_input(run_dir: Path) -> int:
-    """Inputs near the documented boundaries: a Qwen-boundary conversation on
-    the forced ensemble, and DeepSeek-direct retrieval up to near 1M tokens."""
+    """Conversations beyond Qwen's context through the judged product (the
+    answerers must still succeed on the policies role's bounded output), and
+    DeepSeek-direct retrieval up to near 1M tokens."""
 
     import secrets
 
@@ -2136,44 +2137,63 @@ def long_input(run_dir: Path) -> int:
         )
     )
     filler = " filler"
-    key = "K" + secrets.token_hex(12).upper()
-    target = int(config["qwen_boundary_prompt_tokens"])
     prefix = "Read this log and recover its archive key.\n"
-    needle = f"\nThe archive key is {key}.\n"
     suffix = "\nReturn only the archive key."
-    overhead = len(qwen_tokenizer.encode(prefix + needle + suffix, add_special_tokens=False).ids)
-    repeats = target - overhead
-    prompt = prefix + filler * (repeats // 2) + needle + filler * (repeats - repeats // 2) + suffix
-    started = time.monotonic()
-    status, body, _ = _post_chat(
-        {
-            "model": ENSEMBLE_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4096,
-        },
-        timeout_s=14400,
-    )
-    choice = body["choices"][0] if status == 200 and isinstance(body, dict) else {}
-    content = (choice.get("message") or {}).get("content") or ""
-    events = ((body.get("kairyu_trace_v2") if isinstance(body, dict) else None) or {}).get(
-        "events"
-    ) or []
-    reports.append(
-        {
-            "case": "ensemble_qwen_boundary",
-            "target_input_tokens": target,
-            "status": status,
-            "usage": body.get("usage") if isinstance(body, dict) else None,
-            "key_found": key in content,
-            "finish_reason": choice.get("finish_reason"),
-            "failed_stages": [e.get("node") for e in events if e.get("status") == "failed"],
-            "total_s": time.monotonic() - started,
-            "passed": status == 200
-            and key in content
-            and not any(e.get("status") == "failed" for e in events),
-            "error": body if status != 200 else None,
+    # Conversations beyond Qwen's 262,144-token context through the judged
+    # product: the judge and the head (both Qwen) cannot read them and fall
+    # back / fail by Kairyu's contract, while the four Qwen answerers read the
+    # policies role's bounded output and must still succeed (V41T-D2
+    # amendment 4). Every DeepSeek role must succeed and the key must be found.
+    must_succeed = ("requirements", "independent", "policies", "synthesis", "final", "audit")
+    must_succeed += tuple(f"answer_{index}" for index in range(1, 5))
+    for target in config["qwen_overflow_prompt_tokens"]:
+        target = int(target)
+        key = "K" + secrets.token_hex(12).upper()
+        needle = f"\nThe archive key is {key}.\n"
+        overhead = len(
+            qwen_tokenizer.encode(prefix + needle + suffix, add_special_tokens=False).ids
+        )
+        repeats = target - overhead
+        prompt = (
+            prefix + filler * (repeats // 2) + needle + filler * (repeats - repeats // 2) + suffix
+        )
+        started = time.monotonic()
+        status, body, _ = _post_chat(
+            {
+                "model": PRODUCT_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 4096,
+            },
+            timeout_s=14400,
+        )
+        choice = body["choices"][0] if status == 200 and isinstance(body, dict) else {}
+        content = (choice.get("message") or {}).get("content") or ""
+        events = ((body.get("kairyu_trace_v2") if isinstance(body, dict) else None) or {}).get(
+            "events"
+        ) or []
+        succeeded = {
+            e.get("node")
+            for e in events
+            if e.get("status") == "success" and e.get("kind") in {"generation", "verification"}
         }
-    )
+        reports.append(
+            {
+                "case": f"product_qwen_overflow_{target}",
+                "target_input_tokens": target,
+                "status": status,
+                "usage": body.get("usage") if isinstance(body, dict) else None,
+                "key_found": key in content,
+                "finish_reason": choice.get("finish_reason"),
+                "failed_stages": [e.get("node") for e in events if e.get("status") == "failed"],
+                "judge_fallback": any(
+                    e.get("node") == "profile_judge" and e.get("kind") == "fallback" for e in events
+                ),
+                "missing_stages": sorted(set(must_succeed) - succeeded),
+                "total_s": time.monotonic() - started,
+                "passed": status == 200 and key in content and set(must_succeed) <= succeeded,
+                "error": body if status != 200 else None,
+            }
+        )
     _write(run_dir / "long-input.json", reports)
     deepseek_tokenizer = Tokenizer.from_file(
         str(

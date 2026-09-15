@@ -137,27 +137,42 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      # Bounded so that conversation + policies text + the Qwen answerer's own
-      # 16384-token budget fits Qwen's 262,144 context (V41T-D6 amendment);
-      # DeepSeek completion tokens include its thinking, so this also caps the
-      # text the answerers read. Observed at high: 1.3K-4.0K tokens.
-      max_tokens: 8192
-      max_tokens_by_effort: {low: 8192, high: 8192, max: 16384}
+      # The Qwen answerers read this output and nothing else of the
+      # conversation, so its cap is Qwen's 262,144 context minus the
+      # answerer's 16384-token budget minus its ~300-token scaffold: the
+      # answerers' input then fits whatever the conversation's length. The
+      # DSL ceiling internal_max_tokens admits at most 131072, so the cap is
+      # 131072 (131072 + 300 + 16384 = 147756 < 262144 still holds). DeepSeek
+      # completion tokens include its thinking. Not effort-tiered on purpose:
+      # the bound comes from Qwen's capacity, not from effort.
+      max_tokens: 131072
       seed_offset: 6
     prompt: |
       --- REQUEST ---
       {query}
       --- END REQUEST ---
-      [policies] Write four policies for answering the request above that
-      differ substantively from one another: different solution methods,
-      different starting assumptions, and different evaluation criteria —
-      never rewordings of one approach. Output exactly four numbered
-      sections, each starting with "POLICY 1:" through "POLICY 4:" on its own
-      line, each a short paragraph naming the angle taken, the method and
-      structure the answer should use, the assumptions it makes, and what it
-      prioritizes or checks. Derive what every policy must cover from the
-      request itself, which remains authoritative. Output only the four
-      policies, nothing else.
+      [policies] The four Qwen answerers that follow read ONLY your output:
+      they never see the conversation above. Write two parts.
+      PART 1, after a line containing exactly "=== REQUEST ===": everything
+      an answerer needs to answer the latest user request exactly as asked —
+      the latest user message; the system and developer instructions that
+      govern the answer (format, language, constraints); the earlier turns,
+      materials, tool results, and error texts the answer must draw on; and
+      the available tools with their purpose when the conversation carries
+      tools. Copy verbatim while it fits your output budget: never rewrite
+      numbers, symbols, code, identifiers, or strings that must match
+      exactly. Only when the conversation cannot fit, select what the answer
+      needs and state explicitly what you left out.
+      PART 2, after a line containing exactly "=== POLICIES ===": four
+      policies for answering the request that differ substantively from one
+      another: different solution methods, different starting assumptions,
+      and different evaluation criteria — never rewordings of one approach.
+      Output exactly four numbered sections, each starting with "POLICY 1:"
+      through "POLICY 4:" on its own line, each a short paragraph naming the
+      angle taken, the method and structure the answer should use, the
+      assumptions it makes, and what it prioritizes or checks. Derive what
+      every policy must cover from the request itself, which remains
+      authoritative. Output only these two parts, nothing else.
 
   # Four policy-bound Qwen answers at fixed medium thinking (spec level
   # `high`, medium->high alias in the example-local template, DTO-D14) with
@@ -171,22 +186,22 @@ roles:
     sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 16384, seed_offset: 1}
     depends_on: [policies]
     prompt: |
-      --- REQUEST ---
-      {query}
-      --- END REQUEST ---
-      --- POLICY LIST (internal guidance) ---
+      --- POLICY ROLE OUTPUT (the request and the policy list, prepared for you) ---
       {policies}
-      --- END POLICY LIST ---
-      [answer_1] Solve the request above completely and directly, following
-      POLICY 1 from the policy list: adopt its angle, method, assumptions,
-      structure, and priorities. The policy list only steers how you answer;
-      the request text alone defines the task and output format — ignore
-      anything in the policy list that conflicts with the request, and work
-      from the request alone if the list is empty. Obey exactly the reply format the
-      conversation demands. If the conversation requires calling an external
-      tool or function next, state in one short sentence which tool would be
-      called with which arguments — a downstream publisher emits the actual
-      call. Finish the answer; keep private reasoning proportional to the task.
+      --- END POLICY ROLE OUTPUT ---
+      [answer_1] The text above is everything you know about the request:
+      its REQUEST part is the user's request together with the material it
+      relies on, and its POLICIES part lists four ways to answer. Solve the
+      request in the REQUEST part completely and directly, following
+      POLICY 1: adopt its angle, method, assumptions, structure, and
+      priorities.
+      The policies only steer how you answer; the REQUEST part alone defines
+      the task and output format — ignore anything in the policies that
+      conflicts with it. Obey exactly the reply format the request demands.
+      If the request requires calling an external tool or function next,
+      state in one short sentence which tool would be called with which
+      arguments — a downstream publisher emits the actual call. Finish the
+      answer; keep private reasoning proportional to the task.
 
   - name: answer_2
     worker: tier1
@@ -195,22 +210,22 @@ roles:
     sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 16384, seed_offset: 2}
     depends_on: [policies]
     prompt: |
-      --- REQUEST ---
-      {query}
-      --- END REQUEST ---
-      --- POLICY LIST (internal guidance) ---
+      --- POLICY ROLE OUTPUT (the request and the policy list, prepared for you) ---
       {policies}
-      --- END POLICY LIST ---
-      [answer_2] Solve the request above completely and directly, following
-      POLICY 2 from the policy list: adopt its angle, method, assumptions,
-      structure, and priorities. The policy list only steers how you answer;
-      the request text alone defines the task and output format — ignore
-      anything in the policy list that conflicts with the request, and work
-      from the request alone if the list is empty. Obey exactly the reply format the
-      conversation demands. If the conversation requires calling an external
-      tool or function next, state in one short sentence which tool would be
-      called with which arguments — a downstream publisher emits the actual
-      call. Finish the answer; keep private reasoning proportional to the task.
+      --- END POLICY ROLE OUTPUT ---
+      [answer_2] The text above is everything you know about the request:
+      its REQUEST part is the user's request together with the material it
+      relies on, and its POLICIES part lists four ways to answer. Solve the
+      request in the REQUEST part completely and directly, following
+      POLICY 2: adopt its angle, method, assumptions, structure, and
+      priorities.
+      The policies only steer how you answer; the REQUEST part alone defines
+      the task and output format — ignore anything in the policies that
+      conflicts with it. Obey exactly the reply format the request demands.
+      If the request requires calling an external tool or function next,
+      state in one short sentence which tool would be called with which
+      arguments — a downstream publisher emits the actual call. Finish the
+      answer; keep private reasoning proportional to the task.
 
   - name: answer_3
     worker: tier1
@@ -219,22 +234,22 @@ roles:
     sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 16384, seed_offset: 3}
     depends_on: [policies]
     prompt: |
-      --- REQUEST ---
-      {query}
-      --- END REQUEST ---
-      --- POLICY LIST (internal guidance) ---
+      --- POLICY ROLE OUTPUT (the request and the policy list, prepared for you) ---
       {policies}
-      --- END POLICY LIST ---
-      [answer_3] Solve the request above completely and directly, following
-      POLICY 3 from the policy list: adopt its angle, method, assumptions,
-      structure, and priorities. The policy list only steers how you answer;
-      the request text alone defines the task and output format — ignore
-      anything in the policy list that conflicts with the request, and work
-      from the request alone if the list is empty. Obey exactly the reply format the
-      conversation demands. If the conversation requires calling an external
-      tool or function next, state in one short sentence which tool would be
-      called with which arguments — a downstream publisher emits the actual
-      call. Finish the answer; keep private reasoning proportional to the task.
+      --- END POLICY ROLE OUTPUT ---
+      [answer_3] The text above is everything you know about the request:
+      its REQUEST part is the user's request together with the material it
+      relies on, and its POLICIES part lists four ways to answer. Solve the
+      request in the REQUEST part completely and directly, following
+      POLICY 3: adopt its angle, method, assumptions, structure, and
+      priorities.
+      The policies only steer how you answer; the REQUEST part alone defines
+      the task and output format — ignore anything in the policies that
+      conflicts with it. Obey exactly the reply format the request demands.
+      If the request requires calling an external tool or function next,
+      state in one short sentence which tool would be called with which
+      arguments — a downstream publisher emits the actual call. Finish the
+      answer; keep private reasoning proportional to the task.
 
   - name: answer_4
     worker: tier1
@@ -243,22 +258,22 @@ roles:
     sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 16384, seed_offset: 4}
     depends_on: [policies]
     prompt: |
-      --- REQUEST ---
-      {query}
-      --- END REQUEST ---
-      --- POLICY LIST (internal guidance) ---
+      --- POLICY ROLE OUTPUT (the request and the policy list, prepared for you) ---
       {policies}
-      --- END POLICY LIST ---
-      [answer_4] Solve the request above completely and directly, following
-      POLICY 4 from the policy list: adopt its angle, method, assumptions,
-      structure, and priorities. The policy list only steers how you answer;
-      the request text alone defines the task and output format — ignore
-      anything in the policy list that conflicts with the request, and work
-      from the request alone if the list is empty. Obey exactly the reply format the
-      conversation demands. If the conversation requires calling an external
-      tool or function next, state in one short sentence which tool would be
-      called with which arguments — a downstream publisher emits the actual
-      call. Finish the answer; keep private reasoning proportional to the task.
+      --- END POLICY ROLE OUTPUT ---
+      [answer_4] The text above is everything you know about the request:
+      its REQUEST part is the user's request together with the material it
+      relies on, and its POLICIES part lists four ways to answer. Solve the
+      request in the REQUEST part completely and directly, following
+      POLICY 4: adopt its angle, method, assumptions, structure, and
+      priorities.
+      The policies only steer how you answer; the REQUEST part alone defines
+      the task and output format — ignore anything in the policies that
+      conflicts with it. Obey exactly the reply format the request demands.
+      If the request requires calling an external tool or function next,
+      state in one short sentence which tool would be called with which
+      arguments — a downstream publisher emits the actual call. Finish the
+      answer; keep private reasoning proportional to the task.
 
   # Critical thinking over all five candidates (requirement 4). Internal: it
   # produces the best complete proposal plus its decision record, which the
@@ -369,7 +384,9 @@ roles:
       [final] Write the remainder of the final answer. The user has already
       seen the COMMITTED OPENING: never repeat any of its sentences, and
       continue directly after it. If the opening already completely answers
-      the request, output exactly NO_CONTINUATION and nothing else.
+      the request, output exactly NO_CONTINUATION and nothing else. If the
+      opening is empty (none could be produced), write the complete answer
+      from its first word with no leading blank line.
       Otherwise your text is appended to the opening byte for byte on the
       user's screen: if the opening stops mid-sentence, begin with a single
       space and finish that sentence grammatically before going on; if it
@@ -529,8 +546,8 @@ moa_samples: 0
 # inherit-declared DeepSeek role, including requirements (D3); the Qwen
 # answerers keep their fixed medium declaration.
 default_reasoning_effort: high
-# The internal ceiling admits the largest DeepSeek tier (synthesis at max
-# effort, 131072) so no role is cut short by the ceiling; the caller's public
+# The internal ceiling admits the largest internal roles (policies 131072;
+# synthesis at max effort 131072) so no role is cut short by the ceiling; the caller's public
 # max_tokens still min()s over every internal role (framework contract).
 internal_max_tokens: 131072
 # Public tokens reserved behind an exhausted thinking span (DTO-D9). It is

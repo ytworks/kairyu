@@ -176,8 +176,12 @@ def test_v41_tiered_l2_pins_the_deepseek_led_dag_and_its_forced_twin() -> None:
         for field_name in ("prompt", "prompt_headless"):
             text = getattr(role, field_name)
             if text:
-                # The L3-rendered conversation enters every prompt exactly once.
-                assert text.count("{query}") == 1, (name, field_name)
+                # The L3-rendered conversation enters every prompt exactly once,
+                # except the Qwen answerers, which read the policies role's
+                # output alone so their input fits Qwen whatever the
+                # conversation's length (V41T-D2 amendment 4).
+                expected = 0 if name.startswith("answer_") else 1
+                assert text.count("{query}") == expected, (name, field_name)
     head = roles["head"]
     assert head.role_type == "head" and head.depends_on == () and head.sampling.max_tokens == 256
     requirements = roles["requirements"]
@@ -192,12 +196,10 @@ def test_v41_tiered_l2_pins_the_deepseek_led_dag_and_its_forced_twin() -> None:
     assert "{requirements}" not in independent.prompt and "{policies}" not in independent.prompt
     policies = roles["policies"]
     assert policies.depends_on == ()
-    assert policies.sampling.max_tokens == 8192
-    assert policies.sampling.max_tokens_by_effort.model_dump() == {
-        "low": 8192,
-        "high": 8192,
-        "max": 16384,
-    }
+    # The DSL ceiling (131072) bounds the answerers' input: 131072 + 16384 +
+    # the ~300-token scaffold stays under Qwen's 262144 context.
+    assert policies.sampling.max_tokens == 131072
+    assert policies.sampling.max_tokens_by_effort is None
     for index in range(1, 5):
         answer = roles[f"answer_{index}"]
         assert answer.depends_on == ("policies",)
@@ -416,6 +418,9 @@ def test_v41_tiered_dag_runs_requirements_candidates_synthesis_final_audit(
         assert CHECKLIST not in text and POLICIES not in text and "Candidate text" not in text
     for index in range(1, 5):
         _, text = sent[f"answer_{index}"][0]
+        # The answerers see the policies role's output and nothing of the
+        # rendered conversation.
+        assert "Compare A and B" not in text
         assert CHECKLIST not in text and POLICIES in text and f"POLICY {index}" in text
     _, synthesis_text = sent["synthesis"][0]
     for name in ("independent", "answer_1", "answer_2", "answer_3", "answer_4"):

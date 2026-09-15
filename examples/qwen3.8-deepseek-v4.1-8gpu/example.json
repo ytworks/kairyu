@@ -334,7 +334,10 @@
       "max_tokens": 8192
     },
     "long_input": {
-      "qwen_boundary_prompt_tokens": 240000,
+      "qwen_overflow_prompt_tokens": [
+        300000,
+        600000
+      ],
       "deepseek_native_targets": [
         32768,
         262144,

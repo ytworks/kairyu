@@ -96,7 +96,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) and the checklist-to-audit-only rewiring, every public gate is being re-run as chain run 10
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) the checklist-to-audit-only rewiring and the policies-output-only answerers, every public gate is being re-run as chain run 11
 
 ## Change Log
 
@@ -107,6 +107,11 @@ in `.claude/rules/progress-log.md`).
 - What: `_SHARED_PREPARED_PAYLOADS_LOCK`, `OpenAICompatBackend._prepared_payloads_lock` / `_prepared_image_urls_lock`, `KairyuBackend._prepared_requests_lock` and `ZmqEngineBackend._prepared_requests_lock` are now `threading.RLock` (the vision image cache already was). A regression test drops the last reference to a cached request while holding each cache's lock, which runs the weakref discard callback on the holding thread; it deadlocked on all five caches before and passes now. Resolves the blocker recorded below.
 - Why: the discard callbacks run at garbage-collection time on whichever thread triggers collection, including one inside the guarded region; a non-re-entrant lock then blocks the gateway's event loop forever.
 - Refs: PR #603 (based on PR #602); `kairyu/engine/{openai_backend,kairyu_backend,zmq_backend}.py`; `tests/unit/test_prepared_cache_discard_reentrancy.py`
+
+### 2026-09-15 — [amendment] V41T-D2: the tiered Qwen answerers read the policies output alone
+- What: owner instruction — the roles before the Qwen answerers must make their input fit Qwen whatever the conversation's length. The answerers' prompts drop `{query}`; their only input is the `policies` output (cap 131072 = the DSL ceiling; 131072 + ~300 + 16384 < 262144). `policies` now writes a `=== REQUEST ===` part (the request and its material, verbatim while it fits) before `=== POLICIES ===`; the final writes the whole answer when the opening is empty. The long-input gate now sends 300K- and 600K-token conversations through the judged product. Supersedes the same-day static-cap amendment; all public gates re-run as chain run 11.
+- Why: a bound that includes the conversation cannot be guaranteed by configuration; a bound on a DeepSeek output can, and DeepSeek reads up to 1,048,576 tokens.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 4); example README
 
 ### 2026-09-15 — [amendment] V41T-D2/D6: the tiered checklist is read by the audit only; policies cap bounds the Qwen answerers' input
 - What: owner instruction — `policies`, `answer_1..4`, `synthesis` and `final` no longer receive or depend on the requirements checklist (the audit alone reads it; `requirements` stays a scheduling-only dependency of `final` because the Conductor runs the verifier inline after its target). `policies` runs in the first wave. Its cap becomes 8192 (16384 at `max`) so rendered conversation + policies text + the answerer's 16384 budget fits Qwen's 262,144 context: guaranteed rendered conversation ≈237K tokens (≈229K at `max`). CPU tests updated; every public gate re-runs as chain run 10.
