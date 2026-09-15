@@ -190,19 +190,28 @@ def test_v41_tiered_l2_pins_the_deepseek_led_dag_and_its_forced_twin() -> None:
     independent = roles["independent"]
     assert independent.depends_on == ()
     assert "{requirements}" not in independent.prompt and "{policies}" not in independent.prompt
-    assert roles["policies"].depends_on == ("requirements",)
+    policies = roles["policies"]
+    assert policies.depends_on == ()
+    assert policies.sampling.max_tokens == 8192
+    assert policies.sampling.max_tokens_by_effort.model_dump() == {
+        "low": 8192,
+        "high": 8192,
+        "max": 16384,
+    }
     for index in range(1, 5):
         answer = roles[f"answer_{index}"]
-        assert answer.depends_on == ("policies", "requirements")
+        assert answer.depends_on == ("policies",)
         assert f"POLICY {index}" in answer.prompt
         assert answer.sampling.seed_offset == index
         assert answer.sampling.max_tokens == 16384 and answer.sampling.top_k == 20
     candidates = {"independent", "answer_1", "answer_2", "answer_3", "answer_4"}
     synthesis = roles["synthesis"]
-    assert set(synthesis.depends_on) == candidates | {"requirements"}
+    assert set(synthesis.depends_on) == candidates
     assert "=== DECISION RECORD ===" in synthesis.prompt
     final = roles["final"]
     assert final.role_type == "publisher"
+    # requirements stays a scheduling dependency of final (the audit verifier
+    # runs inline after it and needs the checklist complete), never an input.
     assert set(final.depends_on) == candidates | {"head", "synthesis", "requirements"}
     assert final.sampling.max_tokens is None and final.sampling.max_tokens_by_effort is None
     assert (
@@ -211,6 +220,10 @@ def test_v41_tiered_l2_pins_the_deepseek_led_dag_and_its_forced_twin() -> None:
     audit = roles["audit"]
     assert audit.role_type == "verifier" and audit.verifies == "final"
     assert set(audit.depends_on) == {"final", "head", "requirements"}
+    # The checklist is verification data: only the audit reads it.
+    for name, role in roles.items():
+        reads = "{requirements}" in (role.prompt or "") + (role.prompt_headless or "")
+        assert reads == (name == "audit"), name
     assert spec.budget.max_steps == ORCH["max_steps"] == 19
     assert spec.budget.max_refine_depth == ORCH["product_max_refinements"] == 2
     assert spec.internal_max_tokens == ORCH["internal_max_output_tokens"] == 131072
@@ -395,22 +408,21 @@ def test_v41_tiered_dag_runs_requirements_candidates_synthesis_final_audit(
         if name != "head":
             assert name in sent, name
 
-    # Requirements and the independent candidate read only the conversation.
-    for name in ("requirements", "independent"):
+    # Requirements, the independent candidate and the policies read only the
+    # conversation; the checklist reaches the audit alone (verification data).
+    for name in ("requirements", "independent", "policies"):
         _, text = sent[name][0]
         assert "Compare A and B" in text
         assert CHECKLIST not in text and POLICIES not in text and "Candidate text" not in text
-    _, policies_text = sent["policies"][0]
-    assert CHECKLIST in policies_text and "Candidate text" not in policies_text
     for index in range(1, 5):
         _, text = sent[f"answer_{index}"][0]
-        assert CHECKLIST in text and POLICIES in text and f"POLICY {index}" in text
+        assert CHECKLIST not in text and POLICIES in text and f"POLICY {index}" in text
     _, synthesis_text = sent["synthesis"][0]
     for name in ("independent", "answer_1", "answer_2", "answer_3", "answer_4"):
         assert f"Candidate text from {name}." in synthesis_text
-    assert CHECKLIST in synthesis_text
+    assert CHECKLIST not in synthesis_text
     _, final_text = sent["final"][0]
-    assert PROPOSAL in final_text and CHECKLIST in final_text
+    assert PROPOSAL in final_text and CHECKLIST not in final_text
     assert ("Comparison:" in final_text) is head_enabled
     assert ("COMMITTED OPENING" in final_text) is head_enabled
     _, audit_text = sent["audit"][0]

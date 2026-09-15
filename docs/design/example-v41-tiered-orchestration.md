@@ -46,7 +46,7 @@ tokens), `synthesis` (DeepSeek: verify premises, evidence, method, and the
 conditions of each conclusion; counterexamples, boundaries, omissions,
 shared errors; fix, combine, consider new approaches; output the complete
 proposal plus an internal decision record), `final` (DeepSeek publisher:
-re-check the proposal against request, checklist, and all candidates;
+re-check the proposal against request and all candidates;
 continue the committed head or write the complete headless answer; adoption
 decisions stay in private reasoning), `audit` (DeepSeek verifier of `final`:
 `PASS`/`FAIL` first line, one line per requirement ID, `max_refine_depth: 2`,
@@ -108,6 +108,30 @@ last attempt per the existing Conductor contract).
 - Why: the preamble is a user-visible defect, not only an audit finding,
   and the refinement rounds it caused doubled ensemble completion time.
 
+### V41T-D2 amendment 3 (2026-09-15) — the checklist is verification data; the Qwen answerers' input is bounded by the policies cap
+
+- What (owner instruction): the requirements checklist is read by `audit`
+  only. `policies`, `answer_1..4`, `synthesis`, and `final` (streamed and
+  headless) no longer receive it or depend on it; `policies` now runs in the
+  first wave next to `head`, `requirements`, and `independent`.
+  `requirements` remains a scheduling dependency of `final` because the
+  Conductor runs a verifier inline after its target and rejects a verifier
+  input that the target does not depend on (`conductor.py` `_validate`);
+  the final's prompts never render it. `budget.max_steps` is unchanged.
+- Why: a role that writes the answer while reading the extracted criteria
+  lets the extractor's interpretation leak into the answer, and the audit
+  then checks an answer that was written to its own checklist; the request
+  must remain the only source for the answer.
+- Qwen input bound (owner instruction): the roles that run before the Qwen
+  answerers must have output caps such that rendered conversation +
+  upstream text + the answerer's 16,384-token budget fits Qwen's 262,144
+  context. Kairyu has no per-request remaining-budget calculation, so the
+  bound is static: `policies` is capped at 8,192 tokens (16,384 at `max`;
+  DeepSeek completion tokens include thinking, so the cap bounds the text
+  too — observed 1.3K–4.0K at high). Guaranteed rendered conversation:
+  ≈237,000 tokens at default/low effort, ≈229,000 at `max` (updates D6's
+  ≈245,000). `head` (256) and the judge (8) read the conversation alone.
+
 ## V41T-D3 — Requirement extraction on DeepSeek with the PR #595 contract
 
 The `requirements` role ports PR #595's specification: a bare JSON array of
@@ -116,8 +140,8 @@ consecutive, `minimum`/`optional`, explicit constraints never downgraded,
 literals / numbers / operators / punctuation / line breaks preserved, later
 corrections honoured, quoted text / image text / tool results treated as
 data, no invented obligations, no fences or commentary. The checklist is
-untrusted data for `policies`, the answerers, `synthesis`, `final`, and
-`audit`; the request remains authoritative. JSON is prompt-constrained (no
+verification data read by `audit` alone (amendment 2026-09-15, below); the
+request remains authoritative. JSON is prompt-constrained (no
 grammar; the DSL exposes no per-role structured-output setting).
 
 Effort: `inherit` + `default_reasoning_effort: high` — omitted → high, max →
@@ -137,8 +161,9 @@ Sampling, thinking level, template, and the DTO-D15 continuation on the Qwen
 thinking route are unchanged. This is a deliberate deviation from the
 original "131072" figure for the Qwen medium route (owner decision
 2026-09-14). Residual, framework-owned: the upstream 400 reason is still
-masked as 502; inputs beyond the Qwen context minus the role caps (~245,000
-rendered tokens on the ensemble) cannot be served by Qwen-involving routes
+masked as 502; inputs beyond the configured bound (~237,000 rendered tokens
+on the ensemble at default effort, ~229,000 at `max`; V41T-D6 amendment
+2026-09-15) cannot be served by Qwen-involving routes
 (no windowed reading exists in `main`); the ensemble's `final` also has no
 fixed cap.
 

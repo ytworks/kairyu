@@ -273,6 +273,12 @@ The verification tool runs from the PR #603 worktree merged with this
 branch, so `run.json` records `git_commit` `1100047b`; the served example
 files are byte-identical to `2676016f` (served-config SHA `931a0683…`).
 
+Run 9 was stopped during its coding matrix (owner instruction 2026-09-15):
+the requirements checklist must be read by the audit only, and the roles
+before the Qwen answerers must be capped so their input fits Qwen's context
+(V41T-D2 amendment 3). The rows below stay as config-C evidence; every
+public gate re-runs as chain run 10 on served config D.
+
 ### Run 9 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T003219Z`, PASS)
 
 | c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
@@ -402,7 +408,7 @@ files are byte-identical to `2676016f` (served-config SHA `931a0683…`).
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS on config C, run 9 (`20260915T003219Z`); also PASS on configs B (run 8) and A |
+| Judged product, generic | `verify.sh serving-auto-max` | run 10 (config D) pending; PASS on config C run 9 (`20260915T003219Z`), B (run 8) and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
