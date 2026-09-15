@@ -348,6 +348,29 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   full conversation.
 - Artifacts: `verification-results/20260915T042329Z-serving-auto-max/`.
 
+### Run 11 — `serving-auto-max-coding`, judged product, coding 2.9K-token prompts (run `20260915T051015Z`; c1/c8 rows PASS, c16 31/32, c32 not run)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | Qwen placement | DeepSeek-direct denominator (32/32 `stop`) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_think_medium 32 (0) | 287 ms | 18,585 / 221,716 ms | 34.2 / 236.7 s | 1,512 s | 45.0 | 68,164 | 50 / 14 (serial, not gated) | 39,087 ms (gate not applicable) |
+| 8 | 32/32 | qwen_think_medium 32 (0) | 365 ms | 23,538 / 120,986 ms | 36.4 / 133.1 s | 232 s | 265.9 | 61,830 | 36 / 28 | 45,511 ms |
+| 16 | 31/32 | qwen_think_medium 32 (0) | 493 ms | 30,193 / 247,838 ms | 44.9 / 261.6 s | 265 s | 278.6 | 74,076 | 31 / 34 | 66,794 ms |
+| 32 | — | not run: the tool stops a matrix after a failed row | | | | | | | | |
+
+- c16 sample 28 (route `qwen_think_medium`): the first Qwen attempt ended
+  after 6,971 tokens of thinking with no public text (far below its
+  65,536-token budget — the model stopped by itself inside its thinking
+  span). Kairyu's DTO-D15 continuation then forced `</think>` and
+  re-dispatched with the 256-token `public_output_floor`; the model wrote
+  reasoning-style text into the public channel and was cut at 256 tokens
+  (`finish_reason: length`), which fails the row. First occurrence in about
+  450 judged coding samples across runs 8–11. Recorded; no configuration
+  change (only the floor size is example-owned, and a larger floor does not
+  make the continuation an answer).
+- The c16 and c32 rows will be re-measured after the chain under a new run
+  id with `VERIFY_CONCURRENCY=16,32`; both results stay recorded.
+- Artifacts: `verification-results/20260915T051015Z-serving-auto-max-coding/`.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
