@@ -297,7 +297,15 @@ before the Qwen answerers must be capped so their input fits Qwen's context
 (V41T-D2 amendment 3). The rows below stay as config-C evidence; every
 public gate re-runs as chain run 10 on served config D.
 
+## Public gates on served config E (specs: the Qwen answerers read the policies output alone, V41T-D2 amendment 4; gateway image from PR #603; gate chain run 11)
+
+(Filled in as run 11 progresses.)
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
+
+Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
+the static policies cap still left the conversation itself unbounded for
+the Qwen answerers; config E makes the policies output their only input.
 
 Smoke request on the rewired DAG (`gate-logs-run10-smoke/`, one forced
 ensemble, the generic case 2 prompt): `head`, `independent`, `policies`
@@ -448,7 +456,7 @@ run 10 measure how often this happens.
 | Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
 | Normal restart | `verify.sh restart` | not run |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (Qwen boundary ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/600K-token conversations through the judged product; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish

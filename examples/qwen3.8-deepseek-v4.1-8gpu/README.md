@@ -62,8 +62,8 @@ original requirement on purpose; see V41T-D4 in the design document.
 | 1 | `head` | Qwen | off | conversation | 256, streamed to the user from t=0 |
 | 1 | `requirements` | DeepSeek | caller's effort, default high | conversation | 16384 / 32768 / 65536 by effort |
 | 1 | `independent` | DeepSeek | caller's effort | conversation, tools, images only | 16384 / 32768 / 65536 |
-| 1 | `policies` | DeepSeek | caller's effort | conversation | 8192 / 8192 / 16384 (bounded so the Qwen answerers' input fits; see below) |
-| 2 | `answer_1..4` | Qwen (2 replicas, 2 + 2) | medium | conversation + policies, one `POLICY n` each | 16384 |
+| 1 | `policies` | DeepSeek | caller's effort | conversation | 131072 (the Qwen answerers read this output alone; see below) |
+| 2 | `answer_1..4` | Qwen (2 replicas, 2 + 2) | medium | the `policies` output only (request part + `POLICY n`); never the conversation | 16384 |
 | 3 | `synthesis` | DeepSeek | caller's effort | conversation + all 5 candidates | 16384 / 65536 / 131072 |
 | 4 | `final` | DeepSeek | caller's effort | conversation + all 5 candidates + proposal + committed head | caller's limit minus the head |
 | 4 | `audit` | DeepSeek (verifier) | caller's effort | head + final + checklist (the only reader of the checklist) | 8192 / 16384 / 32768 |
@@ -78,16 +78,24 @@ original requirement on purpose; see V41T-D4 in the design document.
   slot empty). `requirements` stays a scheduling dependency of `final` only
   because Kairyu runs the verifier inline after its target and requires every
   verifier input to be complete by then.
-- The Qwen answerers' input is bounded by configuration, not by a per-request
-  calculation (Kairyu has none): rendered conversation + policies text +
-  their own 16,384-token budget must fit Qwen's 262,144 context, so the
-  `policies` cap is 8,192 (16,384 at `max` effort; DeepSeek completion tokens
-  include thinking, so the cap also bounds the text). Guaranteed rendered
-  conversation length for the ensemble: about 237,000 tokens at default/low
-  effort and about 229,000 at `max` (the head's 256 and the judge's 8 never
-  bind first).
-- `policies` writes four policies that differ in method, assumptions, and
-  evaluation criteria, not wording.
+- The Qwen answerers never read the rendered conversation: their only input
+  is the `policies` output (owner instruction 2026-09-15), so their input
+  fits Qwen's 262,144 context whatever the conversation's length —
+  131,072 (the `policies` cap, which is also the DSL ceiling
+  `internal_max_tokens`) + about 300 tokens of scaffold + their own
+  16,384-token budget = 147,756. The `policies` role therefore writes two
+  parts: `=== REQUEST ===` (the latest user request, the governing system /
+  developer instructions, the earlier turns, materials, tool results and
+  tool inventory the answer relies on — copied verbatim while it fits the
+  budget, otherwise selected with the omissions stated) and
+  `=== POLICIES ===` (`POLICY 1:`–`POLICY 4:`). Copying the request costs
+  DeepSeek output time (about 65 tokens/s single-stream: about 2 minutes
+  for an 8K-token request, up to about 35 minutes when the cap is reached).
+  The head (256) and the judge (8) still read the conversation; beyond
+  Qwen's context the judge falls back to the ensemble and the head fails
+  silently (no streamed opening), both by Kairyu's contract.
+- `policies` writes the answerers' request part and four policies that
+  differ in method, assumptions, and evaluation criteria, not wording.
 - `synthesis` checks premises, evidence, methods, and the conditions under
   which each candidate's conclusion holds; looks for counterexamples,
   boundary conditions, omissions, and errors common to all five; fixes and
@@ -219,11 +227,12 @@ row is only a valid denominator when all 32 requests completed with
 
 ## Known limits (Kairyu `main`, recorded, not hidden)
 
-1. No windowed reading of inputs that exceed a model's context: Qwen-involving
-   routes fail with an upstream 400 (surfaced as Kairyu's generic 502) once
-   the rendered input exceeds the bound above (about 237,000 tokens for the
-   ensemble at default effort, 229,000 at `max`); DeepSeek-only routes reach
-   1,048,576.
+1. No windowed reading of inputs that exceed a model's context. The
+   ensemble's Qwen answerers are bounded by construction (above); the judge
+   and the head are not (nothing runs before them), so a rendered
+   conversation beyond 262,144 tokens is always served by the ensemble
+   without a streamed opening, and the Qwen direct routes are unreachable
+   for it. DeepSeek roles read up to 1,048,576 tokens.
 2. The upstream 400 reason is replaced by "orchestration final unit produced
    no public output" (502); the actual reason is in the gateway log.
 3. L3 appends `<image:N>` directly to the user text in the rendered

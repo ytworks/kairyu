@@ -97,12 +97,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 - Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) and the checklist-to-audit-only rewiring, every public gate is being re-run as chain run 10
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) the checklist-to-audit-only rewiring and the policies-output-only answerers, every public gate is being re-run as chain run 11
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-15 — [amendment] V41T-D2: the tiered Qwen answerers read the policies output alone
+- What: owner instruction — the roles before the Qwen answerers must make their input fit Qwen whatever the conversation's length. The answerers' prompts drop `{query}`; their only input is the `policies` output (cap 131072 = the DSL ceiling; 131072 + ~300 + 16384 < 262144). `policies` now writes a `=== REQUEST ===` part (the request and its material, verbatim while it fits) before `=== POLICIES ===`; the final writes the whole answer when the opening is empty. The long-input gate now sends 300K- and 600K-token conversations through the judged product. Supersedes the same-day static-cap amendment; all public gates re-run as chain run 11.
+- Why: a bound that includes the conversation cannot be guaranteed by configuration; a bound on a DeepSeek output can, and DeepSeek reads up to 1,048,576 tokens.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 4); example README
 
 ### 2026-09-15 — [amendment] V41T-D2/D6: the tiered checklist is read by the audit only; policies cap bounds the Qwen answerers' input
 - What: owner instruction — `policies`, `answer_1..4`, `synthesis` and `final` no longer receive or depend on the requirements checklist (the audit alone reads it; `requirements` stays a scheduling-only dependency of `final` because the Conductor runs the verifier inline after its target). `policies` runs in the first wave. Its cap becomes 8192 (16384 at `max`) so rendered conversation + policies text + the answerer's 16384 budget fits Qwen's 262,144 context: guaranteed rendered conversation ≈237K tokens (≈229K at `max`). CPU tests updated; every public gate re-runs as chain run 10.
