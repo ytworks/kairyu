@@ -222,13 +222,16 @@ decisions.
   visible content. Invalid baselines fail the gate rather than being skipped.
 - The V4/8-GPU measurements are never reused. Speed is never bought by
   reducing input, thinking, candidates, or stages.
-- Amendment (2026-09-14): a candidate role (`answer_1..4`, `independent`)
-  that ends at its cap is counted per stage (`stages.json` cap hits) and
-  recorded, not a failed row — it is one weak input to a synthesis that
-  reviews all five critically, and the published answer is still gated by
-  the audit. Head, requirements, policies, synthesis, final, and audit cap
-  hits keep failing the row. `VERIFY_CONCURRENCY` re-runs selected rows of
-  a matrix under a new run id.
+- Amendment (2026-09-14, extended 2026-09-15): a candidate role
+  (`answer_1..4`, `independent`) or the `policies` role that ends at its cap
+  is counted per stage (`stages.json` cap hits) and recorded, not a failed
+  row — each is one weak input to a synthesis that reviews all five
+  candidates critically, and the published answer is still gated by the
+  audit (since amendment 4 the policies output feeds the answerers only;
+  its first cap hit was a 65,536-token thinking run on the generic prompt
+  whose answer still passed the audit). Head, requirements, synthesis,
+  final, and audit cap hits keep failing the row. `VERIFY_CONCURRENCY`
+  re-runs selected rows of a matrix under a new run id.
 - Known `main` limitations are recorded in the README and MEASUREMENTS
   rather than worked around: no windowed long-input reading, 502 masking of
   upstream 400s, `<image:N>` concatenation and the duplicated latest-user

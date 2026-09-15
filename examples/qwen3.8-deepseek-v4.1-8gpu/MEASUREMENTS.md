@@ -371,6 +371,27 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   id with `VERIFY_CONCURRENCY=16,32`; both results stay recorded.
 - Artifacts: `verification-results/20260915T051015Z-serving-auto-max-coding/`.
 
+### Run 11 — `serving-ensemble`, forced ensemble, generic c1 (run `20260915T062825Z`, row 31/32 under the tool's rule at the time)
+
+| c | ok | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit: first-attempt PASS / after 1 / after 2 / exhausted | cap hits | Qwen placement |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 `stop` | 2,064 / 2,098 ms | 402.2 / 1,063.7 s | 14,417 s | 4.9 | 1,280,845 | 23 / 6 / 3 / 0 | head 6 (designed); answer_4 2; policies 1 (sample 19: 65,536 tokens, 947 s; its answer passed the audit first time) | 82 / 78 |
+
+- Audit outcomes on the amended DAG: 23 of 32 first-attempt PASS and no
+  exhaustion (config A: 13 / 8 exhausted; config B: 14 / 2).
+- Per-stage duration p50 / p99 (ms): head 6,312 / 7,712; requirements
+  50,372 / 87,108; independent 22,711 / 40,040; policies 75,479 / 947,293
+  (now writing the REQUEST part; 4,989 tokens p50); answer_1..4 44,784–
+  114,799 / 240,748–366,618; synthesis 30,494 / 83,715; final 26,489 /
+  72,064 (44 attempts); audit 68,189 / 233,925.
+- The policies cap hit failed the row under the tool's rule at the time
+  (only candidates were exempt), which made the tool skip the generic
+  c8/c16/c32 rows. The rule now counts a policies cap hit per stage like a
+  candidate's (its output feeds the answerers only; the synthesis and audit
+  gate the result — design doc V41T-D6 amendment); the skipped rows are
+  re-run after the chain under a new run id.
+- Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/generic/generic-c1/`.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):

@@ -570,8 +570,9 @@ def test_v41_tiered_row_validator_requires_every_role_and_flags_cut_offs(verific
             event["usage"]["completion_tokens"] = caps["requirements"]
     problems = verification.sample_problems(cut_off, judged=True, require_head=True, caps=caps)
     assert any("requirements ended at its" in problem for problem in problems)
-    # A candidate that spends its whole budget is a weak synthesis input,
-    # counted per stage, not a failed row.
+    # A candidate (or the policies role, which feeds the answerers only) that
+    # spends its whole budget is a weak synthesis input, counted per stage,
+    # not a failed row.
     candidate_at_cap = _primary_sample()
     for event in candidate_at_cap["trace"]["events"]:
         if event["node"] == "answer_1":
