@@ -273,6 +273,24 @@ The verification tool runs from the PR #603 worktree merged with this
 branch, so `run.json` records `git_commit` `1100047b`; the served example
 files are byte-identical to `2676016f` (served-config SHA `931a0683…`).
 
+The verification tool runs from the PR #603 worktree merged with this
+branch (`git_commit` `df202a63` in `run.json`); the served example files are
+byte-identical to `17e0233b` (served-config SHA `fd1a4b6d…`).
+
+### Run 10 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T025028Z`, PASS)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 240 ms | 2,308 / 2,334 ms | 8.3 / 12.5 s | 279 s | 33.2 | 9,391 | — | 53 / 11 (serial, not gated) | 2,308 vs 15,284 ms → PASS |
+| 8 | 32/32 | qwen_direct 31, primary 1 (1) | 320 ms | 6,470 / 13,936 ms | 26.4 / 335.7 s | 383 s | 29.1 | 42,344 | PASS 1 (first attempt) | 34 / 34 | 11,974 (primary) vs 21,025 ms → PASS |
+| 16 | 32/32 | qwen_direct 30, primary 2 (2) | 1,253 ms | 20,460 / 33,161 ms | 46.9 / 409.3 s | 475 s | 30.4 | 77,166 | PASS 2 (first attempt) | 37 / 35 | 20,502 (primary) vs 30,116 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,468 ms | 52,215 / 74,297 ms | 72.5 / 85.5 s | 86 s | 110.9 | 9,616 | — | 32 / 32 | 52,215 vs 46,345 ms → PASS (1.13×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop`; no gateway hang. The three
+  judge-fallback ensembles passed their first audit; `policies` used
+  1,942–2,531 completion tokens under its new 8,192 cap.
+- Artifacts: `verification-results/20260915T025028Z-serving-auto-max/`.
+
 Run 9 was stopped during its coding matrix (owner instruction 2026-09-15):
 the requirements checklist must be read by the audit only, and the roles
 before the Qwen answerers must be capped so their input fits Qwen's context
@@ -422,7 +440,7 @@ run 10 measure how often this happens.
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | run 10 (config D) pending; PASS on config C run 9 (`20260915T003219Z`), B (run 8) and A |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config D, run 10 (`20260915T025028Z`); also PASS on configs C, B and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
