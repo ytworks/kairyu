@@ -519,7 +519,7 @@ run 10 measure how often this happens.
 | Gate | Command | Result |
 |---|---|---|
 | Judged product, generic | `verify.sh serving-auto-max` | PASS on config E, run 11 (`20260915T042329Z`); also PASS on configs D, C, B and A |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | config E run 11: c1/c8 PASS, c16 31/32 (one DTO-D15 continuation cut at 256), c32 pending re-run; rows PASS on configs B (run 8) and A |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
