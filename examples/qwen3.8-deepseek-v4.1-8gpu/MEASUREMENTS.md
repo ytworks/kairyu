@@ -448,6 +448,21 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   DeepSeek spent all of 65,536 tokens thinking without output in 5 of 32
   forced ensembles. Served config changes → run 12 re-runs every gate.
 
+### Run 12 (`20260916T013604Z`) — discarded
+
+After the `docker exec` failure the DeepSeek container was recreated by
+hand with `docker compose up --force-recreate deepseek` through the
+launcher's compose wrapper but without its preflight, so it received the
+wrapper's render-only default `cpuset: 0` instead of the NUMA-local CPU set
+the launcher assigns (`control.py` `_preflight` / `_assign_cpusets`). With
+the Engram tables in pinned host memory served from one CPU core, the
+DeepSeek-direct c1 baseline decoded at 20.0 tokens/s instead of ≈67 and its
+first-visible-content p50 rose from ≈15 s to 57.3 s (the judged product row
+itself was unaffected: 2,283 ms, 32/32). The run was stopped after that
+row, the container was recreated with the launcher's cpuset, and every gate
+re-runs as run 13. Lesson recorded: recreate services only through the
+launcher's `up` path or with its preflight applied.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
