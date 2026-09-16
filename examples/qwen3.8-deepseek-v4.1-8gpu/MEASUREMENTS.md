@@ -448,6 +448,22 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   DeepSeek spent all of 65,536 tokens thinking without output in 5 of 32
   forced ensembles. Served config changes → run 12 re-runs every gate.
 
+## Public gates on served config F (specs at commit `963df10d`: synthesis 131,072 at high effort, caller `max_tokens` 131,072 in the matrices and the Chat UI; gateway image from PR #603; served `git_commit` `1b2eca8f`, served-config SHA `13e5ef2d…`; gate chain run 13 from 2026-09-16 02:50 UTC)
+
+### Run 13 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260916T024958Z`, PASS)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 235 ms | 2,281 / 2,351 ms | 8.5 / 11.3 s | 278 s | 33.3 | 9,377 | — | 50 / 14 (serial, not gated) | 2,281 vs 15,408 ms → PASS |
+| 8 | 32/32 | qwen_direct 32 (0) | 319 ms | 6,428 / 13,927 ms | 28.1 / 45.1 s | 122 s | 79.3 | 9,763 | — | 32 / 32 | 6,428 vs 24,560 ms → PASS |
+| 16 | 32/32 | qwen_direct 29, primary 3 (3) | 1,236 ms | 17,756 / 39,660 ms | 49.8 / 469.9 s | 546 s | 27.0 | 97,847 | PASS 3 (first attempt) | 38 / 38 | 20,457 (primary) vs 30,362 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,187 ms | 48,741 / 80,384 ms | 67.0 / 93.0 s | 93 s | 104.6 | 9,858 | — | 32 / 32 | 48,741 vs 42,949 ms → PASS (1.13×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop` at normal speed (66.7 output
+  tok/s at c1, the container re-pinned to its NUMA CPU set); no gateway
+  hang; the three judge-fallback ensembles passed their first audit.
+- Artifacts: `verification-results/20260916T024958Z-serving-auto-max/`.
+
 ### Run 12 (`20260916T013604Z`) — discarded
 
 After the `docker exec` failure the DeepSeek container was recreated by
@@ -610,7 +626,7 @@ run 10 measure how often this happens.
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS on config E, run 11 (`20260915T042329Z`); also PASS on configs D, C, B and A |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config F, run 13 (`20260916T024958Z`); also PASS on configs E, D, C, B and A |
 | Judged product, coding | `verify.sh serving-auto-max-coding` | config E run 11: c1/c8 PASS, c16 31/32 (one DTO-D15 continuation cut at 256), c32 pending re-run; rows PASS on configs B (run 8) and A |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
