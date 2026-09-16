@@ -315,8 +315,11 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 65536
-      max_tokens_by_effort: {low: 16384, high: 65536, max: 131072}
+      # Raised to the DSL ceiling at high effort (owner decision 2026-09-16):
+      # on coding tasks the synthesis spent all of 65536 tokens thinking in
+      # 3 of 32 requests and emitted no proposal.
+      max_tokens: 131072
+      max_tokens_by_effort: {low: 16384, high: 131072, max: 131072}
       seed_offset: 7
     prompt: |
       --- REQUEST ---

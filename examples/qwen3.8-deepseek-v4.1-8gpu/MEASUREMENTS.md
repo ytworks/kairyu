@@ -323,6 +323,131 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   that doubling plus the policies cap of 131,072, the gate's second target
   is 450K tokens rather than 600K (2 × 450K + 131K < 1,048,576).
 
+### Run 11 — `serving-auto-max`, judged product, generic 8K-token prompts (run `20260915T042329Z`, PASS; served `git_commit` `e091fd1a` = this branch at `3d930e50` merged into the PR #603 worktree, served-config SHA `78b6e80d…`)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit | Qwen placement | gate: product vs DeepSeek-direct p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_direct 32 (0) | 239 ms | 2,306 / 2,354 ms | 9.1 / 12.4 s | 302 s | 34.1 | 10,427 | — | 53 / 11 (serial, not gated) | 2,306 vs 14,879 ms → PASS |
+| 8 | 32/32 | qwen_direct 31, primary 1 (1) | 320 ms | 6,433 / 13,823 ms | 26.7 / 526.5 s | 579 s | 21.2 | 56,256 | PASS 1 (after one refinement) | 34 / 34 | 12,327 (primary) vs 23,694 ms → PASS |
+| 16 | 32/32 | qwen_direct 27, primary 5 (5) | 1,168 ms | 20,473 / 44,668 ms | 52.0 / 780.2 s | 826 s | 21.8 | 216,183 | PASS 5 (3 first attempt, 1 after one, 1 after two refinements) | 43 / 41 | 28,262 (primary) vs 36,243 ms → PASS |
+| 32 | 32/32 | qwen_direct 32 (0) | 2,235 ms | 58,358 / 75,805 ms | 83.4 / 87.8 s | 88 s | 113.3 | 10,076 | — | 32 / 32 | 58,358 vs 45,101 ms → PASS (1.29×) |
+
+- All paired DeepSeek-direct rows 32/32 `stop`; no gateway hang. In the six
+  judge-fallback ensembles the `policies` role (now writing the REQUEST part
+  too) took 60 s at c8 and 116 s p50 at c16 with 3.7K–5.7K completion
+  tokens; one Qwen answer hit its 16,384 cap at c16 (recorded, non-fatal).
+  With the matrix's caller `max_tokens 65536`, Kairyu clamps every internal
+  role to 65,536, so the effective policies cap in these rows is 65,536
+  (the bound 65,536 + 300 + 16,384 still holds).
+- Fidelity of the REQUEST part on this synthetic prompt: DeepSeek copied
+  the row label and the task sentence but replaced the 8K-token repeated
+  keyword block with an explicit omission note ("[Omitted from this copy:
+  the remaining user-message text is the p…"), although it fit and the
+  prompt forbids abbreviating the latest user message. Recorded as observed
+  behaviour on degenerate input; the synthesis, final and audit read the
+  full conversation.
+- Artifacts: `verification-results/20260915T042329Z-serving-auto-max/`.
+
+### Run 11 — `serving-auto-max-coding`, judged product, coding 2.9K-token prompts (run `20260915T051015Z`; c1/c8 rows PASS, c16 31/32, c32 not run)
+
+| c | ok | routes (judge fallbacks) | judge p50 | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | Qwen placement | DeepSeek-direct denominator (32/32 `stop`) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 | qwen_think_medium 32 (0) | 287 ms | 18,585 / 221,716 ms | 34.2 / 236.7 s | 1,512 s | 45.0 | 68,164 | 50 / 14 (serial, not gated) | 39,087 ms (gate not applicable) |
+| 8 | 32/32 | qwen_think_medium 32 (0) | 365 ms | 23,538 / 120,986 ms | 36.4 / 133.1 s | 232 s | 265.9 | 61,830 | 36 / 28 | 45,511 ms |
+| 16 | 31/32 | qwen_think_medium 32 (0) | 493 ms | 30,193 / 247,838 ms | 44.9 / 261.6 s | 265 s | 278.6 | 74,076 | 31 / 34 | 66,794 ms |
+| 32 | — | not run: the tool stops a matrix after a failed row | | | | | | | | |
+
+- c16 sample 28 (route `qwen_think_medium`): the first Qwen attempt ended
+  after 6,971 tokens of thinking with no public text (far below its
+  65,536-token budget — the model stopped by itself inside its thinking
+  span). Kairyu's DTO-D15 continuation then forced `</think>` and
+  re-dispatched with the 256-token `public_output_floor`; the model wrote
+  reasoning-style text into the public channel and was cut at 256 tokens
+  (`finish_reason: length`), which fails the row. First occurrence in about
+  450 judged coding samples across runs 8–11. Recorded; no configuration
+  change (only the floor size is example-owned, and a larger floor does not
+  make the continuation an answer).
+- The c16 and c32 rows will be re-measured after the chain under a new run
+  id with `VERIFY_CONCURRENCY=16,32`; both results stay recorded.
+- Artifacts: `verification-results/20260915T051015Z-serving-auto-max-coding/`.
+
+### Run 11 — `serving-ensemble`, forced ensemble, generic c1 (run `20260915T062825Z`, row 31/32 under the tool's rule at the time)
+
+| c | ok | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit: first-attempt PASS / after 1 / after 2 / exhausted | cap hits | Qwen placement |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 `stop` | 2,064 / 2,098 ms | 402.2 / 1,063.7 s | 14,417 s | 4.9 | 1,280,845 | 23 / 6 / 3 / 0 | head 6 (designed); answer_4 2; policies 1 (sample 19: 65,536 tokens, 947 s; its answer passed the audit first time) | 82 / 78 |
+
+- Audit outcomes on the amended DAG: 23 of 32 first-attempt PASS and no
+  exhaustion (config A: 13 / 8 exhausted; config B: 14 / 2).
+- Per-stage duration p50 / p99 (ms): head 6,312 / 7,712; requirements
+  50,372 / 87,108; independent 22,711 / 40,040; policies 75,479 / 947,293
+  (now writing the REQUEST part; 4,989 tokens p50); answer_1..4 44,784–
+  114,799 / 240,748–366,618; synthesis 30,494 / 83,715; final 26,489 /
+  72,064 (44 attempts); audit 68,189 / 233,925.
+- The policies cap hit failed the row under the tool's rule at the time
+  (only candidates were exempt), which made the tool skip the generic
+  c8/c16/c32 rows. The rule now counts a policies cap hit per stage like a
+  candidate's (its output feeds the answerers only; the synthesis and audit
+  gate the result — design doc V41T-D6 amendment); the skipped rows are
+  re-run after the chain under a new run id.
+- Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/generic/generic-c1/`.
+
+### Run 11 — `serving-ensemble`, forced ensemble, coding c1 (run `20260915T062825Z`, row 27/32 under the tool's rule at the time)
+
+| c | ok | first visible content p50 / p99 | completion p50 / p99 | wall | public tok/s | internal output tokens | audit: first-attempt PASS / after 1 / after 2 / exhausted | cap hits | Qwen placement |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 32/32 `stop` | 402 / 446 ms | 655.6 / 1,436.5 s | 22,795 s | 7.7 | 2,041,114 | 28 / 3 / 0 / 1 | head 31 (designed); answer_2 1, answer_3 4, answer_4 1; policies 2; synthesis 3 | 81 / 79 |
+
+- Five requests had a DeepSeek role spend its entire 65,536-token budget on
+  thinking and emit no text: `policies` in samples 9 and 11 (the answerers
+  then received an empty work order), `synthesis` in samples 8, 23 and 24
+  (the final wrote the answer from the request and the candidates). Four of
+  the five still passed the audit (three at the first attempt); sample 11
+  exhausted its refinements and was published. Each such stage took about
+  950 s. The tool's rule at the time failed the row on the policies and
+  synthesis cap hits, so the coding c8/c16/c32 rows were skipped.
+- Per-stage duration p50 / p99 (ms): head 6,007 / 6,047; requirements
+  74,258 / 149,652; independent 43,587 / 161,039; policies 77,194 /
+  950,403; answer_1..4 44,170–102,497 / 327,337–387,628; synthesis 114,235 /
+  941,944; final 70,483 / 144,709 (37 attempts); audit 83,611 / 144,182.
+- Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/coding/coding-c1/`.
+
+### Run 11 — cancellation, long-input, restart (PASS); browser, tool-calling, vision, issue-599 (not measured: attestation failure)
+
+- `cancellation` (`20260915T175735Z`) PASS: disconnect after the first
+  public bytes (stream open 0.77 s, DeepSeek + one Qwen replica busy) →
+  every engine and the gateway back to 0 in-flight after 117.2 s, the
+  follow-up request served; disconnect while the remainder was withheld
+  (during the audit, stream open 90.7 s) → released after 3.75 s.
+- `long-input` (`20260915T180109Z`) PASS: 300,000- and 450,000-token
+  conversations through `kairyu-ensemble-max` answered with the key (510 s
+  and 823 s; DeepSeek roles read 600,059 / 900,057 prompt tokens because
+  the L3 rendering carries the latest turn twice; the head failed as
+  designed; all four Qwen answerers succeeded on the policies output);
+  DeepSeek-direct retrieval at 32,768 / 262,144 / 1,039,872 prompt tokens
+  returned the key in 5 / 34 / 234 s.
+- `restart` (`20260915T182758Z`) PASS: `docker compose restart` of every
+  service, ready after 160.9 s, both public models answered.
+- `browser`, `tool-calling`, `vision`, `issue-599` did not run: after the
+  restart, `docker exec` into the DeepSeek container fails with "error
+  starting setns process: fork/exec /proc/self/fd/6" (Docker 29.6.1 / runc
+  1.3.6; the vLLM server itself stayed healthy over HTTP, and `docker exec`
+  works on the Qwen and gateway containers and on fresh containers of the
+  same image), and the tool's runtime attestation used `docker exec` to
+  hash the patch scripts. The attestation now reads the files from a
+  throwaway container of the running container's image. The Docker-side
+  failure also makes the container's exec-based healthcheck report
+  "unhealthy" although the server answers.
+- The host watchdog fired once (18:29:47 UTC) during the restart gate: the
+  gateway was legitimately not ready while every service restarted; its
+  py-spy dump shows an idle event loop (no deadlock). The watchdog is now
+  stopped (the deadlock fix is served).
+- Owner decision (2026-09-16): raise the synthesis cap at high effort and
+  the caller `max_tokens` used by the verification matrices and the Chat
+  UI from 65,536 to 131,072 (the DSL ceiling), because on coding tasks
+  DeepSeek spent all of 65,536 tokens thinking without output in 5 of 32
+  forced ensembles. Served config changes → run 12 re-runs every gate.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
@@ -470,15 +595,15 @@ run 10 measure how often this happens.
 
 | Gate | Command | Result |
 |---|---|---|
-| Judged product, generic | `verify.sh serving-auto-max` | PASS on config D, run 10 (`20260915T025028Z`); also PASS on configs C, B and A |
-| Judged product, coding | `verify.sh serving-auto-max-coding` | rows PASS, gate not applicable, on config B run 8 (`20260914T163330Z`) and config A (`20260914T031731Z`) |
+| Judged product, generic | `verify.sh serving-auto-max` | PASS on config E, run 11 (`20260915T042329Z`); also PASS on configs D, C, B and A |
+| Judged product, coding | `verify.sh serving-auto-max-coding` | config E run 11: c1/c8 PASS, c16 31/32 (one DTO-D15 continuation cut at 256), c32 pending re-run; rows PASS on configs B (run 8) and A |
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
-| Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
-| Normal restart | `verify.sh restart` | not run |
+| Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | PASS on config E, run 11 (`20260915T175735Z`) |
+| Normal restart | `verify.sh restart` | PASS on config E, run 11 (`20260915T182758Z`) |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (300K/450K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/450K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | PASS on config E, run 11 (`20260915T180109Z`) |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish

@@ -64,7 +64,7 @@ original requirement on purpose; see V41T-D4 in the design document.
 | 1 | `independent` | DeepSeek | caller's effort | conversation, tools, images only | 16384 / 32768 / 65536 |
 | 1 | `policies` | DeepSeek | caller's effort | conversation | 131072 (the Qwen answerers read this output alone; see below) |
 | 2 | `answer_1..4` | Qwen (2 replicas, 2 + 2) | medium | the `policies` output only (request part + `POLICY n`); never the conversation | 16384 |
-| 3 | `synthesis` | DeepSeek | caller's effort | conversation + all 5 candidates | 16384 / 65536 / 131072 |
+| 3 | `synthesis` | DeepSeek | caller's effort | conversation + all 5 candidates | 16384 / 131072 / 131072 |
 | 4 | `final` | DeepSeek | caller's effort | conversation + all 5 candidates + proposal + committed head | caller's limit minus the head |
 | 4 | `audit` | DeepSeek (verifier) | caller's effort | head + final + checklist (the only reader of the checklist) | 8192 / 16384 / 32768 |
 
@@ -118,7 +118,7 @@ original requirement on purpose; see V41T-D4 in the design document.
 - Budget: `max_steps: 19` = 10 generation calls + 1 empty-output re-dispatch
   + 3 audits + 3 bounded re-audits + 2 refinements. `internal_max_tokens:
   131072` admits the largest role tier; the caller's `max_tokens` still caps
-  every internal role (Kairyu contract), so the Chat UI's 65536 is the
+  every internal role (Kairyu contract), so the Chat UI's 131072 is the
   effective ceiling from the UI.
 
 `kairyu-ensemble-max` serves the same DAG without the judge (V41T-D5; it also
@@ -249,7 +249,7 @@ row is only a valid denominator when all 32 requests completed with
    assistant-prefill continuation is GPU-verified; the Qwen thinking route
    keeps it.
 5. A client `max_tokens` smaller than the internal role tiers clamps every
-   internal role to that value (framework contract); the Chat UI sends 65536.
+   internal role to that value (framework contract); the Chat UI sends 131072.
 6. `requirements` output is prompt-constrained JSON, not grammar-constrained.
 7. Qwen candidates have no separate thinking budget; the 16384-token cap
    bounds thinking + answer, and a cap hit fails the serving row.

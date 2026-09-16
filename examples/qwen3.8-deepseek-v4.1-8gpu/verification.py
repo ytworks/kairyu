@@ -36,7 +36,10 @@ QWEN_REPLICAS = int(SPEC["allocation"]["tier1"]["replicas"])
 PRIMARY_ROLES: tuple[str, ...] = tuple(SPEC["orchestration"]["roles"])
 PRIMARY_GENERATION_ROLES = tuple(role for role in PRIMARY_ROLES if role != "audit")
 PRIMARY_VERIFICATION_ROLES = ("audit",)
-CANDIDATE_ROLES = ("independent", "answer_1", "answer_2", "answer_3", "answer_4")
+# Roles whose output only feeds the Qwen answerers (policies) or the synthesis
+# (the five candidates): running out of budget there degrades one input of a
+# critically reviewed, audited pipeline and is counted per stage, not fatal.
+CANDIDATE_ROLES = ("policies", "independent", "answer_1", "answer_2", "answer_3", "answer_4")
 ROUTE_FINAL_NODES: dict[str, str] = dict(SPEC["orchestration"]["profile_final_roles"])
 TTFT_GATED_PROFILES = tuple(SPEC["orchestration"]["ttft_gated_profiles"])
 JUDGE_NODE = "profile_judge"
@@ -697,9 +700,10 @@ def sample_problems(
             and event.get("kind") in {"generation", "verification"}
             and isinstance(tokens, int)
             and cap is not None
-            # The head's cap is its designed split point; a candidate that
-            # runs out of budget is one weak input to the critical synthesis,
-            # counted in stages.json (cap_hits) rather than failing the row.
+            # The head's cap is its designed split point; a candidate or the
+            # policies role that runs out of budget is one weak input to the
+            # critical synthesis, counted in stages.json (cap_hits) rather
+            # than failing the row.
             and node not in {"final", "head", *CANDIDATE_ROLES}
             and tokens >= cap
         ):
@@ -2299,12 +2303,18 @@ def runtime_evidence() -> dict:
             # patch scripts inside the container equal this checkout's files)
             # and record the actual ID; the pinned ID is the reference build.
             expected = SPEC["vllm"]["deepseek"]["patches"]
+            # Read the files from a throwaway container of the exact image the
+            # running container uses (`docker exec` into the live vLLM container
+            # failed with "error starting setns process" after its restart on
+            # 2026-09-15 while the server itself stayed healthy).
             listed = subprocess.check_output(
                 [
                     "docker",
-                    "exec",
-                    _container(service),
+                    "run",
+                    "--rm",
+                    "--entrypoint",
                     "sha256sum",
+                    container["Image"],
                     *(f"/opt/kairyu/{name}" for name in expected),
                 ],
                 text=True,

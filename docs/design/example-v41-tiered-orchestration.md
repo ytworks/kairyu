@@ -157,6 +157,20 @@ last attempt per the existing Conductor contract).
 - Cost: DeepSeek copies the request into its output (≈65 tokens/s
   single-stream), and the wave scheduler makes the answerers wait for it.
 
+### V41T-D2 amendment 5 (2026-09-16) — synthesis cap and caller ceiling at the DSL maximum
+
+- What (owner decision): `synthesis` gets 131,072 tokens at high and max
+  effort (was 65,536 at high); the verification matrices and the Chat UI
+  send `max_tokens 131072` instead of 65,536, because Kairyu clamps every
+  internal role to the caller's limit.
+- Why: on coding tasks in the forced ensemble, DeepSeek spent all of
+  65,536 tokens thinking and emitted no text in 5 of 32 requests
+  (`policies` twice, `synthesis` three times); the pipeline still
+  published audited answers (four PASS, one exhausted), but each such stage
+  cost about 950 s and lost its contribution. Thinking length cannot be
+  bounded directly; doubling the room halves the chance of running out at
+  the price of a longer worst case (about 30 minutes per run-out).
+
 ## V41T-D3 — Requirement extraction on DeepSeek with the PR #595 contract
 
 The `requirements` role ports PR #595's specification: a bare JSON array of
@@ -222,13 +236,16 @@ decisions.
   visible content. Invalid baselines fail the gate rather than being skipped.
 - The V4/8-GPU measurements are never reused. Speed is never bought by
   reducing input, thinking, candidates, or stages.
-- Amendment (2026-09-14): a candidate role (`answer_1..4`, `independent`)
-  that ends at its cap is counted per stage (`stages.json` cap hits) and
-  recorded, not a failed row — it is one weak input to a synthesis that
-  reviews all five critically, and the published answer is still gated by
-  the audit. Head, requirements, policies, synthesis, final, and audit cap
-  hits keep failing the row. `VERIFY_CONCURRENCY` re-runs selected rows of
-  a matrix under a new run id.
+- Amendment (2026-09-14, extended 2026-09-15): a candidate role
+  (`answer_1..4`, `independent`) or the `policies` role that ends at its cap
+  is counted per stage (`stages.json` cap hits) and recorded, not a failed
+  row — each is one weak input to a synthesis that reviews all five
+  candidates critically, and the published answer is still gated by the
+  audit (since amendment 4 the policies output feeds the answerers only;
+  its first cap hit was a 65,536-token thinking run on the generic prompt
+  whose answer still passed the audit). Head, requirements, synthesis,
+  final, and audit cap hits keep failing the row. `VERIFY_CONCURRENCY`
+  re-runs selected rows of a matrix under a new run id.
 - Known `main` limitations are recorded in the README and MEASUREMENTS
   rather than worked around: no windowed long-input reading, 502 masking of
   upstream 400s, `<image:N>` concatenation and the duplicated latest-user

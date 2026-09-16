@@ -292,7 +292,7 @@
   "verification": {
     "serving": {
       "prompt_tokens_approx": 8192,
-      "combined_max_tokens": 65536,
+      "combined_max_tokens": 131072,
       "concurrency": [
         1,
         8,
@@ -308,7 +308,7 @@
     },
     "coding": {
       "prompt_tokens_approx": 1536,
-      "combined_max_tokens": 65536,
+      "combined_max_tokens": 131072,
       "concurrency": [
         1,
         8,

@@ -108,7 +108,7 @@ def test_v41_tiered_compose_places_deepseek_on_six_gpus_and_qwen_on_two() -> Non
     ui = services["chat-ui"]["environment"]
     assert ui["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(ui["OPENAI_API_CONFIGS"]) == {"0": {"model_ids": ["kairyu-auto-max"]}}
-    assert json.loads(ui["DEFAULT_MODEL_PARAMS"]) == {"max_tokens": 65536, "stream_response": False}
+    assert json.loads(ui["DEFAULT_MODEL_PARAMS"]) == {"max_tokens": 131072, "stream_response": False}
     assert services["chat-ui"]["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
     assert services["chat-ui"]["ports"] == [
         "${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3008}:8080"
@@ -539,8 +539,8 @@ def _primary_sample(*, judged: bool = True) -> dict:
 
 
 def test_v41_tiered_row_validator_requires_every_role_and_flags_cut_offs(verification) -> None:
-    caps = verification.role_caps("high", 65536)
-    assert caps["requirements"] == 32768 and caps["synthesis"] == 65536
+    caps = verification.role_caps("high", 131072)
+    assert caps["requirements"] == 32768 and caps["synthesis"] == 131072
     assert caps["answer_1"] == 16384 and caps["audit"] == 16384 and caps["head"] == 256
     assert "final" not in caps
     good = _primary_sample()
@@ -570,8 +570,9 @@ def test_v41_tiered_row_validator_requires_every_role_and_flags_cut_offs(verific
             event["usage"]["completion_tokens"] = caps["requirements"]
     problems = verification.sample_problems(cut_off, judged=True, require_head=True, caps=caps)
     assert any("requirements ended at its" in problem for problem in problems)
-    # A candidate that spends its whole budget is a weak synthesis input,
-    # counted per stage, not a failed row.
+    # A candidate (or the policies role, which feeds the answerers only) that
+    # spends its whole budget is a weak synthesis input, counted per stage,
+    # not a failed row.
     candidate_at_cap = _primary_sample()
     for event in candidate_at_cap["trace"]["events"]:
         if event["node"] == "answer_1":
