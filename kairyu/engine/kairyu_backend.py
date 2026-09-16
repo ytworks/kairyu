@@ -1646,7 +1646,9 @@ class KairyuBackend:
             int,
             tuple[weakref.ReferenceType[GenerationRequest], PreparedPrompt],
         ] = {}
-        self._prepared_requests_lock = threading.Lock()
+        # Re-entrant: the discard weakref callback may run, at garbage
+        # collection time, on the thread that already holds this lock.
+        self._prepared_requests_lock = threading.RLock()
         # Unknown compatibility tokenizers have no thread-safety promise.
         # Their callers queue on the event loop so they do not occupy prompt
         # executor threads while waiting for the shared tokenizer instance.
