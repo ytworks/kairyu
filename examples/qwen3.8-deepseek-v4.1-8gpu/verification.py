@@ -2303,12 +2303,18 @@ def runtime_evidence() -> dict:
             # patch scripts inside the container equal this checkout's files)
             # and record the actual ID; the pinned ID is the reference build.
             expected = SPEC["vllm"]["deepseek"]["patches"]
+            # Read the files from a throwaway container of the exact image the
+            # running container uses (`docker exec` into the live vLLM container
+            # failed with "error starting setns process" after its restart on
+            # 2026-09-15 while the server itself stayed healthy).
             listed = subprocess.check_output(
                 [
                     "docker",
-                    "exec",
-                    _container(service),
+                    "run",
+                    "--rm",
+                    "--entrypoint",
                     "sha256sum",
+                    container["Image"],
                     *(f"/opt/kairyu/{name}" for name in expected),
                 ],
                 text=True,

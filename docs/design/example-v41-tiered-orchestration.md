@@ -157,6 +157,20 @@ last attempt per the existing Conductor contract).
 - Cost: DeepSeek copies the request into its output (≈65 tokens/s
   single-stream), and the wave scheduler makes the answerers wait for it.
 
+### V41T-D2 amendment 5 (2026-09-16) — synthesis cap and caller ceiling at the DSL maximum
+
+- What (owner decision): `synthesis` gets 131,072 tokens at high and max
+  effort (was 65,536 at high); the verification matrices and the Chat UI
+  send `max_tokens 131072` instead of 65,536, because Kairyu clamps every
+  internal role to the caller's limit.
+- Why: on coding tasks in the forced ensemble, DeepSeek spent all of
+  65,536 tokens thinking and emitted no text in 5 of 32 requests
+  (`policies` twice, `synthesis` three times); the pipeline still
+  published audited answers (four PASS, one exhausted), but each such stage
+  cost about 950 s and lost its contribution. Thinking length cannot be
+  bounded directly; doubling the room halves the chance of running out at
+  the price of a longer worst case (about 30 minutes per run-out).
+
 ## V41T-D3 — Requirement extraction on DeepSeek with the PR #595 contract
 
 The `requirements` role ports PR #595's specification: a bare JSON array of

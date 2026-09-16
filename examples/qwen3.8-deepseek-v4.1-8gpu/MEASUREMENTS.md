@@ -412,6 +412,42 @@ Checks before run 11 (`gate-logs-run11-smoke/`):
   941,944; final 70,483 / 144,709 (37 attempts); audit 83,611 / 144,182.
 - Artifacts: `verification-results/20260915T062825Z-serving-ensemble/serving-ensemble/coding/coding-c1/`.
 
+### Run 11 — cancellation, long-input, restart (PASS); browser, tool-calling, vision, issue-599 (not measured: attestation failure)
+
+- `cancellation` (`20260915T175735Z`) PASS: disconnect after the first
+  public bytes (stream open 0.77 s, DeepSeek + one Qwen replica busy) →
+  every engine and the gateway back to 0 in-flight after 117.2 s, the
+  follow-up request served; disconnect while the remainder was withheld
+  (during the audit, stream open 90.7 s) → released after 3.75 s.
+- `long-input` (`20260915T180109Z`) PASS: 300,000- and 450,000-token
+  conversations through `kairyu-ensemble-max` answered with the key (510 s
+  and 823 s; DeepSeek roles read 600,059 / 900,057 prompt tokens because
+  the L3 rendering carries the latest turn twice; the head failed as
+  designed; all four Qwen answerers succeeded on the policies output);
+  DeepSeek-direct retrieval at 32,768 / 262,144 / 1,039,872 prompt tokens
+  returned the key in 5 / 34 / 234 s.
+- `restart` (`20260915T182758Z`) PASS: `docker compose restart` of every
+  service, ready after 160.9 s, both public models answered.
+- `browser`, `tool-calling`, `vision`, `issue-599` did not run: after the
+  restart, `docker exec` into the DeepSeek container fails with "error
+  starting setns process: fork/exec /proc/self/fd/6" (Docker 29.6.1 / runc
+  1.3.6; the vLLM server itself stayed healthy over HTTP, and `docker exec`
+  works on the Qwen and gateway containers and on fresh containers of the
+  same image), and the tool's runtime attestation used `docker exec` to
+  hash the patch scripts. The attestation now reads the files from a
+  throwaway container of the running container's image. The Docker-side
+  failure also makes the container's exec-based healthcheck report
+  "unhealthy" although the server answers.
+- The host watchdog fired once (18:29:47 UTC) during the restart gate: the
+  gateway was legitimately not ready while every service restarted; its
+  py-spy dump shows an idle event loop (no deadlock). The watchdog is now
+  stopped (the deadlock fix is served).
+- Owner decision (2026-09-16): raise the synthesis cap at high effort and
+  the caller `max_tokens` used by the verification matrices and the Chat
+  UI from 65,536 to 131,072 (the DSL ceiling), because on coding tasks
+  DeepSeek spent all of 65,536 tokens thinking without output in 5 of 32
+  forced ensembles. Served config changes → run 12 re-runs every gate.
+
 ## Public gates on served config D (specs at commit `17e0233b`: checklist read by the audit only, policies cap 8,192 / 16,384; gateway image from PR #603; gate chain run 10 from 2026-09-15 02:50 UTC)
 
 Run 10 was stopped during its coding matrix (owner instruction 2026-09-15):
@@ -564,10 +600,10 @@ run 10 measure how often this happens.
 | Forced ensemble, generic + coding | `verify.sh serving-ensemble` | config B run 8 generic c1 PASS, c8 rows PASS (`20260914T175232Z`, stopped for the head/final amendment); run 9 pending |
 | Tool calling (900 s turn) on both models | `verify.sh tool-calling` | not run |
 | Images on both models (headless JSON proves DeepSeek saw the image) | `verify.sh vision` | not run |
-| Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | not run |
-| Normal restart | `verify.sh restart` | not run |
+| Public cancellation (early and during the withheld remainder) | `verify.sh cancellation` | PASS on config E, run 11 (`20260915T175735Z`) |
+| Normal restart | `verify.sh restart` | PASS on config E, run 11 (`20260915T182758Z`) |
 | Issue #599 saved request | `verify.sh issue-599` | queued in run 6 (request file found: `kairyu-bench/results/deepswe-full-3w-20260913-r1/progress-detail/api-failure-investigation/request.json`) |
-| Long inputs (300K/450K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | not run |
+| Long inputs (300K/450K-token conversations through the forced ensemble; DeepSeek-direct 32K/256K/~1M) | `verify.sh long-input` | PASS on config E, run 11 (`20260915T180109Z`) |
 | Chat UI browser gate (shared script, tiered phase) | `verify.sh browser` | not run |
 
 Each serving row writes `row-serving.json` (per-request timing, finish

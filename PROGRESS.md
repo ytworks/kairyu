@@ -97,12 +97,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 - Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) the checklist-to-audit-only rewiring and the policies-output-only answerers, every public gate is being re-run as chain run 11
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) the checklist-to-audit-only rewiring, the policies-output-only answerers and the 131072 ceilings, every public gate is being re-run as chain run 12
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-16 — [amendment] V41T-D2: tiered synthesis cap and caller ceiling raised to 131072
+- What: `synthesis` is capped at 131072 at high/max effort (was 65536 at high); the verification matrices and the Chat UI send `max_tokens 131072`. Run 11 on the previous config passed the judged generic matrix, cancellation, long-input (300K/450K-token conversations through the forced ensemble) and restart; in the forced coding ensembles DeepSeek spent all 65536 tokens thinking without output in 5/32 requests. The runtime attestation now hashes the DeepSeek patch scripts from a throwaway container of the served image (`docker exec` into the live vLLM container fails on this host after a restart). Every gate re-runs as chain run 12.
+- Why: thinking length cannot be bounded directly; the DSL ceiling gives the most room the framework admits.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 5); example `MEASUREMENTS.md` (run 11)
 
 ### 2026-09-15 — [amendment] V41T-D2: the tiered Qwen answerers read the policies output alone
 - What: owner instruction — the roles before the Qwen answerers must make their input fit Qwen whatever the conversation's length. The answerers' prompts drop `{query}`; their only input is the `policies` output (cap 131072 = the DSL ceiling; 131072 + ~300 + 16384 < 262144). `policies` now writes a `=== REQUEST ===` part (the request and its material, verbatim while it fits) before `=== POLICIES ===`; the final writes the whole answer when the opening is empty. The long-input gate now sends 300K- and 450K-token conversations through the forced ensemble (the judge reads a 4,000-character view and cannot route by length — recorded limit). Supersedes the same-day static-cap amendment; all public gates re-run as chain run 11.
