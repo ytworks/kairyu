@@ -11,6 +11,84 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-09-11 — [progress] V4.1 full-model API gates pass on TP8
+- What: the SM120 overlay starts all eight GPUs, captures graphs and serves default/low/high/max reasoning, tools, images and cancellation; all initial API gates pass. UI effort selection uses the existing top-level L3 field. Performance selection and final context/restart gates remain pending.
+- Why: the experimental off toggle used template kwargs rejected by the unchanged legacy L3; retaining V4's effort vocabulary keeps the requested L2/L3 structure.
+- Refs: PR #597; example `MEASUREMENTS.md` initial runs `20260911T032048Z` through `20260911T032052Z`.
+
+### 2026-09-11 — [amendment] V4.1 indexer requires 64-token blocks and MXFP4 on SM120
+- What: correct the preceding 128-token manager-block candidate to 64/BLHNC, with SWA=64, C1=64, C2=32. Enable the existing MXFP4 indexer only for V4.1 on SM120. All 16 sparse-attention and four real indexer writer/prefill/decode numerical cases pass; full-model serving remains pending.
+- Why: DeepGEMM rejects C1 pages of 128 and SM120 FP8 C2 pages of 32; its MXFP4 path supports both required sizes. The indexer oracle independently unpacks actual Q/K bytes (max error 2.4e-7), and CPU guards retain rejection for unverified model/device combinations.
+- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md`, `check_sm120_pages.py`, `check_sm120_indexer.py`. Supersedes the block-size choice in the preceding SM120 cache-compatibility entry.
+
+### 2026-09-11 — [progress] V4.1 SM120 cache compatibility
+- What: pin an example-local L1 overlay with 64-token SWA pages and C1 128-token dual-cache prefill instantiations; use manager blocks 128/BLHNC and disable unsupported adaptive verification. All 16 packed-cache GPU numerical cases pass at upstream DSV4 tolerances; full-model serving and tuning remain pending.
+- Why: the official V4.1 image's SWA pages and indexer layout assumptions fail startup on SM120 before serving. Source-anchored adaptations retain the existing kernel arithmetic and keep L2/L3 unchanged.
+- Refs: PR #597; `examples/deepseek-v4.1-flash-8gpu/{patch_runtime.py,check_sm120_pages.py,MEASUREMENTS.md}`; FN-D9 V4.1 amendment.
+
+### 2026-09-11 — [amendment] FN-D9: V4.1 Flash on one eight-GPU replica
+- What: add a separate V4.1 example with the existing V4 vision ReplicaPool/API/UI path; default thinking is the official high (75). Pin the checkpoint manifest and isolate runtime encoder alignment. Fixed-token measurements distinguish model output from visible content; completed-answer gates stay separate. CPU contracts pass; GPU selection is pending.
+- Why: the owner revised the initial two-replica request to one TP8 replica; the initial vLLM encoder maps high differently from the checkpoint, and content-only timing mismeasures all-reasoning output.
+- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/deepseek-v4.1-flash-8gpu/`; implementation plan `2026-09-11-deepseek-v41-flash-example.md`.
+
+
+### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
+- What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates
+  PASS — DeepSeek c64 689 tok/s, Qwen c32 548 tok/s, placement 32/32 at every row ≥c8,
+  tool-calling 6/6, vision 2/2. `qwen3.8-flash-next-dp2-8gpu` now serves without the
+  recipe's `--speculative-config mtp k=3` and with `--kv-cache-memory` pinned (a cold
+  torch.compile cache made vLLM's start-up profile shrink replica 0's KV cache to 741K
+  tokens vs 3.45M); `verify.sh vision` requires the answer to name the probe colour.
+- Why: with prefix caching + MTP, `vllm@27a94d1c` corrupts batched answers on the hybrid
+  GDN checkpoint (`ductduct…`; 13/274 at 2-12 concurrent, 0/1,508 with either off,
+  63.8% with `--no-async-scheduling`; upstream vllm#53912). Prefix caching is what
+  Kairyu's prefix-aware placement and multi-turn traffic use, so MTP is the one dropped.
+- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/*/MEASUREMENTS.md`; supersedes the "MTP k=3" wording in the 2026-09-04 FN-D9 entry below
+
+### 2026-09-04 — [amendment] FN-D9: two vision replica-pool examples
+- What: `examples/deepseek-v4-flash-vision-exp-dp2-8gpu` (TP4+EP4 × 2, official recipe
+  + SM120 marlin, 1M ctx) and `examples/qwen3.8-flash-next-dp2-8gpu` (TP4 × 2, official
+  rtx_pro_6000_4x FP8 layout, MTP k=3, 256K ctx): one public text+image model each,
+  no-login Chat UI with a reasoning-effort dropdown in each model's official vocabulary,
+  `verify.sh vision` gate, shared upstream-main `27a94d1c` + FlashInfer `60b49158`
+  SM120 overlay image with a fail-closed image-ID pin.
+- Why: both checkpoints need upstream `main` (official tags predate the support PRs;
+  FlashInfer 0.6.18 breaks SM120 sparse-MLA on the first image); Qwen's template
+  rejects L3-normalized efforts, so an example-local alias restores them.
+- Refs: FN-D9 amendment 2026-09-04 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py; GPU evidence pending
+
+### 2026-09-02 — [amendment] FN-D9: replica examples must serve OpenAI tool calls
+- What: DP2 DeepSeek drops the Kairyu-rendered /completions passthrough (forwards
+  no tools; DSML parse is whole-block only) for the Qwen-style legacy path: vLLM
+  renders with the checkpoint's deepseek_v4 encoder + `--tool-call-parser
+  deepseek_v4`, Kairyu forwards tools to /chat/completions and normalizes. Both
+  examples gain a fail-closed readiness tool probe + `verify.sh tool-calling`
+  and non-thinking default kwargs (Qwen gate caught empty `content` on plain chat).
+- Why: PR #584 review — SWE-bench Pro got `tool_calls: null` every turn (22/22
+  RepeatedFormatError). GPU-verified: both tool gates 6/6, both matrices
+  re-pinned, SWE-bench Pro smoke 3/3 (kairyu-bench `20260902T010540Z-3bf671e8`).
+- Refs: PR #584; FN-D9 amendment; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-02 — [amendment] FN-D9: replica placement gates reject material skew
+- What: both replica-pool examples now limit a replica to 1.25× the even share.
+  Behavior tests reject the 8-way `16,16,16,8,2,2,2,2` and 2-way `63,1`
+  skews while the retained exact-even distributions pass. The verification-only
+  config change does not require a GPU rerun.
+- Why: the former 2× bound admitted materially skewed distributions as passing.
+- Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
+- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
+  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
+  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
+  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
+  split from `placement_log_path`. Same run/verify UX; no product code changed.
+- Why: a plain scale-out serving path (one API over N identical L1 replicas)
+  next to the orchestrated tiered example. GPU-verified 2026-09-01: gates green,
+  exact 8x8 / 32x2 splits; Qwen 313.7 tok/s at c8 (8.0x c1), DeepSeek 471 tok/s
+  at c32 (1.95x one replica) — MEASUREMENTS.md runs 20260901T133331Z / 20260901T140112Z.
+- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py
+
 ### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
 - What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
   empty-output re-dispatch of a final unit whose span the upstream chat

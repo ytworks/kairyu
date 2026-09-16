@@ -1,0 +1,295 @@
+name: kairyu-qwen38-deepseekv41-8gpu
+
+x-qwen: &qwen
+  image: ${QWEN_VLLM_IMAGE:-vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f}
+  ipc: host
+  environment:
+    HF_HOME: /models/.cache
+    HF_HUB_OFFLINE: "1"
+    HF_HUB_DISABLE_TELEMETRY: "1"
+    VLLM_NO_USAGE_STATS: "1"
+    VLLM_USE_DEEP_GEMM: "0"
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    SAFETENSORS_FAST_GPU: "1"
+    XDG_CACHE_HOME: /root/.cache
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    TRITON_CACHE_DIR: /root/.cache/triton
+    TILELANG_CACHE_DIR: /root/.cache/tilelang
+    TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
+  command: &qwen-command
+    - /models/qwen3.8-27b-fp8
+    - --served-model-name
+    - qwen3.8-27b
+    - --max-model-len
+    - "262144"
+    - --mm-processor-kwargs
+    - '{"min_pixels":65536,"max_pixels":2097152}'
+    - --limit-mm-per-prompt.image
+    - "1"
+    - --limit-mm-per-prompt.video
+    - "0"
+    - --dtype
+    - bfloat16
+    - --kv-cache-dtype
+    - fp8
+    - --mamba-cache-dtype
+    - float16
+    - --mamba-ssm-cache-dtype
+    - float16
+    - --mamba-cache-mode
+    - align
+    - --enable-prefix-caching
+    - --enable-chunked-prefill
+    - --max-num-batched-tokens
+    - "32768"
+    - --max-num-seqs
+    - "32"
+    - --gpu-memory-utilization
+    - "0.95"
+    - --attention-backend
+    - FLASHINFER
+    - --enable-flashinfer-autotune
+    - --compilation-config
+    - '{"cudagraph_mode":"PIECEWISE"}'
+    - --generation-config
+    - vllm
+    # The L1 (vLLM) chat template for the Qwen worker: the checkpoint's own
+    # template with Kairyu's effort words mapped onto it (the stock template
+    # accepts only low/medium/xhigh and rejects Kairyu's high/max; DTO-D14
+    # renders high as the medium tier). L3 does not render Qwen chats and the
+    # Chat UI never touches this service.
+    - --chat-template
+    - /etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja
+    # No default chat-template kwargs: thinking L2 roles declare
+    # reasoning_effort: high (the medium tier, DTO-D14) in auto-max.yaml,
+    # which the example-local template turns into thinking mode per request.
+    - --reasoning-parser
+    - qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder
+    - --disable-uvicorn-access-log
+  healthcheck: &health
+    test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
+    interval: 5s
+    timeout: 3s
+    retries: 1440
+    start_period: 30s
+  restart: unless-stopped
+
+services:
+  qwen-0:
+    <<: *qwen
+    cpuset: ${QWEN_0_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_0_PATH}
+        target: /root/.cache
+      - ./l1-qwen3.8-27b-vllm-chat-template.jinja:/etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["6"]
+              capabilities: [gpu]
+
+  qwen-1:
+    <<: *qwen
+    cpuset: ${QWEN_1_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_1_PATH}
+        target: /root/.cache
+      - ./l1-qwen3.8-27b-vllm-chat-template.jinja:/etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["7"]
+              capabilities: [gpu]
+
+  # DeepSeek-V4.1-Flash on GPUs 0-5 as one vLLM service: TP2 x attention-DP3,
+  # EP6 with Engram tables in pinned host memory — the configuration PR #598
+  # measured on this host. TP6 cannot divide the checkpoint's 64 attention
+  # heads / 8 output groups, and DSpark's 128 draft experts do not divide EP6,
+  # so speculative decoding stays off. The image is this example's overlay
+  # (vllm-sm120.Dockerfile: masked sparse-KV zero row + seeded top-p
+  # terminator fix) on the sibling deepseek-v4.1-flash-8gpu SM120 overlay;
+  # run.sh builds both from their recipes when absent.
+  deepseek:
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120-masked-kv-budget}
+    ipc: host
+    cpuset: ${DEEPSEEK_CPUSET}
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: "1"
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      TILELANG_CACHE_DIR: /root/.cache/tilelang
+      TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+      # The Python frontend carries the checkpoint's official effort mapping
+      # (low=50, high=75, max=100) in the SM120 overlay image.
+      VLLM_USE_RUST_FRONTEND: "0"
+      # Generated FlashInfer kernels for the masked-KV overlay live in their own
+      # namespace of the persistent cache so an unpatched kernel of the same
+      # version can never shadow the fix.
+      FLASHINFER_WORKSPACE_BASE: /root/.cache/flashinfer-masked-kv-v1
+    volumes:
+      - type: bind
+        source: ${DEEPSEEK_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${DEEPSEEK_CACHE_PATH}
+        target: /root/.cache
+    command:
+      - /models/deepseek-v4.1-flash
+      - --served-model-name
+      - deepseek-v4.1-flash
+      - --max-model-len
+      - "1048576"
+      - --trust-remote-code
+      - --kv-cache-dtype
+      - fp8
+      - --attention-config
+      - '{"indexer_kv_dtype":"mxfp4"}'
+      - --block-size
+      - "64"
+      - --tensor-parallel-size
+      - "2"
+      - --data-parallel-size
+      - "3"
+      - --data-parallel-backend
+      - mp
+      - --enable-expert-parallel
+      - --moe-backend
+      - marlin
+      - --tokenizer-mode
+      - deepseek_v41
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v41
+      # No --default-chat-template-kwargs: the encoder thinks at the official
+      # high default on its own, and a server-side thinking=true default would
+      # OR over the enable_thinking=false that non-thinking roles send.
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-num-seqs
+      - "32"
+      - --max-num-batched-tokens
+      - "16384"
+      - --disable-uvicorn-access-log
+      # Engram tables in pinned host memory (15.74 GiB x 2 per rank, ~189 GiB
+      # total). GPU-resident tables left no memory for the KV cache at TP2
+      # (candidate 1) and cannot fit at TP1 at all; see MEASUREMENTS.md.
+      - --engram-config
+      - '{"cpu_offload":true}'
+      - --limit-mm-per-prompt
+      - '{"image":1}'
+    healthcheck: *health
+    # Loopback-only L1 access for the paired DeepSeek-direct baseline rows and
+    # the public-token oracle. The Chat UI only sees the Kairyu L3 endpoint.
+    ports:
+      - 127.0.0.1:${DEEPSEEK_L1_PORT:-8009}:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3", "4", "5"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: "1"
+        KAIRYU_EMBEDDINGS: "1"
+        KAIRYU_EMBEDDING_MODEL_REPOSITORY: Qdrant/all-MiniLM-L6-v2-onnx
+        KAIRYU_EMBEDDING_MODEL_REVISION: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+        KAIRYU_EMBEDDING_MODEL_SHA256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+        KAIRYU_EMBEDDING_PROVENANCE_SHA256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
+    image: ${KAIRYU_IMAGE:-local/kairyu:qwen38-deepseekv41-tiered-example}
+    command: [/etc/kairyu/kairyu.yaml]
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+      # Codex remote-compaction tokens are AES-256-GCM sealed with this
+      # secret; without a stable value a gateway restart invalidates every
+      # outstanding token mid-session.
+      KAIRYU_RESPONSES_COMPACTION_SECRET: ${KAIRYU_RESPONSES_COMPACTION_SECRET:?set a random secret of at least 32 bytes (e.g. openssl rand -hex 32)}
+    volumes:
+      - type: bind
+        source: ${PLACEMENT_LOG_PATH}
+        target: /var/lib/kairyu/placement
+      - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./ensemble-max.yaml:/etc/kairyu/ensemble-max.yaml:ro
+      - ./router.json:/etc/kairyu/router.json:ro
+    depends_on:
+      qwen-0: {condition: service_healthy}
+      qwen-1: {condition: service_healthy}
+      deepseek: {condition: service_healthy}
+    ports:
+      - ${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8008}:8000
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+
+  # The Chat UI talks ONLY to Kairyu L3 (the `kairyu` service). It never
+  # reaches the L1 vLLM services; the Qwen L1 template above is vLLM's own
+  # rendering for the Qwen worker and has nothing to do with this UI.
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      # Only the judged product is a Chat UI model; kairyu-ensemble-max is an
+      # API-only verification model.
+      OPENAI_API_CONFIGS: '{"0":{"model_ids":["kairyu-auto-max"]}}'
+      DEFAULT_MODELS: kairyu-auto-max
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":131072,"stream_response":false}'
+      ENABLE_PERSISTENT_CONFIG: "false"
+      RESET_CONFIG_ON_START: "true"
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "false"
+      WEBUI_AUTH: "false"
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3008}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      RAG_EMBEDDING_ENGINE: ""
+    volumes:
+      - type: bind
+        source: ${WEBUI_STORAGE_PATH}
+        target: /app/backend/data
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3008}:8080
+    restart: unless-stopped

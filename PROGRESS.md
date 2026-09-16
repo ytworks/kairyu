@@ -96,90 +96,56 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
+- Kairyu gateway self-deadlock (`kairyu/engine/openai_backend.py`: `_peek_prepared_payload` holds the non-re-entrant `_prepared_payloads_lock` while a GC-triggered weakref callback `discard` re-acquires it on the same thread; same pattern on `_SHARED_PREPARED_PAYLOADS_LOCK`). Observed 2026-09-14 on the V4.1 tiered example at c16 judged load: the whole gateway (including `/readyz`) froze with the process alive; py-spy evidence in the example's `MEASUREMENTS.md`. Framework fix pending owner authorization
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + amendments): serves TP2×DP3/EP6 on the example-owned masked-KV overlay; native L1 gates pass; judged matrices pass on the deadlock-fixed gateway (PR #603); after the audit-driven prompt amendments (fabricated execution claims; head preamble + length) the checklist-to-audit-only rewiring, the policies-output-only answerers and the 131072 ceilings, every public gate is being re-run as chain run 12
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-16 — [amendment] V41T-D2: tiered synthesis cap and caller ceiling raised to 131072
+- What: `synthesis` is capped at 131072 at high/max effort (was 65536 at high); the verification matrices and the Chat UI send `max_tokens 131072`. Run 11 on the previous config passed the judged generic matrix, cancellation, long-input (300K/450K-token conversations through the forced ensemble) and restart; in the forced coding ensembles DeepSeek spent all 65536 tokens thinking without output in 5/32 requests. The runtime attestation now hashes the DeepSeek patch scripts from a throwaway container of the served image (`docker exec` into the live vLLM container fails on this host after a restart). Every gate re-runs as chain run 12.
+- Why: thinking length cannot be bounded directly; the DSL ceiling gives the most room the framework admits.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 5); example `MEASUREMENTS.md` (run 11)
+
+### 2026-09-15 — [amendment] V41T-D2: the tiered Qwen answerers read the policies output alone
+- What: owner instruction — the roles before the Qwen answerers must make their input fit Qwen whatever the conversation's length. The answerers' prompts drop `{query}`; their only input is the `policies` output (cap 131072 = the DSL ceiling; 131072 + ~300 + 16384 < 262144). `policies` now writes a `=== REQUEST ===` part (the request and its material, verbatim while it fits) before `=== POLICIES ===`; the final writes the whole answer when the opening is empty. The long-input gate now sends 300K- and 450K-token conversations through the forced ensemble (the judge reads a 4,000-character view and cannot route by length — recorded limit). Supersedes the same-day static-cap amendment; all public gates re-run as chain run 11.
+- Why: a bound that includes the conversation cannot be guaranteed by configuration; a bound on a DeepSeek output can, and DeepSeek reads up to 1,048,576 tokens.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 4); example README
+
+### 2026-09-15 — [amendment] V41T-D2/D6: the tiered checklist is read by the audit only; policies cap bounds the Qwen answerers' input
+- What: owner instruction — `policies`, `answer_1..4`, `synthesis` and `final` no longer receive or depend on the requirements checklist (the audit alone reads it; `requirements` stays a scheduling-only dependency of `final` because the Conductor runs the verifier inline after its target). `policies` runs in the first wave. Its cap becomes 8192 (16384 at `max`) so rendered conversation + policies text + the answerer's 16384 budget fits Qwen's 262,144 context: guaranteed rendered conversation ≈237K tokens (≈229K at `max`). CPU tests updated; every public gate re-runs as chain run 10.
+- Why: an answer written while reading the extracted criteria is then audited against its own checklist; and Kairyu has no per-request budget calculation, so the Qwen bound must come from static upstream caps.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 3); example README (Qwen input bound)
+
+### 2026-09-14 — [amendment] V41T-D2/D6: the tiered head opens with the answer; candidate cap hits are recorded, not fatal
+- What: recorded audit texts showed the forced ensemble's first-attempt FAILs came from the head's "state what is being answered" opening ("The request asks for…" on 64/64 answers) and a combined length over the requested total. The head now starts with the answer and keeps under half of a stated length; the final sizes the remainder to the requested total. A candidate that spends its budget counts per stage instead of failing the row; `VERIFY_CONCURRENCY` allows partial matrix re-runs. All public gates re-run (chain run 9) on the revised specs.
+- Why: the preamble is user-visible and doubled ensemble completion through refinements; a truncated candidate is one weak input to a critical synthesis whose output the audit still gates.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment 2, V41T-D6 amendment); example `MEASUREMENTS.md` (run 8)
+
+### 2026-09-14 — [progress] Blocker: gateway self-deadlock in the OpenAI backend's prepared-payload cache
+- What: during the V4.1 tiered example's judged c16 row the gateway froze entirely (no chat, no `/readyz`, process alive, 0 % CPU). py-spy shows the event-loop thread in `openai_backend._peek_prepared_payload` holding `_prepared_payloads_lock` (`threading.Lock`) while the weakref callback `discard`, fired by garbage collection, blocks on the same lock; `_SHARED_PREPARED_PAYLOADS_LOCK` shares the pattern. Timing-dependent (the same row passed earlier). The example restarts the gateway and re-runs its gates; `kairyu/` is untouched.
+- Why: a GC-time weakref callback that takes a non-re-entrant lock can run on the thread that already holds it. Fix candidates (re-entrant lock, or a callback that never blocks) need owner authorization as a framework change.
+- Refs: PR #602; `examples/qwen3.8-deepseek-v4.1-8gpu/MEASUREMENTS.md` (run 6); `kairyu/engine/openai_backend.py` `_retain_prepared_payload` / `_peek_prepared_payload` (since `1fff59db`)
+
+### 2026-09-14 — [amendment] V41T-D2: the V4.1 tiered audit rejects unbacked execution claims
+- What: the first forced-ensemble row (generic c1, 32 requests) exhausted the audit 8 times; replayed audit texts showed the benchmark row label `Run <id>, case N` extracted as a requirement to execute, honest "not executed" answers FAILed and invented execution results PASSed (25/32 published answers). The audit now accepts run/test/measure/verify claims only with the matching tool call and result, FAILs them as fabrication otherwise, and accepts a plain "cannot be performed this turn" statement; synthesis and final carry the same rule; benchmark rows label their identity as an identifier. The three replayed requests then passed on the first audit without invented results. All public gates are re-run on the revised specs.
+- Why: a publication gate that rewards fabricated evidence inverts its purpose; example-owned prompt policy, Kairyu unchanged.
+- Refs: PR #602 (`e8d7ba8e`); `docs/design/example-v41-tiered-orchestration.md` (V41T-D2 amendment); example `MEASUREMENTS.md` (audit diagnosis)
+
+### 2026-09-14 — [amendment] V41T-D1: the V4.1 tiered example owns a masked-KV DeepSeek overlay
+- What: on the sibling's unpatched SM120 overlay every six-GPU DeepSeek topology fails (KV allocation at 0.95 GPU-resident; illegal memory access + NCCL error in the TP sequence-parallel path with offload; NaN log-probabilities / garbage text from the second request per engine at TP1×DP6 and TP2×DP3 GPU-resident; FlashMLA rejects 64-token pages). The example now ships PR #598's overlay recipe (Dockerfile + `patch_masked_kv.py` + `patch_top_p.py`, SHA-256 pinned) built by `run.sh` on any host and attested by content; served topology TP2×DP3, EP6, Engram in pinned host memory, 0.90, 16384 batching.
+- Why: owner decision — restricting the example to the sibling's image was not a requirement, and PR #598 had served six GPUs correctly on that overlay; Kairyu stays unchanged. Supersedes the plan's stop rule.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D1 amendment); example `MEASUREMENTS.md` candidates 1–6
+
+### 2026-09-14 — [design] V41T-D1..D6: DeepSeek V4.1 (6 GPU) + Qwen3.8 (2 GPU) tiered example
+- What: new `examples/qwen3.8-deepseek-v4.1-8gpu` keeps the judged five routes; the ensemble is DeepSeek-led (PR #595 requirements checklist, four policies, four Qwen + one DeepSeek candidates, critical synthesis, final continuing the streamed Qwen head, DeepSeek audit with ≤2 refinements); a judge-free `kairyu-ensemble-max` forces the ensemble for verification; Qwen direct routes drop their fixed `max_tokens` (Issue #599); the DeepSeek image is the sibling's pinned overlay reused by ID. CPU contracts pass; no GPU evidence yet.
+- Why: owner requirements (2026-09-14) with Kairyu, sibling examples, and shared scripts unchanged; the DSL offers no caller-side profile forcing and no effort floor, so a second orchestrator and `inherit` + default high are used; TP6 is invalid for the checkpoint and DSpark cannot divide EP6.
+- Refs: `docs/design/example-v41-tiered-orchestration.md`; PR #602; `tests/unit/test_v41_tiered_examplectl.py`
+
 ### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
 - What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
 - Why: DSpark improves c1 throughput 1.91×; EP-off exhausts KV memory at the same limits, PCIe IPC stalls during autotuning, and 8K batching shows no throughput gain. Keep unmeasured alternatives and broad quality claims outside this evidence.
 - Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md` records exact configuration, run IDs, hashes and limitations.
 
-### 2026-09-11 — [progress] V4.1 full-model API gates pass on TP8
-- What: the SM120 overlay starts all eight GPUs, captures graphs and serves default/low/high/max reasoning, tools, images and cancellation; all initial API gates pass. UI effort selection uses the existing top-level L3 field. Performance selection and final context/restart gates remain pending.
-- Why: the experimental off toggle used template kwargs rejected by the unchanged legacy L3; retaining V4's effort vocabulary keeps the requested L2/L3 structure.
-- Refs: PR #597; example `MEASUREMENTS.md` initial runs `20260911T032048Z` through `20260911T032052Z`.
-
-### 2026-09-11 — [amendment] V4.1 indexer requires 64-token blocks and MXFP4 on SM120
-- What: correct the preceding 128-token manager-block candidate to 64/BLHNC, with SWA=64, C1=64, C2=32. Enable the existing MXFP4 indexer only for V4.1 on SM120. All 16 sparse-attention and four real indexer writer/prefill/decode numerical cases pass; full-model serving remains pending.
-- Why: DeepGEMM rejects C1 pages of 128 and SM120 FP8 C2 pages of 32; its MXFP4 path supports both required sizes. The indexer oracle independently unpacks actual Q/K bytes (max error 2.4e-7), and CPU guards retain rejection for unverified model/device combinations.
-- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md`, `check_sm120_pages.py`, `check_sm120_indexer.py`. Supersedes the block-size choice in the preceding SM120 cache-compatibility entry.
-
-### 2026-09-11 — [progress] V4.1 SM120 cache compatibility
-- What: pin an example-local L1 overlay with 64-token SWA pages and C1 128-token dual-cache prefill instantiations; use manager blocks 128/BLHNC and disable unsupported adaptive verification. All 16 packed-cache GPU numerical cases pass at upstream DSV4 tolerances; full-model serving and tuning remain pending.
-- Why: the official V4.1 image's SWA pages and indexer layout assumptions fail startup on SM120 before serving. Source-anchored adaptations retain the existing kernel arithmetic and keep L2/L3 unchanged.
-- Refs: PR #597; `examples/deepseek-v4.1-flash-8gpu/{patch_runtime.py,check_sm120_pages.py,MEASUREMENTS.md}`; FN-D9 V4.1 amendment.
-
-### 2026-09-11 — [amendment] FN-D9: V4.1 Flash on one eight-GPU replica
-- What: add a separate V4.1 example with the existing V4 vision ReplicaPool/API/UI path; default thinking is the official high (75). Pin the checkpoint manifest and isolate runtime encoder alignment. Fixed-token measurements distinguish model output from visible content; completed-answer gates stay separate. CPU contracts pass; GPU selection is pending.
-- Why: the owner revised the initial two-replica request to one TP8 replica; the initial vLLM encoder maps high differently from the checkpoint, and content-only timing mismeasures all-reasoning output.
-- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/deepseek-v4.1-flash-8gpu/`; implementation plan `2026-09-11-deepseek-v41-flash-example.md`.
-
-### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
-- What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates
-  PASS — DeepSeek c64 689 tok/s, Qwen c32 548 tok/s, placement 32/32 at every row ≥c8,
-  tool-calling 6/6, vision 2/2. `qwen3.8-flash-next-dp2-8gpu` now serves without the
-  recipe's `--speculative-config mtp k=3` and with `--kv-cache-memory` pinned (a cold
-  torch.compile cache made vLLM's start-up profile shrink replica 0's KV cache to 741K
-  tokens vs 3.45M); `verify.sh vision` requires the answer to name the probe colour.
-- Why: with prefix caching + MTP, `vllm@27a94d1c` corrupts batched answers on the hybrid
-  GDN checkpoint (`ductduct…`; 13/274 at 2-12 concurrent, 0/1,508 with either off,
-  63.8% with `--no-async-scheduling`; upstream vllm#53912). Prefix caching is what
-  Kairyu's prefix-aware placement and multi-turn traffic use, so MTP is the one dropped.
-- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/*/MEASUREMENTS.md`; supersedes the "MTP k=3" wording in the 2026-09-04 FN-D9 entry below
-
-### 2026-09-04 — [amendment] FN-D9: two vision replica-pool examples
-- What: `examples/deepseek-v4-flash-vision-exp-dp2-8gpu` (TP4+EP4 × 2, official recipe
-  + SM120 marlin, 1M ctx) and `examples/qwen3.8-flash-next-dp2-8gpu` (TP4 × 2, official
-  rtx_pro_6000_4x FP8 layout, MTP k=3, 256K ctx): one public text+image model each,
-  no-login Chat UI with a reasoning-effort dropdown in each model's official vocabulary,
-  `verify.sh vision` gate, shared upstream-main `27a94d1c` + FlashInfer `60b49158`
-  SM120 overlay image with a fail-closed image-ID pin.
-- Why: both checkpoints need upstream `main` (official tags predate the support PRs;
-  FlashInfer 0.6.18 breaks SM120 sparse-MLA on the first image); Qwen's template
-  rejects L3-normalized efforts, so an example-local alias restores them.
-- Refs: FN-D9 amendment 2026-09-04 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py; GPU evidence pending
-
-### 2026-09-02 — [amendment] FN-D9: replica examples must serve OpenAI tool calls
-- What: DP2 DeepSeek drops the Kairyu-rendered /completions passthrough (forwards
-  no tools; DSML parse is whole-block only) for the Qwen-style legacy path: vLLM
-  renders with the checkpoint's deepseek_v4 encoder + `--tool-call-parser
-  deepseek_v4`, Kairyu forwards tools to /chat/completions and normalizes. Both
-  examples gain a fail-closed readiness tool probe + `verify.sh tool-calling`
-  and non-thinking default kwargs (Qwen gate caught empty `content` on plain chat).
-- Why: PR #584 review — SWE-bench Pro got `tool_calls: null` every turn (22/22
-  RepeatedFormatError). GPU-verified: both tool gates 6/6, both matrices
-  re-pinned, SWE-bench Pro smoke 3/3 (kairyu-bench `20260902T010540Z-3bf671e8`).
-- Refs: PR #584; FN-D9 amendment; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
-
-### 2026-09-02 — [amendment] FN-D9: replica placement gates reject material skew
-- What: both replica-pool examples now limit a replica to 1.25× the even share.
-  Behavior tests reject the 8-way `16,16,16,8,2,2,2,2` and 2-way `63,1`
-  skews while the retained exact-even distributions pass. The verification-only
-  config change does not require a GPU rerun.
-- Why: the former 2× bound admitted materially skewed distributions as passing.
-- Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
-
-### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
-- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
-  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
-  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
-  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
-  split from `placement_log_path`. Same run/verify UX; no product code changed.
-- Why: a plain scale-out serving path (one API over N identical L1 replicas)
-  next to the orchestrated tiered example. GPU-verified 2026-09-01: gates green,
-  exact 8x8 / 32x2 splits; Qwen 313.7 tok/s at c8 (8.0x c1), DeepSeek 471 tok/s
-  at c32 (1.95x one replica) — MEASUREMENTS.md runs 20260901T133331Z / 20260901T140112Z.
-- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py
