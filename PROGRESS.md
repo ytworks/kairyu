@@ -104,6 +104,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-30 — [amendment] M1 D7: context-fit routing and `context_fallbacks`
+- What: orchestrated models measure the conversation per worker (NFC byte bound, exact `/tokenize` count only when needed) and check each profile's worst case against its workers' context; the judge sees only fitting routes, `context_fallbacks` substitutes a long-conversation twin profile, a head that cannot fit is skipped, and a conversation no route can hold returns `context_length_exceeded` (400) instead of an upstream 400 masked as 502.
+- Why: the judge's bounded view cannot see length, so long conversations were routed onto 262K-context Qwen routes (PR #602, Issue #599); the owner requires Qwen answerers to read the original conversation when it fits and a DeepSeek digest only when it does not.
+- Refs: `docs/design/m1-orchestration-and-interface.md` D7 amendment; `kairyu/orchestration/{orchestrator,conductor,request}.py`, `kairyu/dsl/spec.py`; `tests/server/test_context_fit_routing.py`
+
 ### 2026-09-30 — [amendment] m10 A39: AsyncRequest v1 pre-merge review fixes
 - What: an unstorable result publishes a fenced `result_persistence_failed` error after one retry; the third lease expiry fails a request with `lease_expired` instead of re-running it (defers and releases do not count); heartbeats retry transient renewal errors until the lease would expire; shutdown returns unfinished claims to the queue at once (zero-delay defer, no tenant cooldown); `/metrics` collectors render on the event loop with only the blocking store warmup off-loop; the capacity 429 omits `Retry-After` when request retention is off, and startup warns.
 - Why: PR #604 review — each replaced path re-ran inference (without bound for an unstorable result), read unlocked `ReplicaPool` state from a second thread, or promised a retry that could not succeed.

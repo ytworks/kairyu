@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -17,6 +18,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     backend_admission_upper_bound,
+    backend_count_prompt_tokens_async,
     backend_max_model_len,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
@@ -192,6 +194,10 @@ class ProfileChoice:
     profile: str
     label: str
     criteria: str
+
+
+class ContextLengthExceeded(ValueError):
+    """No route of the model can hold the conversation (context fit)."""
 
 
 @dataclass(frozen=True)
@@ -382,6 +388,7 @@ class Orchestrator:
         profile_judge: ProfileJudge | None = None,
         default_reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
+        context_fallbacks: Mapping[str, str] | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -465,6 +472,17 @@ class Orchestrator:
                     f"profile_judge fallback references unknown profile "
                     f"{profile_judge.fallback!r}"
                 )
+        # Profile -> the profile that serves a call it cannot fit (context
+        # fit): e.g. an ensemble whose small-context roles read the whole
+        # conversation falls back to one whose roles read a bounded digest.
+        self._context_fallbacks = dict(context_fallbacks or {})
+        for source, target in self._context_fallbacks.items():
+            if source not in self._profiles or target not in self._profiles:
+                raise ValueError(
+                    f"context_fallbacks references unknown profile {source!r} -> {target!r}"
+                )
+            if source == target or target in self._context_fallbacks:
+                raise ValueError("context_fallbacks must map to a terminal profile")
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
@@ -773,11 +791,61 @@ class Orchestrator:
         """
 
         if self._extra_profiles is None:
-            return "primary"
-        judgment = call.role_profile_judgment
-        if judgment is not None and judgment in self._profiles:
-            return judgment
-        return self._fallback_profile()
+            base = "primary"
+        else:
+            judgment = call.role_profile_judgment
+            if judgment is not None and judgment in self._profiles:
+                base = judgment
+            else:
+                base = self._fallback_profile()
+        return self._context_fit_profile(call, base)
+
+    def _profile_context_fit(self, call: OrchestrationRequest, profile: str) -> bool | None:
+        if call.context_tokens is None:
+            return None
+        return self._new_conductor(call, [], profile=profile).context_fit()
+
+    def _profile_or_context_fallback_fit(
+        self, call: OrchestrationRequest, profile: str
+    ) -> bool | None:
+        status = self._profile_context_fit(call, profile)
+        if status is not True and profile in self._context_fallbacks:
+            fallback = self._profile_context_fit(call, self._context_fallbacks[profile])
+            if fallback is True or status is False:
+                return fallback
+        return status
+
+    def _context_fit_profile(self, call: OrchestrationRequest, selected: str) -> str:
+        """Serve ``selected`` unless the conversation cannot fit it.
+
+        Order: the selected profile, its declared context fallback, the
+        judge fallback, then the judge's choices; a guaranteed fit wins over
+        an unknown one, and a profile that cannot fit is never used. Unknown
+        fit (no measurement) keeps the selection unchanged.
+        """
+
+        if call.context_tokens is None:
+            return selected
+        candidates = [selected]
+        if selected in self._context_fallbacks:
+            candidates.append(self._context_fallbacks[selected])
+        candidates.append(self._fallback_profile())
+        if self._profile_judge is not None:
+            candidates.extend(choice.profile for choice in self._profile_judge.choices)
+        ordered = list(dict.fromkeys(candidates))
+        statuses: dict[str, bool | None] = {}
+        for name in ordered:
+            statuses[name] = self._profile_context_fit(call, name)
+            if statuses[name] is True:
+                # The first guaranteed fit in preference order wins.
+                return name
+        for name in ordered:
+            if statuses[name] is None:
+                return name
+        raise ContextLengthExceeded(
+            "context_length_exceeded: the conversation does not fit any route of "
+            "this model"
+        )
 
     def _roles_for(self, call: OrchestrationRequest) -> tuple[RoleSpec, ...]:
         return self._profiles[self._role_profile(call)]
@@ -800,11 +868,19 @@ class Orchestrator:
 
         assert self._profile_judge is not None
         choices = self._profile_judge.choices
-        if call.multimodal_prompt is None:
-            return choices
-        return tuple(
-            choice for choice in choices if self._profile_accepts_images(choice.profile)
-        )
+        if call.multimodal_prompt is not None:
+            choices = tuple(
+                choice for choice in choices if self._profile_accepts_images(choice.profile)
+            )
+        if call.context_tokens is not None:
+            # Never offer a route the conversation cannot fit (the judge only
+            # sees a bounded view of the latest turn, not its length).
+            choices = tuple(
+                choice
+                for choice in choices
+                if self._profile_or_context_fallback_fit(call, choice.profile) is not False
+            )
+        return choices
 
     def will_judge_role_profile(
         self,
@@ -883,6 +959,53 @@ class Orchestrator:
             completion_tokens=judge.completion_tokens + usage.completion_tokens,
             cached_tokens=judge.cached_tokens + usage.cached_tokens,
         )
+
+    async def measure_context(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> OrchestrationRequest:
+        """Attach the conversation size per worker for context-fit routing.
+
+        A cheap byte bound decides every call whose routes fit even at that
+        bound; only then are the workers asked for an exact count. An image
+        leaves the upper bound open (the exact text count stays a lower
+        bound). A worker that cannot count leaves the size unknown, which
+        only reorders routes and never rejects the call on its own.
+        """
+
+        call = self._request(request)
+        if call.context_tokens is not None or self._moa_samples > 0:
+            return call
+        notes: list[str] = []
+        workers: dict[str, EngineBackend] = {}
+        for roles in self._profiles.values():
+            workers.update(
+                {
+                    worker: backend
+                    for worker, backend in self._conductor_workers(roles, notes).items()
+                    if backend_max_model_len(backend) is not None
+                }
+            )
+        if not workers:
+            return call
+        text_bound = len(unicodedata.normalize("NFC", call.prompt).encode())
+        upper = None if call.multimodal_prompt is not None else text_bound
+        bounded = replace(
+            call,
+            context_tokens={worker: (0, upper) for worker in workers},
+        )
+        if all(
+            self._profile_context_fit(bounded, name) is True for name in self._profiles
+        ):
+            return bounded
+        measured: dict[str, tuple[int, int | None]] = {}
+        for worker, backend in workers.items():
+            count = await backend_count_prompt_tokens_async(backend, call.prompt)
+            if count is None:
+                measured[worker] = (0, None)
+            else:
+                measured[worker] = (count, None if call.multimodal_prompt is not None else count)
+        return replace(call, context_tokens=measured)
 
     async def judge_role_profile(
         self,
@@ -1812,10 +1935,11 @@ class Orchestrator:
         notes: list[str],
         *,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
+        profile: str | None = None,
     ) -> Conductor:
         """Construct the one exact role execution contract used by preflight/run."""
 
-        roles = self._roles_for(call)
+        roles = self._roles_for(call) if profile is None else self._profiles[profile]
         return Conductor(
             roles=roles,
             workers=self._conductor_workers(roles, notes),
@@ -1839,6 +1963,7 @@ class Orchestrator:
             execution_workers=self._execution_workers,
             reasoning_effort=self._effective_reasoning_effort(call),
             public_output_floor=self._profile_output_floor(roles),
+            context_tokens=call.context_tokens,
         )
 
     def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:

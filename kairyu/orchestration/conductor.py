@@ -9,6 +9,9 @@ gates its target with a bounded refine loop. All prompts are rendered as
 from __future__ import annotations
 
 import asyncio
+import json
+import string
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -20,6 +23,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_max_model_len,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
 )
@@ -496,6 +500,19 @@ def _is_pass(verdict_text: str) -> bool:
     return first_line.upper().startswith(_PASS_PREFIX)
 
 
+# Tokens a worker's chat template adds around one rendered role prompt
+# (role markers, a system line such as an effort budget, generation prompt).
+_CHAT_TEMPLATE_TOKEN_MARGIN = 1024
+
+
+def _nfc_bytes(text: str) -> int:
+    """A token upper bound for byte-level BPE tokenizers: every token covers
+    at least one byte of the NFC-normalized text (NFC can expand some code
+    points, so raw bytes are not a bound; measured 2026-09-30)."""
+
+    return len(unicodedata.normalize("NFC", text).encode())
+
+
 def _verdict_is_inconclusive(verdict_text: str) -> bool:
     """True when no PASS/FAIL was declared (e.g. the role's private
     deliberation consumed its whole token budget before a public verdict)."""
@@ -530,6 +547,7 @@ class Conductor:
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
         reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
+        context_tokens: Mapping[str, tuple[int, int | None]] | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -574,6 +592,9 @@ class Conductor:
         # thinking is capped at budget - floor and the empty-output
         # re-dispatch force-closes the reasoning span with the reserve.
         self._public_output_floor = public_output_floor
+        # Per worker: (lower bound, upper bound or None) of the conversation
+        # tokens, measured once at the serving boundary (context fit).
+        self._context_tokens = dict(context_tokens or {})
         self._execution_workers = dict(execution_workers or {})
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
@@ -646,7 +667,102 @@ class Conductor:
             return False
         if params.extra_args.get("response_format") is not None:
             return False
+        if self._head_context_fit() is False:
+            # The conversation plus the opening cannot fit the head's worker:
+            # answer headless instead of sending a request it must reject.
+            return False
         return True
+
+    def _head_context_fit(self) -> bool | None:
+        if self._head is None or not self._context_tokens:
+            return None
+        return self._role_context_fit(self._head, head_enabled=True)
+
+    def context_fit(self) -> bool | None:
+        """Whether every role this call dispatches fits its worker's context.
+
+        ``True``: guaranteed even when every upstream output reaches its cap.
+        ``False``: the conversation alone cannot fit, or the worst case does
+        not (a fit is not guaranteed). ``None``: unknown (no measurement, an
+        unbounded input, or a worker without a declared context length). A
+        head that cannot fit is disabled for the call rather than counted.
+        """
+
+        if not self._context_tokens:
+            return None
+        head_enabled = self._head_enabled()
+        status: bool | None = True
+        for spec in self._roles:
+            if spec.role_type == "executor":
+                continue
+            if spec.requires == "image" and self._multimodal_prompt is None:
+                continue
+            if self._head is not None and spec.name == self._head.name:
+                if not head_enabled:
+                    continue
+            role_status = self._role_context_fit(spec, head_enabled=head_enabled)
+            if role_status is False:
+                return False
+            if role_status is None:
+                status = None
+        return status
+
+    def _fit_template(self, spec: RoleSpec, *, head_enabled: bool) -> str:
+        if (
+            spec.prompt_headless
+            and self._units
+            and spec.name == self._selected_final_unit().name
+            and not head_enabled
+        ):
+            return spec.prompt_headless
+        return spec.prompt
+
+    def _slot_cap(self, name: str, *, head_enabled: bool) -> int | None:
+        """Largest text a dependency slot can render, in tokens."""
+
+        spec = self._by_name.get(name)
+        if spec is None:
+            return 0
+        if spec.role_type == "executor":
+            return None
+        if spec.requires == "image" and self._multimodal_prompt is None:
+            return 0
+        if self._head is not None and name == self._head.name and not head_enabled:
+            return 0
+        return self._request_intent(spec)[0].max_tokens
+
+    def _role_context_fit(self, spec: RoleSpec, *, head_enabled: bool) -> bool | None:
+        limit = backend_max_model_len(self._workers.get(spec.worker))
+        if limit is None:
+            return None
+        template = self._fit_template(spec, head_enabled=head_enabled)
+        parsed = list(string.Formatter().parse(template))
+        fields = {field for _, field, _, _ in parsed if field}
+        literal = "".join(text for text, _, _, _ in parsed)
+        lower = 0
+        upper: int | None = 0
+        if "query" in fields:
+            measured = self._context_tokens.get(spec.worker)
+            if measured is None:
+                return None
+            lower, upper = measured
+        own = self._request_intent(spec)[0].max_tokens
+        own_tokens = own if own is not None else 1
+        if lower + own_tokens > limit:
+            return False
+        slots = 0
+        for slot in fields - {"query"}:
+            cap = self._slot_cap(slot, head_enabled=head_enabled)
+            if cap is None:
+                return None
+            slots += cap
+        if upper is None:
+            return None
+        scaffold = _nfc_bytes(self._shared_prefix + literal + spec.prompt_suffix)
+        if self._units and spec.name == self._selected_final_unit().name and self._final_tools:
+            scaffold += _nfc_bytes(json.dumps(list(self._final_tools)))
+        worst = upper + scaffold + _CHAT_TEMPLATE_TOKEN_MARGIN + slots + own_tokens
+        return worst <= limit
 
     def _head_sampling_params(self) -> SamplingParams:
         """The head derives from the caller's PUBLIC sampling so its style
@@ -2534,14 +2650,15 @@ class Conductor:
 
         if self._head is None or self._head_enabled():
             return frozenset()
+        reason = "context" if self._head_context_fit() is False else "intent"
         run.trace.append(
             self._trace_event(
                 self._head,
-                "skipped:intent",
+                f"skipped:{reason}",
                 operation="generation",
                 status="skipped",
                 attempt=0,
-                metadata={"reason": "intent", "head": True},
+                metadata={"reason": reason, "head": True},
             )
         )
         return frozenset({self._head.name})

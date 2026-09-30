@@ -54,6 +54,10 @@ class OrchestrationRequest:
     # None means the judge was deterministically skipped, not that a dispatched
     # call necessarily failed to return a verdict.
     role_profile_judge_event: TraceEvent | None = None
+    # Conversation size per worker, measured once at the serving boundary:
+    # (lower bound, upper bound or None when unbounded, e.g. image tokens).
+    # None means unmeasured; profile selection then assumes nothing about fit.
+    context_tokens: Mapping[str, tuple[int, int | None]] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -77,6 +81,18 @@ class OrchestrationRequest:
             TraceEvent,
         ):
             raise TypeError("role_profile_judge_event must be a TraceEvent or null")
+        if self.context_tokens is not None:
+            measured = dict(self.context_tokens)
+            for worker, bounds in measured.items():
+                lower, upper = bounds
+                if (
+                    not isinstance(worker, str)
+                    or type(lower) is not int
+                    or lower < 0
+                    or (upper is not None and (type(upper) is not int or upper < lower))
+                ):
+                    raise ValueError("context_tokens must map workers to (lower, upper|None)")
+            object.__setattr__(self, "context_tokens", measured)
         if self.conversation_affinity_key is not None and (
             not isinstance(self.conversation_affinity_key, str)
             or not self.conversation_affinity_key

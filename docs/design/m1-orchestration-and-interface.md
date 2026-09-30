@@ -169,6 +169,26 @@ YAML loader produces pydantic-validated `OrchestratorSpec` (agent pool, role DAG
 The `@role` decorator API constructs identical spec objects in Python. One schema, two
 front-ends; the Conductor consumes only the spec.
 
+**Context-fit amendment (2026-09-30).** An orchestrated model never dispatches a route
+whose workers cannot hold the conversation. The serving boundary measures the conversation
+once per worker (`Orchestrator.measure_context`): an NFC-normalized UTF-8 byte count bounds
+the tokens of byte-level BPE tokenizers (raw bytes do not: NFC expands some code points,
+measured 2026-09-30), and only when that bound leaves a route in doubt are the workers asked
+for an exact count (`/tokenize`); images leave the upper bound open. Every role of a profile
+is then checked for its worst case — conversation + scaffold + chat-template margin + the
+caps of the dependency outputs it renders + its own cap — against its worker's
+`max_model_len`: `True` guarantees a fit, `False` means the fit is not guaranteed or the
+conversation alone does not fit, `None` is unknown. A head that cannot fit is disabled for
+the call (`skipped:context`; the final unit renders `prompt_headless`). The judge is offered
+only profiles that fit directly or through `context_fallbacks` (a spec map such as
+`{primary: primary_long}`); selection prefers a guaranteed fit over an unknown one — the
+selected profile, its context fallback, the judge fallback, then the choices — never uses a
+profile that cannot fit, and returns `context_length_exceeded` (HTTP 400) when none can. An
+unmeasured or uncountable conversation leaves selection unchanged or only reorders it.
+Before this, the judge (which reads a 4,000-character view) routed a 300K-token
+conversation onto a 262K-context route and the upstream 400 surfaced as a 502 (PR #602,
+Issue #599), and a head or a small-context role reading the conversation failed upstream.
+
 ## 3. Out of scope for M1 (deferred with reasons)
 
 - Custom scheduler / KV manager / CUDA graphs / spec decode / quantized load — M2/M3.

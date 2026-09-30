@@ -2385,6 +2385,9 @@ def create_app(
                     ),
                 )
                 selected = auto_models[request.model]
+                # Measure the conversation once so routing never selects a
+                # route whose workers cannot hold it (context fit).
+                orchestration_request = await selected.measure_context(orchestration_request)
                 judge_will_run = selected.will_judge_role_profile(orchestration_request)
                 try:
                     if judge_will_run:

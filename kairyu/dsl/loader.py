@@ -251,4 +251,5 @@ def build_orchestrator(
         profile_judge=profile_judge,
         default_reasoning_effort=spec.default_reasoning_effort,
         public_output_floor=spec.public_output_floor,
+        context_fallbacks=spec.context_fallbacks,
     )

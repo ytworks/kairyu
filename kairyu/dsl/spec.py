@@ -374,6 +374,10 @@ class OrchestratorSpec(BaseModel):
     # Optional LLM verdict selecting among the profiles. Without it the
     # primary DAG always serves.
     profile_judge: ProfileJudgeSpec | None = None
+    # Profile -> profile that serves a call whose conversation cannot fit it
+    # (context fit): e.g. {primary: primary_long} when the primary DAG has
+    # small-context roles that read the whole conversation.
+    context_fallbacks: dict[str, str] = Field(default_factory=dict)
     budget: BudgetSpec = BudgetSpec()
     router: RouterSpec = RouterSpec()
     shared_prefix: str = ""
@@ -422,6 +426,12 @@ class OrchestratorSpec(BaseModel):
                 "public_output_floor cannot be combined with moa_samples > 0; "
                 "the floor applies only to the Conductor final unit"
             )
+        fallback_profiles = {"primary", *profile_names}
+        for source, target in self.context_fallbacks.items():
+            if source not in fallback_profiles or target not in fallback_profiles:
+                raise ValueError(
+                    f"context_fallbacks references unknown profile {source!r} -> {target!r}"
+                )
         if self.profile_judge is not None:
             if not self.profiles:
                 raise ValueError("profile_judge requires at least one profile")
