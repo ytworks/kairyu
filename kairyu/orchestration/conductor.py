@@ -614,6 +614,7 @@ class Conductor:
         )
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
         self._validate()
+        self._unit_depth = self._dependency_depths()
 
     def _selected_final_unit(self) -> RoleSpec:
         terminal = [
@@ -1058,6 +1059,21 @@ class Conductor:
                     f"the head role {self._head.name!r} to continue its committed "
                     "public prefix"
                 )
+
+    def _dependency_depths(self) -> dict[str, int]:
+        """Longest dependency path from a root unit (roots are 0)."""
+
+        depths: dict[str, int] = {}
+
+        def depth(name: str) -> int:
+            if name not in depths:
+                deps = self._unit_deps.get(name, frozenset())
+                depths[name] = 1 + max((depth(dep) for dep in deps), default=-1)
+            return depths[name]
+
+        for name in self._unit_deps:
+            depth(name)
+        return depths
 
     def _check_acyclic(self) -> None:
         remaining = {name: set(deps) for name, deps in self._unit_deps.items()}
@@ -2645,14 +2661,22 @@ class Conductor:
             # Orchestrator boundary; internal stage text never substitutes
             # for the public answer (issue #496).
             return None
-        # Budget exhaustion best-so-far (EO-D7/O4): the last completed
-        # generation stage stands in — never an executor's machine output or
-        # the head, whose committed text _public_text already carries.
-        for name in reversed(run.completion_order):
+        # Budget exhaustion best-so-far (EO-D7/O4): the most downstream
+        # completed generation stage stands in — never an executor's machine
+        # output or the head, whose committed text _public_text already
+        # carries. Units start as soon as their own dependencies finish, so
+        # completion order alone can end on a shallow side branch; depth
+        # decides and completion order only breaks ties.
+        best: RoleSpec | None = None
+        best_rank = (-1, -1)
+        for position, name in enumerate(run.completion_order):
             candidate = self._by_name[name]
-            if candidate.role_type not in {"executor", "head"}:
-                return candidate
-        return None
+            if candidate.role_type in {"executor", "head"}:
+                continue
+            rank = (self._unit_depth.get(name, 0), position)
+            if rank > best_rank:
+                best, best_rank = candidate, rank
+        return best
 
     def _terminal_units(self) -> list[RoleSpec]:
         dependents: set[str] = set()
@@ -2669,13 +2693,18 @@ class Conductor:
         exclude: frozenset[str] = frozenset(),
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
     ) -> None:
+        # Each unit starts as soon as its own dependencies finish; a slow
+        # sibling at the same depth never holds back an unrelated dependent.
         pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
         for deps in pending.values():
             deps.difference_update(exclude)
-        while pending:
+        running: dict[asyncio.Task[None], str] = {}
+
+        def launch_ready() -> None:
             ready = [name for name, deps in pending.items() if not deps]
-            await asyncio.gather(
-                *(
+            for name in ready:
+                del pending[name]
+                task = asyncio.create_task(
                     self._run_unit_safe(
                         run,
                         session,
@@ -2683,13 +2712,30 @@ class Conductor:
                         self._by_name[name],
                         event_sink=event_sink,
                     )
-                    for name in ready
                 )
-            )
-            for name in ready:
-                del pending[name]
-            for deps in pending.values():
-                deps.difference_update(ready)
+                running[task] = name
+
+        try:
+            launch_ready()
+            while running:
+                done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                finished = []
+                for task in done:
+                    finished.append(running.pop(task))
+                    # _run_unit_safe absorbs unit failures; only cancellation
+                    # and other BaseExceptions reach here and end the run.
+                    task.result()
+                for deps in pending.values():
+                    deps.difference_update(finished)
+                launch_ready()
+            assert not pending, f"unschedulable units: {sorted(pending)}"
+        finally:
+            # Cancel and settle every in-flight unit so budget reservations
+            # and upstream requests are released before the caller continues.
+            for task in running:
+                task.cancel()
+            if running:
+                await asyncio.gather(*running, return_exceptions=True)
 
     async def _stream_unit(
         self,

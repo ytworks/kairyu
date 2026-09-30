@@ -131,6 +131,17 @@ the engine can enforce it per-step. Exceeding a budget is a normal, reported out
 result so far is returned), not an exception, matching Fugu's "recursion depth as
 inference-time compute axis" framing.
 
+**Dependency-scheduling amendment (2026-09-30).** The wave schedule is replaced by
+dependency-driven dispatch: a unit starts as soon as its own declared dependencies have
+finished, instead of waiting for every unit of the previous wave (`_run_pending`). The DAG,
+each unit's inputs, step admission, and failure isolation are unchanged; only hidden
+barriers between unrelated units are removed (in the tiered examples the four answerers
+waited for the slowest first-wave role although they read only `policies`). Cancellation
+cancels and settles every in-flight unit before propagating, so reservations and upstream
+requests are released. Because completion order no longer follows depth, the budget
+best-so-far fallback picks the completed generation unit with the longest dependency path
+(completion order breaks ties) rather than the last one to finish.
+
 ### D5. KV-affinity is designed in now, exploited in M2
 
 The differentiation core (multi-step orchestration hitting shared-prefix KV cache) needs the

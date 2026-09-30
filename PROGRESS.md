@@ -104,6 +104,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-30 — [amendment] M1 D4: Conductor units start when their own dependencies finish
+- What: `_run_pending` dispatches each unit as soon as its declared dependencies complete instead of per-wave `gather`; cancellation settles every in-flight unit; the budget best-so-far fallback prefers the deepest completed unit.
+- Why: wave barriers made units wait for unrelated siblings (the V4.1 six-GPU answerers waited for the slowest first-wave DeepSeek role, PR #602) — pure latency with no quality effect.
+- Refs: `docs/design/m1-orchestration-and-interface.md` D4 amendment; `kairyu/orchestration/conductor.py`; `tests/unit/test_conductor.py`
+
 ### 2026-09-30 — [amendment] m10 A39: AsyncRequest v1 pre-merge review fixes
 - What: an unstorable result publishes a fenced `result_persistence_failed` error after one retry; the third lease expiry fails a request with `lease_expired` instead of re-running it (defers and releases do not count); heartbeats retry transient renewal errors until the lease would expire; shutdown returns unfinished claims to the queue at once (zero-delay defer, no tenant cooldown); `/metrics` collectors render on the event loop with only the blocking store warmup off-loop; the capacity 429 omits `Retry-After` when request retention is off, and startup warns.
 - Why: PR #604 review — each replaced path re-ran inference (without bound for an unstorable result), read unlocked `ReplicaPool` state from a second thread, or promised a retry that could not succeed.

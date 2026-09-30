@@ -524,6 +524,99 @@ async def test_diamond_dag_runs_middle_wave_concurrently():
     assert result.final_text == result.outputs["synth"]
 
 
+class RoleGatedBackend:
+    """Answers each role by its prompt tag; tagged roles wait for their gate."""
+
+    def __init__(self, gated: tuple[str, ...] = ()) -> None:
+        self.started: list[str] = []
+        self.gates = {tag: asyncio.Event() for tag in gated}
+        self.cancelled: list[str] = []
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        tag = request.prompt.split(":", 1)[0]
+        self.started.append(tag)
+        gate = self.gates.get(tag)
+        if gate is not None:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(tag)
+                raise
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(CompletionOutput(index=0, text=f"{tag}-out", token_ids=()),),
+        )
+
+    async def stream(self, request):  # pragma: no cover - unused
+        yield await self.generate(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+def _side_branch_roles() -> tuple[RoleSpec, ...]:
+    # "slow" and "fast" are both roots; "next" needs only "fast".
+    return (
+        RoleSpec(name="slow", worker="w", prompt="slow: {query}"),
+        RoleSpec(name="fast", worker="w", prompt="fast: {query}"),
+        RoleSpec(name="next", worker="w", prompt="next: {fast}", depends_on=("fast",)),
+        RoleSpec(
+            name="final",
+            worker="w",
+            prompt="final: {slow} {next}",
+            role_type="synthesizer",
+            depends_on=("slow", "next"),
+        ),
+    )
+
+
+async def test_unit_starts_when_its_own_dependencies_finish():
+    backend = RoleGatedBackend(gated=("slow",))
+    conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
+    run = asyncio.create_task(conductor.run("q"))
+    for _ in range(50):
+        if "next" in backend.started:
+            break
+        await asyncio.sleep(0)
+    # "next" ran while its unrelated same-depth sibling was still in flight.
+    assert "next" in backend.started
+    assert "final" not in backend.started
+    backend.gates["slow"].set()
+    result = await run
+    assert result.final_text == "final-out"
+
+
+async def test_cancelling_a_run_cancels_every_in_flight_unit():
+    backend = RoleGatedBackend(gated=("slow", "fast"))
+    conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
+    run = asyncio.create_task(conductor.run("q"))
+    for _ in range(50):
+        if len(backend.started) == 2:
+            break
+        await asyncio.sleep(0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert sorted(backend.cancelled) == ["fast", "slow"]
+
+
+async def test_budget_fallback_prefers_the_most_downstream_output():
+    # Three steps run slow, fast and next; final is skipped by the budget.
+    # "slow" finishes last, but "next" is further along the DAG.
+    backend = RoleGatedBackend(gated=("slow",))
+    conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
+    run = asyncio.create_task(conductor.run("q", budget=Budget(max_steps=3)))
+    for _ in range(50):
+        if "next" in backend.started:
+            break
+        await asyncio.sleep(0)
+    backend.gates["slow"].set()
+    result = await run
+    assert "final" not in result.outputs
+    assert result.final_text == "next-out"
+
+
 def test_verifier_with_unavailable_dependency_rejected_at_init():
     # M1: a verifier runs inline after its target, so a dependency the target
     # doesn't have (here "planner", scheduled in a parallel wave) would render
