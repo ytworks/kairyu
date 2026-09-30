@@ -94,6 +94,7 @@ profile_judge:
   worker: tier2
   prompt_prefix: "<u>"
   prompt_suffix: "<a>"
+  priority: -10
   choices:
     - {profile: primary, label: CODE, criteria: "code authoring"}
     - {profile: general, label: GENERAL, criteria: "everything else"}
@@ -116,6 +117,7 @@ profile_judge:
         "prompt_prefix": "<u>",
         "prompt_suffix": "<a>",
         "fallback": "primary",
+        "priority": -10,
         "choices": [
             {"profile": "primary", "label": "CODE", "criteria": "code authoring"},
             {"profile": "general", "label": "GENERAL", "criteria": "everything else"},

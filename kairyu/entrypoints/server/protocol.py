@@ -184,6 +184,7 @@ class ProfileJudgePayload(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     fallback: str = "primary"
+    priority: int = 0
     choices: list[ProfileChoicePayload] = Field(default_factory=list)
 
 
