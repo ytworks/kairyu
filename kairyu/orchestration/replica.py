@@ -52,6 +52,7 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound_async,
     backend_admission_upper_bound_key,
     backend_count_prompt_tokens_async,
+    backend_render_generation_prompt_async,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
     backend_supports_slo_defer,
@@ -61,7 +62,7 @@ from kairyu.engine.backend import (
     validate_backend_request,
     validate_backend_request_before_prepare,
 )
-from kairyu.engine.prompt import prompt_kind, prompt_text
+from kairyu.engine.prompt import TemplatedPrompt, prompt_kind, prompt_text
 from kairyu.orchestration.kv_routing import KvRoutingIndex, PreparedKvRouting
 from kairyu.orchestration.prefix_index import PrefixIndex, PreparedPrefixKeys
 from kairyu.orchestration.router import JsonlRouterLog
@@ -948,6 +949,21 @@ class ReplicaPool:
                 seen.add(key)
             representatives.append(backend)
         return tuple(representatives)
+
+    async def render_generation_prompt_async(
+        self,
+        request: GenerationRequest,
+    ) -> TemplatedPrompt | None:
+        """Render through one capable replica: replicas share one model and
+        chat template, so the first rendered prompt is authoritative."""
+
+        for replica_id in self.replica_ids:
+            rendered = await backend_render_generation_prompt_async(
+                self._entries[replica_id].backend, request
+            )
+            if rendered is not None:
+                return rendered
+        return None
 
     async def count_prompt_tokens_async(self, prompt: str) -> int | None:
         """Delegate ``/v1/messages/count_tokens`` to one capable replica.

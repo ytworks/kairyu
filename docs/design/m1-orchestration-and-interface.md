@@ -131,6 +131,24 @@ the engine can enforce it per-step. Exceeding a budget is a normal, reported out
 result so far is returned), not an exception, matching Fugu's "recursion depth as
 inference-time compute axis" framing.
 
+**Internal-output-floor amendment (2026-09-30).** The forced-close continuation that
+issue #542 / DTO-D15 gave the final unit extends to internal roles and verifiers through a
+per-role `output_floor`: the first attempt may reason within `max_tokens - output_floor`,
+and an attempt that ends inside its reasoning span with no output is continued once, after
+a forced close of that span, with `output_floor` tokens (one extra step; the dry attempt's
+usage and timing are recorded on its `retry:empty_output` event). A verifier with a floor
+states the verdict it deliberated to instead of re-verifying from scratch at the same
+effort. Without it a thinking planner, synthesizer, or verifier that spent its budget
+deliberating left its dependents an empty slot (DeepSeek V4.1 `policies`/`synthesis` spent
+65,536 tokens, ~950 s, with no output in PR #602). A third continuation mode, `rendered`,
+serves chat templates that cannot continue a final assistant message (the DeepSeek V4.1
+encoder renders a `continue_final_message` prefill as a closed turn, measured 2026-09-30):
+the worker's vLLM upstream renders its own generation prompt (`/tokenize` +
+`/detokenize`, effort passed as a template kwarg as the chat endpoint does), and the
+captured reasoning plus the close tag extend it on the templated `/completions` lane. It
+declines multimodal and tool-bearing calls, which keep their empty attempt; a `rendered`
+role on a worker that cannot render is rejected at construction.
+
 ### D5. KV-affinity is designed in now, exploited in M2
 
 The differentiation core (multi-step orchestration hitting shared-prefix KV cache) needs the

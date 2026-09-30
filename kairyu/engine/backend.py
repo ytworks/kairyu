@@ -406,6 +406,29 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
     )
 
 
+async def backend_render_generation_prompt_async(
+    backend: object,
+    request: GenerationRequest,
+) -> TemplatedPrompt | None:
+    """The upstream-rendered generation prompt for a forced-close continuation.
+
+    ``None`` means the backend cannot render it (the caller then leaves the
+    empty attempt as it is).
+    """
+
+    renderer = getattr(backend, "render_generation_prompt_async", None)
+    if not callable(renderer):
+        return None
+    rendered = await renderer(request)
+    if rendered is None:
+        return None
+    if not isinstance(rendered, TemplatedPrompt):
+        raise TypeError(
+            "backend render_generation_prompt_async must return a TemplatedPrompt or None"
+        )
+    return rendered
+
+
 async def backend_count_prompt_tokens_async(
     backend: object, prompt: str
 ) -> int | None:

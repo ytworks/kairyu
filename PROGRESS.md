@@ -104,6 +104,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-30 — [amendment] M1 D4: internal roles and verifiers keep an output floor
+- What: a per-role `output_floor` reserves output tokens behind reasoning for internal roles and verifiers; an attempt that ends inside its reasoning span is continued once after a forced close. New `rendered` continuation mode extends the vLLM upstream's own rendered generation prompt on `/completions` for templates that cannot continue a final assistant message.
+- Why: DeepSeek V4.1 roles spent their whole 65,536-token budget deliberating with no output (PR #602); raising caps only lowered the odds. The V4.1 encoder closes a `continue_final_message` prefill instead of continuing it (S1 spike, 2026-09-30), so the existing chat mode cannot serve it.
+- Refs: `docs/design/m1-orchestration-and-interface.md` D4 amendment; `kairyu/orchestration/conductor.py`, `kairyu/engine/openai_backend.py`; `tests/unit/test_internal_output_floor.py`
+
 ### 2026-09-30 — [amendment] m10 A39: AsyncRequest v1 pre-merge review fixes
 - What: an unstorable result publishes a fenced `result_persistence_failed` error after one retry; the third lease expiry fails a request with `lease_expired` instead of re-running it (defers and releases do not count); heartbeats retry transient renewal errors until the lease would expire; shutdown returns unfinished claims to the queue at once (zero-delay defer, no tenant cooldown); `/metrics` collectors render on the event loop with only the blocking store warmup off-loop; the capacity 429 omits `Retry-After` when request retention is off, and startup warns.
 - Why: PR #604 review — each replaced path re-ran inference (without bound for an unstorable result), read unlocked `ReplicaPool` state from a second thread, or promised a retry that could not succeed.

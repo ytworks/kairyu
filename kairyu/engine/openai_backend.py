@@ -1006,6 +1006,78 @@ class OpenAICompatBackend:
         count = payload.get("count") if isinstance(payload, dict) else None
         return count if type(count) is int and count >= 0 else None
 
+    async def render_generation_prompt_async(
+        self,
+        request: GenerationRequest,
+        *,
+        timeout_s: float = 10.0,
+    ) -> TemplatedPrompt | None:
+        """The upstream chat template's generation prompt for ``request``.
+
+        A vLLM upstream renders the exact chat body Kairyu would send
+        (``/tokenize`` with ``add_generation_prompt``) and returns its text
+        (``/detokenize``), so a forced-close continuation can extend the
+        model's own open reasoning span on ``/completions`` where the
+        template cannot continue a final assistant message. ``None`` when the
+        upstream cannot render it or the request is not a plain text chat
+        without tools; the text is only usable on the templated-passthrough
+        ``/completions`` lane.
+        """
+
+        if (
+            self._capabilities.upstream != "vllm"
+            or not self._allow_templated_chat_passthrough
+            or type(request.prompt) is not str
+            or request.tools
+            or request.tools_in_prompt
+            or request.assistant_prefill is not None
+        ):
+            return None
+        try:
+            validated = await run_prompt_work(self._dispatch_preflight, request)
+            payload = self._payload(request, validated=validated, image_urls=None)
+        except UpstreamClientError:
+            return None
+        kwargs = dict(payload.get("chat_template_kwargs") or {})
+        # /tokenize has no top-level reasoning_effort: the chat endpoint moves
+        # it into the template kwargs before rendering, so mirror that.
+        if payload.get("reasoning_effort") is not None:
+            kwargs["reasoning_effort"] = payload["reasoning_effort"]
+        body: dict[str, object] = {
+            "model": self._model,
+            "messages": payload["messages"],
+            "add_generation_prompt": True,
+        }
+        if kwargs:
+            body["chat_template_kwargs"] = kwargs
+        root = (
+            self._base_url[: -len("/v1")]
+            if self._base_url.endswith("/v1")
+            else self._base_url
+        )
+        try:
+            client = self._get_client()
+            tokenized = await client.post(
+                f"{root}/tokenize", json=body, headers=self._headers(), timeout=timeout_s
+            )
+            if tokenized.status_code != 200:
+                return None
+            tokens = tokenized.json().get("tokens")
+            if not isinstance(tokens, list) or not tokens:
+                return None
+            detokenized = await client.post(
+                f"{root}/detokenize",
+                json={"model": self._model, "tokens": tokens},
+                headers=self._headers(),
+                timeout=timeout_s,
+            )
+            if detokenized.status_code != 200:
+                return None
+            text = detokenized.json().get("prompt")
+        except (httpx.HTTPError, RuntimeError, ValueError):
+            return None
+        return TemplatedPrompt(text) if isinstance(text, str) and text else None
+
     def _api_key(self) -> str:
         assert self._api_key_env is not None
         key = os.environ.get(self._api_key_env)

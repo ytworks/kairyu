@@ -175,12 +175,22 @@ class RoleNodeSpec(BaseModel):
     # the worker's upstream chat template opened the span, so the captured
     # reasoning plus the close tag is sent as an assistant-turn prefill the
     # template re-renders as a closed thinking turn and generation continues.
-    reasoning_continuation: Literal["prefix", "chat"] = "prefix"
+    # "rendered": the upstream chat template cannot continue a final
+    # assistant message, so the worker's upstream renders its own generation
+    # prompt and the reasoning plus the close tag extend it on the templated
+    # /completions lane (the worker must allow templated passthrough).
+    reasoning_continuation: Literal["prefix", "chat", "rendered"] = "prefix"
     # The literal that opens the span for "chat" continuation (e.g.
     # "<think>"): vLLM continues the final assistant message only when it
     # appears verbatim in the rendered chat, so the prefill must reproduce the
     # template's closed thinking turn "<open>\n<reasoning>\n<close>\n\n".
     reasoning_open_tag: str = ""
+    # Tokens an internal role reserves for its output after reasoning: the
+    # first attempt thinks within max_tokens - output_floor, and an attempt
+    # that ends inside its reasoning span with no output is continued once
+    # after a forced close with output_floor tokens. Requires
+    # reasoning_close_tag; the final unit uses public_output_floor.
+    output_floor: int | None = Field(default=None, ge=1, le=131072)
     # Dispatch condition. "image": the role runs only when the request carries
     # image input; on text requests it is skipped entirely (no model call, no
     # budget step), its dependents run as if it were absent, and its template

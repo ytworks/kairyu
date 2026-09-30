@@ -20,6 +20,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_render_generation_prompt_async,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
 )
@@ -183,8 +184,19 @@ class RoleSpec:
     # How the floor continues exhausted deliberation (DTO-D15): "prefix"
     # appends reasoning + close tag to the role's own scaffold; "chat" sends
     # them as an assistant prefill the worker's upstream chat template
-    # re-renders as a closed thinking turn (the template opened the span).
+    # re-renders as a closed thinking turn (the template opened the span);
+    # "rendered" asks the worker's upstream for its own rendered generation
+    # prompt and extends it on the templated /completions lane, for chat
+    # templates that cannot continue a final assistant message.
     reasoning_continuation: str = "prefix"
+    # Tokens reserved for this internal role's output after its reasoning:
+    # the first attempt may think within max_tokens - output_floor, and an
+    # attempt that spends its budget inside the reasoning span with no
+    # output is continued once after a forced close with output_floor
+    # tokens (a verifier continues to its verdict instead of re-verifying
+    # from scratch). The selected final unit uses the spec-level
+    # public_output_floor instead.
+    output_floor: int | None = None
     # The literal opening the span for "chat" continuation ("<think>"): the
     # prefill must reproduce the template's rendered closed thinking turn
     # verbatim or vLLM refuses to continue the final message.
@@ -228,10 +240,27 @@ class RoleSpec:
                 f"role {self.name!r}: reasoning_close_tag declares an open "
                 "reasoning span and cannot combine with reasoning_closed"
             )
-        if self.reasoning_continuation not in {"prefix", "chat"}:
+        if self.reasoning_continuation not in {"prefix", "chat", "rendered"}:
             raise ValueError(
-                f"role {self.name!r}: reasoning_continuation must be 'prefix' or 'chat'"
+                f"role {self.name!r}: reasoning_continuation must be 'prefix', "
+                "'chat', or 'rendered'"
             )
+        if self.reasoning_continuation == "rendered" and not self.reasoning_close_tag:
+            raise ValueError(
+                f"role {self.name!r}: reasoning_continuation 'rendered' requires "
+                "reasoning_close_tag"
+            )
+        if self.output_floor is not None:
+            if type(self.output_floor) is not int or self.output_floor < 1:
+                raise ValueError(f"role {self.name!r}: output_floor must be a positive integer")
+            if not self.reasoning_close_tag:
+                raise ValueError(
+                    f"role {self.name!r}: output_floor requires reasoning_close_tag"
+                )
+            if self.role_type in {"head", "executor"}:
+                raise ValueError(
+                    f"role {self.name!r}: a {self.role_type} role cannot declare output_floor"
+                )
         if self.reasoning_continuation == "chat" and not (
             self.reasoning_close_tag and self.reasoning_open_tag
         ):
@@ -755,7 +784,18 @@ class Conductor:
                 self._final_parallel_tool_calls,
                 self._final_tool_call_protocol,
             )
-        return self._role_sampling_params(spec), (), None, False, None, "generic"
+        return self._internal_role_sampling_params(spec), (), None, False, None, "generic"
+
+    def _internal_role_sampling_params(self, spec: RoleSpec) -> SamplingParams:
+        """Role params, with the output floor reserved out of attempt 0."""
+
+        params = self._role_sampling_params(spec)
+        floor = spec.output_floor
+        if floor is None or params.max_tokens is None or params.max_tokens - floor < 1:
+            # At or below the floor there is nothing to split; the bounded
+            # continuation still gets the floor.
+            return params
+        return params.clone(max_tokens=params.max_tokens - floor)
 
     def _final_public_params(self) -> SamplingParams:
         """The caller's public params with the final unit's policy overrides.
@@ -891,6 +931,29 @@ class Conductor:
             )
         return f"{prompt}{reasoning}{spec.reasoning_close_tag}\n\n", None
 
+    async def _forced_close_retry(
+        self,
+        run: _RunState,
+        session: str,
+        spec: RoleSpec,
+        prompt: str,
+        reasoning: str,
+        attempt: int,
+    ) -> tuple[str, str | None] | None:
+        """The continuation input after a forced reasoning close, or ``None``
+        when the worker cannot continue this call (a ``rendered`` role on a
+        multimodal or tool-bearing call, or an upstream render failure)."""
+
+        if spec.reasoning_continuation != "rendered":
+            return self._think_close_continuation(spec, prompt, reasoning)
+        request = self._generation_request(run, session, spec, prompt, attempt)
+        rendered = await backend_render_generation_prompt_async(
+            self._workers[spec.worker], request
+        )
+        if rendered is None:
+            return None
+        return TemplatedPrompt(f"{rendered}{reasoning}{spec.reasoning_close_tag}"), None
+
     def _public_budget_remaining(self, run: _RunState) -> int | None:
         """Tokens the final unit may still generate; ``None`` when unlimited."""
 
@@ -947,6 +1010,14 @@ class Conductor:
         if len(self._by_name) != len(self._roles):
             raise ValueError("duplicate role names")
         for role in self._roles:
+            if role.reasoning_continuation == "rendered" and not callable(
+                getattr(self._workers.get(role.worker), "render_generation_prompt_async", None)
+            ):
+                raise ValueError(
+                    f"role {role.name!r}: reasoning_continuation 'rendered' needs a "
+                    f"worker that renders its upstream generation prompt; "
+                    f"{role.worker!r} does not"
+                )
             if role.role_type == "executor":
                 if role.worker not in self._execution_workers:
                     raise ValueError(
@@ -1012,6 +1083,11 @@ class Conductor:
                 raise ValueError(
                     f"the final unit {final.name!r} publishes every request and "
                     "cannot declare requires"
+                )
+            if final.output_floor is not None:
+                raise ValueError(
+                    f"the final unit {final.name!r} reserves public output through "
+                    "public_output_floor, not output_floor"
                 )
             if self._public_output_floor is not None and not final.reasoning_close_tag:
                 # A floor with no close tag would silently never reserve
@@ -2133,10 +2209,26 @@ class Conductor:
                 observed.text,
                 observed.completions,
             )
-            if (
+            empty = not self._has_public_output(text, completions)
+            internal_floor = (
+                None if is_final_unit or empty_retry_used or not empty else spec.output_floor
+            )
+            continuation = None
+            if internal_floor is not None:
+                # Internal output floor: an attempt that spent its budget in
+                # its reasoning span is continued once after a forced close.
+                continuation = await self._forced_close_retry(
+                    run,
+                    session,
+                    spec,
+                    prompt,
+                    self._model_reasoning(observed.completions) or "",
+                    depth + 1,
+                )
+            if continuation is not None or (
                 is_final_unit
                 and not empty_retry_used
-                and not self._has_public_output(text, completions)
+                and empty
                 # A committed head makes an empty continuation a legitimate
                 # head-only answer (EO-D7) — unless a verifier is about to
                 # judge the text, when the bounded retry is strictly cheaper
@@ -2148,26 +2240,36 @@ class Conductor:
                 # a silent successful "stop".
                 empty_retry_used = True
                 metadata: dict[str, object] = {"reason": "empty_output"}
-                floor = self._think_close_floor()
-                if floor is not None:
+                floor = internal_floor if internal_floor is not None else self._think_close_floor()
+                if floor is not None and continuation is None:
                     # Public-output floor (issue #542): continue the captured
                     # deliberation after a forced reasoning close, answering
                     # with the reserved public tokens; parser-classified
                     # reasoning on the closed span is reclaimed as public.
-                    reasoning = self._model_reasoning(observed.completions) or ""
                     # Continue the attempt that ran dry — the refined prompt
                     # on a refinement attempt, not attempt 0's scaffold.
-                    prompt, retry_prefill = self._think_close_continuation(
-                        spec, prompt, reasoning
+                    continuation = await self._forced_close_retry(
+                        run,
+                        session,
+                        spec,
+                        prompt,
+                        self._model_reasoning(observed.completions) or "",
+                        depth + 1,
                     )
+                if floor is not None and continuation is not None:
+                    prompt, retry_prefill = continuation
                     dispatch_spec = replace(
                         spec,
                         reasoning_closed=True,
                         reasoning_close_tag="",
                         reasoning_continuation="prefix",
                         reasoning_open_tag="",
+                        output_floor=None,
                     )
-                    remaining = self._public_budget_remaining(run)
+                    remaining = (
+                        None if internal_floor is not None
+                        else self._public_budget_remaining(run)
+                    )
                     retry_max_tokens = (
                         floor if remaining is None else max(1, min(floor, remaining))
                     )
@@ -2176,6 +2278,8 @@ class Conductor:
                         mode=spec.reasoning_continuation,
                         reserved_tokens=floor,
                     )
+                elif floor is not None:
+                    metadata.update(continuation="unavailable", mode=spec.reasoning_continuation)
                 run.trace.append(
                     self._trace_event(
                         spec,
@@ -2184,6 +2288,10 @@ class Conductor:
                         status="retried",
                         attempt=depth,
                         detail="empty public output",
+                        # The dry attempt's own spend: its usage is already
+                        # in the run totals and belongs to this stage.
+                        timing=observed.timing,
+                        usage=observed.usage,
                         budget=TraceBudget.between(run.budget, run.budget),
                         metadata=metadata,
                     )
@@ -2301,6 +2409,37 @@ class Conductor:
                 retry_spec = replace(
                     verifier, name=f"{verifier.name}:reverify"
                 )
+                retry_max_tokens: int | None = None
+                retry_prefill: str | None = None
+                verifier_reasoning = self._model_reasoning(verifier_observed.completions)
+                if (
+                    verifier.output_floor is not None
+                    and verifier_reasoning
+                    and not verdict.strip()
+                ):
+                    # The verifier deliberated to its budget without a
+                    # verdict: close that deliberation and let it state the
+                    # verdict it reached, rather than deliberating afresh at
+                    # the same effort (which tends to run dry again).
+                    continuation = await self._forced_close_retry(
+                        run,
+                        session,
+                        verifier,
+                        verifier_prompt,
+                        verifier_reasoning,
+                        depth + 1,
+                    )
+                    if continuation is not None:
+                        retry_prompt, retry_prefill = continuation
+                        retry_max_tokens = verifier.output_floor
+                        retry_spec = replace(
+                            retry_spec,
+                            reasoning_closed=True,
+                            reasoning_close_tag="",
+                            reasoning_continuation="prefix",
+                            reasoning_open_tag="",
+                            output_floor=None,
+                        )
                 # The first observation has already been emitted. If the
                 # retry cannot dispatch or fails, the final round outcome
                 # remains attributable to the original verifier without
@@ -2316,9 +2455,15 @@ class Conductor:
                         depth,
                         spec=retry_spec,
                         operation="verification",
+                        max_tokens_override=retry_max_tokens,
+                        assistant_prefill=retry_prefill,
                     )
                     verifier_observed = retry_observed
-                    verdict = verifier_observed.text
+                    # A closed-span continuation reclaims parser-classified
+                    # text as the verdict (the reasoning_closed contract).
+                    verdict, _ = self._unit_public_output(
+                        retry_spec, retry_observed.text, retry_observed.completions
+                    )
                     verdict_trace_spec = retry_spec
                     verdict_trace_observed = retry_observed
                 except _BudgetRefused:
@@ -2748,20 +2893,23 @@ class Conductor:
             # reserved public tokens; the reasoning_closed reclaim publishes
             # parser-classified output at stream end.
             floor = self._think_close_floor()
-            prompt, assistant_prefill = self._think_close_continuation(
-                spec, prompt, think_continuation
+            continuation = await self._forced_close_retry(
+                run, session, spec, prompt, think_continuation, attempt
             )
-            spec = replace(
-                spec,
-                reasoning_closed=True,
-                reasoning_close_tag="",
-                reasoning_continuation="prefix",
-                reasoning_open_tag="",
-            )
-            if floor is not None:
-                max_tokens_override = (
-                    floor if remaining is None else max(1, min(floor, remaining))
+            if continuation is not None:
+                prompt, assistant_prefill = continuation
+                spec = replace(
+                    spec,
+                    reasoning_closed=True,
+                    reasoning_close_tag="",
+                    reasoning_continuation="prefix",
+                    reasoning_open_tag="",
+                    output_floor=None,
                 )
+                if floor is not None:
+                    max_tokens_override = (
+                        floor if remaining is None else max(1, min(floor, remaining))
+                    )
         backend = self._workers[spec.worker]
         request = self._generation_request(
             run,

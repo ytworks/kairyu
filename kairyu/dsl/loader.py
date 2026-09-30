@@ -182,6 +182,7 @@ def build_orchestrator(
             reasoning_close_tag=role.reasoning_close_tag,
             reasoning_continuation=role.reasoning_continuation,
             reasoning_open_tag=role.reasoning_open_tag,
+            output_floor=role.output_floor,
             requires=role.requires,
         )
 

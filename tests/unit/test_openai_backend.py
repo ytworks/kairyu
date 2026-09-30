@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -3230,3 +3231,46 @@ async def test_count_prompt_tokens_transport_error_is_none():
         upstream="vllm",
     )
     assert await backend.count_prompt_tokens_async("x") is None
+
+
+async def test_vllm_renders_the_generation_prompt_for_a_forced_close_continuation():
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append((request.url.path, body))
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, json={"count": 3, "tokens": [1, 2, 3]})
+        return httpx.Response(200, json={"prompt": "<sys>effort 75<user>hi<asst><think>"})
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+    request = GenerationRequest(
+        request_id="r",
+        prompt="hi",
+        sampling_params=SamplingParams(max_tokens=8),
+        reasoning_effort="high",
+    )
+    rendered = await backend.render_generation_prompt_async(request)
+    declined = await backend.render_generation_prompt_async(
+        replace(request, tools=({"type": "function", "function": {"name": "f"}},))
+    )
+    await backend.shutdown()
+
+    assert isinstance(rendered, TemplatedPrompt)
+    assert rendered == "<sys>effort 75<user>hi<asst><think>"
+    (tokenize_path, tokenize), (detokenize_path, detokenize) = calls
+    assert (tokenize_path, detokenize_path) == ("/tokenize", "/detokenize")
+    assert tokenize["messages"] == [{"role": "user", "content": "hi"}]
+    assert tokenize["add_generation_prompt"] is True
+    # /tokenize has no top-level effort; the chat endpoint's template kwarg.
+    assert tokenize["chat_template_kwargs"]["reasoning_effort"] == "high"
+    assert detokenize["tokens"] == [1, 2, 3]
+    # Tool-bearing calls cannot be continued on the /completions lane.
+    assert declined is None
