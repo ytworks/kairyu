@@ -729,7 +729,21 @@ class Conductor:
             return 0
         if self._head is not None and name == self._head.name and not head_enabled:
             return 0
-        return self._request_intent(spec)[0].max_tokens
+        return self._fit_cap(spec)
+
+    def _fit_cap(self, spec: RoleSpec) -> int | None:
+        """A role's whole token allowance across all of its attempts.
+
+        Internal roles use the role cap itself rather than a first-attempt
+        share of it: a continuation re-sends the reasoning and then spends the
+        rest, so input growth plus output stays within the cap.
+        """
+
+        head = self._head is not None and spec.name == self._head.name
+        final = bool(self._units) and spec.name == self._selected_final_unit().name
+        if head or final:
+            return self._request_intent(spec)[0].max_tokens
+        return self._role_sampling_params(spec).max_tokens
 
     def _role_context_fit(self, spec: RoleSpec, *, head_enabled: bool) -> bool | None:
         limit = backend_max_model_len(self._workers.get(spec.worker))
@@ -746,7 +760,7 @@ class Conductor:
             if measured is None:
                 return None
             lower, upper = measured
-        own = self._request_intent(spec)[0].max_tokens
+        own = self._fit_cap(spec)
         own_tokens = own if own is not None else 1
         if lower + own_tokens > limit:
             return False
