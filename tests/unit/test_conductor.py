@@ -531,10 +531,20 @@ class RoleGatedBackend:
         self.started: list[str] = []
         self.gates = {tag: asyncio.Event() for tag in gated}
         self.cancelled: list[str] = []
+        self._arrivals: dict[str, asyncio.Event] = {}
+
+    def arrival(self, tag: str) -> asyncio.Event:
+        return self._arrivals.setdefault(tag, asyncio.Event())
+
+    async def wait_started(self, *tags: str) -> None:
+        await asyncio.wait_for(
+            asyncio.gather(*(self.arrival(tag).wait() for tag in tags)), timeout=10
+        )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         tag = request.prompt.split(":", 1)[0]
         self.started.append(tag)
+        self.arrival(tag).set()
         gate = self.gates.get(tag)
         if gate is not None:
             try:
@@ -575,12 +585,9 @@ async def test_unit_starts_when_its_own_dependencies_finish():
     backend = RoleGatedBackend(gated=("slow",))
     conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
     run = asyncio.create_task(conductor.run("q"))
-    for _ in range(50):
-        if "next" in backend.started:
-            break
-        await asyncio.sleep(0)
+    await backend.wait_started("next")
     # "next" ran while its unrelated same-depth sibling was still in flight.
-    assert "next" in backend.started
+    assert not backend.gates["slow"].is_set()
     assert "final" not in backend.started
     backend.gates["slow"].set()
     result = await run
@@ -591,10 +598,7 @@ async def test_cancelling_a_run_cancels_every_in_flight_unit():
     backend = RoleGatedBackend(gated=("slow", "fast"))
     conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
     run = asyncio.create_task(conductor.run("q"))
-    for _ in range(50):
-        if len(backend.started) == 2:
-            break
-        await asyncio.sleep(0)
+    await backend.wait_started("slow", "fast")
     run.cancel()
     with pytest.raises(asyncio.CancelledError):
         await run
@@ -607,10 +611,7 @@ async def test_budget_fallback_prefers_the_most_downstream_output():
     backend = RoleGatedBackend(gated=("slow",))
     conductor = Conductor(roles=_side_branch_roles(), workers={"w": backend})
     run = asyncio.create_task(conductor.run("q", budget=Budget(max_steps=3)))
-    for _ in range(50):
-        if "next" in backend.started:
-            break
-        await asyncio.sleep(0)
+    await backend.wait_started("next")
     backend.gates["slow"].set()
     result = await run
     assert "final" not in result.outputs
