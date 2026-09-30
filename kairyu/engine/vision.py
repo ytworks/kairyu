@@ -16,12 +16,12 @@ import hashlib
 import re
 import threading
 import warnings
-import weakref
 from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 
 from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
+from kairyu.engine.weak_identity_cache import WeakIdentityBuckets
 
 _DATA_URL = re.compile(
     r"\Adata:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]*={0,2})\Z"
@@ -55,7 +55,6 @@ _JPEG_SOF_MARKERS = frozenset(
 _VERIFIED_RASTER_CACHE_LIMIT = 512
 _verified_raster_cache: OrderedDict[bytes, None] = OrderedDict()
 _verified_raster_cache_lock = threading.Lock()
-_prepared_image_cache_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -65,13 +64,10 @@ class _PreparedImageInput:
     verified: bool = False
 
 
-_prepared_image_cache: dict[
-    int,
-    tuple[
-        weakref.ReferenceType[MultimodalPrompt],
-        dict[ImageInputPolicy, _PreparedImageInput],
-    ],
-] = {}
+# Preparation per exact prompt object and image policy.
+_prepared_image_cache: WeakIdentityBuckets[MultimodalPrompt, _PreparedImageInput] = (
+    WeakIdentityBuckets()
+)
 
 
 def _raster_verification_key(mime: str, data: bytes) -> bytes:
@@ -103,8 +99,7 @@ def _clear_verified_raster_cache() -> None:
 
     with _verified_raster_cache_lock:
         _verified_raster_cache.clear()
-    with _prepared_image_cache_lock:
-        _prepared_image_cache.clear()
+    _prepared_image_cache.clear()
 
 
 class InvalidImageInput(ValueError):
@@ -329,34 +324,14 @@ class ImageInputPolicy:
         self,
         prompt: MultimodalPrompt,
     ) -> _PreparedImageInput | None:
-        with _prepared_image_cache_lock:
-            entry = _prepared_image_cache.get(id(prompt))
-            if entry is None or entry[0]() is not prompt:
-                return None
-            return entry[1].get(self)
+        return _prepared_image_cache.get(prompt, self)
 
     def _remember_preparation(
         self,
         prompt: MultimodalPrompt,
         prepared: _PreparedImageInput,
     ) -> None:
-        prompt_id = id(prompt)
-
-        def discard(reference: weakref.ReferenceType[MultimodalPrompt]) -> None:
-            with _prepared_image_cache_lock:
-                current = _prepared_image_cache.get(prompt_id)
-                if current is not None and current[0] is reference:
-                    _prepared_image_cache.pop(prompt_id, None)
-
-        with _prepared_image_cache_lock:
-            entry = _prepared_image_cache.get(prompt_id)
-            if entry is None or entry[0]() is not prompt:
-                reference = weakref.ref(prompt, discard)
-                policies: dict[ImageInputPolicy, _PreparedImageInput] = {}
-                _prepared_image_cache[prompt_id] = (reference, policies)
-            else:
-                policies = entry[1]
-            policies[self] = prepared
+        _prepared_image_cache.set(prompt, self, prepared)
 
     def _prepare_prompt(
         self,

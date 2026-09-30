@@ -67,6 +67,7 @@ from kairyu.engine.tokenizer import (
     grammar_vocabulary,
     resolve_tokenizer,
 )
+from kairyu.engine.weak_identity_cache import WeakIdentityCache
 from kairyu.models.generation import (
     GenerationConfigMode,
     GenerationDefaults,
@@ -1642,11 +1643,9 @@ class KairyuBackend:
         # A native HTTP preflight resolves text to enforce max_model_len before
         # response headers. Keep that result only for this exact request object
         # and consume it on submit; this is not a cross-request prompt cache.
-        self._prepared_requests: dict[
-            int,
-            tuple[weakref.ReferenceType[GenerationRequest], PreparedPrompt],
-        ] = {}
-        self._prepared_requests_lock = threading.Lock()
+        self._prepared_requests: WeakIdentityCache[
+            GenerationRequest, PreparedPrompt
+        ] = WeakIdentityCache()
         # Unknown compatibility tokenizers have no thread-safety promise.
         # Their callers queue on the event loop so they do not occupy prompt
         # executor threads while waiting for the shared tokenizer instance.
@@ -1730,56 +1729,20 @@ class KairyuBackend:
         self,
         request: GenerationRequest,
     ) -> PreparedPrompt | None:
-        key = id(request)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                return cached[1]
-            # Defensive against delayed weakref callbacks and object-ID reuse.
-            self._prepared_requests.pop(key, None)
-        return None
+        return self._prepared_requests.peek(request)
 
     def _retain_prepared_request(
         self,
         request: GenerationRequest,
         prepared: PreparedPrompt,
     ) -> PreparedPrompt:
-        key = id(request)
-        backend_ref = weakref.ref(self)
-
-        def discard(request_ref: weakref.ReferenceType[GenerationRequest]) -> None:
-            backend = backend_ref()
-            if backend is None:
-                return
-            with backend._prepared_requests_lock:
-                current = backend._prepared_requests.get(key)
-                if current is not None and current[0] is request_ref:
-                    backend._prepared_requests.pop(key, None)
-
-        request_ref = weakref.ref(request, discard)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is not None and cached[0]() is request:
-                return cached[1]
-            self._prepared_requests[key] = (request_ref, prepared)
-        return prepared
+        return self._prepared_requests.retain(request, prepared)
 
     def _take_prepared_request(
         self,
         request: GenerationRequest,
     ) -> PreparedPrompt | None:
-        key = id(request)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                self._prepared_requests.pop(key, None)
-                return cached[1]
-            self._prepared_requests.pop(key, None)
-        return None
+        return self._prepared_requests.take(request)
 
     def _prepare_request(self, request: GenerationRequest) -> PreparedPrompt:
         validate_native_request_surface(request)
@@ -2701,8 +2664,7 @@ class KairyuBackend:
                 await asyncio.to_thread(self._loop.close)
         finally:
             self._preparing_requests.clear()
-            with self._prepared_requests_lock:
-                self._prepared_requests.clear()
+            self._prepared_requests.clear()
             # Stop spawned distributed ranks even if settling the pump or loop fails.
             launcher = getattr(self._loop, "parallel_launcher", None)
             if launcher is None:

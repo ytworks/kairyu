@@ -195,7 +195,7 @@ async def test_zero_token_prompt_is_rejected_before_backend_state():
 
     with pytest.raises(ValueError, match="at least one token"):
         backend.validate_request(request)
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     with pytest.raises(ValueError, match="at least one token"):
         await backend.prepare_request(request)
     with pytest.raises(ValueError, match="at least one token"):
@@ -511,7 +511,7 @@ async def test_validated_tool_request_reuses_exact_prepared_tokens_for_n_choices
     assert "You must call one of the available functions." in tokenizer.encoded_texts[0]
     assert len(result.completions) == 3
     assert all(completion.finish_reason == "length" for completion in result.completions)
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     await backend.shutdown()
 
 
@@ -530,7 +530,7 @@ async def test_direct_public_call_without_preflight_tokenizes_off_loop_once(stre
     assert result.finished
     assert tokenizer.encoded_texts == ["direct request"]
     assert tokenizer.encode_threads != [event_loop_thread]
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     await backend.shutdown()
 
 
@@ -729,7 +729,7 @@ async def test_cancelled_prepare_worker_does_not_publish_cache():
         preparation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await preparation
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
 
         tokenizer.release.set()
         for _ in range(100):
@@ -739,7 +739,7 @@ async def test_cancelled_prepare_worker_does_not_publish_cache():
 
         assert tokenizer.calls == 1
         assert backend._preparing_requests == {}
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
     finally:
         tokenizer.release.set()
         await asyncio.gather(preparation, return_exceptions=True)
@@ -759,7 +759,7 @@ async def test_abandoned_prepared_request_releases_prepared_tokens():
     gc.collect()
 
     assert request_ref() is None
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     await backend.shutdown()
 
 

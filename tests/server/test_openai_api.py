@@ -183,7 +183,7 @@ async def test_native_http_text_prompt_is_tokenized_once(endpoint, stream):
 
     assert response.status_code == 200
     assert tokenizer.encode_calls == 1
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     await backend.shutdown()
 
 

@@ -531,7 +531,7 @@ async def test_direct_public_calls_parent_tokenize_off_loop_once_each(
             thread_id != event_loop_thread
             for thread_id in tokenizer.encode_threads
         )
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
     finally:
         await backend.shutdown()
 
@@ -2006,7 +2006,7 @@ async def test_parent_preflight_enforces_context_limit_without_starting_child():
         assert backend._process is None
         assert backend._active_request_ids == set()
         assert backend._queues == {}
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
 
         boundary = await backend.generate(
             _request(
@@ -2033,7 +2033,7 @@ async def test_abandoned_parent_preflight_does_not_retain_request():
     gc.collect()
 
     assert request_ref() is None
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     await backend.shutdown()
 
 
@@ -2137,7 +2137,7 @@ async def test_cancelled_parent_prepare_worker_does_not_publish_cache():
         preparation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await preparation
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
 
         tokenizer.release.set()
         for _ in range(100):
@@ -2147,7 +2147,7 @@ async def test_cancelled_parent_prepare_worker_does_not_publish_cache():
 
         assert tokenizer.calls == 1
         assert backend._preparing_requests == {}
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
         assert backend._process is None
     finally:
         tokenizer.release.set()
@@ -2187,7 +2187,7 @@ async def test_streaming_context_rejection_is_http_400_before_sse_headers(
         assert "exceed max_model_len" in response.json()["error"]["message"]
         assert not response.headers["content-type"].startswith("text/event-stream")
         assert backend._process is None
-        assert backend._prepared_requests == {}
+        assert len(backend._prepared_requests) == 0
     finally:
         await backend.shutdown()
 
@@ -2275,7 +2275,7 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
     assert tokenize.stage == "tokenize"
     assert tokenize.duration_ns == 100
     assert tokenize.occurrences == 2
-    assert backend._prepared_requests == {}
+    assert len(backend._prepared_requests) == 0
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)
     assert request.request_id not in backend._parent_tokenize_durations_ns

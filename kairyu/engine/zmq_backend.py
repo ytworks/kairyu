@@ -78,6 +78,7 @@ from kairyu.engine.tokenizer import (
     tokenize_loglikelihood_continuation,
     tokenizer_encode_is_concurrent_safe,
 )
+from kairyu.engine.weak_identity_cache import WeakIdentityCache
 from kairyu.models.generation import (
     GenerationConfigMode,
     GenerationDefaults,
@@ -1178,11 +1179,9 @@ class ZmqEngineBackend:
         # layers. Retain only this exact immutable request object, consume the
         # prepared token prompt at submit, and let an abandoned request's weak
         # reference reclaim the entry.
-        self._prepared_requests: dict[
-            int,
-            tuple[weakref.ReferenceType[GenerationRequest], _PreparedProcPrompt],
-        ] = {}
-        self._prepared_requests_lock = threading.Lock()
+        self._prepared_requests: WeakIdentityCache[
+            GenerationRequest, _PreparedProcPrompt
+        ] = WeakIdentityCache()
         # Unknown compatibility tokenizers queue on the event loop, leaving
         # prompt executor threads available to other backends while they wait.
         self._prompt_tokenizer_gate = asyncio.Lock()
@@ -1817,8 +1816,7 @@ class ZmqEngineBackend:
         # Terminal before the first await. If a model load is in flight, its
         # Pipe poll sees ``abandoned`` while every caller shares one cleanup.
         self._closed = True
-        with self._prepared_requests_lock:
-            self._prepared_requests.clear()
+        self._prepared_requests.clear()
         abandoned = self._startup_abandoned
         if abandoned is not None:
             abandoned.set()
@@ -1846,55 +1844,20 @@ class ZmqEngineBackend:
         self,
         request: GenerationRequest,
     ) -> _PreparedProcPrompt | None:
-        key = id(request)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                return cached[1]
-            # Defensive against delayed weakref callbacks and object-ID reuse.
-            self._prepared_requests.pop(key, None)
-        return None
+        return self._prepared_requests.peek(request)
 
     def _retain_prepared_request(
         self,
         request: GenerationRequest,
         prepared: _PreparedProcPrompt,
     ) -> _PreparedProcPrompt:
-        key = id(request)
-        backend_ref = weakref.ref(self)
-
-        def discard(request_ref: weakref.ReferenceType[GenerationRequest]) -> None:
-            backend = backend_ref()
-            if backend is None:
-                return
-            with backend._prepared_requests_lock:
-                current = backend._prepared_requests.get(key)
-                if current is not None and current[0] is request_ref:
-                    backend._prepared_requests.pop(key, None)
-
-        request_ref = weakref.ref(request, discard)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is not None and cached[0]() is request:
-                return cached[1]
-            self._prepared_requests[key] = (request_ref, prepared)
-        return prepared
+        return self._prepared_requests.retain(request, prepared)
 
     def _take_prepared_request(
         self,
         request: GenerationRequest,
     ) -> _PreparedProcPrompt | None:
-        key = id(request)
-        with self._prepared_requests_lock:
-            cached = self._prepared_requests.get(key)
-            if cached is None:
-                return None
-            self._prepared_requests.pop(key, None)
-            if cached[0]() is request:
-                return cached[1]
-        return None
+        return self._prepared_requests.take(request)
 
     def _prepare_request(
         self,

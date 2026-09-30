@@ -19,7 +19,6 @@ import asyncio
 import json
 import os
 import re
-import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
@@ -54,6 +53,7 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
+from kairyu.engine.weak_identity_cache import WeakIdentityBuckets, WeakIdentityCache
 from kairyu.outputs import CompletionOutput, TokenLogprob, _lazy_text
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
@@ -165,14 +165,11 @@ def _split_completion_reasoning(text: str, end_tag: str) -> tuple[str, str]:
     return reasoning, content
 
 
-_SHARED_PREPARED_PAYLOADS: dict[
-    int,
-    tuple[
-        weakref.ReferenceType[GenerationRequest],
-        dict[tuple[object, ...], bytes],
-    ],
-] = {}
-_SHARED_PREPARED_PAYLOADS_LOCK = threading.Lock()
+# Wire bytes per exact request object, shared by every builtin backend with
+# the same payload contract.
+_SHARED_PREPARED_PAYLOADS: WeakIdentityBuckets[GenerationRequest, bytes] = (
+    WeakIdentityBuckets()
+)
 
 
 async def _await_task_cancellation_safe(task: asyncio.Task[None]) -> None:
@@ -738,17 +735,13 @@ class OpenAICompatBackend:
         self._owns_client = client is None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
-        self._prepared_payloads: dict[
-            int,
-            tuple[weakref.ReferenceType[GenerationRequest], bytes],
-        ] = {}
-        self._prepared_payloads_lock = threading.Lock()
+        self._prepared_payloads: WeakIdentityCache[GenerationRequest, bytes] = (
+            WeakIdentityCache()
+        )
         self._preparing_payloads: dict[int, _PayloadPreparationFlight] = {}
-        self._prepared_image_urls: dict[
-            int,
-            tuple[weakref.ReferenceType[GenerationRequest], tuple[str, ...]],
-        ] = {}
-        self._prepared_image_urls_lock = threading.Lock()
+        self._prepared_image_urls: WeakIdentityCache[
+            GenerationRequest, tuple[str, ...]
+        ] = WeakIdentityCache()
         self._preparing_images: dict[int, _ImagePreparationFlight] = {}
 
     @property
@@ -1063,15 +1056,7 @@ class OpenAICompatBackend:
         self,
         request: GenerationRequest,
     ) -> bytes | None:
-        key = id(request)
-        with self._prepared_payloads_lock:
-            cached = self._prepared_payloads.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                return cached[1]
-            self._prepared_payloads.pop(key, None)
-        return None
+        return self._prepared_payloads.peek(request)
 
     def _shared_payload_contract(self) -> tuple[object, ...] | None:
         """Exact builtin contract whose immutable wire bytes are shareable."""
@@ -1092,15 +1077,7 @@ class OpenAICompatBackend:
         contract = self._shared_payload_contract()
         if contract is None:
             return None
-        key = id(request)
-        with _SHARED_PREPARED_PAYLOADS_LOCK:
-            cached = _SHARED_PREPARED_PAYLOADS.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                return cached[1].get(contract)
-            _SHARED_PREPARED_PAYLOADS.pop(key, None)
-        return None
+        return _SHARED_PREPARED_PAYLOADS.get(request, contract)
 
     def _retain_shared_prepared_payload(
         self,
@@ -1110,59 +1087,20 @@ class OpenAICompatBackend:
         contract = self._shared_payload_contract()
         if contract is None:
             return payload
-        key = id(request)
-
-        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
-            with _SHARED_PREPARED_PAYLOADS_LOCK:
-                current = _SHARED_PREPARED_PAYLOADS.get(key)
-                if current is not None and current[0] is reference:
-                    _SHARED_PREPARED_PAYLOADS.pop(key, None)
-
-        with _SHARED_PREPARED_PAYLOADS_LOCK:
-            cached = _SHARED_PREPARED_PAYLOADS.get(key)
-            if cached is None or cached[0]() is not request:
-                cached = (weakref.ref(request, discard), {})
-                _SHARED_PREPARED_PAYLOADS[key] = cached
-            return cached[1].setdefault(contract, payload)
+        return _SHARED_PREPARED_PAYLOADS.setdefault(request, contract, payload)
 
     def _retain_prepared_payload(
         self,
         request: GenerationRequest,
         payload: bytes,
     ) -> bytes:
-        key = id(request)
-        backend_ref = weakref.ref(self)
-
-        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
-            backend = backend_ref()
-            if backend is None:
-                return
-            with backend._prepared_payloads_lock:
-                current = backend._prepared_payloads.get(key)
-                if current is not None and current[0] is reference:
-                    backend._prepared_payloads.pop(key, None)
-
-        request_ref = weakref.ref(request, discard)
-        with self._prepared_payloads_lock:
-            cached = self._prepared_payloads.get(key)
-            if cached is not None and cached[0]() is request:
-                return cached[1]
-            self._prepared_payloads[key] = (request_ref, payload)
-        return payload
+        return self._prepared_payloads.retain(request, payload)
 
     def _take_prepared_payload(
         self,
         request: GenerationRequest,
     ) -> bytes | None:
-        key = id(request)
-        with self._prepared_payloads_lock:
-            cached = self._prepared_payloads.get(key)
-            if cached is None:
-                return None
-            self._prepared_payloads.pop(key, None)
-            if cached[0]() is request:
-                return cached[1]
-        return None
+        return self._prepared_payloads.take(request)
 
     def _discard_finished_payload_preparation(
         self,
@@ -1285,54 +1223,20 @@ class OpenAICompatBackend:
         self,
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
-        key = id(request)
-        with self._prepared_image_urls_lock:
-            cached = self._prepared_image_urls.get(key)
-            if cached is None:
-                return None
-            if cached[0]() is request:
-                return cached[1]
-            self._prepared_image_urls.pop(key, None)
-        return None
+        return self._prepared_image_urls.peek(request)
 
     def _retain_prepared_image_urls(
         self,
         request: GenerationRequest,
         image_urls: tuple[str, ...],
     ) -> tuple[str, ...]:
-        key = id(request)
-        backend_ref = weakref.ref(self)
-
-        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
-            backend = backend_ref()
-            if backend is None:
-                return
-            with backend._prepared_image_urls_lock:
-                current = backend._prepared_image_urls.get(key)
-                if current is not None and current[0] is reference:
-                    backend._prepared_image_urls.pop(key, None)
-
-        request_ref = weakref.ref(request, discard)
-        with self._prepared_image_urls_lock:
-            cached = self._prepared_image_urls.get(key)
-            if cached is not None and cached[0]() is request:
-                return cached[1]
-            self._prepared_image_urls[key] = (request_ref, image_urls)
-        return image_urls
+        return self._prepared_image_urls.retain(request, image_urls)
 
     def _take_prepared_image_urls(
         self,
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
-        key = id(request)
-        with self._prepared_image_urls_lock:
-            cached = self._prepared_image_urls.get(key)
-            if cached is None:
-                return None
-            self._prepared_image_urls.pop(key, None)
-            if cached[0]() is request:
-                return cached[1]
-        return None
+        return self._prepared_image_urls.take(request)
 
     def _discard_finished_image_preparation(
         self,
@@ -1943,10 +1847,8 @@ class OpenAICompatBackend:
             )
         self._preparing_images.clear()
         self._preparing_payloads.clear()
-        with self._prepared_payloads_lock:
-            self._prepared_payloads.clear()
-        with self._prepared_image_urls_lock:
-            self._prepared_image_urls.clear()
+        self._prepared_payloads.clear()
+        self._prepared_image_urls.clear()
         if self._owns_client:
             client = self._client
             if client is not None and not client.is_closed:
