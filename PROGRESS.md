@@ -132,18 +132,3 @@ in `.claude/rules/progress-log.md`).
   backoff, and PostgreSQL lease-fenced single-writer gates for controller and
   autoscaler work.
 - Refs: docs/design/runner-state-v1.md; kairyu/runners; tests/unit/test_runner_*.py
-
-### 2026-09-11 — [design] Runner State v1 and startup evidence
-- What: added immutable, versioned Runner status and startup phase schemas,
-  strict logical transition validation, pure status updates, and gap-free
-  image/model/compile/warmup reporting with bounded failure records.
-- Why: Pod phase alone cannot distinguish image pull, model load, warmup,
-  serving readiness, active work, or safe drain; controller and autoscaler
-  implementation now share one executable contract.
-- Refs: docs/design/runner-state-v1.md; kairyu/runners;
-  tests/unit/test_runner_lifecycle.py
-
-### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
-- What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
-- Why: DSpark improves c1 throughput 1.91×; EP-off exhausts KV memory at the same limits, PCIe IPC stalls during autotuning, and 8K batching shows no throughput gain. Keep unmeasured alternatives and broad quality claims outside this evidence.
-- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md` records exact configuration, run IDs, hashes and limitations.

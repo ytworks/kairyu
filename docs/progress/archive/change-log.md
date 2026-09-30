@@ -11,6 +11,21 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-09-11 — [design] Runner State v1 and startup evidence
+- What: added immutable, versioned Runner status and startup phase schemas,
+  strict logical transition validation, pure status updates, and gap-free
+  image/model/compile/warmup reporting with bounded failure records.
+- Why: Pod phase alone cannot distinguish image pull, model load, warmup,
+  serving readiness, active work, or safe drain; controller and autoscaler
+  implementation now share one executable contract.
+- Refs: docs/design/runner-state-v1.md; kairyu/runners;
+  tests/unit/test_runner_lifecycle.py
+
+### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
+- What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
+- Why: DSpark improves c1 throughput 1.91×; EP-off exhausts KV memory at the same limits, PCIe IPC stalls during autotuning, and 8K batching shows no throughput gain. Keep unmeasured alternatives and broad quality claims outside this evidence.
+- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md` records exact configuration, run IDs, hashes and limitations.
+
 ### 2026-09-11 — [progress] V4.1 full-model API gates pass on TP8
 - What: the SM120 overlay starts all eight GPUs, captures graphs and serves default/low/high/max reasoning, tools, images and cancellation; all initial API gates pass. UI effort selection uses the existing top-level L3 field. Performance selection and final context/restart gates remain pending.
 - Why: the experimental off toggle used template kwargs rejected by the unchanged legacy L3; retaining V4's effort vocabulary keeps the requested L2/L3 structure.
