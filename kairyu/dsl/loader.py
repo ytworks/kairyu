@@ -209,6 +209,7 @@ def build_orchestrator(
                 for choice in spec.profile_judge.choices
             ),
             fallback=spec.profile_judge.fallback,
+            priority=spec.profile_judge.priority,
         )
         if spec.profile_judge is not None
         else None

@@ -331,6 +331,10 @@ class ProfileJudgeSpec(BaseModel):
     prompt_suffix: str = ""
     choices: tuple[ProfileChoiceSpec, ...] = Field(min_length=2)
     fallback: str = "primary"
+    # vLLM-compatible scheduling priority of the judge call (smaller runs
+    # first). A negative value lets the judge overtake queued generation on a
+    # shared pool; the upstream must run a priority scheduling policy.
+    priority: int = Field(default=0, ge=-(2**31), le=2**31 - 1)
 
     @model_validator(mode="after")
     def _choices_are_distinct(self) -> ProfileJudgeSpec:

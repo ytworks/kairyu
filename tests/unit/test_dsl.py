@@ -473,6 +473,7 @@ def test_profile_judge_loads_and_is_described():
         "prompt_prefix": "<u>",
         "prompt_suffix": "<a>",
         "fallback": "general",
+        "priority": 0,
         "choices": [
             {"profile": "fast", "label": "FAST", "criteria": "trivial"},
             {"profile": "primary", "label": "CODE", "criteria": "code authoring"},

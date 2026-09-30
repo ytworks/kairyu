@@ -169,6 +169,16 @@ YAML loader produces pydantic-validated `OrchestratorSpec` (agent pool, role DAG
 The `@role` decorator API constructs identical spec objects in Python. One schema, two
 front-ends; the Conductor consumes only the spec.
 
+**Judge-priority amendment (2026-09-30).** `profile_judge.priority` (integer, default 0)
+sets the vLLM-compatible scheduling priority of the route-judge call (smaller runs first;
+interactive generation is 0). The judge is a few output tokens on a pool that also serves
+generation; at concurrency 8–16 in the V4.1 six-GPU runs (PR #602) it queued behind that
+generation, hit its 5 s timeout, and sent every such request to the fallback ensemble — the
+slowest route. A negative priority lets the judge overtake queued work. It only takes
+effect on an upstream running a priority scheduling policy (vLLM
+`--scheduling-policy priority`, which rejects non-zero priorities otherwise); the
+deployment owns that setting.
+
 ## 3. Out of scope for M1 (deferred with reasons)
 
 - Custom scheduler / KV manager / CUDA graphs / spec decode / quantized load — M2/M3.

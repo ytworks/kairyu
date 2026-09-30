@@ -212,6 +212,7 @@ class ProfileJudge:
     prompt_suffix: str = ""
     choices: tuple[ProfileChoice, ...] = ()
     fallback: str = "primary"
+    priority: int = 0
 
     def __post_init__(self) -> None:
         if len(self.choices) < 2:
@@ -654,6 +655,7 @@ class Orchestrator:
                             "prompt_prefix": self._profile_judge.prompt_prefix,
                             "prompt_suffix": self._profile_judge.prompt_suffix,
                             "fallback": self._profile_judge.fallback,
+                            "priority": self._profile_judge.priority,
                             "choices": [
                                 {
                                     "profile": choice.profile,
@@ -858,6 +860,7 @@ class Orchestrator:
                 max_tokens=self._profile_judge.max_tokens,
                 temperature=0.0,
             ),
+            priority=self._profile_judge.priority,
             chat_template_kwargs=chat_template_kwargs,
         )
 

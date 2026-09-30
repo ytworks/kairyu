@@ -1696,6 +1696,7 @@ def _profiled_orchestrator(
     judge_prompt_prefix="",
     judge_prompt_suffix="",
     fallback="primary",
+    judge_priority=0,
 ):
     # Issue #509 / DTO-D13: one served model, several role profiles selected
     # per request by an optional LLM judge. The primary profile is a single
@@ -1759,6 +1760,7 @@ def _profiled_orchestrator(
                     ProfileChoice("ensemble", "GENERAL", "everything else"),
                 ),
                 fallback=fallback,
+                priority=judge_priority,
             )
             if judge is not None
             else None
@@ -1922,6 +1924,7 @@ async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
         judge,
         judge_prompt_prefix="<bos><user>",
         judge_prompt_suffix="<assistant></think>",
+        judge_priority=-5,
     )
 
     call = await orchestrator.judge_role_profile(
@@ -1939,6 +1942,8 @@ async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
     assert body["prompt"].startswith("<bos><user>")
     assert body["prompt"].endswith("<assistant></think>")
     assert "messages" not in body
+    # The configured judge priority overtakes queued generation upstream.
+    assert body["priority"] == -5
 
 
 @pytest.mark.parametrize(

@@ -104,6 +104,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-30 — [amendment] M1 D7: route-judge scheduling priority
+- What: `profile_judge.priority` (default 0) is sent as the judge call's vLLM-compatible priority, so a negative value lets the judge overtake queued generation on a priority-scheduled pool.
+- Why: under load the judge waited behind generation on its shared Qwen pool, timed out, and fell back to the slowest (ensemble) route for every such request (PR #602 runs 6–13).
+- Refs: `docs/design/m1-orchestration-and-interface.md` D7 amendment; `kairyu/dsl/spec.py`, `kairyu/orchestration/orchestrator.py`
+
 ### 2026-09-30 — [amendment] m10 A39: AsyncRequest v1 pre-merge review fixes
 - What: an unstorable result publishes a fenced `result_persistence_failed` error after one retry; the third lease expiry fails a request with `lease_expired` instead of re-running it (defers and releases do not count); heartbeats retry transient renewal errors until the lease would expire; shutdown returns unfinished claims to the queue at once (zero-delay defer, no tenant cooldown); `/metrics` collectors render on the event loop with only the blocking store warmup off-loop; the capacity 429 omits `Retry-After` when request retention is off, and startup warns.
 - Why: PR #604 review — each replaced path re-ran inference (without bound for an unstorable result), read unlocked `ReplicaPool` state from a second thread, or promised a retry that could not succeed.
