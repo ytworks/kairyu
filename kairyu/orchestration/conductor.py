@@ -194,6 +194,12 @@ class RoleSpec:
     # call, no step), dependents run as if it were absent, and its template
     # slot renders as "" (DTO-D11).
     requires: str | None = None
+    # Stop an attempt as soon as its reasoning or output ends in one short
+    # unit (<= 8 characters) repeated over at least this many characters: a
+    # degenerate loop that would otherwise run to max_tokens. The attempt is
+    # returned truncated before the loop (finish_reason "repetition"), so an
+    # empty output is continued like an exhausted reasoning span.
+    repetition_stop_chars: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -227,6 +233,12 @@ class RoleSpec:
             raise ValueError(
                 f"role {self.name!r}: reasoning_close_tag declares an open "
                 "reasoning span and cannot combine with reasoning_closed"
+            )
+        if self.repetition_stop_chars is not None and (
+            type(self.repetition_stop_chars) is not int or self.repetition_stop_chars < 64
+        ):
+            raise ValueError(
+                f"role {self.name!r}: repetition_stop_chars must be an integer >= 64"
             )
         if self.reasoning_continuation not in {"prefix", "chat"}:
             raise ValueError(
@@ -494,6 +506,25 @@ class _GenerationObservation:
 def _is_pass(verdict_text: str) -> bool:
     first_line = verdict_text.strip().splitlines()[0] if verdict_text.strip() else ""
     return first_line.upper().startswith(_PASS_PREFIX)
+
+
+_REPETITION_MAX_PERIOD = 8
+
+
+def _repetition_onset(text: str, min_chars: int) -> int | None:
+    """Start of a trailing run of one unit (<= 8 chars) spanning >= min_chars."""
+
+    if len(text) < min_chars:
+        return None
+    for period in range(1, _REPETITION_MAX_PERIOD + 1):
+        unit = text[-period:]
+        start = len(text) - period
+        # Walk back unit by unit while the text keeps repeating it.
+        while start >= period and text[start - period : start] == unit:
+            start -= period
+        if len(text) - start >= min_chars:
+            return start
+    return None
 
 
 def _verdict_is_inconclusive(verdict_text: str) -> bool:
@@ -1554,7 +1585,12 @@ class Conductor:
                     "kairyu.stream": False,
                 },
             ) as span:
-                result = await backend.generate(request)
+                if event_spec.repetition_stop_chars is not None and request.sampling_params.n == 1:
+                    result = await self._generate_with_repetition_stop(
+                        backend, request, event_spec.repetition_stop_chars
+                    )
+                else:
+                    result = await backend.generate(request)
                 actual_cost = self._cost_model(request, result)
                 reconciled = run.budget.reconcile_success(
                     cost=actual_cost,
@@ -1612,6 +1648,91 @@ class Conductor:
                 steps_consumed=1,
                 cost_consumed_usd=actual_cost,
             ),
+        )
+
+    @staticmethod
+    async def _generate_with_repetition_stop(
+        backend: EngineBackend,
+        request: GenerationRequest,
+        min_chars: int,
+    ) -> GenerationResult:
+        """Stream one generation and stop it inside a degenerate repetition.
+
+        Closing the stream cancels the upstream request. A stopped attempt
+        keeps the text before the loop, reports finish_reason "repetition",
+        and carries no usage (the upstream reports usage only at the end).
+        """
+
+        text: list[str] = []
+        reasoning: list[str] = []
+        text_end = reasoning_end = 0
+        text_tail = reasoning_tail = ""
+        window = min_chars + 2 * _REPETITION_MAX_PERIOD
+        last: GenerationResult | None = None
+        stopped = False
+        stream = backend.stream(request)
+        try:
+            async for partial in stream:
+                last = partial
+                if not partial.completions:
+                    continue
+                completion = partial.completions[0]
+                delta, text_end = completion.delta_after(text_end)
+                thought, reasoning_end = completion.reasoning_delta_after(reasoning_end)
+                if delta:
+                    text.append(delta)
+                    text_tail = (text_tail + delta)[-window:]
+                if thought:
+                    reasoning.append(thought)
+                    reasoning_tail = (reasoning_tail + thought)[-window:]
+                if (delta and _repetition_onset(text_tail, min_chars) is not None) or (
+                    thought and _repetition_onset(reasoning_tail, min_chars) is not None
+                ):
+                    stopped = True
+                    break
+        finally:
+            await stream.aclose()
+        if last is None:
+            raise RuntimeError("generation stream produced no result")
+        full_text = "".join(text)
+        full_reasoning = "".join(reasoning)
+        if not stopped:
+            completion = last.completions[0] if last.completions else None
+            return GenerationResult(
+                request_id=last.request_id,
+                prompt=last.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0,
+                        text=full_text,
+                        token_ids=(),
+                        finish_reason=completion.finish_reason if completion else None,
+                        reasoning_content=full_reasoning or None,
+                    ),
+                ),
+                usage=last.usage,
+                finished=True,
+            )
+        onset = _repetition_onset(full_text, min_chars)
+        if onset is not None:
+            full_text = full_text[:onset]
+        onset = _repetition_onset(full_reasoning, min_chars)
+        if onset is not None:
+            full_reasoning = full_reasoning[:onset]
+        return GenerationResult(
+            request_id=last.request_id,
+            prompt=last.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=full_text,
+                    token_ids=(),
+                    finish_reason="repetition",
+                    reasoning_content=full_reasoning or None,
+                ),
+            ),
+            usage=None,
+            finished=True,
         )
 
     async def _run_executor_unit(
@@ -2148,6 +2269,8 @@ class Conductor:
                 # a silent successful "stop".
                 empty_retry_used = True
                 metadata: dict[str, object] = {"reason": "empty_output"}
+                if any(c.finish_reason == "repetition" for c in observed.completions):
+                    metadata["stopped"] = "repetition"
                 floor = self._think_close_floor()
                 if floor is not None:
                     # Public-output floor (issue #542): continue the captured

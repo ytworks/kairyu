@@ -131,6 +131,18 @@ the engine can enforce it per-step. Exceeding a budget is a normal, reported out
 result so far is returned), not an exception, matching Fugu's "recursion depth as
 inference-time compute axis" framing.
 
+**Repetition-stop amendment (2026-09-30).** A role may declare `repetition_stop_chars`: its
+attempts are streamed and stopped as soon as the reasoning or the output ends in one unit
+of at most eight characters repeated over that many characters. Closing the stream cancels
+the upstream request; the attempt returns truncated before the loop with finish reason
+`repetition` (no usage: the upstream reports it only at the end) and an empty output then
+takes the existing empty-output path, e.g. the forced-close continuation from the reasoning
+before the loop. DeepSeek V4.1 at its official sampling occasionally writes a legitimate run
+("0.000…", "IIII…") and never leaves it: about 1.6% of completed coding answers at high
+effort spent the whole 131,072-token budget (~34 minutes) that way, on the six-GPU overlay
+and the parent TP8 configuration alike, and 27–32 of 32 resamples from the loop's start did
+not escape at any tested temperature or top-p. Streamed public finals are not guarded.
+
 ### D5. KV-affinity is designed in now, exploited in M2
 
 The differentiation core (multi-step orchestration hitting shared-prefix KV cache) needs the

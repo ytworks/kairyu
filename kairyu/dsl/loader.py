@@ -183,6 +183,7 @@ def build_orchestrator(
             reasoning_continuation=role.reasoning_continuation,
             reasoning_open_tag=role.reasoning_open_tag,
             requires=role.requires,
+            repetition_stop_chars=role.repetition_stop_chars,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None

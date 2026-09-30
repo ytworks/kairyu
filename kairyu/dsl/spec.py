@@ -187,6 +187,10 @@ class RoleNodeSpec(BaseModel):
     # slot renders as "" (DTO-D11). Head, final, verifier, and executor roles
     # cannot be conditional.
     requires: Literal["image"] | None = None
+    # Stop an attempt once its reasoning or output ends in one unit of at most
+    # 8 characters repeated over this many characters (a degenerate loop that
+    # would run to max_tokens); the attempt is kept truncated before the loop.
+    repetition_stop_chars: int | None = Field(default=None, ge=64)
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:

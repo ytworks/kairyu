@@ -104,6 +104,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-30 — [amendment] M1 D4: stop degenerate repetition loops early
+- What: `repetition_stop_chars` makes a role stream its attempts and stop them once the reasoning or output ends in a short unit repeated over that many characters; the attempt is kept truncated before the loop (finish reason `repetition`) and an empty output follows the empty-output path.
+- Why: DeepSeek V4.1 at official sampling sometimes enters an inescapable run of one character and burns its whole budget (~1.6% of high-effort coding answers, ~34 min each), independent of topology or the masked-KV overlay (measured 2026-09-30).
+- Refs: `docs/design/m1-orchestration-and-interface.md` D4 amendment; `kairyu/orchestration/conductor.py`; `tests/unit/test_repetition_stop.py`
+
 ### 2026-09-30 — [amendment] m10 A39: AsyncRequest v1 pre-merge review fixes
 - What: an unstorable result publishes a fenced `result_persistence_failed` error after one retry; the third lease expiry fails a request with `lease_expired` instead of re-running it (defers and releases do not count); heartbeats retry transient renewal errors until the lease would expire; shutdown returns unfinished claims to the queue at once (zero-delay defer, no tenant cooldown); `/metrics` collectors render on the event loop with only the blocking store warmup off-loop; the capacity 429 omits `Retry-After` when request retention is off, and startup warns.
 - Why: PR #604 review — each replaced path re-ran inference (without bound for an unstorable result), read unlocked `ReplicaPool` state from a second thread, or promised a retry that could not succeed.
