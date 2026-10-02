@@ -1049,7 +1049,10 @@ class NodeModelCacheAgent:
                 self._discard_staging(staging)
         if not staging.exists():
             try:
-                (staging / "tree").mkdir(mode=0o700, parents=True)
+                # Each level gets its own mode: ``parents=True`` would create
+                # the staging directory with the process umask instead.
+                staging.mkdir(mode=0o700)
+                (staging / "tree").mkdir(mode=0o700)
             except OSError as exc:
                 raise InvalidNodeModelCacheEntryError("cannot create staging tree") from exc
             self._write_bytes(manifest_path, expected_manifest)

@@ -21,6 +21,16 @@ from kairyu.artifacts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _owner_only_umask():
+    # The cache refuses group/world-writable directories. Tests create their
+    # own directories with the process umask, which is 0002 on hosts with
+    # per-user groups; pin it so the fixtures match what the cache requires.
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
 class MutableClock:
     def __init__(self, value: int = 100) -> None:
         self.value = value

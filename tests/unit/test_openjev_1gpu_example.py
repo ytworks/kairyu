@@ -26,9 +26,16 @@ QUESTION = [{"role": "user", "content": "What is 17 * 19? Reply with only the in
 @pytest.fixture
 def example(monkeypatch):
     monkeypatch.syspath_prepend(str(EXAMPLE))
-    for name in ("control", "verification", "benchmark", "think_core", "patch_openjev"):
-        sys.modules.pop(name, None)
-    return importlib.import_module
+    # The example's modules shadow repo packages of the same name (the
+    # verification/ package); restore sys.modules so later tests import theirs.
+    names = ("control", "verification", "benchmark", "think_core", "patch_openjev")
+    saved = {name: sys.modules.pop(name, None) for name in names}
+    yield importlib.import_module
+    for name, module in saved.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 def _usage(prompt: int, completion: int) -> dict:

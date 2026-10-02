@@ -46,6 +46,17 @@ from kairyu.artifacts import (
     sign_model_artifact_manifest,
 )
 
+
+@pytest.fixture(autouse=True)
+def _owner_only_umask():
+    # The cache refuses group/world-writable directories. Tests create their
+    # own directories with the process umask, which is 0002 on hosts with
+    # per-user groups; pin it so the fixtures match what the cache requires.
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
 _DATA = {
     "LICENSE": b"Apache-2.0\n",
     "weights/model.bin": b"0123456789abcdef",
