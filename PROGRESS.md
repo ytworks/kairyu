@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-02 — [amendment] Strict conversation bounds for judge and checklist state; final-only empty rule (PR #618 re-review)
+- What: shared `bounded_conversation` enforces the bound on every kept message; checklist `state[].max_total_chars` (example: 100,000); the non-empty rule is final-unit only; the seed is preflighted with its own intent plus caller tools.
+- Why: re-review reproduced a seed rejected under the final role's sampling, a refined empty intermediate, and caps exceeded by kept/reasoning fields; the GPU rerun showed long verified turns `checklist_unavailable` (state 526K-651K chars > 160K).
+- Refs: m1 D8/D9 amendments, VCO-D14; PR #618, issue #617
+
 ### 2026-10-02 — [amendment] Empty attempts never pass; seed tool preflight; bounded route-judge conversation (PR #618 review)
 - What: an empty attempt is never a checklist PASS and never published over a non-empty one; preflight validates a dependent seed's worker under the caller's tools; `profile_judge.max_conversation_chars` bounds the System One judge state (example: 120,000 chars).
 - Why: review reproduced 502 `EmptyFinalOutput` from a vacuous PASS and a post-generation tool rejection; the GPU rerun showed long DeepSWE turns overflowing OpenJev's 65,536-token context (HTTP 400) and falling back to deepseek_think.

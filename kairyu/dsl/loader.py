@@ -134,7 +134,12 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
             for question in spec.questions
         ),
         state=tuple(
-            StateSection(key=section.key, source=section.source, max_chars=section.max_chars)
+            StateSection(
+                key=section.key,
+                source=section.source,
+                max_chars=section.max_chars,
+                max_total_chars=section.max_total_chars,
+            )
             for section in spec.state
         ),
         subject=spec.subject,

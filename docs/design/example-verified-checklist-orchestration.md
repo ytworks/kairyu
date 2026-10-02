@@ -309,6 +309,12 @@ characters of conversation (`max_conversation_chars`, m1 D9 amendment): the
 first message plus the newest that fit; a 111-message DeepSWE conversation
 bounded this way is 37,716 OpenJev tokens.
 
+Second GPU rerun (5376ec73): no judge 400s, every response a structured tool
+call, but long turns on the verified route ended `checklist_unavailable`:
+their conversation state was 526,443-651,415 characters against
+`max_state_chars: 160000`. Every checklist's conversation section now sets
+`max_total_chars: 100000`, leaving 60,000 characters for the other sections.
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to

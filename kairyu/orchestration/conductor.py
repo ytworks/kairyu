@@ -958,6 +958,42 @@ class Conductor:
             return None
         return self._role_reasoning_effort(self._selected_final_unit())
 
+    def seed_intent_request(self, text: str) -> tuple[RoleSpec, GenerationRequest] | None:
+        """The seed of a seeded final unit as it will dispatch, for preflight.
+
+        Its draft is published unchanged, so it carries the caller's tool
+        contract with its own sampling, effort and template (issue #617);
+        ``text`` stands in for a prompt that depends on upstream outputs.
+        """
+
+        if not self._units:
+            return None
+        seed = self._selected_final_unit().seed_from
+        if seed is None:
+            return None
+        spec = self._by_name[seed]
+        (
+            sampling_params,
+            tools,
+            tool_choice,
+            tools_in_prompt,
+            parallel_tool_calls,
+            tool_call_protocol,
+        ) = self._request_intent(spec)
+        prompt = self._worker_prompt(spec, text)
+        return spec, GenerationRequest(
+            request_id=f"preflight-seed-{spec.name}",
+            prompt=prompt,
+            sampling_params=sampling_params,
+            chat_template_kwargs=self._worker_chat_template_kwargs(spec, prompt),
+            tools=tools,
+            tool_choice=tool_choice,
+            tools_in_prompt=tools_in_prompt,
+            parallel_tool_calls=parallel_tool_calls,
+            tool_call_protocol=tool_call_protocol,
+            reasoning_effort=self._role_reasoning_effort(spec),
+        )
+
     def final_retry_intent_assistant_prefill(self) -> str | None:
         """A representative chat-continuation prefill for preflight.
 
@@ -2477,10 +2513,15 @@ class Conductor:
                     unavailable.reason, depth + 1, config.threshold
                 )
             return True
-        if verdict.passed and not self._has_public_output(text, completions):
-            # An empty attempt can pass every item vacuously (no claims, no
-            # forbidden words); accepting it fails the request although an
-            # earlier attempt may have an answer (issue #617).
+        if (
+            is_final_unit
+            and verdict.passed
+            and not self._has_public_output(text, completions)
+        ):
+            # An empty final answer can pass every item vacuously (no claims,
+            # no forbidden words); accepting it fails the request although an
+            # earlier attempt may have an answer (issue #617). An intermediate
+            # role's empty output stays governed by its own checklist.
             verdict = replace(
                 verdict,
                 passed=False,
@@ -2550,13 +2591,17 @@ class Conductor:
             return False
         published = verdict
         if not verdict.passed:
-            # An exhausted refinement never publishes an empty attempt over
+            # An exhausted final unit never publishes an empty attempt over
             # one with an answer: that would fail the request (issue #617).
-            visible = [
-                attempt
-                for attempt in attempts
-                if self._has_public_output(attempt[0], attempt[1])
-            ]
+            visible = (
+                [
+                    attempt
+                    for attempt in attempts
+                    if self._has_public_output(attempt[0], attempt[1])
+                ]
+                if is_final_unit
+                else attempts
+            )
             chosen = None
             if config.on_exhausted == "latest_checks_passed":
                 chosen = next(

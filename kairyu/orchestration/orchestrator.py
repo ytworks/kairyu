@@ -48,7 +48,9 @@ from kairyu.orchestration.execution import ExecutionBackend, ExecutorDescriptor
 from kairyu.orchestration.features import latest_user_view
 from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
+    MIN_CONVERSATION_CHARS,
     OrchestrationRequest,
+    bounded_conversation,
     conversation_messages,
     default_orchestration_request,
 )
@@ -171,27 +173,6 @@ class OrchestratorExecutionError(RuntimeError):
         self.result = result
 
 
-def _bounded_conversation(
-    messages: list[object],
-    max_chars: int,
-) -> tuple[list[object], int]:
-    """Keep the first message and the newest ones within ``max_chars`` of JSON.
-
-    The newest message is always kept: it is the request being routed.
-    """
-
-    # Each element of the JSON list adds a ", " separator.
-    sizes = [len(json.dumps(message, ensure_ascii=False)) + 2 for message in messages]
-    if sum(sizes) <= max_chars or len(messages) <= 2:
-        return messages, 0
-    budget = max_chars - sizes[0] - sizes[-1]
-    start = len(messages) - 1
-    while start > 1 and sizes[start - 1] <= budget:
-        start -= 1
-        budget -= sizes[start]
-    return [messages[0], *messages[start:]], start - 1
-
-
 class EmptyFinalOutput(RuntimeError):
     """The selected final unit produced no caller-visible text."""
 
@@ -249,8 +230,8 @@ class ProfileJudge:
     # whenever its probability reaches ``prefer_min_probability`` (else the
     # most probable route); each message is cut to ``max_message_chars``,
     # and ``max_conversation_chars`` bounds the whole conversation so the
-    # read fits the judge's context: the first message and the newest ones
-    # that fit are kept, the rest counted in ``omitted_messages``.
+    # read fits the judge's context (``bounded_conversation``), the omitted
+    # middle counted in ``conversation_omitted_messages``.
     question: str = ""
     prefer_label: str | None = None
     prefer_min_probability: float = 0.5
@@ -268,8 +249,13 @@ class ProfileJudge:
             raise ValueError("profile_judge prefer_min_probability must be in [0, 1]")
         if self.max_message_chars < 1:
             raise ValueError("profile_judge max_message_chars must be positive")
-        if self.max_conversation_chars is not None and self.max_conversation_chars < 1:
-            raise ValueError("profile_judge max_conversation_chars must be positive")
+        if (
+            self.max_conversation_chars is not None
+            and self.max_conversation_chars < MIN_CONVERSATION_CHARS
+        ):
+            raise ValueError(
+                f"profile_judge max_conversation_chars must be at least {MIN_CONVERSATION_CHARS}"
+            )
         labels = [choice.label for choice in self.choices]
         if len(set(labels)) != len(labels):
             raise ValueError("profile_judge choice labels must be unique")
@@ -1053,7 +1039,7 @@ class Orchestrator:
             ]
         omitted = 0
         if judge.max_conversation_chars is not None and isinstance(conversation, list):
-            conversation, omitted = _bounded_conversation(
+            conversation, omitted = bounded_conversation(
                 conversation, judge.max_conversation_chars
             )
         state: dict[str, object] = {
@@ -1062,7 +1048,7 @@ class Orchestrator:
             "image_attached": call.multimodal_prompt is not None,
         }
         if omitted:
-            state["omitted_messages"] = omitted
+            state["conversation_omitted_messages"] = omitted
         offered = self._offered_choices(call)
         return {
             "model": "",
@@ -1174,21 +1160,13 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> tuple[str, ...]:
-        if decision is not None and decision.target != "multi_agent":
-            keys = {decision.target}
+        roles = self._roles_for(call)
+        if decision is None:
+            keys = {"tier1", "tier2", self._conductor_final_role(roles).worker}
+        elif decision.target == "multi_agent":
+            keys = {"tier2" if self._moa_samples > 0 else self._conductor_final_role(roles).worker}
         else:
-            roles = self._roles_for(call)
-            final_role = self._conductor_final_role(roles)
-            # A seeded final unit publishes its seed's draft, generated under
-            # the caller's tool contract, so the seed's worker must accept
-            # that contract too, whatever the seed depends on (issue #617).
-            final_workers = {final_role.worker} | {
-                role.worker for role in roles if role.name == final_role.seed_from
-            }
-            if decision is None:
-                keys = {"tier1", "tier2", *final_workers}
-            else:
-                keys = {"tier2"} if self._moa_samples > 0 else final_workers
+            keys = {decision.target}
         fallback = next(iter(self._engines))
         return tuple(
             dict.fromkeys(key if key in self._engines else fallback for key in sorted(keys))
@@ -1367,6 +1345,21 @@ class Orchestrator:
                             request_id=f"preflight-retry-{key}",
                             assistant_prefill=retry_assistant_prefill,
                         ),
+                        validation_only=True,
+                    )
+                )
+        if conductor is not None:
+            # A seeded final unit publishes its seed's draft, generated under
+            # the caller's tool contract with the seed's own settings: its
+            # worker must accept that intent before any role generates,
+            # whatever the seed depends on (issue #617).
+            seed = conductor.seed_intent_request(f"{self._shared_prefix}{call.prompt}")
+            if seed is not None:
+                spec, request = seed
+                requests.append(
+                    _IntentRequest(
+                        spec.worker if spec.worker in self._engines else next(iter(self._engines)),
+                        request,
                         validation_only=True,
                     )
                 )

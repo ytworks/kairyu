@@ -253,6 +253,14 @@ policy publishes the newest non-empty attempt over an empty last one; and
 preflight validates the seed's worker under the caller's tool contract
 whatever the seed depends on, so an unsupported tool request is refused
 before any generation.
+Second review amendment (PR #618): the non-empty rule applies to the final
+unit only (an intermediate role's empty output stays governed by its own
+checklist), and the seed is preflighted with its own sampling, effort and
+template plus the caller's tools, not the final role's settings.
+`state[].max_total_chars` bounds a checklist's `query` section the same way
+as the route judge (`bounded_conversation`, omitted count in
+`<key>_omitted_messages`); per-message cuts alone left long agent
+conversations above `max_state_chars`, so every checklist was unavailable.
 
 ### D9. System One profile judge (2026-10-01)
 
@@ -272,9 +280,12 @@ event records `p_<LABEL>` per route, and admission bounds the read by its
 body size (System One bills at most its input without `think`).
 Amendment (2026-10-02, issue #617): `max_conversation_chars` bounds the
 whole conversation sent to the judge (per-message cuts alone did not): the
-first message and the newest messages that fit are kept, and the state
-records `omitted_messages`. Unbounded, a long agent conversation exceeded the
-judge model's context and every read fell back.
+newest message gets up to half, the first up to half of the rest, the newest
+others fill the remainder, and kept messages that are still too large (any
+field, including reasoning and tool calls) are cut, so the bound always
+holds (minimum 1,000); the state records `conversation_omitted_messages`.
+Unbounded, a long agent conversation exceeded the judge model's context and
+every read fell back.
 
 Why (framework boundary): (1) the LLM judge reads only a generated label
 string; (2) `ProfileJudge` workers were generation engines only, so a

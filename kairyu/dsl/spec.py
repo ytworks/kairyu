@@ -165,6 +165,7 @@ class StateSectionSpec(BaseModel):
     key: str = Field(min_length=1)
     source: str = Field(min_length=1)
     max_chars: int | None = Field(default=None, ge=1)
+    max_total_chars: int | None = Field(default=None, ge=1000)
 
 
 class CurationSpec(BaseModel):
@@ -484,7 +485,7 @@ class ProfileJudgeSpec(BaseModel):
     question: str = ""
     prefer: ProfileJudgePreferSpec | None = None
     max_message_chars: int = Field(default=4000, ge=1, le=1_000_000)
-    max_conversation_chars: int | None = Field(default=None, ge=1, le=100_000_000)
+    max_conversation_chars: int | None = Field(default=None, ge=1000, le=100_000_000)
 
     @model_validator(mode="after")
     def _choices_are_distinct(self) -> ProfileJudgeSpec:

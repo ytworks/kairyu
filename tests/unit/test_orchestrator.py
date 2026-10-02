@@ -704,21 +704,25 @@ async def test_async_prepare_rejects_noninitial_final_sampling_policy() -> None:
     assert tier2.generated == []
 
 
-async def test_async_prepare_rejects_tools_unsupported_by_a_dependent_seed() -> None:
+@pytest.mark.parametrize("with_tools", [True, False])
+async def test_async_prepare_validates_a_dependent_seed_with_its_own_intent(with_tools) -> None:
     # Issue #617 review: a seeded final unit publishes its seed's draft, so
-    # the seed is generated under the caller's tools; a seed worker that
-    # cannot take them must reject the request before any generation, even
-    # when the seed depends on another role.
+    # the seed is generated under the caller's tools with its own settings.
+    # Preflight must refuse tools its worker cannot take before any role
+    # generates, even when the seed depends on another role, and must not
+    # hold the seed to the final role's sampling (temperature 1.5 here).
     events: list[tuple[str, str]] = []
 
-    class RejectToolsBackend(_PreparingBackend):
+    class SeedWorker(_PreparingBackend):
         def validate_request(self, request: GenerationRequest) -> None:
             super().validate_request(request)
             if request.tools:
                 raise ValueError("tools rejected")
+            if (request.sampling_params.temperature or 0) > 1.0:
+                raise ValueError("temperature above 1 rejected")
 
     tier1 = _PreparingBackend("tier1", events)
-    tier2 = RejectToolsBackend("tier2", events)
+    tier2 = SeedWorker("tier2", events)
     roles = (
         RoleSpec(name="plan", worker="tier1", role_type="proposer", prompt="[plan] {query}"),
         RoleSpec(
@@ -727,6 +731,7 @@ async def test_async_prepare_rejects_tools_unsupported_by_a_dependent_seed() -> 
             role_type="proposer",
             depends_on=("plan",),
             prompt="[draft] {query} {plan}",
+            sampling=RoleSamplingOverrides(temperature=0.5),
         ),
         RoleSpec(
             name="final",
@@ -736,21 +741,25 @@ async def test_async_prepare_rejects_tools_unsupported_by_a_dependent_seed() -> 
             seed_from="draft",
             prompt="",
             refine_prompt="[repair] {previous}",
+            sampling=RoleSamplingOverrides(temperature=1.5),
         ),
     )
     orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2}, roles=roles)
     call = OrchestrationRequest(
         prompt=COMPLEX,
         sampling_params=SamplingParams(max_tokens=64),
-        tools=({"type": "function", "function": {"name": "bash"}},),
+        tools=({"type": "function", "function": {"name": "bash"}},) if with_tools else (),
     )
 
+    if not with_tools:
+        await orchestrator.prepare_request(call)
+        assert any(r.sampling_params.temperature == 0.5 for r in tier2.validated)
+        return
     with pytest.raises(
         ValueError,
         match=r"^final orchestration intent is unsupported: tier2: tools rejected$",
     ):
         await orchestrator.prepare_request(call)
-
     assert tier1.generated == []
     assert tier2.generated == []
 

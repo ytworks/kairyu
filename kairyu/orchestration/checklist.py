@@ -36,7 +36,11 @@ from kairyu.orchestration.checks import (
     run_check,
     static_check_is_valid,
 )
-from kairyu.orchestration.request import conversation_messages
+from kairyu.orchestration.request import (
+    MIN_CONVERSATION_CHARS,
+    bounded_conversation,
+    conversation_messages,
+)
 
 
 class DecisionBackend(Protocol):
@@ -168,18 +172,31 @@ class StateSection:
     ``source`` is ``query`` (the request: its role-tagged messages when the
     query is Kairyu's chat transcript) or a role name (its output, embedded
     as a JSON value when it parses as JSON). A text value longer than
-    ``max_chars`` is cut with an explicit marker.
+    ``max_chars`` is cut with an explicit marker. ``max_total_chars`` bounds
+    the whole conversation of a ``query`` section (``bounded_conversation``);
+    the omitted middle is counted in ``<key>_omitted_messages``.
     """
 
     key: str
     source: str
     max_chars: int | None = None
+    max_total_chars: int | None = None
 
     def __post_init__(self) -> None:
         if not self.key or not self.source:
             raise ValueError("a state section needs a key and a source")
         if self.max_chars is not None and self.max_chars < 1:
             raise ValueError(f"state section {self.key!r}: max_chars must be positive")
+        if self.max_total_chars is not None:
+            if self.source != "query":
+                raise ValueError(
+                    f"state section {self.key!r}: max_total_chars bounds only a query section"
+                )
+            if self.max_total_chars < MIN_CONVERSATION_CHARS:
+                raise ValueError(
+                    f"state section {self.key!r}: max_total_chars must be at least "
+                    f"{MIN_CONVERSATION_CHARS}"
+                )
 
 
 @dataclass(frozen=True)
@@ -922,12 +939,17 @@ def build_state(
         if section.source == "query":
             messages = conversation_messages(query)
             if messages is not None:
-                state[section.key] = [
+                cut = [
                     {**message, "content": _cut(message["content"], section.max_chars)}
                     if isinstance(message, dict) and isinstance(message.get("content"), str)
                     else message
                     for message in messages
                 ]
+                if section.max_total_chars is not None:
+                    cut, omitted = bounded_conversation(cut, section.max_total_chars)
+                    if omitted:
+                        state[f"{section.key}_omitted_messages"] = omitted
+                state[section.key] = cut
                 continue
             raw = query
         else:

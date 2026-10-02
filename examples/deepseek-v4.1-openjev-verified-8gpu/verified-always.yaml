@@ -231,7 +231,7 @@ roles:
             condition_a: "{a[id]}: {a[proposition]}"
             condition_b: "{b[id]}: {b[proposition]}"
       state:
-        - {key: conversation, source: query, max_chars: 20000}
+        - {key: conversation, source: query, max_chars: 20000, max_total_chars: 100000}
         - {key: checklist, source: extract}
       threshold: 0.5
       max_state_chars: 160000
@@ -423,7 +423,7 @@ roles:
             condition: "{item[id]}: {item[proposition]}"
             request_words: "{item[sources]}"
       state:
-        - {key: conversation, source: query, max_chars: 20000}
+        - {key: conversation, source: query, max_chars: 20000, max_total_chars: 100000}
         - {key: implicit_conditions, source: implicit}
       threshold: 0.5
       max_state_chars: 160000
@@ -643,7 +643,7 @@ roles:
             basis: "{item[basis]}"
             evidence: "{item[evidence]}"
       state:
-        - {key: conversation, source: query, max_chars: 20000}
+        - {key: conversation, source: query, max_chars: 20000, max_total_chars: 100000}
         - {key: checklist, source: extract}
         - {key: implicit_conditions, source: implicit}
         - {key: answer, source: answer}

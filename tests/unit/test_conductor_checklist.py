@@ -18,6 +18,7 @@ from kairyu.orchestration.checklist import (
     StateSection,
 )
 from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.request import CONVERSATION_JSON_CLOSE, CONVERSATION_JSON_OPEN
 from kairyu.outputs import CompletionOutput
 
 
@@ -260,6 +261,84 @@ async def test_seed_of_the_final_unit_is_generated_under_the_caller_tool_contrac
     assert by_role["generator"].tools == tools
     assert by_role["generator"].tool_choice == "auto"
     assert by_role["claims"].tools == ()
+
+
+async def test_an_empty_intermediate_output_stays_governed_by_its_own_checklist():
+    # PR #618 review: only the published answer must have text; an extractor
+    # whose checks pass on an empty result is not refined.
+    roles = (
+        RoleSpec(name="quotes", worker="gen", prompt="[quotes] {query}"),
+        RoleSpec(
+            name="quotes_check",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="quotes",
+            depends_on=("quotes",),
+            checklist=ChecklistConfig(
+                checks=(
+                    ChecklistCheck(
+                        id="Q1",
+                        proposition="no invented marker",
+                        primitive="not_contains",
+                        params={"text": "zzz"},
+                    ),
+                ),
+                max_refinements=2,
+            ),
+        ),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            prompt="[answer] {quotes}",
+            depends_on=("quotes", "quotes_check"),
+        ),
+    )
+    backend = RoutedBackend(
+        {"quotes": [""], "answer": ["There are no matching citations."]}
+    )
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne({})})
+
+    result = await conductor.run("Cite the sources.", budget=Budget(max_steps=3))
+
+    assert result.final_text == "There are no matching citations."
+    assert [p.split("]")[0] for p in backend.prompts] == ["[quotes", "[answer"]
+
+
+async def test_a_long_conversation_is_bounded_so_the_checklist_is_judged():
+    # Issue #617 GPU rerun: per-message cuts left a long agent conversation
+    # above max_state_chars, so every checklist was unavailable.
+    roles = _answer_roles(max_state_chars=4000)
+    config = roles[3].checklist
+    roles = (
+        *roles[:3],
+        dataclasses.replace(
+            roles[3],
+            checklist=dataclasses.replace(
+                config,
+                state=(
+                    StateSection("request", "query", max_chars=500, max_total_chars=2000),
+                    StateSection("answer", "answer"),
+                ),
+            ),
+        ),
+    )
+    turns = [{"role": "user", "content": "What is six times seven?"}]
+    turns += [{"role": "tool", "content": f"log {i} " + "x" * 400} for i in range(30)]
+    query = f"{CONVERSATION_JSON_OPEN}{json.dumps(turns)}{CONVERSATION_JSON_CLOSE}"
+    backend = RoutedBackend(
+        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
+    )
+    judge = FakeSystemOne({})
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run(query, budget=Budget(max_steps=12))
+
+    assert result.verification.guaranteed is True
+    state = judge.bodies[0]["state"]
+    assert len(json.dumps(state["request"], ensure_ascii=False)) <= 2000
+    assert state["request"][0]["content"] == "What is six times seven?"
+    assert state["request_omitted_messages"] == len(turns) - len(state["request"])
 
 
 async def test_unavailable_judge_publishes_the_draft_unverified():

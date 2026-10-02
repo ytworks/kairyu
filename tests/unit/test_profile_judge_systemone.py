@@ -134,4 +134,4 @@ async def test_a_long_conversation_is_bounded_to_fit_the_judge():
     # The task and the newest turns stay; the omission is stated.
     assert conversation[0]["content"] == "Fix the failing test."
     assert conversation[-1]["content"].startswith("result 19 ")
-    assert state["omitted_messages"] == len(turns) - len(conversation)
+    assert state["conversation_omitted_messages"] == len(turns) - len(conversation)
