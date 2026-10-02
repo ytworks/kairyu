@@ -2455,11 +2455,12 @@ class Conductor:
             is_final_unit
             and verdict.passed
             and not self._has_public_output(text, completions)
+            and not self._head_committed_text(run).strip()
         ):
             # An empty final answer can pass vacuously; accepting it fails the
             # request although an earlier attempt may have an answer (issue
             # #617). An intermediate role's empty output stays governed by its
-            # own checklist.
+            # own checklist, and a committed head is itself public output.
             verdict = replace(
                 verdict,
                 passed=False,

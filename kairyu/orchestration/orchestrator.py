@@ -1923,15 +1923,20 @@ class Orchestrator:
             call.sampling_params.best_of or call.sampling_params.n,
         )
         call_roles = self._roles_for(call)
-        largest_role_prompt = max(
-            call_roles,
-            key=lambda role: len(role.prompt.encode("utf-8")),
-            default=None,
+        # {tools} copies the caller's tool definitions into a role prompt, and
+        # a seeded stage dispatches with them too (PR #618).
+        tool_bytes = (
+            len(json.dumps(list(call.tools), ensure_ascii=False).encode()) if call.tools else 0
         )
+
+        def expanded_bytes(role: RoleSpec) -> int:
+            return len(role.prompt.encode("utf-8")) + role.prompt.count("{tools}") * tool_bytes
+
+        largest_role_prompt = max(call_roles, key=expanded_bytes, default=None)
         role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
-        role_bytes = len(role_prompt.encode("utf-8"))
+        role_bytes = expanded_bytes(largest_role_prompt) if largest_role_prompt else 0
         supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
-        stage_prompt = max(1, supplied_bytes + role_bytes + 256)
+        stage_prompt = max(1, supplied_bytes + role_bytes + tool_bytes + 256)
         internal_output = internal.max_tokens
         head = self._conductor_head_role(call_roles)
         if head is not None and head.sampling is not None and head.sampling.max_tokens:

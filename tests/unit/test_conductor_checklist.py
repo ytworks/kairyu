@@ -18,9 +18,10 @@ from kairyu.orchestration.checklist import (
     ItemSource,
     StateSection,
 )
-from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.conductor import Conductor, RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.request import CONVERSATION_JSON_CLOSE, CONVERSATION_JSON_OPEN
 from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 
 class RoutedBackend:
@@ -767,3 +768,43 @@ async def test_the_acceptance_read_needs_its_own_budget_step():
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=2))
 
     assert judge.bodies == [] and result.verification.reason == "budget"
+
+
+async def test_a_committed_head_is_a_public_answer_when_the_continuation_is_empty():
+    # The public answer is the committed head plus the continuation; an empty
+    # continuation after a complete head is not an empty answer.
+    backend = RoutedBackend({"head": ["42"], "answer": ["", ""]})
+    roles = (
+        RoleSpec(
+            name="head",
+            worker="gen",
+            role_type="head",
+            prompt="[head] {query}",
+            sampling=RoleSamplingOverrides(max_tokens=8),
+        ),
+        RoleSpec(name="answer", worker="gen", prompt="[answer] {head}", depends_on=("head",)),
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=(ChecklistQuestion(id="R1", proposition="states 42"),),
+                state=(StateSection("head", "head"), StateSection("answer", "answer")),
+                max_refinements=1,
+            ),
+        ),
+    )
+    conductor = Conductor(
+        roles,
+        {"gen": backend},
+        decision_workers={"judge": FakeSystemOne()},
+        final_sampling_params=SamplingParams(max_tokens=64),
+    )
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=8))
+
+    assert result.final_text == "42"
+    assert result.verification.guaranteed is True and result.verification.attempts == 1

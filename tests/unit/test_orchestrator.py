@@ -2304,3 +2304,24 @@ def test_trace_envelope_starts_at_judge_queued_at() -> None:
     )
     assert _trace_started_at_from(event) == "2026-08-25T13:28:04.528Z"
     assert _trace_started_at_from(None)  # falls back to a fresh timestamp
+
+
+def test_auto_admission_bound_charges_tool_definitions_copied_into_stages() -> None:
+    # PR #618: {tools} copies the caller's tool definitions into internal
+    # prompts; every private stage may carry them, not only the final request.
+    roles = (
+        RoleSpec(name="analyse", worker="tier1", prompt="[analyse] {query} {tools}"),
+        RoleSpec(name="answer", worker="tier1", prompt="{analyse}", depends_on=("analyse",)),
+    )
+    orchestrator = _orchestrator(roles=roles, budget=Budget(max_steps=4))
+
+    def bound_for(size: int) -> int:
+        tool = {"type": "function", "function": {"name": "lookup", "description": "t" * size}}
+        return orchestrator.admission_upper_bound(
+            OrchestrationRequest(
+                prompt=COMPLEX, sampling_params=SamplingParams(max_tokens=32), tools=(tool,)
+            )
+        ).tokens
+
+    # Three private stages and the final request each carry the 8,192 bytes.
+    assert bound_for(8_193) - bound_for(1) >= 4 * 8_192
