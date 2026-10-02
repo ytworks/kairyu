@@ -304,8 +304,9 @@ roles:
       {previous}
       --- END DRAFT ANSWER ---
 
-  # Coverage (VCO-D15): one Jev request over every adopted point, each with
-  # the answer exactly as it will be sent (a tool call in its text form).
+  # Coverage (VCO-D15): one Jev request over every adopted point, with the
+  # answer exactly as it will be sent (a tool call in its text form), the
+  # request verbatim and the history summary.
   - name: checklist
     worker: jev
     role_type: verifier
@@ -318,25 +319,32 @@ roles:
           proposition: "{item[point]}"
           foreach: {role: extract, path: points}
           tags: {origin: explicit}
-          ask: Does the answer contain this point?
-          criteria_true: The answer covers this point fully
-          criteria_false: The answer leaves this point out or covers it only partly
+          ask: Does the answer fully and correctly do what this point requires?
+          criteria_true: Every part of the point is met, exactly as the point states it
+          criteria_false: >-
+            Some part of the point is missing, only partly met, or met incorrectly
           context:
             point: "{item[point]}"
         - id: "{item[id]}"
           proposition: "{item[point]}"
           foreach: {role: implicit, path: points}
           tags: {origin: implicit}
-          ask: Does the answer contain this point?
-          criteria_true: The answer covers this point fully
-          criteria_false: The answer leaves this point out or covers it only partly
+          ask: Does the answer fully and correctly do what this point requires?
+          criteria_true: Every part of the point is met, exactly as the point states it
+          criteria_false: >-
+            Some part of the point is missing, only partly met, or met incorrectly
           context:
             point: "{item[point]}"
+      # The request and the history summary give the judge the context the
+      # answer must fit (VCO-D15 calibration: AUROC 0.852 with them, 0.791
+      # with the answer alone).
       state:
+        - {key: request, source: request, max_total_chars: 100000}
+        - {key: history, source: history}
         - {key: answer, source: answer}
-      # tau_hi: calibrated on InFoBench expert labels for this question and
-      # state (calibrate.py, alpha = 0.10 at 95 % confidence).
-      threshold: 0.9966
+      # tau_hi: InFoBench expert labels, alpha = 0.10 at 95 % confidence
+      # (calibrate.py; calibration upper bound 0.0999, held-out 0.0865).
+      threshold: 0.9895
       max_refinements: 2
       on_unavailable: publish_unverified
       unverified_from: generator

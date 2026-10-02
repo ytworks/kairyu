@@ -49,6 +49,44 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## Coverage calibration for VCO-D15 (2026-10-02, 23:33-00:05 JST)
+
+InFoBench expert labels (249 answers, 1,129 labels, 239 violations), the same
+split as below (25 / 25 instructions, seed 20261001), alpha 0.10 at 95 %.
+DeepSeek rewrites each labelled question as a point; OpenJev reads one
+coverage question per point through the production checklist code, every
+point of an answer in one System One request. Variants differ only in the
+coverage question and its state, measured on the same point statements
+(`coverage_variants`; production `calibrate.py` re-run below).
+
+| Variant | state | question | AUROC | tau_hi | held-out acceptance | held-out upper bound | held-out answers passing every point |
+|---|---|---|---:|---:|---:|---:|---:|
+| earlier design (2026-10-01) | conversation, checklist, answer, claims | does the answer satisfy the requirement | 0.850 | 0.9966 | - | 8.7 % | 54 / 125 |
+| V0 (owner's first form) | answer | does the answer contain this point | 0.791 | 0.99966 | 49 % | **12.4 %** | 20 / 125 |
+| V1 | request, answer | contain | 0.809 | 0.99973 | 53 % | **11.1 %** | 23 / 125 |
+| V2 | answer | satisfy the requirement (default) | 0.815 | 0.999986 | 26 % | 8.4 % | 4 / 125 |
+| V3 | answer | strict | 0.815 | 0.9977 | 52 % | 9.7 % | 19 / 125 |
+| V4 | request, answer | strict | 0.848 | 0.9950 | 59 % | 7.9 % | 39 / 125 |
+| **V5 (adopted)** | **request, history, answer** | **strict** | **0.852** | **0.9894** | **64 %** | **8.6 %** | **45 / 125** |
+
+Strict question: "Does the answer fully and correctly do what this point
+requires?" (yes: every part met exactly as the point states it; no: missing,
+partly met or met incorrectly). The history summary is the production
+`history` role (non-thinking DeepSeek); InFoBench requests are single turns, so
+247 of 249 summaries are "none". V0 and V1 fail alpha on the held-out half;
+V5 is the configuration in `verified.yaml`.
+
+Production re-run (`./verify.sh calibrate`, statements and history summaries
+regenerated, `calibration/judged-coverage-v2.jsonl`, `calibration/tau.json`):
+
+| Half | tau | accepted | violations | rate | upper bound |
+|---|---:|---:|---:|---:|---:|
+| calibration | 0.98887 | 383 (70 %) | 28 | 7.3 % | 9.89 % |
+| held-out | 0.98887 | 374 (64 %) | 25 | 6.7 % | 9.21 % |
+
+Held-out answers passing every point: 45 / 125 (7 violated). The threshold 0.9895 is at
+least both calibrated values (0.98941, 0.98887).
+
 ## tau_hi calibration (2026-10-01)
 
 `./verify.sh calibrate`, full production checklist path (DeepSeek rewrites

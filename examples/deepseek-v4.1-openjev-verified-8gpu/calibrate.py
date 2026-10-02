@@ -4,9 +4,10 @@
 InFoBench's expert annotation pairs model answers with decomposed yes/no
 requirements and a human pass/fail label for each. Every requirement is
 judged through this example's own production path (VCO-D15): DeepSeek turns
-the question into a point statement (like the extractor writes), and OpenJev
-reads the example's coverage question for that point over the answer alone,
-through the same Kairyu checklist code as serving. tau_hi is the smallest
+the question into a point statement (like the extractor writes) and runs the
+example's history role, and OpenJev reads the example's coverage question for
+that point over the request, the history summary and the answer, through the
+same Kairyu checklist code as serving. tau_hi is the smallest
 threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
 upper bound on the violation rate <= alpha on the calibration half; the
 held-out half is reported unchanged.
@@ -46,6 +47,7 @@ from kairyu.entrypoints.server.chat_service import (  # noqa: E402
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest  # noqa: E402
 from kairyu.orchestration.checklist import ChecklistConfig  # noqa: E402
 from kairyu.orchestration.checklist import judge as judge_checklist  # noqa: E402
+from kairyu.orchestration.request import conversation_text  # noqa: E402
 
 SPEC = control.SPEC
 # InFoBench expert annotation (Easy and Hard subsets), Google Drive file ids
@@ -163,14 +165,17 @@ _STATEMENT_PROMPT = (
 
 
 def prepare(sample: dict, l1_url: str, roles: dict[str, dict]) -> dict:
-    """Point statements for one sample."""
+    """Point statements and the history summary for one sample."""
 
-    del roles
     statements = [
         _deepseek(l1_url, _STATEMENT_PROMPT.format(question=question)).strip()
         for question in sample["questions"]
     ]
-    return {**sample, "statements": statements}
+    conversation = conversation_text(_query(sample["request"]))
+    history = _deepseek(
+        l1_url, roles["history"]["prompt"].format_map({"conversation": conversation})
+    ).strip()
+    return {**sample, "statements": statements, "history": history}
 
 
 def _requirement_checklist() -> ChecklistConfig:
@@ -204,6 +209,7 @@ def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
     outputs = {
         "extract": json.dumps({"points": requirements}, ensure_ascii=False),
         "answer": sample["answer"],
+        "history": sample["history"],
     }
     query = _query(sample["request"])
 
@@ -283,8 +289,8 @@ def main() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     roles = _roles()
-    # VCO-D15 question and state; reads of the earlier format are not reused.
-    cache = directory / "judged-coverage.jsonl"
+    # VCO-D15 question and state; reads of earlier formats are not reused.
+    cache = directory / "judged-coverage-v2.jsonl"
     done = {}
     if cache.is_file():
         for line in cache.read_text(encoding="utf-8").splitlines():

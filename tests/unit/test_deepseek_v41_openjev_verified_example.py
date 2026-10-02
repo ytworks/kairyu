@@ -236,8 +236,13 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
         {"role": "user", "content": "Name the capital of France in one word."}
     ]
     assert adopt["state"]["history"] == "none"
-    # Coverage: every adopted point against the answer as it will be sent.
-    assert coverage["state"] == {"answer": "Paris"}
+    # Coverage: every adopted point against the answer as it will be sent,
+    # in the context of the request and the history summary.
+    assert coverage["state"] == {
+        "request": adopt["state"]["request"],
+        "history": "none",
+        "answer": "Paris",
+    }
     assert len(coverage["questions"]) == 3
 
 

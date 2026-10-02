@@ -52,7 +52,7 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
   ▼
 ┌─ wave 3 ─────────────────────────────────────────────────────────────────────────────┐
 │ answer     = the generator's draft, unchanged (no model call)                        │
-│   └─ checklist  Jev, 1 request: does the answer contain each adopted point?          │
+│   └─ checklist  Jev, 1 request: does the answer fully do each adopted point?        │
 │                 a missed point → repair (DeepSeek), judged again, at most twice      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -74,15 +74,16 @@ question is a `noul` (yes/no) read that returns P(yes).
 adopt (necessity)                              checklist (coverage)
 ──────────────────────────────────────────    ──────────────────────────────────────────
 state:                                         state:
-  request: [system/developer messages,           answer: the reply exactly as it will be
-            latest user message]  (verbatim)             sent (a tool call in its text form)
-  history: the summary from `history`
+  request: [system/developer messages,           request: the same, verbatim
+            latest user message]  (verbatim)     history: the same summary
+  history: the summary from `history`            answer:  the reply exactly as it will be
+                                                          sent (a tool call in its text form)
 questions, one per point of both lists:        questions, one per adopted point:
-  "Is this point necessary to answer the         "Does the answer contain this point?"
-   request?"                                      yes: covers it fully
-  yes: an answer leaving it out would not         no:  leaves it out or covers it partly
-       answer the request as asked              threshold: τ_hi (calibrated, InFoBench)
-  no:  the request is answered fully without it
+  "Is this point necessary to answer the         "Does the answer fully and correctly do
+   request?"                                      what this point requires?"
+  yes: an answer leaving it out would not         yes: every part met as the point states
+       answer the request as asked                no:  missing, partial or incorrect
+  no:  the request is answered fully without it threshold: τ_hi = 0.9895 (InFoBench)
 threshold: drop below 0.5 (default)
 ```
 

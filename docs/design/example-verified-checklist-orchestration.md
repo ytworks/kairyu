@@ -352,8 +352,9 @@ respect to the request.
    Points with p < 0.5 leave their list. `history` waits for both extractors
    so that `adopt`, its verifier, reads both lists in one request.
 3. **Coverage.** One Jev request asks, for every adopted point, "does the
-   answer contain this point?". The state is the answer exactly as it will be
-   sent. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
+   answer fully and correctly do what this point requires?". The state is the
+   answer exactly as it will be sent, with the request verbatim and the
+   history summary. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
    at most twice; otherwise the last non-empty answer is returned as
    `refinement_limit`.
 4. **Agent turns.** A request with `tools` is answered by one assistant
@@ -362,8 +363,14 @@ respect to the request.
    the completion of the task.
 
 tau_hi is recalibrated on InFoBench for the coverage question and its state
-(`calibrate.py`); the per-claim G1 calibration (`calibrate_g1.py`) is removed
-with G1.
+(`calibrate.py`, alpha = 0.10 at 95 %); the per-claim G1 calibration
+(`calibrate_g1.py`) is removed with G1. The owner's first form (the answer
+alone, "does the answer contain this point?") reached AUROC 0.791 and failed
+alpha on the held-out half (upper bound 12.4 %). Five variants were measured on
+the same point statements; the owner chose the best, which adds the request
+and the history summary to the state and asks the stricter question: AUROC
+0.852 (the earlier design: 0.850), tau_hi 0.9895, held-out upper bound 8.6 %,
+45 of 125 held-out answers pass every point (MEASUREMENTS.md).
 
 ## Limitations
 
