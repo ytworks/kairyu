@@ -365,7 +365,15 @@ respect to the request.
    meet every point. This replaces VCO-D1's draft "from the conversation
    only": the draft aims at the requirement set it is judged against. The
    cost is the extraction and adoption time before the draft starts.
-5. **Agent turns.** A request with `tools` is answered by one assistant
+5. **One unit for every stage (amendment, DeepSWE r2).** The extractors
+   list points about the reply given now, but adoption asked whether a point
+   was "necessary to answer the request" with only the request and history:
+   on agent turns the request is the whole task, so Jev dropped the step's
+   points (p 0.0-0.5) and four turns kept none. Adoption now asks "must the
+   reply the assistant gives now meet this point?" and also reads the
+   caller's tool definitions. A checklist with no item to judge is
+   unavailable, never a pass.
+6. **Agent turns.** A request with `tools` is answered by one assistant
    message, which may hold several tool calls. The extractors read the tool
    definitions (`{tools}`) and list what this one message must do now, never
    the completion of the task.

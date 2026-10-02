@@ -174,7 +174,9 @@ roles:
       when there are none). With tools, the answer is one assistant message
       of a tool-using loop: list only what this one message presupposes
       (for example that a command it runs is valid for the environment the
-      tool results show), never the completion of the whole task.
+      tool results show). Never list what later messages will do: the code
+      the task will eventually change, the language it is written in, tests
+      run at the end, branches or commits.
 
       The caller fixed the answer's output format below ("none" when
       free): write only points an answer in exactly this format can meet,
@@ -244,9 +246,9 @@ roles:
       --- END CONVERSATION ---
 
   # Adoption (VCO-D15): one Jev request over every point of both lists,
-  # each with the request verbatim and the history summary. A point the
-  # request does not need (p < 0.5) leaves its list before the answer is
-  # judged. Never repairs; an unavailable judge keeps every point (the final
+  # with the request verbatim, the history summary and the caller's tools. A
+  # point the reply needed now does not need (p < 0.5) leaves its list before
+  # the draft is written. Never repairs; an unavailable judge keeps every point (the final
   # checklist is then unjudgeable too and the answer is unverified).
   - name: adopt
     worker: jev
@@ -260,11 +262,11 @@ roles:
           proposition: "{item[point]}"
           threshold: 0.0
           foreach: {role: extract, path: points}
-          ask: Is this point necessary to answer the request?
+          ask: Must the reply the assistant gives now meet this point?
           criteria_true: >-
-            An answer that leaves this point out would not answer the request
-            as it was asked
-          criteria_false: The request can be answered fully without this point
+            A reply given now that misses this point is not the reply this
+            conversation needs at this step
+          criteria_false: The reply needed now can be complete and correct without this point
           context:
             point: "{item[point]}"
         - id: "{item[id]}"
@@ -272,16 +274,19 @@ roles:
           proposition: "{item[point]}"
           threshold: 0.0
           foreach: {role: implicit, path: points}
-          ask: Is this point necessary to answer the request?
+          ask: Must the reply the assistant gives now meet this point?
           criteria_true: >-
-            An answer that leaves this point out would not answer the request
-            as it was asked
-          criteria_false: The request can be answered fully without this point
+            A reply given now that misses this point is not the reply this
+            conversation needs at this step
+          criteria_false: The reply needed now can be complete and correct without this point
           context:
             point: "{item[point]}"
+      # The same unit as the extractors: the one reply given now. The tools
+      # show when that reply is one step of a tool-using loop (VCO-D15).
       state:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
+        - {key: tools, source: tools}
       max_refinements: 0
       on_unavailable: publish_unverified
       curate:

@@ -82,13 +82,15 @@ state:                                         state:
   request: [system/developer messages,           request: the same, verbatim
             latest user message]  (verbatim)     history: the same summary
   history: the summary from `history`            answer:  the reply exactly as it will be
+  tools:   the caller's tool definitions
                                                           sent ({text, tool_calls} when it calls a tool)
 questions, one per point of both lists:        questions, one per adopted point:
-  "Is this point necessary to answer the         "Does the answer fully and correctly do
-   request?"                                      what this point requires?"
-  yes: an answer leaving it out would not         yes: every part met as the point states
-       answer the request as asked                no:  missing, partial or incorrect
-  no:  the request is answered fully without it threshold: τ_hi = 0.9895 (InFoBench)
+  "Must the reply the assistant gives now        "Does the answer fully and correctly do
+   meet this point?"                              what this point requires?"
+  yes: a reply missing it is not the reply        yes: every part met as the point states
+       this conversation needs at this step       no:  missing, partial or incorrect
+  no:  the reply needed now is complete and     threshold: τ_hi = 0.9895 (InFoBench)
+       correct without it
 threshold: drop below 0.5 (default)
 ```
 
@@ -100,7 +102,8 @@ checklist read
   ├─ some point missed ──► repair (DeepSeek, the missed points) ──► checklist read again
   │                         └─ still missed after 2 repairs ───► the last non-empty answer,
   │                                                              guaranteed: false (refinement_limit)
-  └─ Jev unavailable or a list unreadable ────────► the draft,
+  └─ Jev unavailable, a list unreadable or ──────► the draft,
+     no point left to judge
                                                     guaranteed: false (judge_unavailable /
                                                     checklist_unavailable)
 ```
