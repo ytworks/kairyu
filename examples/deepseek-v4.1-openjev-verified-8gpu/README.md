@@ -37,7 +37,6 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
 ┌─ wave 1 (parallel, DeepSeek) ───────────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
 │ implicit   implicit points   {"points": [{"id": "I1", "point": ...}]}  at most four  │
-│ generator  the draft         from the conversation only, never from the points       │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │
   ▼
@@ -50,9 +49,15 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │ adopted points
   ▼
-┌─ wave 3 ─────────────────────────────────────────────────────────────────────────────┐
+┌─ wave 3 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
+│ generator  the draft: the conversation plus the adopted points, written to meet      │
+│            every point (the caller's tools and response_format apply)                │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌─ wave 4 ─────────────────────────────────────────────────────────────────────────────┐
 │ answer     = the generator's draft, unchanged (no model call)                        │
-│   └─ checklist  Jev, 1 request: does the answer fully do each adopted point?        │
+│   └─ checklist  Jev, 1 request: does the answer fully do each adopted point?         │
 │                 a missed point → repair (DeepSeek), judged again, at most twice      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -77,7 +82,7 @@ state:                                         state:
   request: [system/developer messages,           request: the same, verbatim
             latest user message]  (verbatim)     history: the same summary
   history: the summary from `history`            answer:  the reply exactly as it will be
-                                                          sent (a tool call in its text form)
+                                                          sent ({text, tool_calls} when it calls a tool)
 questions, one per point of both lists:        questions, one per adopted point:
   "Is this point necessary to answer the         "Does the answer fully and correctly do
    request?"                                      what this point requires?"

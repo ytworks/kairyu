@@ -25,6 +25,8 @@ Roles (owner, 2026-10-01):
 
 ### VCO-D1 — DAG
 
+*Amended by VCO-D15 (2026-10-03): the generator writes after adoption, to meet the adopted points.*
+
 `verified.yaml` (DSL only; no Python orchestration in the example):
 
 1. Wave 1: `extract` (DeepSeek, thinking high, JSON grammar) and
@@ -353,11 +355,17 @@ respect to the request.
    so that `adopt`, its verifier, reads both lists in one request.
 3. **Coverage.** One Jev request asks, for every adopted point, "does the
    answer fully and correctly do what this point requires?". The state is the
-   answer exactly as it will be sent, with the request verbatim and the
-   history summary. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
+   answer exactly as it will be sent (tool calls as `{text, tool_calls}`, so
+   the judge reads them as calls the caller executes), with the request
+   verbatim and the history summary. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
    at most twice; otherwise the last non-empty answer is returned as
    `refinement_limit`.
-4. **Agent turns.** A request with `tools` is answered by one assistant
+4. **Draft (amendment, owner decision).** `generator` runs after adoption and
+   writes the draft from the conversation plus the adopted points, told to
+   meet every point. This replaces VCO-D1's draft "from the conversation
+   only": the draft aims at the requirement set it is judged against. The
+   cost is the extraction and adoption time before the draft starts.
+5. **Agent turns.** A request with `tools` is answered by one assistant
    message, which may hold several tool calls. The extractors read the tool
    definitions (`{tools}`) and list what this one message must do now, never
    the completion of the task.
@@ -371,6 +379,10 @@ the same point statements; the owner chose the best, which adds the request
 and the history summary to the state and asks the stricter question: AUROC
 0.852 (the earlier design: 0.850), tau_hi 0.9895, held-out upper bound 8.6 %,
 45 of 125 held-out answers pass every point (MEASUREMENTS.md).
+
+DeepSeek runs with `disable_any_whitespace` (xgrammar): a grammar-constrained
+extractor once emitted whitespace inside its JSON until max_tokens, leaving
+its list unreadable and the turn `checklist_unavailable` (DeepSWE, PR #618).
 
 ## Limitations
 

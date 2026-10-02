@@ -92,6 +92,8 @@ services:
     - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
     - --reasoning-parser
     - deepseek_v41
+    - --structured-outputs-config
+    - '{"backend":"xgrammar","disable_any_whitespace":true}'
     - --enable-auto-tool-choice
     - --tool-call-parser
     - deepseek_v41

@@ -216,10 +216,8 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
         ("I1", "implicit"),
     ]
     by_role = {_text(body).split("]", 1)[0].lstrip("["): body for body in seen}
-    # The generator sees only the conversation, never the points, and the
-    # draft is published as-is (no repair call).
-    generator = next(body for body in seen if _text(body).startswith("Kairyu L2"))
-    assert "names Paris" not in _text(generator) and "repair" not in by_role
+    # The draft is published as-is (no repair call).
+    assert "repair" not in by_role
     # The extractors analyse the user's request, not Kairyu's answer contract.
     extract_text = _text(by_role["extract"])
     assert "Name the capital of France in one word." in extract_text
@@ -278,6 +276,9 @@ async def test_a_point_the_request_does_not_need_is_never_judged() -> None:
     judged = {item.proposition for item in result.verification.items}
     assert unneeded not in judged and len(judged) == 2
     assert unneeded not in json.dumps(reads[-1]["questions"])
+    # The generator writes after adoption, to meet exactly the kept points.
+    generator = _text(next(body for body in seen if _text(body).startswith("Kairyu L2")))
+    assert "names Paris" in generator and unneeded not in generator
     assert result.verification.guaranteed
 
 

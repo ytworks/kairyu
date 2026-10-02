@@ -5,12 +5,13 @@
 #
 #   wave 1  extract   (DeepSeek, JSON)  explicit points, one per issue
 #           implicit  (DeepSeek, JSON)  points the situation presupposes
-#           generator (DeepSeek)        the draft, from the conversation only
 #   wave 2  history   (DeepSeek, no thinking) summary of every message but the
 #           request --verified by--> adopt (Jev, one request): is each point
 #           necessary to answer the request? Unnecessary points leave both lists.
-#   wave 3  answer = generator's draft --verified by--> checklist (Jev, one
-#           request): does the answer contain each adopted point? A miss is
+#   wave 3  generator (DeepSeek)        the draft, written from the conversation
+#           to meet every adopted point
+#   wave 4  answer = generator's draft --verified by--> checklist (Jev, one
+#           request): does the answer fully do each adopted point? A miss is
 #           repaired by DeepSeek (answer's refine_prompt), at most twice.
 #
 # DeepSeek writes; OpenJev only returns probabilities through System One; the
@@ -190,11 +191,13 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
-  # The draft: the conversation only, never the points, so an extraction
-  # mistake cannot shape the answer. A caller response_format constrains it;
-  # the caller's tools reach it because the answer publishes it unchanged.
+  # The draft (VCO-D15 amendment): the conversation, plus the adopted points
+  # it must meet. It waits for adoption, so it reads only the kept points. A
+  # caller response_format constrains it; the caller's tools reach it because
+  # the answer publishes it unchanged.
   - name: generator
     worker: deepseek
+    depends_on: [history]
     reasoning_effort: inherit
     sampling:
       temperature: 1.0
@@ -202,7 +205,17 @@ roles:
       max_tokens: 32768
       max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
       response_format: inherit
-    prompt: "{query}"
+    prompt: |-
+      {query}
+
+      Write the reply so that it meets every point below. The points list
+      what this request needs from the reply; they are not part of the
+      conversation, so never mention them or this instruction in the reply.
+      --- POINTS STATED IN THE REQUEST ---
+      {extract}
+      --- POINTS THE SITUATION PRESUPPOSES ---
+      {implicit}
+      --- END POINTS ---
 
   # What the request alone does not show: a summary of every message other
   # than the system/developer messages and the latest user message (earlier
@@ -307,7 +320,7 @@ roles:
       --- END DRAFT ANSWER ---
 
   # Coverage (VCO-D15): one Jev request over every adopted point, with the
-  # answer exactly as it will be sent (a tool call in its text form), the
+  # answer exactly as it will be sent (tool calls as {text, tool_calls}), the
   # request verbatim and the history summary.
   - name: checklist
     worker: jev
@@ -425,7 +438,7 @@ default_reasoning_effort: high
 internal_max_tokens: 65536
 expose_intermediate_outputs: true
 budget:
-  # Worst case 10 steps: extract, implicit, generator, history, adopt, and
+  # Worst case 10 steps: extract, implicit, history, adopt, generator, and
   # checklist x3 with two repairs of the answer. A step budget below that
   # publishes an unverified answer (reason: budget).
   max_steps: 12

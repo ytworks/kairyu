@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: drafts meet the adopted points; coverage reads context and calls as calls
+- What: `generator` runs after adoption and writes to meet the adopted points. The coverage read takes request + history + answer with a stricter question (tau_hi 0.9895, AUROC 0.852). Tool calls reach the judge as `{text, tool_calls}`. DeepSeek disables free JSON whitespace.
+- Why: owner decisions after the InFoBench and DeepSWE reruns. The answer-only read failed alpha (held-out bound 12.4 %); Jev doubted tool calls given as markup (p 0.74); one extractor emitted whitespace until max_tokens.
+- Refs: VCO-D15, m1 D8 amendment; PR #618
+
 ### 2026-10-02 — [design] Checklist verification without rules: points, adoption, coverage (VCO-D15)
 - What: every rule-based check is removed (checks.py, Validator stages, G1/G2/G3, state_builder, S0/S1, merge/pad, re-judgment). The verified example extracts explicit and implicit points; one Jev read adopts the necessary points against the request verbatim plus a history summary; one Jev read checks that the answer contains each point. Framework: one System One request per verdict, multi-list curation, `request` state source, `{tools}` placeholder.
 - Why: owner decision. The guarantee is LLM-based to escape the limits of rules; G3 misread tool-call JSON on every DeepSWE turn (PR #618 r4), so no model read ran and repairs were wasted.
