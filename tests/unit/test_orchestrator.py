@@ -704,6 +704,57 @@ async def test_async_prepare_rejects_noninitial_final_sampling_policy() -> None:
     assert tier2.generated == []
 
 
+async def test_async_prepare_rejects_tools_unsupported_by_a_dependent_seed() -> None:
+    # Issue #617 review: a seeded final unit publishes its seed's draft, so
+    # the seed is generated under the caller's tools; a seed worker that
+    # cannot take them must reject the request before any generation, even
+    # when the seed depends on another role.
+    events: list[tuple[str, str]] = []
+
+    class RejectToolsBackend(_PreparingBackend):
+        def validate_request(self, request: GenerationRequest) -> None:
+            super().validate_request(request)
+            if request.tools:
+                raise ValueError("tools rejected")
+
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = RejectToolsBackend("tier2", events)
+    roles = (
+        RoleSpec(name="plan", worker="tier1", role_type="proposer", prompt="[plan] {query}"),
+        RoleSpec(
+            name="draft",
+            worker="tier2",
+            role_type="proposer",
+            depends_on=("plan",),
+            prompt="[draft] {query} {plan}",
+        ),
+        RoleSpec(
+            name="final",
+            worker="tier1",
+            role_type="publisher",
+            depends_on=("draft",),
+            seed_from="draft",
+            prompt="",
+            refine_prompt="[repair] {previous}",
+        ),
+    )
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2}, roles=roles)
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=64),
+        tools=({"type": "function", "function": {"name": "bash"}},),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^final orchestration intent is unsupported: tier2: tools rejected$",
+    ):
+        await orchestrator.prepare_request(call)
+
+    assert tier1.generated == []
+    assert tier2.generated == []
+
+
 def test_validate_request_rejects_unsupported_chat_continuation_retry() -> None:
     class RejectAssistantPrefillBackend(_PreparingBackend):
         def validate_request(self, request: GenerationRequest) -> None:

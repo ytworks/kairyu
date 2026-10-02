@@ -171,6 +171,27 @@ class OrchestratorExecutionError(RuntimeError):
         self.result = result
 
 
+def _bounded_conversation(
+    messages: list[object],
+    max_chars: int,
+) -> tuple[list[object], int]:
+    """Keep the first message and the newest ones within ``max_chars`` of JSON.
+
+    The newest message is always kept: it is the request being routed.
+    """
+
+    # Each element of the JSON list adds a ", " separator.
+    sizes = [len(json.dumps(message, ensure_ascii=False)) + 2 for message in messages]
+    if sum(sizes) <= max_chars or len(messages) <= 2:
+        return messages, 0
+    budget = max_chars - sizes[0] - sizes[-1]
+    start = len(messages) - 1
+    while start > 1 and sizes[start - 1] <= budget:
+        start -= 1
+        budget -= sizes[start]
+    return [messages[0], *messages[start:]], start - 1
+
+
 class EmptyFinalOutput(RuntimeError):
     """The selected final unit produced no caller-visible text."""
 
@@ -226,11 +247,15 @@ class ProfileJudge:
     # decision worker: the route is read as one ``choice`` question over the
     # conversation. ``question`` is its instructions; ``prefer_label`` wins
     # whenever its probability reaches ``prefer_min_probability`` (else the
-    # most probable route); each message is cut to ``max_message_chars``.
+    # most probable route); each message is cut to ``max_message_chars``,
+    # and ``max_conversation_chars`` bounds the whole conversation so the
+    # read fits the judge's context: the first message and the newest ones
+    # that fit are kept, the rest counted in ``omitted_messages``.
     question: str = ""
     prefer_label: str | None = None
     prefer_min_probability: float = 0.5
     max_message_chars: int = 4000
+    max_conversation_chars: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.choices) < 2:
@@ -243,6 +268,8 @@ class ProfileJudge:
             raise ValueError("profile_judge prefer_min_probability must be in [0, 1]")
         if self.max_message_chars < 1:
             raise ValueError("profile_judge max_message_chars must be positive")
+        if self.max_conversation_chars is not None and self.max_conversation_chars < 1:
+            raise ValueError("profile_judge max_conversation_chars must be positive")
         labels = [choice.label for choice in self.choices]
         if len(set(labels)) != len(labels):
             raise ValueError("profile_judge choice labels must be unique")
@@ -1024,14 +1051,22 @@ class Orchestrator:
                 else message
                 for message in messages
             ]
+        omitted = 0
+        if judge.max_conversation_chars is not None and isinstance(conversation, list):
+            conversation, omitted = _bounded_conversation(
+                conversation, judge.max_conversation_chars
+            )
+        state: dict[str, object] = {
+            "conversation": conversation,
+            "tool_calling": bool(call.tools or call.tools_in_prompt),
+            "image_attached": call.multimodal_prompt is not None,
+        }
+        if omitted:
+            state["omitted_messages"] = omitted
         offered = self._offered_choices(call)
         return {
             "model": "",
-            "state": {
-                "conversation": conversation,
-                "tool_calling": bool(call.tools or call.tools_in_prompt),
-                "image_attached": call.multimodal_prompt is not None,
-            },
+            "state": state,
             "questions": {
                 "route": {
                     "type": "choice",
@@ -1139,13 +1174,21 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> tuple[str, ...]:
-        roles = self._roles_for(call)
-        if decision is None:
-            keys = {"tier1", "tier2", self._conductor_final_role(roles).worker}
-        elif decision.target == "multi_agent":
-            keys = {"tier2" if self._moa_samples > 0 else self._conductor_final_role(roles).worker}
-        else:
+        if decision is not None and decision.target != "multi_agent":
             keys = {decision.target}
+        else:
+            roles = self._roles_for(call)
+            final_role = self._conductor_final_role(roles)
+            # A seeded final unit publishes its seed's draft, generated under
+            # the caller's tool contract, so the seed's worker must accept
+            # that contract too, whatever the seed depends on (issue #617).
+            final_workers = {final_role.worker} | {
+                role.worker for role in roles if role.name == final_role.seed_from
+            }
+            if decision is None:
+                keys = {"tier1", "tier2", *final_workers}
+            else:
+                keys = {"tier2"} if self._moa_samples > 0 else final_workers
         fallback = next(iter(self._engines))
         return tuple(
             dict.fromkeys(key if key in self._engines else fallback for key in sorted(keys))

@@ -670,6 +670,10 @@ profile_judge:
   timeout_seconds: 10.0
   fallback: deepseek_think
   max_message_chars: 4000
+  # OpenJev holds 65,536 tokens: a 111-message DeepSWE conversation bounded
+  # to 120,000 characters is 37,716 tokens (VCO-D14); unbounded, every long
+  # agent turn was rejected (HTTP 400) and fell back to deepseek_think.
+  max_conversation_chars: 120000
   question: >-
     Which route should answer the latest user request in this conversation?
     The verified route checks the answer against every requirement before

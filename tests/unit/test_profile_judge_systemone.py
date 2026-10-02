@@ -34,7 +34,7 @@ class FakeJev:
         )
 
 
-def _orchestrator(jev, llm, *, prefer=None):
+def _orchestrator(jev, llm, *, prefer=None, max_conversation_chars=None):
     verified = (RoleSpec(name="v_final", worker="llm", prompt="[verified] {query}"),)
     think = (RoleSpec(name="t_final", worker="llm", prompt="[think] {query}"),)
     return Orchestrator(
@@ -53,6 +53,7 @@ def _orchestrator(jev, llm, *, prefer=None):
             fallback="deepseek_think",
             prefer_label=prefer[0] if prefer else None,
             prefer_min_probability=prefer[1] if prefer else 0.5,
+            max_conversation_chars=max_conversation_chars,
         ),
     )
 
@@ -112,3 +113,25 @@ async def test_an_unavailable_judge_falls_back():
     assert call.role_profile_judge_event.metadata["fallback"] == "backend_error"
     await orchestrator.run(call)
     assert [prompt[:7] for prompt in llm.prompts_seen] == ["[think]"]
+
+
+async def test_a_long_conversation_is_bounded_to_fit_the_judge():
+    # Issue #617: unbounded, a long agent conversation exceeded the judge's
+    # context, every read failed (HTTP 400) and routing silently fell back.
+    jev = FakeJev({"THINK": 0.2, "VERIFIED": 0.8})
+    orchestrator = _orchestrator(jev, MockBackend(), max_conversation_chars=1500)
+    turns = [{"role": "user", "content": "Fix the failing test."}]
+    for index in range(20):
+        turns.append({"role": "assistant", "content": f"step {index} " + "x" * 100})
+        turns.append({"role": "user", "content": f"result {index} " + "y" * 100})
+
+    call = await orchestrator.judge_role_profile(_chat(*turns))
+
+    assert call.role_profile_judgment == "primary"
+    state = jev.bodies[0]["state"]
+    conversation = state["conversation"]
+    assert len(json.dumps(conversation, ensure_ascii=False)) <= 1500
+    # The task and the newest turns stay; the omission is stated.
+    assert conversation[0]["content"] == "Fix the failing test."
+    assert conversation[-1]["content"].startswith("result 19 ")
+    assert state["omitted_messages"] == len(turns) - len(conversation)

@@ -331,6 +331,7 @@ def build_orchestrator(
                 else 0.5
             ),
             max_message_chars=spec.profile_judge.max_message_chars,
+            max_conversation_chars=spec.profile_judge.max_conversation_chars,
         )
         if spec.profile_judge is not None
         else None

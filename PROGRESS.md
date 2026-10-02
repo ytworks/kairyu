@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-02 — [amendment] Empty attempts never pass; seed tool preflight; bounded route-judge conversation (PR #618 review)
+- What: an empty attempt is never a checklist PASS and never published over a non-empty one; preflight validates a dependent seed's worker under the caller's tools; `profile_judge.max_conversation_chars` bounds the System One judge state (example: 120,000 chars).
+- Why: review reproduced 502 `EmptyFinalOutput` from a vacuous PASS and a post-generation tool rejection; the GPU rerun showed long DeepSWE turns overflowing OpenJev's 65,536-token context (HTTP 400) and falling back to deepseek_think.
+- Refs: m1 D8/D9 amendments, VCO-D14; PR #618, issue #617
+
 ### 2026-10-02 — [amendment] Seeded final drafts carry the caller's tools; exhaustion never publishes an empty attempt (#617)
 - What: the seed role of a seeded final unit is generated under the caller's tool contract; `latest_checks_passed` chooses only attempts with visible text; unary empty output reports `EmptyFinalOutput`; verified example repair prompt emits tool calls via the tool interface.
 - Why: DeepSWE on `kairyu-verified` got HTTP 200 text-only pseudo tool calls (the published generator draft had no tools) and 502s when an empty last repair was published over a non-empty draft.

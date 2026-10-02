@@ -247,6 +247,12 @@ caller-visible text (an empty attempt passes the deterministic checks
 vacuously) and falls back to the first non-empty one, so an empty last repair
 no longer turns an exhausted refinement into an empty-output failure. The
 unary empty-output failure reports `EmptyFinalOutput`, like the stream.
+Review amendment (PR #618): an empty attempt never counts as a PASS (with no
+claims it passes every item vacuously); exhaustion under any `on_exhausted`
+policy publishes the newest non-empty attempt over an empty last one; and
+preflight validates the seed's worker under the caller's tool contract
+whatever the seed depends on, so an unsupported tool request is refused
+before any generation.
 
 ### D9. System One profile judge (2026-10-01)
 
@@ -264,6 +270,11 @@ policy), otherwise the most probable route wins. Timeouts, transport
 failures, non-200 replies and malformed answers apply `fallback`. The judge
 event records `p_<LABEL>` per route, and admission bounds the read by its
 body size (System One bills at most its input without `think`).
+Amendment (2026-10-02, issue #617): `max_conversation_chars` bounds the
+whole conversation sent to the judge (per-message cuts alone did not): the
+first message and the newest messages that fit are kept, and the state
+records `omitted_messages`. Unbounded, a long agent conversation exceeded the
+judge model's context and every read fell back.
 
 Why (framework boundary): (1) the LLM judge reads only a generated label
 string; (2) `ProfileJudge` workers were generation engines only, so a

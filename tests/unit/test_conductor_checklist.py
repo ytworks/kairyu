@@ -212,9 +212,10 @@ async def test_exhausted_refinements_publish_the_latest_attempt_that_passed_chec
     assert [p.split("]")[0] for p in backend.prompts].count("[repair") == 2
 
 
-async def test_exhausted_refinements_never_publish_an_empty_repair_over_a_draft():
-    # Issue #617: an empty repair passes the deterministic checks vacuously
-    # and must not replace the non-empty draft, which failed the request.
+async def test_an_empty_repair_never_replaces_a_draft_even_when_it_passes_vacuously():
+    # Issue #617: an empty repair has no claims to judge, so it passes every
+    # item vacuously; accepting or publishing it failed the request although
+    # the non-empty draft was available.
     roles = _answer_roles()
     roles = (
         *roles[:3],
@@ -224,7 +225,7 @@ async def test_exhausted_refinements_never_publish_an_empty_repair_over_a_draft(
         {
             "generator": ["The answer is 42, says the moon."],
             "repair": ["", "", "", ""],
-            "claims": [_claims("says the moon"), *[_claims("says the void")] * 2],
+            "claims": [_claims("says the moon"), *[_claims()] * 2],
         }
     )
     judge = FakeSystemOne({"says the": 0.3})

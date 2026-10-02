@@ -2477,6 +2477,16 @@ class Conductor:
                     unavailable.reason, depth + 1, config.threshold
                 )
             return True
+        if verdict.passed and not self._has_public_output(text, completions):
+            # An empty attempt can pass every item vacuously (no claims, no
+            # forbidden words); accepting it fails the request although an
+            # earlier attempt may have an answer (issue #617).
+            verdict = replace(
+                verdict,
+                passed=False,
+                checks_passed=False,
+                text=f"FAIL\n{config.feedback_header}\n- the answer is empty",
+            )
         attempts.append((text, completions, verdict))
         run.outputs[verifier.name] = verdict.text
         max_refinements = config.max_refinements
@@ -2539,23 +2549,27 @@ class Conductor:
         if not verdict.passed and can_refine:
             return False
         published = verdict
-        if not verdict.passed and config.on_exhausted == "latest_checks_passed":
-            # An empty attempt passes the deterministic checks vacuously;
-            # publishing it over a non-empty one turns an exhausted
-            # refinement into a failed request (issue #617).
+        if not verdict.passed:
+            # An exhausted refinement never publishes an empty attempt over
+            # one with an answer: that would fail the request (issue #617).
             visible = [
                 attempt
                 for attempt in attempts
                 if self._has_public_output(attempt[0], attempt[1])
-            ] or attempts
-            chosen = next(
-                (attempt for attempt in reversed(visible) if attempt[2].checks_passed),
-                visible[0],
-            )
-            self._publish_attempt(
-                run, spec, chosen[0], chosen[1], is_final_unit=is_final_unit
-            )
-            published = chosen[2]
+            ]
+            chosen = None
+            if config.on_exhausted == "latest_checks_passed":
+                chosen = next(
+                    (attempt for attempt in reversed(visible) if attempt[2].checks_passed),
+                    (visible or attempts)[0],
+                )
+            elif visible and visible[-1] is not attempts[-1]:
+                chosen = visible[-1]
+            if chosen is not None:
+                self._publish_attempt(
+                    run, spec, chosen[0], chosen[1], is_final_unit=is_final_unit
+                )
+                published = chosen[2]
         changed = False
         if config.curate is not None:
             before = run.outputs[spec.name]

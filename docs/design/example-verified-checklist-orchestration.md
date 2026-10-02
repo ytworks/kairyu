@@ -300,6 +300,15 @@ tool contract, and exhaustion never chooses an empty attempt when a non-empty
 one exists. The repair prompt now tells DeepSeek to emit a tool call through
 the tool interface, never as text.
 
+Review amendment (PR #618): an empty repair that passes every item vacuously
+is not accepted, so the draft is published as `refinement_limit`. The same
+GPU rerun showed every later agent turn (about 42K-token conversations)
+falling back to deepseek_think: the route judge's state exceeded OpenJev's
+65,536-token context (HTTP 400). The judge now reads at most 120,000
+characters of conversation (`max_conversation_chars`, m1 D9 amendment): the
+first message plus the newest that fit; a 111-message DeepSWE conversation
+bounded this way is 37,716 OpenJev tokens.
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
