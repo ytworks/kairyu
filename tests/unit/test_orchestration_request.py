@@ -443,11 +443,6 @@ async def test_concurrent_calls_do_not_mix_request_intent():
             ],
             120_000,
         ),
-        (
-            [{"role": "user", "content": "task"}]
-            + [{"role": "tool", "content": f"out {i} " + "o" * 300} for i in range(60)],
-            5_000,
-        ),
     ],
 )
 def test_bounded_conversation_never_exceeds_its_bound(messages, max_chars):

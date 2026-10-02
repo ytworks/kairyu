@@ -18,10 +18,10 @@ from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.checklist import (
-    ChecklistCheck,
     ChecklistConfig,
     ChecklistQuestion,
     CurationConfig,
+    CurationTarget,
     DecisionBackend,
     ItemSource,
     StateSection,
@@ -90,7 +90,6 @@ def _item_source(source: ItemSourceSpec | None) -> ItemSource | None:
         role=source.role,
         path=source.path,
         where=source.where,
-        pairs_sharing=source.pairs_sharing,
     )
 
 
@@ -98,30 +97,11 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
     if spec is None:
         return None
     return ChecklistConfig(
-        checks=tuple(
-            ChecklistCheck(
-                id=check.id,
-                proposition=check.proposition,
-                primitive=check.primitive,
-                params=check.params,
-                foreach=_item_source(check.foreach),
-                primitive_key=check.primitive_key,
-                params_key=check.params_key,
-                sources_key=check.sources_key,
-                stage=check.stage,
-                group=check.group,
-                semantic_fallback=check.semantic_fallback,
-                tags=check.tags,
-            )
-            for check in spec.checks
-        ),
         questions=tuple(
             ChecklistQuestion(
                 id=question.id,
                 proposition=question.proposition,
                 foreach=_item_source(question.foreach),
-                sources_key=question.sources_key,
-                expect=question.expect,
                 threshold=question.threshold,
                 group=question.group,
                 subject=question.subject,
@@ -147,20 +127,25 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
         samples=spec.samples,
         think=spec.think,
         steps=spec.steps,
-        max_questions_per_call=spec.max_questions_per_call,
         max_questions=spec.max_questions,
         max_state_chars=spec.max_state_chars,
         feedback_header=spec.feedback_header,
         feedback_item=spec.feedback_item,
         max_refinements=spec.max_refinements,
-        on_exhausted=spec.on_exhausted,
         on_unavailable=spec.on_unavailable,
         unverified_from=spec.unverified_from,
-        guarantee_groups=spec.guarantee_groups,
         curate=(
             None
             if spec.curate is None
-            else CurationConfig(**spec.curate.model_dump())
+            else CurationConfig(
+                targets=tuple(
+                    CurationTarget(role=target.role, items_path=target.items_path)
+                    for target in spec.curate.targets
+                ),
+                drop_group=spec.curate.drop_group,
+                drop_below=spec.curate.drop_below,
+                id_key=spec.curate.id_key,
+            )
         ),
     )
 

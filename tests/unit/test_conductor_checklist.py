@@ -1,7 +1,6 @@
-"""Checklist verifiers: deterministic checks, System One reads, and the
-guarantee report published with the final answer."""
+"""Checklist verifiers: System One reads in one request, curation of upstream
+lists, and the guarantee report published with the final answer."""
 
-import dataclasses
 import json
 
 import pytest
@@ -10,10 +9,10 @@ from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.systemone import SystemOneReply, SystemOneUnavailableError
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.checklist import (
-    ChecklistCheck,
     ChecklistConfig,
     ChecklistQuestion,
     CurationConfig,
+    CurationTarget,
     ItemSource,
     StateSection,
 )
@@ -50,10 +49,10 @@ class RoutedBackend:
 
 
 class FakeSystemOne:
-    """Yes-probability per question chosen by a substring of its instructions."""
+    """P(yes) per question from a rule over the state and the question."""
 
-    def __init__(self, probabilities: dict[str, float], *, down: bool = False) -> None:
-        self._probabilities = probabilities
+    def __init__(self, rule=None, *, down: bool = False) -> None:
+        self._rule = rule or (lambda state, question: 0.99)
         self._down = down
         self.bodies: list[dict] = []
 
@@ -61,14 +60,10 @@ class FakeSystemOne:
         self.bodies.append(body)
         if self._down:
             raise SystemOneUnavailableError("ConnectError")
-        answers = {}
-        for key, question in body["questions"].items():
-            text = json.dumps(question["instructions"])
-            p = next(
-                (value for needle, value in self._probabilities.items() if needle in text),
-                0.99,
-            )
-            answers[key] = {"noul": p}
+        answers = {
+            key: {"noul": self._rule(body["state"], json.dumps(question["instructions"]))}
+            for key, question in body["questions"].items()
+        }
         return SystemOneReply(
             status=200,
             body=json.dumps({"answers": answers}).encode(),
@@ -78,30 +73,17 @@ class FakeSystemOne:
         )
 
 
+def _contains_42(state, question):
+    return 0.99 if "42" in str(state.get("answer", "")) else 0.1
+
+
 def _answer_roles(**config_overrides) -> tuple[RoleSpec, ...]:
     config = ChecklistConfig(
-        checks=(
-            ChecklistCheck(
-                id="R1",
-                proposition="states the answer 42",
-                primitive="contains",
-                params={"text": "42"},
-            ),
-        ),
-        questions=(
-            ChecklistQuestion(
-                id="G1",
-                proposition="every claim is grounded",
-                ask="Is this claim supported?",
-                context={"claim": "{item[text]}"},
-                foreach=ItemSource(role="claims", path="claims"),
-            ),
-        ),
-        state=(StateSection("request", "query"), StateSection("answer", "answer")),
+        questions=(ChecklistQuestion(id="R1", proposition="states the answer 42"),),
+        state=(StateSection("answer", "answer"),),
         subject="the answer",
         threshold=0.8,
         max_refinements=2,
-        on_exhausted="latest_checks_passed",
         on_unavailable="publish_unverified",
         unverified_from="generator",
         **config_overrides,
@@ -117,68 +99,41 @@ def _answer_roles(**config_overrides) -> tuple[RoleSpec, ...]:
             refine_prompt="[repair] {previous}\n{feedback}",
         ),
         RoleSpec(
-            name="claims",
-            worker="gen",
-            prompt="[claims] {answer}",
-            depends_on=("answer",),
-        ),
-        RoleSpec(
             name="checklist",
             worker="judge",
             prompt="",
             role_type="verifier",
             verifies="answer",
-            depends_on=("answer", "claims"),
+            depends_on=("answer",),
             checklist=config,
         ),
     )
 
 
-def _claims(*texts: str) -> str:
-    return json.dumps({"claims": [{"id": f"c{i}", "text": t} for i, t in enumerate(texts)]})
-
-
 async def test_seeded_draft_that_passes_publishes_with_a_guarantee():
-    backend = RoutedBackend(
-        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
-    )
-    judge = FakeSystemOne({})
+    backend = RoutedBackend({"generator": ["The answer is 42."]})
+    judge = FakeSystemOne(_contains_42)
     conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
 
     assert result.final_text == "The answer is 42."
-    assert result.verification is not None
     report = result.verification.as_dict()
     assert report["guaranteed"] is True and report["reason"] is None
-    assert {item["id"]: item["passed"] for item in report["requirements"]} == {
-        "R1": True,
-        "G1": True,
-    }
+    assert [item["id"] for item in report["requirements"]] == ["R1"]
     # The draft is published as-is: no generation for the answer itself.
-    assert [prompt.split("]")[0] for prompt in backend.prompts] == ["[generator", "[claims"]
+    assert [prompt.split("]")[0] for prompt in backend.prompts] == ["[generator"]
     # Jev request shape: a JSON state object and self-contained noul questions.
-    body = judge.bodies[0]
-    assert body["state"] == {
-        "request": "What is six times seven?",
-        "answer": "The answer is 42.",
-    }
+    (body,) = judge.bodies
+    assert body["state"] == {"answer": "The answer is 42."}
     (question,) = body["questions"].values()
-    assert question == {
-        "type": "noul",
-        "instructions": {"question": "Is this claim supported?", "claim": "The answer is 42."},
-    }
+    assert question["type"] == "noul"
+    assert question["instructions"]["requirement"] == "states the answer 42"
 
 
-async def test_deterministic_failure_repairs_before_any_judge_read():
-    backend = RoutedBackend(
-        {
-            "generator": ["The answer is 41."],
-            "repair": ["The answer is 42."],
-            "claims": [_claims("The answer is 42.")],
-        }
-    )
-    judge = FakeSystemOne({})
+async def test_a_failed_item_is_repaired_and_judged_again():
+    backend = RoutedBackend({"generator": ["The answer is 41."], "repair": ["The answer is 42."]})
+    judge = FakeSystemOne(_contains_42)
     conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
@@ -188,54 +143,41 @@ async def test_deterministic_failure_repairs_before_any_judge_read():
     assert result.verification.attempts == 2
     repair_prompt = next(p for p in backend.prompts if p.startswith("[repair]"))
     assert "The answer is 41." in repair_prompt and "[R1] states the answer 42" in repair_prompt
-    # The failed attempt never reached the claim extractor or System One.
-    assert len(judge.bodies) == 1
-    assert sum(p.startswith("[claims]") for p in backend.prompts) == 1
+    assert len(judge.bodies) == 2
 
 
-async def test_exhausted_refinements_publish_the_latest_attempt_that_passed_checks():
+async def test_exhausted_refinements_publish_the_last_attempt_unguaranteed():
     backend = RoutedBackend(
-        {
-            "generator": ["The answer is 42, says the moon."],
-            "repair": ["The answer is 41.", "The answer is 42, says the sun."],
-            "claims": [_claims("says the moon"), _claims("says the sun")],
-        }
+        {"generator": ["It is 41."], "repair": ["It is 40.", "It is 43."]}
     )
-    judge = FakeSystemOne({"says the": 0.3})
-    conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
+    conductor = Conductor(
+        _answer_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne(_contains_42)}
+    )
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=16))
 
-    assert result.final_text == "The answer is 42, says the sun."
+    assert result.final_text == "It is 43."
     report = result.verification.as_dict()
     assert report["guaranteed"] is False and report["reason"] == "refinement_limit"
     assert report["attempts"] == 3
-    assert [p.split("]")[0] for p in backend.prompts].count("[repair") == 2
 
 
 async def test_an_empty_repair_never_replaces_a_draft_even_when_it_passes_vacuously():
-    # Issue #617: an empty repair has no claims to judge, so it passes every
-    # item vacuously; accepting or publishing it failed the request although
-    # the non-empty draft was available.
-    roles = _answer_roles()
-    roles = (
-        *roles[:3],
-        dataclasses.replace(roles[3], checklist=dataclasses.replace(roles[3].checklist, checks=())),
+    # Issue #617: an empty repair can pass every item vacuously; accepting or
+    # publishing it failed the request although the non-empty draft existed.
+    backend = RoutedBackend({"generator": ["It is 41."], "repair": ["", "", "", ""]})
+
+    def judge_rule(state, question):
+        return 0.99 if state["answer"] == "" else 0.1
+
+    conductor = Conductor(
+        _answer_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne(judge_rule)}
     )
-    backend = RoutedBackend(
-        {
-            "generator": ["The answer is 42, says the moon."],
-            "repair": ["", "", "", ""],
-            "claims": [_claims("says the moon"), *[_claims()] * 2],
-        }
-    )
-    judge = FakeSystemOne({"says the": 0.3})
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=16))
 
     assert result.final_unit_ok
-    assert result.final_text == "The answer is 42, says the moon."
+    assert result.final_text == "It is 41."
     report = result.verification.as_dict()
     assert report["guaranteed"] is False and report["reason"] == "refinement_limit"
 
@@ -244,13 +186,15 @@ async def test_seed_of_the_final_unit_is_generated_under_the_caller_tool_contrac
     # Issue #617: the seeded answer publishes the generator's draft as-is, so
     # only a draft written with the caller's tools can carry a real tool call.
     tools = ({"type": "function", "function": {"name": "bash"}},)
-    backend = RoutedBackend(
-        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
+    backend = RoutedBackend({"generator": ["The answer is 42."], "points": ["[]"]})
+    roles = (
+        *_answer_roles(),
+        RoleSpec(name="points", worker="gen", prompt="[points] tools={tools}"),
     )
     conductor = Conductor(
-        _answer_roles(),
+        roles,
         {"gen": backend},
-        decision_workers={"judge": FakeSystemOne({})},
+        decision_workers={"judge": FakeSystemOne(_contains_42)},
         final_tools=tools,
         final_tool_choice="auto",
     )
@@ -260,12 +204,14 @@ async def test_seed_of_the_final_unit_is_generated_under_the_caller_tool_contrac
     by_role = {str(r.prompt).split("]")[0].lstrip("["): r for r in backend.requests}
     assert by_role["generator"].tools == tools
     assert by_role["generator"].tool_choice == "auto"
-    assert by_role["claims"].tools == ()
+    # An analysing role is not given the tools, but reads their definitions.
+    assert by_role["points"].tools == ()
+    assert '"name": "bash"' in str(by_role["points"].prompt)
 
 
 async def test_an_empty_intermediate_output_stays_governed_by_its_own_checklist():
     # PR #618 review: only the published answer must have text; an extractor
-    # whose checks pass on an empty result is not refined.
+    # whose checklist passes on an empty result is not refined.
     roles = (
         RoleSpec(name="quotes", worker="gen", prompt="[quotes] {query}"),
         RoleSpec(
@@ -276,14 +222,8 @@ async def test_an_empty_intermediate_output_stays_governed_by_its_own_checklist(
             verifies="quotes",
             depends_on=("quotes",),
             checklist=ChecklistConfig(
-                checks=(
-                    ChecklistCheck(
-                        id="Q1",
-                        proposition="no invented marker",
-                        primitive="not_contains",
-                        params={"text": "zzz"},
-                    ),
-                ),
+                questions=(ChecklistQuestion(id="Q1", proposition="no invented quote"),),
+                state=(StateSection("quotes", "quotes"),),
                 max_refinements=2,
             ),
         ),
@@ -294,10 +234,8 @@ async def test_an_empty_intermediate_output_stays_governed_by_its_own_checklist(
             depends_on=("quotes", "quotes_check"),
         ),
     )
-    backend = RoutedBackend(
-        {"quotes": [""], "answer": ["There are no matching citations."]}
-    )
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne({})})
+    backend = RoutedBackend({"quotes": [""], "answer": ["There are no matching citations."]})
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne()})
 
     result = await conductor.run("Cite the sources.", budget=Budget(max_steps=3))
 
@@ -305,50 +243,147 @@ async def test_an_empty_intermediate_output_stays_governed_by_its_own_checklist(
     assert [p.split("]")[0] for p in backend.prompts] == ["[quotes", "[answer"]
 
 
+def _chat_query(turns: list[dict]) -> str:
+    return f"{CONVERSATION_JSON_OPEN}{json.dumps(turns)}{CONVERSATION_JSON_CLOSE}"
+
+
+def _points(prefix: str, *texts: str) -> str:
+    return json.dumps(
+        {"points": [{"id": f"{prefix}{n}", "point": text} for n, text in enumerate(texts, 1)]}
+    )
+
+
+async def test_two_point_lists_are_adopted_in_one_read_over_the_request():
+    # Points from two parallel extractors are judged in one System One
+    # request against the request alone (system + latest user message);
+    # points judged unnecessary leave both lists before the answer reads them.
+    turns = [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "tool", "content": "x" * 200},
+        {"role": "user", "content": "Name a primary colour."},
+    ]
+    backend = RoutedBackend(
+        {
+            "explicit": [_points("E", "names a colour", "cites a poem")],
+            "implicit": [_points("I", "is one word", "uses French")],
+            "history": ["The user asked an old question."],
+            "answer": ["Red"],
+        }
+    )
+
+    def necessity(state, question):
+        return 0.1 if "poem" in question or "French" in question else 0.9
+
+    judge = FakeSystemOne(necessity)
+    roles = (
+        RoleSpec(name="explicit", worker="gen", prompt="[explicit] {query}"),
+        RoleSpec(name="implicit", worker="gen", prompt="[implicit] {query}"),
+        RoleSpec(
+            name="history",
+            worker="gen",
+            prompt="[history] {query}",
+            depends_on=("explicit", "implicit"),
+        ),
+        RoleSpec(
+            name="adopt",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="history",
+            depends_on=("history",),
+            checklist=ChecklistConfig(
+                questions=tuple(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role=role, path="points"),
+                        group="necessity",
+                        threshold=0.0,
+                        ask="Is this point necessary to answer the request?",
+                        context={"point": "{item[point]}"},
+                    )
+                    for role in ("explicit", "implicit")
+                ),
+                state=(
+                    StateSection("request", "request"),
+                    StateSection("history", "history"),
+                ),
+                max_refinements=0,
+                curate=CurationConfig(
+                    targets=(
+                        CurationTarget("explicit", "points"),
+                        CurationTarget("implicit", "points"),
+                    ),
+                    drop_group="necessity",
+                ),
+            ),
+        ),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            prompt="[answer] {explicit} {implicit}",
+            depends_on=("history",),
+        ),
+    )
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    await conductor.run(_chat_query(turns), budget=Budget(max_steps=8))
+
+    (body,) = judge.bodies
+    assert len(body["questions"]) == 4
+    assert body["state"]["request"] == [turns[0], turns[-1]]
+    assert body["state"]["history"] == "The user asked an old question."
+    answer_prompt = next(p for p in backend.prompts if p.startswith("[answer]"))
+    assert "names a colour" in answer_prompt and "is one word" in answer_prompt
+    assert "poem" not in answer_prompt and "French" not in answer_prompt
+
+
 async def test_a_long_conversation_is_bounded_so_the_checklist_is_judged():
     # Issue #617 GPU rerun: per-message cuts left a long agent conversation
     # above max_state_chars, so every checklist was unavailable.
     roles = _answer_roles(max_state_chars=4000)
-    config = roles[3].checklist
+    config = roles[2].checklist
     roles = (
-        *roles[:3],
-        dataclasses.replace(
-            roles[3],
-            checklist=dataclasses.replace(
-                config,
+        *roles[:2],
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=config.questions,
                 state=(
                     StateSection("request", "query", max_chars=500, max_total_chars=2000),
                     StateSection("answer", "answer"),
                 ),
+                threshold=config.threshold,
+                max_state_chars=4000,
             ),
         ),
     )
     turns = [{"role": "user", "content": "What is six times seven?"}]
     turns += [{"role": "tool", "content": f"log {i} " + "x" * 400} for i in range(30)]
-    query = f"{CONVERSATION_JSON_OPEN}{json.dumps(turns)}{CONVERSATION_JSON_CLOSE}"
-    backend = RoutedBackend(
-        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
-    )
-    judge = FakeSystemOne({})
+    backend = RoutedBackend({"generator": ["The answer is 42."]})
+    judge = FakeSystemOne(_contains_42)
     conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
 
-    result = await conductor.run(query, budget=Budget(max_steps=12))
+    result = await conductor.run(_chat_query(turns), budget=Budget(max_steps=12))
 
     assert result.verification.guaranteed is True
     state = judge.bodies[0]["state"]
-    assert len(json.dumps(state["request"], ensure_ascii=False)) <= 2000
-    assert state["request"][0]["content"] == "What is six times seven?"
     assert state["request_omitted_messages"] == len(turns) - len(state["request"])
 
 
 async def test_unavailable_judge_publishes_the_draft_unverified():
-    backend = RoutedBackend(
-        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
-    )
+    backend = RoutedBackend({"generator": ["The answer is 42."]})
     conductor = Conductor(
         _answer_roles(),
         {"gen": backend},
-        decision_workers={"judge": FakeSystemOne({}, down=True)},
+        decision_workers={"judge": FakeSystemOne(down=True)},
     )
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
@@ -359,170 +394,6 @@ async def test_unavailable_judge_publishes_the_draft_unverified():
     assert result.verification.reason == "judge_unavailable"
 
 
-async def test_requirement_list_is_curated_before_downstream_roles_read_it():
-    extraction = json.dumps(
-        {
-            "units": [{"id": "U1", "text": "a"}, {"id": "U2", "text": "b"}],
-            "requirements": [
-                {"id": "R1", "proposition": "does a", "sources": ["U1"]},
-                {"id": "R2", "proposition": "also does a", "sources": ["U1"]},
-                {"id": "R3", "proposition": "does c", "sources": ["U2"]},
-            ],
-        }
-    )
-    backend = RoutedBackend({"extract": [extraction], "use": ["done"]})
-    judge = FakeSystemOne({"derived:does c": 0.1, "same:does a|also does a": 0.9})
-    roles = (
-        RoleSpec(name="extract", worker="gen", prompt="[extract] {query}"),
-        RoleSpec(
-            name="requirements_check",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="extract",
-            depends_on=("extract",),
-            checklist=ChecklistConfig(
-                questions=(
-                    ChecklistQuestion(
-                        id="{item[id]}",
-                        proposition="derived:{item[proposition]}",
-                        foreach=ItemSource(role="extract", path="requirements"),
-                        group="necessity",
-                    ),
-                    ChecklistQuestion(
-                        id="{a[id]}+{b[id]}",
-                        proposition="distinct requirements",
-                        ask="same:{a[proposition]}|{b[proposition]}",
-                        foreach=ItemSource(
-                            role="extract", path="requirements", pairs_sharing="sources"
-                        ),
-                        expect="no",
-                        group="exclusivity",
-                    ),
-                ),
-                state=(StateSection("request", "query"),),
-                threshold=0.5,
-                max_refinements=0,
-                curate=CurationConfig(
-                    items_path="requirements",
-                    drop_group="necessity",
-                    merge_group="exclusivity",
-                    units_path="units",
-                    pad={
-                        "id": "P_{unit[id]}",
-                        "proposition": "answers: {unit[text]}",
-                        "kind": "semantic",
-                    },
-                ),
-            ),
-        ),
-        RoleSpec(name="use", worker="gen", prompt="[use] {extract}", depends_on=("extract",)),
-    )
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
-
-    await conductor.run("do a and b", budget=Budget(max_steps=8))
-
-    curated = json.loads(backend.prompts[-1].removeprefix("[use] "))
-    assert curated["requirements"] == [
-        {"id": "R1", "proposition": "does a; also does a", "sources": ["U1"]},
-        {"id": "P_U2", "proposition": "answers: b", "kind": "semantic", "sources": ["U2"]},
-    ]
-
-
-async def test_a_check_failure_still_reports_the_unread_requirements():
-    backend = RoutedBackend({"generator": ["The answer is 41."], "repair": ["Still 41."]})
-    judge = FakeSystemOne({})
-    roles = (
-        RoleSpec(name="generator", worker="gen", prompt="[generator] {query}"),
-        RoleSpec(
-            name="answer",
-            worker="gen",
-            prompt="",
-            depends_on=("generator",),
-            seed_from="generator",
-            refine_prompt="[repair] {previous}\n{feedback}",
-        ),
-        RoleSpec(
-            name="checklist",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="answer",
-            depends_on=("answer",),
-            checklist=ChecklistConfig(
-                checks=(
-                    ChecklistCheck(
-                        id="R1",
-                        proposition="states 42",
-                        primitive="contains",
-                        params={"text": "42"},
-                    ),
-                ),
-                questions=(ChecklistQuestion(id="R2", proposition="explains the product"),),
-                state=(StateSection("answer", "answer"),),
-                max_refinements=1,
-            ),
-        ),
-    )
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
-
-    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=8))
-
-    report = result.verification.as_dict()
-    assert report["guaranteed"] is False and report["reason"] == "refinement_limit"
-    unread = next(item for item in report["requirements"] if item["id"] == "R2")
-    assert unread["judged"] is False and unread["p"] is None
-    # The repair is asked to fix only what was judged, and no read happened.
-    repair = next(p for p in backend.prompts if p.startswith("[repair]"))
-    assert "[R1]" in repair and "[R2]" not in repair
-    assert judge.bodies == []
-
-
-async def test_a_failed_read_cancels_its_siblings_and_keeps_their_usage():
-    import asyncio
-
-    from kairyu.orchestration.checklist import ChecklistRun, ChecklistUnavailable
-
-    hanging = asyncio.Event()
-    cancelled = []
-
-    class SplitJev:
-        async def decide(self, body):
-            (key,) = body["questions"]
-            if key == "q0":
-                return SystemOneReply(status=529, body=b"{}", headers={})
-            if key == "q1":
-                return SystemOneReply(
-                    status=200,
-                    body=json.dumps({"answers": {"q1": {"noul": 0.9}}}).encode(),
-                    headers={},
-                    input_tokens=7,
-                )
-            try:
-                await hanging.wait()
-            except asyncio.CancelledError:
-                cancelled.append(key)
-                raise
-
-    config = ChecklistConfig(
-        questions=tuple(ChecklistQuestion(id=f"R{n}", proposition=f"p{n}") for n in range(3)),
-        state=(StateSection("answer", "answer"),),
-        max_questions_per_call=1,
-    )
-    run = ChecklistRun(config, target_text="x", sources="q")
-
-    try:
-        await run.decide(SplitJev(), {"answer": "x"}, "q")
-    except ChecklistUnavailable as error:
-        usage = error.usage
-    else:
-        raise AssertionError("a 529 read must make the checklist unavailable")
-
-    # No read outlives the decision, and the completed read is still billed.
-    assert cancelled == ["q2"]
-    assert usage == (7, 0)
-
-
 async def test_a_seeded_answer_keeps_its_seeds_finish_reason():
     class LengthBackend(RoutedBackend):
         async def generate(self, request):
@@ -531,11 +402,9 @@ async def test_a_seeded_answer_keeps_its_seeds_finish_reason():
             object.__setattr__(completion, "finish_reason", "length")
             return result
 
-    backend = LengthBackend(
-        {"generator": ["The answer is 42"], "claims": [_claims("The answer is 42.")]}
-    )
+    backend = LengthBackend({"generator": ["The answer is 42"]})
     conductor = Conductor(
-        _answer_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne({})}
+        _answer_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne(_contains_42)}
     )
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
@@ -543,116 +412,11 @@ async def test_a_seeded_answer_keeps_its_seeds_finish_reason():
     assert result.completions[0].finish_reason == "length"
 
 
-async def test_a_downstream_seed_publishes_the_attempt_the_verifier_kept():
-    # Review P1 (round 2): the verifier falls back to its first attempt;
-    # a later seed must not republish the rejected retry's text.
-    backend = RoutedBackend({"source": ["good answer"], "fix": ["bad answer"]})
-    judge = FakeSystemOne({"good answer": 0.1})
-    roles = (
-        RoleSpec(
-            name="source",
-            worker="gen",
-            prompt="[source] {query}",
-            refine_prompt="[fix] {previous}\n{feedback}",
-        ),
-        RoleSpec(
-            name="check",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="source",
-            depends_on=("source",),
-            checklist=ChecklistConfig(
-                checks=(
-                    ChecklistCheck(
-                        id="R1",
-                        proposition="is good",
-                        primitive="contains",
-                        params={"text": "good"},
-                    ),
-                ),
-                questions=(
-                    ChecklistQuestion(
-                        id="R2", proposition="judged", ask="Is it right?", context={"t": "{source}"}
-                    ),
-                ),
-                state=(StateSection("source", "source"),),
-                threshold=0.9,
-                max_refinements=1,
-                on_exhausted="latest_checks_passed",
-            ),
-        ),
-        RoleSpec(
-            name="answer",
-            worker="gen",
-            prompt="",
-            depends_on=("source",),
-            seed_from="source",
-            refine_prompt="[unused] {previous}",
-        ),
-    )
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
-
-    result = await conductor.run("q", budget=Budget(max_steps=8))
-
-    assert result.final_text == "good answer"
-    assert result.completions[0].text == "good answer"
-
-
-def _inline_claims_roles(*, writer_seeded: bool) -> tuple[RoleSpec, ...]:
-    return (
-        RoleSpec(name="draft", worker="gen", prompt="[draft] {query}"),
-        RoleSpec(name="claims", worker="gen", prompt="[claims] {draft}", depends_on=("draft",)),
-        RoleSpec(
-            name="check",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="draft",
-            depends_on=("draft", "claims"),
-            checklist=ChecklistConfig(
-                questions=(ChecklistQuestion(id="R1", proposition="ok"),),
-                state=(StateSection("claims", "claims"),),
-            ),
-        ),
-        RoleSpec(
-            name="writer",
-            worker="gen",
-            prompt="" if writer_seeded else "[writer] {claims}",
-            depends_on=("draft", "claims"),
-            seed_from="draft" if writer_seeded else None,
-            refine_prompt="[fix] {previous}" if writer_seeded else "",
-        ),
-    )
-
-
-async def test_the_orchestrator_resolves_the_final_unit_like_the_conductor():
-    # Review P2 (round 3): a dependency on an inline role is one on its target,
-    # so the writer, not the draft, publishes; a seeded writer refuses n > 1.
-    from kairyu.orchestration.orchestrator import Orchestrator
-    from kairyu.orchestration.request import OrchestrationRequest
-    from kairyu.orchestration.router import RouteThresholds, RuleRouter
-    from kairyu.sampling_params import SamplingParams
-
-    for seeded in (False, True):
-        roles = _inline_claims_roles(writer_seeded=seeded)
-        orchestrator = Orchestrator(
-            {"gen": RoutedBackend({})},
-            router=RuleRouter(RouteThresholds(multi_step_markers=0)),
-            roles=roles,
-            decision_workers={"judge": FakeSystemOne({})},
-        )
-        assert orchestrator._conductor_final_role(roles).name == "writer"
-    with pytest.raises(ValueError, match="n > 1"):
-        await orchestrator.run(
-            OrchestrationRequest(prompt="q", sampling_params=SamplingParams(max_tokens=8, n=2))
-        )
-
-
 def test_a_final_checklist_cannot_curate_what_it_publishes():
     # Review P1 (round 3): the guarantee must describe the published text.
     roles = (
-        RoleSpec(name="answer", worker="gen", prompt="[answer] {query}"),
+        RoleSpec(name="draft", worker="gen", prompt="[draft] {query}"),
+        RoleSpec(name="answer", worker="gen", prompt="[answer] {draft}", depends_on=("draft",)),
         RoleSpec(
             name="check",
             worker="judge",
@@ -663,9 +427,11 @@ def test_a_final_checklist_cannot_curate_what_it_publishes():
             checklist=ChecklistConfig(
                 questions=(ChecklistQuestion(id="R1", proposition="ok"),),
                 state=(StateSection("answer", "answer"),),
-                curate=CurationConfig(items_path="items", drop_group="checklist"),
+                curate=CurationConfig(
+                    targets=(CurationTarget("answer", "items"),), drop_group="checklist"
+                ),
             ),
         ),
     )
     with pytest.raises(ValueError, match="cannot curate"):
-        Conductor(roles, {"gen": RoutedBackend({})}, decision_workers={"judge": FakeSystemOne({})})
+        Conductor(roles, {"gen": RoutedBackend({})}, decision_workers={"judge": FakeSystemOne()})
