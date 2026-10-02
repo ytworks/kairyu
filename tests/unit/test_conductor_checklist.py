@@ -488,3 +488,19 @@ async def test_a_seed_republishes_the_curated_list_not_the_generated_one():
 
     assert "drop me" not in result.final_text
     assert result.completions[0].text == result.final_text
+
+
+async def test_a_judged_tool_call_reaches_the_judge_as_a_call():
+    # DeepSWE (PR #618): as <tool_call> markup inside text, Jev doubted that a
+    # real call was present ("includes a bash call" p 0.74).
+    call = '<tool_call>{"name":"bash","arguments":{"command":"ls -la"}}</tool_call>'
+    backend = RoutedBackend({"generator": [f"Look first.{call}"]})
+    judge = FakeSystemOne()
+    conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
+
+    assert judge.bodies[0]["state"]["answer"] == {
+        "text": "Look first.",
+        "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}],
+    }

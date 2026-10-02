@@ -629,6 +629,32 @@ def _cut(text: str, limit: int | None) -> str:
     return f"{text[:limit]}\n[... {len(text) - limit} more characters cut ...]"
 
 
+# Kairyu's backend-neutral form of a native tool call in a role's text
+# (kairyu.engine.openai_backend._message_text).
+_TOOL_CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+def _with_tool_calls(text: str) -> dict[str, object] | None:
+    """A role output holding tool calls as ``{text, tool_calls}``, else None.
+
+    The judge then reads the calls as calls the caller will execute, not as
+    markup inside prose.
+    """
+
+    calls: list[object] = []
+    for match in _TOOL_CALL.finditer(text):
+        try:
+            call = json.loads(match.group(1))
+        except ValueError:
+            return None
+        if not isinstance(call, Mapping):
+            return None
+        calls.append({"name": call.get("name"), "arguments": call.get("arguments")})
+    if not calls:
+        return None
+    return {"text": _TOOL_CALL.sub("", text).strip(), "tool_calls": calls}
+
+
 def _request_messages(messages: list[object]) -> list[object]:
     """The system and developer messages plus the latest user message, in order."""
 
@@ -688,6 +714,10 @@ def build_state(
                 continue
             except ValueError:
                 pass
+            structured = _with_tool_calls(raw)
+            if structured is not None:
+                state[section.key] = structured
+                continue
         state[section.key] = _cut(raw, section.max_chars)
     return state
 

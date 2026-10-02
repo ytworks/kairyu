@@ -288,6 +288,8 @@ What a checklist does now:
   the latest user message, verbatim.
 - Analysing roles may read `{tools}`, the caller's tool definitions, beside
   `{response_format}`.
+- A role output holding Kairyu's tool-call markup enters the state as
+  `{text, tool_calls}`, so the judge reads the calls as calls.
 
 ### D9. System One profile judge (2026-10-01)
 
