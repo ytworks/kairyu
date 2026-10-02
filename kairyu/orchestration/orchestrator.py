@@ -338,6 +338,10 @@ class _IntentRequest:
     request: GenerationRequest
     role_name: str | None = None
     validation_only: bool = False
+    # A validation-only intent whose full backend validation runs only in
+    # async preparation (e.g. capability checks), so preparation must run
+    # it even though it is never dispatched.
+    prepare_to_validate: bool = False
 
 
 @dataclass
@@ -1361,6 +1365,7 @@ class Orchestrator:
                         spec.worker if spec.worker in self._engines else next(iter(self._engines)),
                         request,
                         validation_only=True,
+                        prepare_to_validate=True,
                     )
                 )
         return tuple(requests)
@@ -1675,9 +1680,17 @@ class Orchestrator:
         preparable_final_requests = tuple(
             intent for intent in plan.final_requests if not intent.validation_only
         )
+        # The seed of a seeded final unit is never dispatched from here, but
+        # its tool capability is only checked by full preparation: skipping
+        # it would let a role generate before the seed is refused (#617).
+        validated_final_requests = tuple(
+            intent
+            for intent in plan.final_requests
+            if not intent.validation_only or intent.prepare_to_validate
+        )
         failure_groups: list[str] = []
         for kind, intents in (
-            ("final", preparable_final_requests),
+            ("final", validated_final_requests),
             ("internal", plan.internal_requests),
             ("initial", plan.initial_requests),
         ):

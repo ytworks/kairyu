@@ -764,6 +764,67 @@ async def test_async_prepare_validates_a_dependent_seed_with_its_own_intent(with
     assert tier2.generated == []
 
 
+async def test_async_prepare_refuses_a_dependent_seed_whose_upstream_rejects_tools() -> None:
+    # PR #618 re-review: the vLLM backend checks tool capability only in full
+    # preparation, not in its structural pre-check; a dependent seed's intent
+    # must still be refused before the planner generates.
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    tier1 = _PreparingBackend("tier1", [])
+    draft = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="draft",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+    )
+    roles = (
+        RoleSpec(name="plan", worker="tier1", role_type="proposer", prompt="[plan] {query}"),
+        RoleSpec(
+            name="draft",
+            worker="tier2",
+            role_type="proposer",
+            depends_on=("plan",),
+            prompt="[draft] {query} {plan}",
+        ),
+        RoleSpec(
+            name="final",
+            worker="tier1",
+            role_type="publisher",
+            depends_on=("draft",),
+            seed_from="draft",
+            prompt="",
+            refine_prompt="[repair] {previous}",
+        ),
+    )
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": draft}, roles=roles)
+    bash = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "strict": True,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=64),
+        tools=(bash,),
+        tool_choice="auto",
+    )
+
+    with pytest.raises(UpstreamClientError, match="tools\\[0\\].function.strict") as refused:
+        await orchestrator.prepare_request(call)
+    assert refused.value.status_code == 400
+    assert tier1.generated == []
+    assert calls == []
+    await draft.shutdown()
+
+
 def test_validate_request_rejects_unsupported_chat_continuation_retry() -> None:
     class RejectAssistantPrefillBackend(_PreparingBackend):
         def validate_request(self, request: GenerationRequest) -> None:
