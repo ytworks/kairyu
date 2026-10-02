@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: Jev accepts the answer after the coverage read
+- What: `checklist.acceptance` (framework) sends a second Jev request with the item results, the prompt and the answer; its p decides the guarantee. The example's repair gets the prompt, answer and missed points. Judged tool calls follow the API's `tool_choice` selection and drop text.
+- Why: owner decision after DeepSWE r3 (single misjudged points failed turns; points about unpublished text); review P2 on judge/API divergence.
+- Refs: VCO-D15 item 7, m1 D8 amendment; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: drafts meet the adopted points; coverage reads context and calls as calls
 - What: `generator` runs after adoption and writes to meet the adopted points. The coverage read takes request + history + answer with a stricter question (tau_hi 0.9895, AUROC 0.852). Tool calls reach the judge as `{text, tool_calls}`. DeepSeek disables free JSON whitespace.
 - Why: owner decisions after the InFoBench and DeepSWE reruns. The answer-only read failed alpha (held-out bound 12.4 %); Jev doubted tool calls given as markup (p 0.74); one extractor emitted whitespace until max_tokens.

@@ -294,6 +294,16 @@ What a checklist does now:
   rules shared with it in `kairyu/tool_call_markup.py`.
 - A state section may read `tools`, the caller's tool definitions.
 - A verdict with no item to judge is unavailable, never a pass.
+- Amendment (2026-10-03, PR #618, owner decision): `checklist.acceptance`
+  adds a second System One request to a verdict. Its state is the declared
+  sections plus the item results (`[{id, point, p, passed}]` under
+  `results_key`); its one `noul` question decides the verdict at its own
+  threshold, and the failing items still feed the refinement. Judged tool
+  calls follow the public API: the caller's `tool_choice` and declared
+  names select them, and the text is dropped when calls are published.
+  Why: a verdict that is the conjunction of per-item reads fails on any
+  single misread item; a holistic read informed by the item results is a
+  reusable gate for any checklist (the question and state stay in the YAML).
 
 ### D9. System One profile judge (2026-10-01)
 

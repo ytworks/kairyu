@@ -16,7 +16,7 @@ System One route judge) and the m11 D8 replica amendment.
 | Layer | What runs here |
 |---|---|
 | L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). OpenJev (DiffusionGemma 26B-A4B NVFP4) on GPU 6 and GPU 7, published image unchanged, read only through System One. |
-| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, generator, adoption read, coverage read, repair (at most 2), fallback. |
+| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, generator, adoption read, coverage read, acceptance read, repair (at most 2), fallback. |
 | L3 | Public models `kairyu-verified` (routed) and `kairyu-verified-always`; `kairyu_verification` on every verified answer; the answer page on :3013. |
 
 ## L2: how an answer is made
@@ -57,8 +57,10 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
   ▼
 ┌─ wave 4 ─────────────────────────────────────────────────────────────────────────────┐
 │ answer     = the generator's draft, unchanged (no model call)                        │
-│   └─ checklist  Jev, 1 request: does the answer fully do each adopted point?         │
-│                 a missed point → repair (DeepSeek), judged again, at most twice      │
+│   └─ checklist  Jev, request 1: does the answer fully do each adopted point?         │
+│                 Jev, request 2: given those results, the original prompt and the     │
+│                 answer, may the answer be adopted as the official reply?             │
+│                 not adopted → repair (DeepSeek), judged again, at most twice         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,7 +72,7 @@ never the completion of the whole task. The generator and every repair carry
 the caller's tools, so a tool call is returned as a structured `tool_calls`
 entry.
 
-### 2. The two Jev requests
+### 2. The Jev requests
 
 Each stage sends all of its questions in one System One request; every
 question is a `noul` (yes/no) read that returns P(yes).
@@ -92,15 +94,30 @@ questions, one per point of both lists:        questions, one per adopted point:
   no:  the reply needed now is complete and     threshold: τ_hi = 0.9895 (InFoBench)
        correct without it
 threshold: drop below 0.5 (default)
+
+acceptance (after coverage, same verdict)
+──────────────────────────────────────────
+state:
+  prompt:    the request, verbatim
+  answer:    the reply exactly as it will be sent
+  checklist: [{id, point, p, passed}] from the coverage read
+question: "May this answer be adopted as the official reply to the prompt?"
+  yes: it answers the prompt, the point results considered
+  no:  part of what the prompt asks is unanswered or wrong
+threshold: τ_accept, calibrated on InFoBench (see MEASUREMENTS.md)
 ```
+
+The coverage read's τ_hi only selects the missed points that the repair
+must meet; the acceptance read decides the guarantee.
 
 ### 3. Outcomes
 
 ```text
 checklist read
-  ├─ every point p ≥ τ_hi ────────────────────────► guaranteed: true
-  ├─ some point missed ──► repair (DeepSeek, the missed points) ──► checklist read again
-  │                         └─ still missed after 2 repairs ───► the last non-empty answer,
+  ├─ acceptance p ≥ τ_accept ──────────────────────► guaranteed: true
+  ├─ not accepted ──► repair (DeepSeek: original prompt, answer, ──► checklist read again
+  │                   missed points; "rewrite to meet them")
+  │                         └─ not accepted after 2 repairs ───► the last non-empty answer,
   │                                                              guaranteed: false (refinement_limit)
   └─ Jev unavailable, a list unreadable or ──────► the draft,
      no point left to judge
@@ -133,13 +150,14 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 
 `kairyu_verification`:
 
-- `guaranteed: true`: the answer contains every adopted point.
+- `guaranteed: true`: Jev accepted the answer as the reply (`acceptance`,
+  P(yes) of the acceptance read) after reading every adopted point's result.
   `requirements[]` lists each point with its `id` (`E…` explicit, `I…`
   implicit), `proposition` (the point), `tags.origin` (`explicit` or
   `implicit`), `p` and `passed`.
 - `guaranteed: false` with `reason`:
-  - `refinement_limit`: two repairs still missed a point; the last
-    non-empty answer is returned with the points it misses.
+  - `refinement_limit`: two repairs were still not accepted; the last
+    non-empty answer is returned with its point results.
   - `judge_unavailable`: neither OpenJev replica answered (down or
     overloaded); the generator's draft is returned as-is.
   - `checklist_unavailable`: a point list could not be read or the read

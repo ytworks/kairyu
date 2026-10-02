@@ -165,6 +165,20 @@ class CurationSpec(BaseModel):
     id_key: str = "id"
 
 
+class AcceptanceSpec(BaseModel):
+    """A final read on whether the target may be adopted as is (one noul
+    question over ``state`` plus the item results)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ask: str = Field(min_length=1)
+    state: tuple[StateSectionSpec, ...] = Field(min_length=1)
+    criteria_true: str = ""
+    criteria_false: str = ""
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    results_key: str = Field(default="checklist", min_length=1)
+
+
 class ChecklistSpec(BaseModel):
     """A verifier judged without generation: System One probabilities
     against ``threshold``, all questions in one request (see
@@ -187,6 +201,7 @@ class ChecklistSpec(BaseModel):
     on_unavailable: Literal["error", "publish_unverified"] = "error"
     unverified_from: str = ""
     curate: CurationSpec | None = None
+    acceptance: AcceptanceSpec | None = None
 
 class ExecutionLimitsSpec(BaseModel):
     model_config = ConfigDict(frozen=True)

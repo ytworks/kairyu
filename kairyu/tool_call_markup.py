@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 GENERIC_TOOL_CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
@@ -79,11 +79,50 @@ def tool_call_payload(payload: object) -> tuple[str, str] | None:
         return None
 
 
-def generic_tool_calls(text: str) -> tuple[str, list[dict[str, object]]]:
+def call_is_selected(
+    name: str,
+    mode: str,
+    allowed_names: frozenset[str],
+    named: str | None,
+) -> bool:
+    """Whether the caller's tool choice lets a call named ``name`` be published.
+
+    ``mode`` is the normalized tool choice ("auto", "none", "required" or
+    "named"); ``allowed_names`` the declared function names.
+    """
+
+    return mode != "none" and name in allowed_names and (named is None or name == named)
+
+
+def tool_selection(
+    tools: Sequence[Mapping[str, object]],
+    tool_choice: object,
+) -> tuple[str, frozenset[str], str | None]:
+    """``(mode, allowed_names, named)`` of an already validated request."""
+
+    allowed: set[str] = set()
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, Mapping) else None
+        if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+            allowed.add(function["name"])
+    if tool_choice is None:
+        return "auto", frozenset(allowed), None
+    if isinstance(tool_choice, str):
+        return tool_choice, frozenset(allowed), None
+    function = tool_choice.get("function") if isinstance(tool_choice, Mapping) else None
+    name = function.get("name") if isinstance(function, Mapping) else None
+    return "named", frozenset(allowed), name if isinstance(name, str) else None
+
+
+def generic_tool_calls(
+    text: str,
+    selection: tuple[str, frozenset[str], str | None] | None = None,
+) -> tuple[str, list[dict[str, object]]]:
     """The text without its publishable calls, and those calls.
 
     Markup the API would not publish as a call stays in the text, as it would
-    in the API's content.
+    in the API's content; with a ``selection`` (:func:`tool_selection`), so
+    does a call the caller's tool choice excludes.
     """
 
     calls: list[dict[str, object]] = []
@@ -98,6 +137,8 @@ def generic_tool_calls(text: str) -> tuple[str, list[dict[str, object]]]:
         if call is None:
             continue
         name, arguments = call
+        if selection is not None and not call_is_selected(name, *selection):
+            continue
         calls.append({"name": name, "arguments": json.loads(arguments)})
         kept.append(text[cursor : match.start()])
         cursor = match.end()
@@ -107,6 +148,8 @@ def generic_tool_calls(text: str) -> tuple[str, list[dict[str, object]]]:
 
 __all__ = [
     "GENERIC_TOOL_CALL",
+    "call_is_selected",
+    "tool_selection",
     "generic_tool_calls",
     "strict_json_loads",
     "tool_call_payload",

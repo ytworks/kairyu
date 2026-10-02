@@ -2339,6 +2339,7 @@ class Conductor:
                 {**run.outputs, target.name: text},
                 query,
                 self._final_tools,
+                self._final_tool_choice,
             )
         except BaseException:
             run.budget = run.budget.release(unknown_cost=unknown_cost)
@@ -2533,7 +2534,12 @@ class Conductor:
         if is_final_unit:
             run.verification = verdict_report(
                 published,
-                threshold=config.threshold,
+                # The threshold that decided the guarantee.
+                threshold=(
+                    config.acceptance.threshold
+                    if config.acceptance is not None
+                    else config.threshold
+                ),
                 attempts=depth + 1,
             )
         return True

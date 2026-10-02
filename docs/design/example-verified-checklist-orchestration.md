@@ -377,6 +377,21 @@ respect to the request.
    message, which may hold several tool calls. The extractors read the tool
    definitions (`{tools}`) and list what this one message must do now, never
    the completion of the task.
+7. **Acceptance (amendment 2026-10-03, owner decision).** After the coverage
+   read, one more Jev request reads the coverage results (each point's p and
+   pass), the original prompt and the answer, and asks whether the answer may
+   be adopted as the official reply. Its P(yes) against tau_accept decides
+   the guarantee; tau_hi only selects the missed points. A rejected answer is
+   repaired with the original prompt, the answer and the missed points, with
+   an explicit instruction to rewrite it to meet them. The judged answer is
+   what the API publishes: with tool calls, the text is dropped and only
+   calls the caller's tools and `tool_choice` allow count. Why: on DeepSWE r3
+   a point-wise conjunction failed on single misjudged points (a correct
+   bash call read at low p) and on points about text the API never
+   publishes, costing repairs; the owner wants the adoption decision made
+   by the judge over the whole answer, informed by the point results.
+   tau_accept is calibrated on InFoBench response labels (all points met),
+   alpha = 0.10 at 95 %, same split as tau_hi.
 
 tau_hi is recalibrated on InFoBench for the coverage question and its state
 (`calibrate.py`, alpha = 0.10 at 95 %); the per-claim G1 calibration

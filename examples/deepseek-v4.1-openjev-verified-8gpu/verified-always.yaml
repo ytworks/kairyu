@@ -308,19 +308,23 @@ roles:
       max_tokens: 32768
       max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
     refine_prompt: |-
-      [repair] The draft answer below misses these points:
-      {feedback}
-      Add what these points need and change nothing else. Output the
-      complete revised answer and nothing else; when the answer is a tool
-      call, emit it through the tool interface, never as text. If the draft
-      is cut off or degenerate (a number or text repeating without end), do
-      not edit it: write the answer anew from the conversation.
-      --- CONVERSATION ---
+      [repair] The answer below was not accepted as the reply to the original
+      prompt. Rewrite it so that it answers the original prompt and meets
+      every point listed under MISSED POINTS. Keep what already answers the
+      prompt; change what the missed points need. Output the complete
+      rewritten answer and nothing else; when the answer is a tool call,
+      emit it through the tool interface, never as text. If the answer is
+      cut off or degenerate (a number or text repeating without end), write
+      it anew from the original prompt.
+      --- ORIGINAL PROMPT ---
       {query}
-      --- END CONVERSATION ---
-      --- DRAFT ANSWER ---
+      --- END ORIGINAL PROMPT ---
+      --- ANSWER ---
       {previous}
-      --- END DRAFT ANSWER ---
+      --- END ANSWER ---
+      --- MISSED POINTS ---
+      {feedback}
+      --- END MISSED POINTS ---
 
   # Coverage (VCO-D15): one Jev request over every adopted point, with the
   # answer exactly as it will be sent (tool calls as {text, tool_calls}), the
@@ -360,9 +364,23 @@ roles:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
         - {key: answer, source: answer}
-      # tau_hi: InFoBench expert labels, alpha = 0.10 at 95 % confidence
-      # (calibrate.py; calibration upper bound 0.0999, held-out 0.0865).
+      # tau_hi (InFoBench expert labels, alpha = 0.10 at 95 % confidence;
+      # calibration upper bound 0.0999, held-out 0.0865) marks a point as
+      # missed for the repair; the acceptance read decides the guarantee.
       threshold: 0.9895
+      # Acceptance (VCO-D15): the point results, the answer and the original
+      # prompt go to Jev, which decides whether the answer may be adopted.
+      acceptance:
+        ask: May this answer be adopted as the official reply to the prompt?
+        criteria_true: >-
+          The answer does what the prompt asks, and the point results show
+          nothing the prompt needs is missing or wrong
+        criteria_false: Something the prompt needs is missing or wrong in the answer
+        state:
+          - {key: prompt, source: request, max_total_chars: 100000}
+          - {key: answer, source: answer}
+        # Calibrated on InFoBench answers (calibrate.py).
+        threshold: 0.5
       max_refinements: 2
       on_unavailable: publish_unverified
       unverified_from: generator

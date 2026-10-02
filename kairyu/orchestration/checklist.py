@@ -33,7 +33,7 @@ from kairyu.orchestration.request import (
     bounded_conversation,
     conversation_messages,
 )
-from kairyu.tool_call_markup import generic_tool_calls
+from kairyu.tool_call_markup import generic_tool_calls, tool_selection
 
 # A JSON value as produced by json.loads.
 JSONValue = object
@@ -217,6 +217,37 @@ class CurationConfig:
 
 
 @dataclass(frozen=True)
+class AcceptanceConfig:
+    """A final System One read on whether the target may be adopted as is.
+
+    After the per-item read, one ``noul`` question (``ask`` with optional
+    criteria) is asked over ``state`` plus the item results under
+    ``results_key`` (each item's id, proposition, p and pass). The verdict
+    passes when its probability reaches ``threshold``; the item results stay
+    in the report, and failing items still go to a repair as feedback.
+    """
+
+    ask: str
+    state: tuple[StateSection, ...]
+    criteria_true: str = ""
+    criteria_false: str = ""
+    threshold: float = 0.5
+    results_key: str = "checklist"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "state", tuple(self.state))
+        if not self.ask:
+            raise ValueError("an acceptance read needs an ask")
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("acceptance threshold must be in [0, 1]")
+        keys = [section.key for section in self.state]
+        if self.results_key in keys or len(set(keys)) != len(keys):
+            raise ValueError("acceptance state keys must be unique and differ from results_key")
+        for name in ("ask", "criteria_true", "criteria_false"):
+            _validate_template(f"acceptance {name}", getattr(self, name))
+
+
+@dataclass(frozen=True)
 class ChecklistConfig:
     questions: tuple[ChecklistQuestion, ...]
     # System One state: a JSON object with one field per section.
@@ -239,6 +270,7 @@ class ChecklistConfig:
     on_unavailable: str = "error"
     unverified_from: str = ""
     curate: CurationConfig | None = None
+    acceptance: AcceptanceConfig | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "questions", tuple(self.questions))
@@ -267,9 +299,10 @@ class ChecklistConfig:
         """Roles whose outputs this checklist reads or edits (for DAG validation)."""
 
         names = {question.foreach.role for question in self.questions if question.foreach}
+        sections = (*self.state, *(self.acceptance.state if self.acceptance else ()))
         names.update(
             section.source
-            for section in self.state
+            for section in sections
             if section.source not in _REQUEST_SOURCES and section.source != _TOOLS_SOURCE
         )
         if self.curate is not None:
@@ -306,6 +339,8 @@ class ChecklistVerdict:
     text: str
     usage: tuple[int, int] = (0, 0)
     reads: int = 0
+    # The acceptance read's probability; None without one.
+    acceptance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -317,6 +352,7 @@ class VerificationReport:
     threshold: float | None
     items: tuple[ChecklistItem, ...] = ()
     attempts: int = 0
+    acceptance: float | None = None
 
     def as_markdown(self) -> str:
         """A readable summary for clients that only show reasoning text."""
@@ -331,6 +367,8 @@ class VerificationReport:
         if self.threshold is not None:
             lines.append(f"- Threshold: p >= {self.threshold}")
         lines.append(f"- Attempts: {self.attempts}")
+        if self.acceptance is not None:
+            lines.append(f"- Accepted as the reply: p={self.acceptance:.3f}")
         if self.items:
             lines.append("")
         for item in self.items:
@@ -344,6 +382,7 @@ class VerificationReport:
             "reason": self.reason,
             "threshold": self.threshold,
             "attempts": self.attempts,
+            **({"acceptance": round(self.acceptance, 6)} if self.acceptance is not None else {}),
             "requirements": [item.as_dict() for item in self.items],
         }
 
@@ -571,9 +610,18 @@ def _aggregate(
     return items
 
 
-def feedback_text(config: ChecklistConfig, items: Sequence[ChecklistItem]) -> str:
+def feedback_text(
+    config: ChecklistConfig,
+    items: Sequence[ChecklistItem],
+    acceptance: float | None = None,
+) -> str:
     failing = [item for item in items if not item.passed]
-    if not failing:
+    if acceptance is not None:
+        if acceptance >= config.acceptance.threshold:
+            return "PASS"
+        if not failing:
+            return f"FAIL\nThe answer was not accepted as the reply (p={acceptance:.2f})."
+    elif not failing:
         return "PASS"
     lines = ["FAIL", config.feedback_header]
     for item in failing:
@@ -597,6 +645,7 @@ async def judge(
     outputs: Mapping[str, str],
     query: str,
     tools: Sequence[Mapping[str, object]] = (),
+    tool_choice: object = None,
 ) -> ChecklistVerdict:
     """One verdict: every question in one System One request."""
 
@@ -614,7 +663,7 @@ async def judge(
             "checklist_unavailable",
             f"{len(pending)} questions exceed the limit of {config.max_questions}",
         )
-    state = build_state(config.state, outputs, query, tools)
+    state = build_state(config.state, outputs, query, tools, tool_choice)
     size = len(json.dumps(state, ensure_ascii=False))
     if config.max_state_chars is not None and size > config.max_state_chars:
         raise ChecklistUnavailable(
@@ -623,13 +672,68 @@ async def judge(
         )
     yes, usage = await _decide(backend, config, state, pending)
     items = tuple(_aggregate(pending, yes))
-    return ChecklistVerdict(
-        passed=all(item.passed for item in items),
-        items=items,
-        text=feedback_text(config, items),
-        usage=usage,
-        reads=1,
+    if config.acceptance is None:
+        return ChecklistVerdict(
+            passed=all(item.passed for item in items),
+            items=items,
+            text=feedback_text(config, items),
+            usage=usage,
+            reads=1,
+        )
+    acceptance, accept_usage = await _accept(
+        backend, config, config.acceptance, items, outputs, query, tools, tool_choice
     )
+    usage = (usage[0] + accept_usage[0], usage[1] + accept_usage[1])
+    return ChecklistVerdict(
+        passed=acceptance >= config.acceptance.threshold,
+        items=items,
+        text=feedback_text(config, items, acceptance),
+        usage=usage,
+        reads=2,
+        acceptance=acceptance,
+    )
+
+
+async def _accept(
+    backend: DecisionBackend,
+    config: ChecklistConfig,
+    acceptance: AcceptanceConfig,
+    items: Sequence[ChecklistItem],
+    outputs: Mapping[str, str],
+    query: str,
+    tools: Sequence[Mapping[str, object]],
+    tool_choice: object,
+) -> tuple[float, tuple[int, int]]:
+    """The acceptance read: one question over its state and the item results."""
+
+    state = build_state(acceptance.state, outputs, query, tools, tool_choice)
+    state[acceptance.results_key] = [
+        {"id": item.id, "point": item.proposition, "p": round(item.p, 4), "passed": item.passed}
+        for item in items
+    ]
+    size = len(json.dumps(state, ensure_ascii=False))
+    if config.max_state_chars is not None and size > config.max_state_chars:
+        raise ChecklistUnavailable(
+            "checklist_unavailable",
+            f"acceptance state of {size} characters exceeds {config.max_state_chars}",
+        )
+    question: dict[str, object] = {"type": "noul", "instructions": acceptance.ask}
+    if acceptance.criteria_true or acceptance.criteria_false:
+        question["criteria"] = {
+            "true": acceptance.criteria_true,
+            "false": acceptance.criteria_false,
+        }
+    pending = [
+        _PendingQuestion(
+            item_id="acceptance",
+            proposition=acceptance.ask,
+            group="acceptance",
+            payload=question,
+            threshold=acceptance.threshold,
+        )
+    ]
+    (p,), usage = await _decide(backend, config, state, pending)
+    return p, usage
 
 
 def _cut(text: str, limit: int | None) -> str:
@@ -638,32 +742,30 @@ def _cut(text: str, limit: int | None) -> str:
     return f"{text[:limit]}\n[... {len(text) - limit} more characters cut ...]"
 
 
-def _with_tool_calls(text: str, max_chars: int | None) -> dict[str, object] | None:
+def _with_tool_calls(
+    text: str,
+    max_chars: int | None,
+    selection: tuple[str, frozenset[str], str | None] | None,
+) -> dict[str, object] | None:
     """A role output holding tool calls as ``{text, tool_calls}``, else None.
 
     Only calls the public API would publish become calls (the shared rules in
-    :mod:`kairyu.tool_call_markup`), so the judge reads them as calls the
-    caller will execute. ``max_chars`` still bounds the result: the text is cut
-    first; output still too long falls back to the cut raw text.
+    :mod:`kairyu.tool_call_markup`, including the caller's tool choice), so the
+    judge reads them as calls the caller will execute. Like the API, a reply
+    that publishes calls carries no text. ``max_chars`` still bounds the
+    result: output too long falls back to the cut raw text.
     """
 
-    remaining, calls = generic_tool_calls(text)
+    _remaining, calls = generic_tool_calls(text, selection)
     if not calls:
         return None
-    structured: dict[str, object] = {"text": remaining.strip(), "tool_calls": calls}
+    # The public API drops the content of a reply that publishes calls.
+    structured: dict[str, object] = {"text": "", "tool_calls": calls}
     if max_chars is None:
         return structured
-    size = len(json.dumps(structured, ensure_ascii=False))
-    if size <= max_chars:
+    if len(json.dumps(structured, ensure_ascii=False)) <= max_chars:
         return structured
-    # Leave room for the cut marker _cut appends.
-    room = max_chars - (size - len(json.dumps(structured["text"], ensure_ascii=False))) - 64
-    if room <= 0:
-        return None
-    structured["text"] = _cut(str(structured["text"]), room)
-    if len(json.dumps(structured, ensure_ascii=False)) > max_chars:
-        return None
-    return structured
+    return None
 
 
 def _request_messages(messages: list[object]) -> list[object]:
@@ -690,6 +792,7 @@ def build_state(
     outputs: Mapping[str, str],
     query: str,
     tools: Sequence[Mapping[str, object]] = (),
+    tool_choice: object = None,
 ) -> dict[str, object]:
     """The System One state object: one field per section.
 
@@ -729,7 +832,9 @@ def build_state(
                 continue
             except ValueError:
                 pass
-            structured = _with_tool_calls(raw, section.max_chars)
+            structured = _with_tool_calls(
+                raw, section.max_chars, tool_selection(tools, tool_choice)
+            )
             if structured is not None:
                 state[section.key] = structured
                 continue
@@ -806,10 +911,12 @@ def verdict_report(
         threshold=threshold,
         items=verdict.items,
         attempts=attempts,
+        acceptance=verdict.acceptance,
     )
 
 
 __all__ = [
+    "AcceptanceConfig",
     "ChecklistConfig",
     "ChecklistItem",
     "ChecklistQuestion",

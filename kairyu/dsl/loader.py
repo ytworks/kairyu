@@ -18,6 +18,7 @@ from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.checklist import (
+    AcceptanceConfig,
     ChecklistConfig,
     ChecklistQuestion,
     CurationConfig,
@@ -113,15 +114,7 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
             )
             for question in spec.questions
         ),
-        state=tuple(
-            StateSection(
-                key=section.key,
-                source=section.source,
-                max_chars=section.max_chars,
-                max_total_chars=section.max_total_chars,
-            )
-            for section in spec.state
-        ),
+        state=_state_sections(spec.state),
         subject=spec.subject,
         threshold=spec.threshold,
         samples=spec.samples,
@@ -147,6 +140,30 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
                 id_key=spec.curate.id_key,
             )
         ),
+        acceptance=(
+            None
+            if spec.acceptance is None
+            else AcceptanceConfig(
+                ask=spec.acceptance.ask,
+                state=_state_sections(spec.acceptance.state),
+                criteria_true=spec.acceptance.criteria_true,
+                criteria_false=spec.acceptance.criteria_false,
+                threshold=spec.acceptance.threshold,
+                results_key=spec.acceptance.results_key,
+            )
+        ),
+    )
+
+
+def _state_sections(sections) -> tuple[StateSection, ...]:
+    return tuple(
+        StateSection(
+            key=section.key,
+            source=section.source,
+            max_chars=section.max_chars,
+            max_total_chars=section.max_total_chars,
+        )
+        for section in sections
     )
 
 

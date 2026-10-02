@@ -9,6 +9,7 @@ from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.systemone import SystemOneReply, SystemOneUnavailableError
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.checklist import (
+    AcceptanceConfig,
     ChecklistConfig,
     ChecklistQuestion,
     CurationConfig,
@@ -490,28 +491,49 @@ async def test_a_seed_republishes_the_curated_list_not_the_generated_one():
     assert result.completions[0].text == result.final_text
 
 
-async def test_a_judged_tool_call_reaches_the_judge_as_a_call():
+BASH = ({"type": "function", "function": {"name": "bash"}},)
+LOOKUP = ({"type": "function", "function": {"name": "lookup"}},)
+
+
+async def test_a_judged_tool_call_reaches_the_judge_as_the_api_publishes_it():
     # DeepSWE (PR #618): as <tool_call> markup inside text, Jev doubted that a
-    # real call was present ("includes a bash call" p 0.74).
+    # real call was present ("includes a bash call" p 0.74). Like the API, a
+    # reply that publishes calls carries no text, so the judge never credits
+    # text the caller will not receive.
     call = '<tool_call>{"name":"bash","arguments":{"command":"ls -la"}}</tool_call>'
     backend = RoutedBackend({"generator": [f"Look first.{call}"]})
     judge = FakeSystemOne()
-    conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
+    conductor = Conductor(
+        _answer_roles(), {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
+    )
 
     await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
     assert judge.bodies[0]["state"]["answer"] == {
-        "text": "Look first.",
+        "text": "",
         "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}],
     }
 
 
-async def test_the_judge_reads_as_calls_only_what_the_api_publishes():
-    # PR #618 review: the public API does not publish this payload as a call.
-    payload = '{"name":"bash","arguments":[]}'
+@pytest.mark.parametrize(
+    ("payload", "tools", "tool_choice"),
+    [
+        # PR #618 reviews: the public API publishes none of these as a call.
+        ('{"name":"bash","arguments":[]}', BASH, None),
+        ('{"name":"bash","arguments":{}}', LOOKUP, None),
+        ('{"name":"bash","arguments":{}}', BASH, "none"),
+    ],
+)
+async def test_the_judge_reads_as_calls_only_what_the_api_publishes(payload, tools, tool_choice):
     backend = RoutedBackend({"generator": [f"Look.<tool_call>{payload}</tool_call>"]})
     judge = FakeSystemOne()
-    conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
+    conductor = Conductor(
+        _answer_roles(),
+        {"gen": backend},
+        decision_workers={"judge": judge},
+        final_tools=tools,
+        final_tool_choice=tool_choice,
+    )
 
     await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
@@ -542,7 +564,9 @@ async def test_a_structured_tool_output_keeps_its_character_bound():
         ),
     )
     judge = FakeSystemOne()
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+    conductor = Conductor(
+        roles, {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
+    )
 
     await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
@@ -591,3 +615,74 @@ async def test_a_checklist_with_nothing_to_judge_never_guarantees():
     assert result.verification.guaranteed is False
     assert result.verification.reason == "checklist_unavailable"
     assert judge.bodies == []
+
+
+def _accepting_roles(threshold: float = 0.5) -> tuple[RoleSpec, ...]:
+    roles = _answer_roles()
+    config = roles[2].checklist
+    return (
+        *roles[:2],
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=config.questions,
+                state=config.state,
+                threshold=config.threshold,
+                max_refinements=2,
+                acceptance=AcceptanceConfig(
+                    ask="May this answer be adopted?",
+                    state=(StateSection("answer", "answer"),),
+                    threshold=threshold,
+                ),
+            ),
+        ),
+    )
+
+
+async def test_the_acceptance_read_decides_the_guarantee_over_the_point_results():
+    # VCO-D15 (wave 4): Jev reads the point results and the answer and decides
+    # whether the answer may be adopted; a missed point alone does not decide.
+    backend = RoutedBackend({"generator": ["It is 41."]})
+
+    def rule(state, question):
+        if "adopted" in question:
+            assert state["checklist"][0]["passed"] is False
+            return 0.9
+        return 0.1
+
+    judge = FakeSystemOne(rule)
+    conductor = Conductor(_accepting_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    coverage, acceptance = judge.bodies
+    assert set(acceptance["state"]) == {"answer", "checklist"}
+    assert acceptance["state"]["checklist"][0]["point"] == "states the answer 42"
+    report = result.verification.as_dict()
+    assert report["guaranteed"] is True and report["acceptance"] == pytest.approx(0.9)
+    assert report["requirements"][0]["passed"] is False
+
+
+async def test_a_rejected_answer_is_repaired_on_its_missed_points_and_judged_again():
+    backend = RoutedBackend({"generator": ["It is 41."], "repair": ["The answer is 42."]})
+
+    def rule(state, question):
+        if "adopted" in question:
+            return 0.9 if all(item["passed"] for item in state["checklist"]) else 0.1
+        return _contains_42(state, question)
+
+    judge = FakeSystemOne(rule)
+    conductor = Conductor(_accepting_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.final_text == "The answer is 42."
+    assert result.verification.guaranteed is True and result.verification.attempts == 2
+    repair = next(p for p in backend.prompts if p.startswith("[repair]"))
+    assert "It is 41." in repair and "[R1] states the answer 42" in repair
+    assert len(judge.bodies) == 4

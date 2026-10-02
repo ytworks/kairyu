@@ -64,6 +64,7 @@ from kairyu.sampling_params import (
 )
 from kairyu.tool_call_markup import (
     GENERIC_TOOL_CALL,
+    call_is_selected,
     strict_json_loads,
     tool_call_payload,
 )
@@ -1474,8 +1475,12 @@ def _build_choice(
         tool_calls = [
             call
             for call in _parse_tool_calls(text, tools, tool_call_protocol)
-            if call.function.name in tool_choice.allowed_names
-            and (tool_choice.named is None or call.function.name == tool_choice.named)
+            if call_is_selected(
+                call.function.name,
+                tool_choice.mode,
+                tool_choice.allowed_names,
+                tool_choice.named,
+            )
         ]
     if tool_calls:
         return Choice(

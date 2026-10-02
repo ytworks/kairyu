@@ -100,6 +100,8 @@ def _openjev(
         if question["type"] == "choice":
             other = next(label for label in question["criteria"] if label != route)
             return {"type": "choice", "probabilities": {route: 0.9, other: 0.1}}
+        if "adopted as the official reply" in text:
+            return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
         if "Must the reply the assistant gives now meet this point" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
         for point, needed in (covered_by or {}).items():
@@ -225,7 +227,7 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
     assert by_role["extract"]["response_format"]["type"] == "json_schema"
     assert by_role["implicit"]["response_format"]["type"] == "json_schema"
     # Two System One requests, one per stage, on the OpenJev replicas.
-    adopt, coverage = reads
+    adopt, coverage, acceptance = reads
     assert {read["replica"] for read in reads} <= {"openjev-0", "openjev-1"}
     # Adoption: every point of both lists, judged against the request
     # verbatim (system/developer + latest user) and the history summary.
@@ -244,6 +246,9 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
         "answer": "Paris",
     }
     assert len(coverage["questions"]) == 3
+    # Acceptance: the point results, the answer and the original prompt.
+    assert set(acceptance["state"]) == {"prompt", "answer", "checklist"}
+    assert acceptance["state"]["prompt"] == adopt["state"]["request"]
 
 
 async def test_a_missing_point_is_repaired_then_guaranteed() -> None:
@@ -263,6 +268,7 @@ async def test_a_missing_point_is_repaired_then_guaranteed() -> None:
     repair = next(_text(body) for body in seen if _text(body).startswith("[repair]"))
     assert "[E1] names Paris" in repair and "[E2]" not in repair
     assert "It is the city on the Seine." in repair
+    assert "--- ORIGINAL PROMPT ---" in repair
 
 
 async def test_a_point_the_request_does_not_need_is_never_judged() -> None:

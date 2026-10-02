@@ -12,6 +12,10 @@ threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
 upper bound on the violation rate <= alpha on the calibration half; the
 held-out half is reported unchanged.
 
+tau_accept (VCO-D15 item 7) is chosen the same way for the acceptance read,
+one per response, labelled acceptable when every requirement label is yes;
+the checklist runs whole (coverage then acceptance), as in serving.
+
 Usage: ./verify.sh calibrate   (after ./run.sh up)
 """
 
@@ -197,11 +201,7 @@ def _requirement_checklist() -> ChecklistConfig:
     return dataclasses.replace(config, questions=(point,))
 
 
-def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
-    """P(requirement satisfied) per requirement, via the production checklist."""
-
-    del roles
-    config = _requirement_checklist()
+def _outputs(sample: dict) -> tuple[list[dict], dict[str, str]]:
     requirements = [
         {"id": f"Q{index}", "point": text}
         for index, text in enumerate(sample["statements"], start=1)
@@ -211,21 +211,44 @@ def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
         "answer": sample["answer"],
         "history": sample["history"],
     }
-    query = _query(sample["request"])
+    return requirements, outputs
 
-    async def read() -> list[float]:
+
+def _read(config: ChecklistConfig, sample: dict):
+    _requirements, outputs = _outputs(sample)
+
+    async def read():
         # The serving path: the L2 reads both OpenJev replicas directly.
         backend = HTTPSystemOneBackend(
             base_urls=OPENJEV_URLS, upstream_model=SPEC["systemone"]["model"], timeout_s=600
         )
         try:
-            verdict = await judge_checklist(config, backend, outputs, query)
+            return await judge_checklist(config, backend, outputs, _query(sample["request"]))
         finally:
             await backend.shutdown()
-        by_id = {item.id: item.p for item in verdict.items}
-        return [by_id[item["id"]] for item in requirements]
 
     return asyncio.run(read())
+
+
+def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
+    """P(requirement satisfied) per requirement, via the production checklist."""
+
+    del roles
+    config = dataclasses.replace(_requirement_checklist(), acceptance=None)
+    requirements, _ = _outputs(sample)
+    verdict = _read(config, sample)
+    by_id = {item.id: item.p for item in verdict.items}
+    return [by_id[item["id"]] for item in requirements]
+
+
+def accept(sample: dict) -> float:
+    """P(accepted as the reply), via the production checklist with acceptance."""
+
+    config = _requirement_checklist()
+    assert config.acceptance is not None
+    verdict = _read(config, sample)
+    assert verdict.acceptance is not None
+    return verdict.acceptance
 
 
 def _binomial_cdf(k: int, n: int, p: float) -> float:
@@ -340,6 +363,39 @@ def main() -> None:
         report["holdout_responses"] = response_level(halves["holdout"], chosen["tau"])
     (directory / "tau.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+
+    accept_cache = directory / "judged-acceptance-v1.jsonl"
+    accepted = {}
+    if accept_cache.is_file():
+        for line in accept_cache.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            accepted[(row["id"], row["model"])] = row["acceptance"]
+    pending = [row for row in judged if (row["id"], row["model"]) not in accepted]
+    print(f"{len(pending)} responses to read for acceptance", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for row, value in zip(pending, pool.map(accept, pending), strict=True):
+            accepted[(row["id"], row["model"])] = value
+            with accept_cache.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps({"id": row["id"], "model": row["model"], "acceptance": value})
+                    + "\n"
+                )
+    responses = {
+        name: [(accepted[(row["id"], row["model"])], int(0 not in row["labels"])) for row in part]
+        for name, part in halves.items()
+    }
+    chosen = choose_tau(responses["calibration"], alpha, confidence)
+    acceptance = {
+        "responses": {name: len(values) for name, values in responses.items()},
+        "unacceptable": {
+            name: [label for _p, label in values].count(0) for name, values in responses.items()
+        },
+        "calibration": chosen,
+    }
+    if chosen["tau"] is not None:
+        acceptance["holdout"] = accepted_stats(responses["holdout"], chosen["tau"], confidence)
+    (directory / "tau-accept.json").write_text(json.dumps(acceptance, indent=2), encoding="utf-8")
+    print(json.dumps(acceptance, indent=2))
 
 
 if __name__ == "__main__":
