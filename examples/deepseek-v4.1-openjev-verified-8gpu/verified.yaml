@@ -472,7 +472,8 @@ roles:
       Fix only the parts these conditions concern and change nothing else.
       Never write that an action was carried out unless the conversation
       contains that tool call and its result. Output the complete revised
-      answer and nothing else. If the draft is cut off or degenerate (a
+      answer and nothing else; when the answer is a tool call, emit it through
+      the tool interface, never as text. If the draft is cut off or degenerate (a
       number or text repeating without end), do not edit it: write the answer
       anew from the conversation.
       --- CONVERSATION ---

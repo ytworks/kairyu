@@ -897,9 +897,22 @@ class Conductor:
     ]:
         if self._head is not None and spec.name == self._head.name:
             return (self._head_sampling_params(), (), None, False, None, "generic")
-        if spec.name == self._selected_final_unit().name:
+        final = self._selected_final_unit()
+        if spec.name == final.name:
             return (
                 self._final_unit_sampling_params(run),
+                self._final_tools,
+                self._final_tool_choice,
+                self._final_tools_in_prompt,
+                self._final_parallel_tool_calls,
+                self._final_tool_call_protocol,
+            )
+        if spec.name == final.seed_from:
+            # A seeded final unit publishes its seed's draft unchanged, so
+            # that draft must be written under the caller's tool contract
+            # (issue #617); sampling stays the seed role's own.
+            return (
+                self._role_sampling_params(spec),
                 self._final_tools,
                 self._final_tool_choice,
                 self._final_tools_in_prompt,
@@ -2527,9 +2540,17 @@ class Conductor:
             return False
         published = verdict
         if not verdict.passed and config.on_exhausted == "latest_checks_passed":
+            # An empty attempt passes the deterministic checks vacuously;
+            # publishing it over a non-empty one turns an exhausted
+            # refinement into a failed request (issue #617).
+            visible = [
+                attempt
+                for attempt in attempts
+                if self._has_public_output(attempt[0], attempt[1])
+            ] or attempts
             chosen = next(
-                (attempt for attempt in reversed(attempts) if attempt[2].checks_passed),
-                attempts[0],
+                (attempt for attempt in reversed(visible) if attempt[2].checks_passed),
+                visible[0],
             )
             self._publish_attempt(
                 run, spec, chosen[0], chosen[1], is_final_unit=is_final_unit

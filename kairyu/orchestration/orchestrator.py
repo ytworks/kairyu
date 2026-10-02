@@ -171,6 +171,10 @@ class OrchestratorExecutionError(RuntimeError):
         self.result = result
 
 
+class EmptyFinalOutput(RuntimeError):
+    """The selected final unit produced no caller-visible text."""
+
+
 class _DirectExecutionError(RuntimeError):
     def __init__(self, cause: BaseException, event: TraceEvent) -> None:
         super().__init__(type(cause).__name__)
@@ -2469,7 +2473,7 @@ class Orchestrator:
                 # after its retry; publishing an internal stage or an empty
                 # "stop" would be a silent lie to the caller (issue #496).
                 raise OrchestratorExecutionError(
-                    RuntimeError("orchestration final unit produced no public output"),
+                    EmptyFinalOutput("orchestration final unit produced no public output"),
                     result_with_trace(
                         text="",
                         prompt_tokens=result.usage[0],

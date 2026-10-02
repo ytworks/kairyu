@@ -287,12 +287,26 @@ final checklist could not read it and the whole answer ended
 to work out the answer itself, and implicit_check writes a broken list once
 more (max_refinements 1; worst case 20 steps, budget 24).
 
+### VCO-D14 — The caller's tools reach the published draft (2026-10-02, issue #617)
+
+DeepSWE (mini-swe-agent, `tools=[bash]`) got HTTP 200 answers whose tool
+calls were plain text (`<invoke name="bash">`, `Tool: bash`), so the agent
+executed nothing; two turns ended HTTP 502 `EmptyFinalOutput`. Cause: only
+the final unit (`answer`) carried the caller's tools, but its attempt 0 is the
+generator's draft, which was generated without them; and `latest_checks_passed`
+published an empty last repair over a non-empty draft. Fix (m1 D8
+amendment): the seed of a seeded final unit is generated under the caller's
+tool contract, and exhaustion never chooses an empty attempt when a non-empty
+one exists. The repair prompt now tells DeepSeek to emit a tool call through
+the tool interface, never as text.
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
   first token is the whole pipeline).
-- Tool-calling turns are not this example's surface: the published answer is
-  the generator's text; tools in the request are context only.
+- Tool-calling turns are served (VCO-D14), but the checklist reads a tool
+  call as `<tool_call>` text, so a requirement such as "calls bash" is judged
+  semantically, not by the call's structure.
 - The routing set is author-labelled with clear-cut categories; borderline
   requests are not measured by it.
 - Thresholds other than tau_hi (0.5 for necessity, sufficiency and

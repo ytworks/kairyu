@@ -1,6 +1,7 @@
 """Checklist verifiers: deterministic checks, System One reads, and the
 guarantee report published with the final answer."""
 
+import dataclasses
 import json
 
 import pytest
@@ -26,10 +27,12 @@ class RoutedBackend:
     def __init__(self, replies: dict[str, list[str]]) -> None:
         self._replies = {tag: list(texts) for tag, texts in replies.items()}
         self.prompts: list[str] = []
+        self.requests: list[GenerationRequest] = []
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         prompt = str(request.prompt)
         self.prompts.append(prompt)
+        self.requests.append(request)
         tag = prompt.split("]", 1)[0].lstrip("[")
         text = self._replies[tag].pop(0)
         return GenerationResult(
@@ -207,6 +210,55 @@ async def test_exhausted_refinements_publish_the_latest_attempt_that_passed_chec
     assert report["guaranteed"] is False and report["reason"] == "refinement_limit"
     assert report["attempts"] == 3
     assert [p.split("]")[0] for p in backend.prompts].count("[repair") == 2
+
+
+async def test_exhausted_refinements_never_publish_an_empty_repair_over_a_draft():
+    # Issue #617: an empty repair passes the deterministic checks vacuously
+    # and must not replace the non-empty draft, which failed the request.
+    roles = _answer_roles()
+    roles = (
+        *roles[:3],
+        dataclasses.replace(roles[3], checklist=dataclasses.replace(roles[3].checklist, checks=())),
+    )
+    backend = RoutedBackend(
+        {
+            "generator": ["The answer is 42, says the moon."],
+            "repair": ["", "", "", ""],
+            "claims": [_claims("says the moon"), *[_claims("says the void")] * 2],
+        }
+    )
+    judge = FakeSystemOne({"says the": 0.3})
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=16))
+
+    assert result.final_unit_ok
+    assert result.final_text == "The answer is 42, says the moon."
+    report = result.verification.as_dict()
+    assert report["guaranteed"] is False and report["reason"] == "refinement_limit"
+
+
+async def test_seed_of_the_final_unit_is_generated_under_the_caller_tool_contract():
+    # Issue #617: the seeded answer publishes the generator's draft as-is, so
+    # only a draft written with the caller's tools can carry a real tool call.
+    tools = ({"type": "function", "function": {"name": "bash"}},)
+    backend = RoutedBackend(
+        {"generator": ["The answer is 42."], "claims": [_claims("The answer is 42.")]}
+    )
+    conductor = Conductor(
+        _answer_roles(),
+        {"gen": backend},
+        decision_workers={"judge": FakeSystemOne({})},
+        final_tools=tools,
+        final_tool_choice="auto",
+    )
+
+    await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    by_role = {str(r.prompt).split("]")[0].lstrip("["): r for r in backend.requests}
+    assert by_role["generator"].tools == tools
+    assert by_role["generator"].tool_choice == "auto"
+    assert by_role["claims"].tools == ()
 
 
 async def test_unavailable_judge_publishes_the_draft_unverified():

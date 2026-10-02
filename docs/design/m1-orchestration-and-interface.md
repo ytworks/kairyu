@@ -238,6 +238,16 @@ mechanism, independent of the example. (4) The mechanism knows checks,
 questions, thresholds and outcomes; which requirements exist, their wording,
 thresholds, repair prompts and curation policy stay in the example's YAML.
 
+Amendment (2026-10-02, issue #617): a seeded final unit publishes its
+seed's draft unchanged, so the seed role is now generated under the caller's
+tool contract (tools, tool_choice, tool protocol) with its own sampling;
+before, a DSL whose seed answered an agent turn published tool calls written
+as plain text. `latest_checks_passed` now chooses among attempts with
+caller-visible text (an empty attempt passes the deterministic checks
+vacuously) and falls back to the first non-empty one, so an empty last repair
+no longer turns an exhausted refinement into an empty-output failure. The
+unary empty-output failure reports `EmptyFinalOutput`, like the stream.
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in

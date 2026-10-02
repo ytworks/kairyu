@@ -76,7 +76,8 @@ requirement table; internal stages are folded below the answer.
 ## Limits
 
 - A verified answer is not streamed before its checklist finishes.
-- Tool-calling turns are not this example's surface (tools are context only).
+- Tool calls are judged as text: a requirement such as "calls bash" is read
+  semantically, not checked against the call's structure.
 - Only τ_hi is calibrated (InFoBench, α = 0.10); the 0.5 thresholds of the
   requirement confirmation are defaults.
 - Claim-level groundedness is advisory: no threshold met α = 0.10 on
