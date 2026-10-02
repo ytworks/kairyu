@@ -67,7 +67,11 @@ from kairyu.orchestration.trace import (
     utc_now_iso,
 )
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import PARALLEL_TOOL_CALLS_EXTRA_ARG, SamplingParams
+from kairyu.sampling_params import (
+    PARALLEL_TOOL_CALLS_EXTRA_ARG,
+    SamplingParams,
+    resolve_parallel_tool_calls,
+)
 
 _PASS_PREFIX = "PASS"
 
@@ -885,13 +889,16 @@ class Conductor:
         if spec.name == final.seed_from:
             # A seeded final unit publishes its seed's draft unchanged, so
             # that draft must be written under the caller's tool contract
-            # (issue #617); sampling stays the seed role's own.
+            # (issue #617); sampling stays the seed role's own, which drops
+            # the legacy extra_args carrier of parallel_tool_calls.
             return (
                 self._role_sampling_params(spec),
                 self._final_tools,
                 self._final_tool_choice,
                 self._final_tools_in_prompt,
-                self._final_parallel_tool_calls,
+                resolve_parallel_tool_calls(
+                    self._final_parallel_tool_calls, self._final_sampling_params.extra_args
+                ),
                 self._final_tool_call_protocol,
             )
         return self._role_sampling_params(spec), (), None, False, None, "generic"
@@ -3036,8 +3043,10 @@ class Conductor:
             await self._run_unit(run, session, query, spec, event_sink=event_sink)
         except _ObservedGenerationError:
             self._mark_failed_final_unit(run, spec)
+            self._mark_unjudged_checklist(run, spec)
         except Exception as error:
             self._mark_failed_final_unit(run, spec)
+            self._mark_unjudged_checklist(run, spec)
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3049,6 +3058,18 @@ class Conductor:
                     error=TraceError(type=type(error).__name__),
                 )
             )
+
+    def _mark_unjudged_checklist(self, run: _RunState, spec: RoleSpec) -> None:
+        """A failed unit leaves its checklist unjudged: no later guarantee.
+
+        A guarantee needs every checklist of the run judged; a target that
+        failed before its checklist ran is the same as an unjudgeable one.
+        """
+
+        verifier = self._verifier_for.get(spec.name)
+        if verifier is not None and verifier.checklist is not None:
+            if verifier.checklist.questions:
+                run.decision_unavailable = run.decision_unavailable or "checklist_unavailable"
 
     def _mark_failed_final_unit(self, run: _RunState, spec: RoleSpec) -> None:
         """A failed selected final unit must not fall back to internal stages.

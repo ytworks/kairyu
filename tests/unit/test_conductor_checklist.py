@@ -3,6 +3,7 @@ lists, and the guarantee report published with the final answer."""
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -808,3 +809,52 @@ async def test_a_committed_head_is_a_public_answer_when_the_continuation_is_empt
 
     assert result.final_text == "42"
     assert result.verification.guaranteed is True and result.verification.attempts == 1
+
+
+async def test_a_failed_checklist_target_leaves_the_run_unguaranteed():
+    # Codex review: a failed `history` skipped its adoption checklist, yet
+    # the final checklist still guaranteed the answer.
+    backend = RoutedBackend({"generator": ["It is 42."]})  # no "history" reply: it fails
+    generator, *rest = _answer_roles()
+    roles = (
+        RoleSpec(name="history", worker="gen", prompt="[history] {query}"),
+        RoleSpec(
+            name="adopt",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="history",
+            depends_on=("history",),
+            checklist=ChecklistConfig(
+                questions=(ChecklistQuestion(id="N1", proposition="is needed"),),
+                state=(StateSection("history", "history"),),
+                max_refinements=0,
+                on_unavailable="publish_unverified",
+            ),
+        ),
+        replace(generator, depends_on=("history",)),
+        *rest,
+    )
+    judge = FakeSystemOne()
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.final_text == "It is 42."
+    assert result.verification.guaranteed is False
+    assert result.verification.reason == "checklist_unavailable"
+
+
+async def test_a_seed_keeps_the_callers_legacy_parallel_tool_restriction():
+    backend = RoutedBackend({"generator": ["It is 42."]})
+    conductor = Conductor(
+        _answer_roles(),
+        {"gen": backend},
+        decision_workers={"judge": FakeSystemOne()},
+        final_tools=BASH,
+        final_sampling_params=SamplingParams(extra_args={"parallel_tool_calls": False}),
+    )
+
+    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
+
+    assert backend.requests[0].parallel_tool_calls is False
