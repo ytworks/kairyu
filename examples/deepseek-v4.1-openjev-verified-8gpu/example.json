@@ -27,9 +27,9 @@
   },
   "orchestration": {
     "spec": "verified.yaml",
-    "roles": ["extract", "requirements_check", "generator", "answer", "state_builder", "checklist"],
+    "roles": ["extract", "implicit", "generator", "history", "adopt", "answer", "checklist"],
     "final_unit": "answer",
-    "budget": {"max_steps": 16, "max_refine_depth": 2}
+    "budget": {"max_steps": 12, "max_refine_depth": 2}
   },
   "deepseek": {
     "repo": "deepseek-ai/DeepSeek-V4.1-Flash",

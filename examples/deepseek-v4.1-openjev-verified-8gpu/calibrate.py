@@ -3,13 +3,13 @@
 
 InFoBench's expert annotation pairs model answers with decomposed yes/no
 requirements and a human pass/fail label for each. Every requirement is
-judged through this example's own production path: DeepSeek turns the
-question into a condition statement (like the extractor writes), the
-example's state builder lists the answer's claims, and OpenJev reads the
-example's checklist state and question wording through Kairyu's System One
-API. tau_hi is the smallest threshold whose accepted requirements have a
-one-sided 95 % Clopper-Pearson upper bound on the violation rate <= alpha on
-the calibration half; the held-out half is reported unchanged.
+judged through this example's own production path (VCO-D15): DeepSeek turns
+the question into a point statement (like the extractor writes), and OpenJev
+reads the example's coverage question for that point over the answer alone,
+through the same Kairyu checklist code as serving. tau_hi is the smallest
+threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
+upper bound on the violation rate <= alpha on the calibration half; the
+held-out half is reported unchanged.
 
 Usage: ./verify.sh calibrate   (after ./run.sh up)
 """
@@ -44,8 +44,8 @@ from kairyu.entrypoints.server.chat_service import (  # noqa: E402
     validate_orchestration_chat_input,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest  # noqa: E402
-from kairyu.orchestration.checklist import ChecklistConfig, ChecklistRun  # noqa: E402
-from kairyu.orchestration.request import conversation_text  # noqa: E402
+from kairyu.orchestration.checklist import ChecklistConfig  # noqa: E402
+from kairyu.orchestration.checklist import judge as judge_checklist  # noqa: E402
 
 SPEC = control.SPEC
 # InFoBench expert annotation (Easy and Hard subsets), Google Drive file ids
@@ -163,38 +163,33 @@ _STATEMENT_PROMPT = (
 
 
 def prepare(sample: dict, l1_url: str, roles: dict[str, dict]) -> dict:
-    """Condition statements and the state builder's claims for one sample."""
+    """Point statements for one sample."""
 
-    query = _query(sample["request"])
+    del roles
     statements = [
         _deepseek(l1_url, _STATEMENT_PROMPT.format(question=question)).strip()
         for question in sample["questions"]
     ]
-    builder = roles["state_builder"]
-    claims = _deepseek(
-        l1_url,
-        builder["prompt"].format_map(
-            {"query": query, "conversation": conversation_text(query), "answer": sample["answer"]}
-        ),
-        response_format=builder["sampling"]["response_format"],
-    )
-    return {**sample, "statements": statements, "claims": claims}
+    return {**sample, "statements": statements}
 
 
 def _requirement_checklist() -> ChecklistConfig:
-    """The production checklist reduced to its requirement questions.
+    """The production coverage checklist, reduced to its explicit-point question.
 
-    The same Kairyu code (ChecklistRun) builds the Jev state and questions
-    as in serving; only the deterministic checks and the per-claim G1
-    questions are left out, because InFoBench labels requirements only.
+    The same Kairyu code builds the Jev state and questions as in serving;
+    InFoBench's labelled requirements stand in for the explicit points.
     """
 
     spec = load_spec(HERE / "verified-always.yaml")
     node = next(role for role in spec.roles if role.name == "checklist")
     config = role_spec(node).checklist
     assert config is not None
-    requirement = next(question for question in config.questions if question.id == "{item[id]}")
-    return dataclasses.replace(config, checks=(), questions=(requirement,))
+    point = next(
+        question
+        for question in config.questions
+        if question.foreach is not None and question.foreach.role == "extract"
+    )
+    return dataclasses.replace(config, questions=(point,))
 
 
 def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
@@ -203,22 +198,12 @@ def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
     del roles
     config = _requirement_checklist()
     requirements = [
-        {
-            "id": f"Q{index}",
-            "proposition": text,
-            "kind": "semantic",
-            "origin": "explicit",
-            "sources": ["U1"],
-        }
+        {"id": f"Q{index}", "point": text}
         for index, text in enumerate(sample["statements"], start=1)
     ]
     outputs = {
-        "extract": json.dumps(
-            {"units": [{"id": "U1", "text": sample["request"]}], "requirements": requirements},
-            ensure_ascii=False,
-        ),
+        "extract": json.dumps({"points": requirements}, ensure_ascii=False),
         "answer": sample["answer"],
-        "state_builder": sample["claims"],
     }
     query = _query(sample["request"])
 
@@ -228,8 +213,7 @@ def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
             base_urls=OPENJEV_URLS, upstream_model=SPEC["systemone"]["model"], timeout_s=600
         )
         try:
-            run = ChecklistRun(config, target_text=sample["answer"], sources=query)
-            verdict = await run.decide(backend, outputs, query)
+            verdict = await judge_checklist(config, backend, outputs, query)
         finally:
             await backend.shutdown()
         by_id = {item.id: item.p for item in verdict.items}
@@ -299,7 +283,8 @@ def main() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     roles = _roles()
-    cache = directory / "judged.jsonl"
+    # VCO-D15 question and state; reads of the earlier format are not reused.
+    cache = directory / "judged-coverage.jsonl"
     done = {}
     if cache.is_file():
         for line in cache.read_text(encoding="utf-8").splitlines():

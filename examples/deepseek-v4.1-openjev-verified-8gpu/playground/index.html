@@ -35,7 +35,6 @@
   th { color:var(--muted); font-weight:500; }
   td.p { font-variant-numeric:tabular-nums; white-space:nowrap; }
   .fail { color:var(--bad); }
-  .advisory { color:var(--muted); }
   details pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; color:var(--muted); }
   .err { color:var(--bad); }
   .table-wrap { overflow-x:auto; }
@@ -44,8 +43,9 @@
 <body>
 <main>
   <h1>Verified Answers</h1>
-  <p class="sub">Every request takes the verified path (model kairyu-verified-always). DeepSeek-V4.1 writes the answer; OpenJev scores every requirement; Kairyu
-    publishes it with a guarantee flag only when every requirement passes.</p>
+  <p class="sub">Every request takes the verified path (model kairyu-verified-always). DeepSeek-V4.1 writes the answer and lists the points it must cover; OpenJev
+    keeps the points the request needs and checks that the answer contains each one; Kairyu publishes it with a guarantee
+    flag only when every point is covered.</p>
   <textarea id="prompt" placeholder="Ask anything. Paste material (documents, tool output) into the request."></textarea>
   <div class="row">
     <button id="send">Send</button>
@@ -60,10 +60,9 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const REASONS = {
-  refinement_limit: "Repair limit reached: the latest version that passed the deterministic checks",
+  refinement_limit: "Repair limit reached: the last answer, with the points it still misses",
   judge_unavailable: "The judge (OpenJev) was unavailable: the unverified draft",
-  checklist_unavailable: "The checklist could not be built or judged: the unverified draft",
-  requirements_unconfirmed: "The requirement checklist could not be confirmed sufficient: no guarantee",
+  checklist_unavailable: "The points could not be read or judged: the unverified draft",
   budget: "The orchestration budget ran out: the unverified draft",
 };
 function render(body, seconds) {
@@ -79,14 +78,11 @@ function render(body, seconds) {
   }
   html += `<div class="answer" style="margin-top:12px">${esc(message.content || "")}</div></div>`;
   if (v && v.requirements?.length) {
-    html += '<div class="card"><strong>Requirements</strong><div class="table-wrap"><table><tr><th>ID</th><th>Requirement</th><th>Kind</th><th>Units</th><th>p</th></tr>';
+    html += '<div class="card"><strong>Points</strong><div class="table-wrap"><table><tr><th>ID</th><th>Point</th><th>Origin</th><th>p</th></tr>';
     for (const r of v.requirements) {
-      // Advisory items (uncalibrated G1) are shown with their p but never gate the guarantee.
-      const advisory = r.tags?.guarantee === "advisory";
-      const mark = advisory ? "advisory" : r.passed ? "✓" : "✗";
-      html += `<tr class="${r.passed ? "" : "fail"}${advisory ? " advisory" : ""}"><td>${esc(r.id)}</td><td>${esc(r.proposition)}</td>`
-        + `<td>${esc(r.kind)}</td><td>${esc((r.sources || []).join(", "))}</td>`
-        + `<td class="p">${r.judged === false ? "not judged" : `${Number(r.p).toFixed(3)} ${mark}`}</td></tr>`;
+      html += `<tr class="${r.passed ? "" : "fail"}"><td>${esc(r.id)}</td><td>${esc(r.proposition)}</td>`
+        + `<td>${esc(r.tags?.origin || "")}</td>`
+        + `<td class="p">${Number(r.p).toFixed(3)} ${r.passed ? "✓" : "✗"}</td></tr>`;
     }
     html += "</table></div></div>";
   }

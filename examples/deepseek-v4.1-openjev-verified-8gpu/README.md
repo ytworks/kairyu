@@ -1,29 +1,102 @@
 # Checklist-verified answers: DeepSeek-V4.1 (6 GPUs) + OpenJev (2 GPUs)
 
 Every answer comes back with a guarantee flag. The flag is on only when the
-answer passed every requirement of a checklist that was confirmed necessary,
-sufficient and mutually exclusive with respect to the request; otherwise the
-best available answer is returned with the flag off and the reason.
-Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D1..D11);
-framework mechanisms: m1 D8 and the m11 D8 replica amendment.
+answer covers every point of a requirement set that is mutually exclusive
+and collectively exhaustive (MECE) with respect to the request: DeepSeek
+lists the points (one per issue, together covering the request), OpenJev
+keeps only the points the request needs, and OpenJev confirms that the
+answer contains each kept point. Otherwise the best available answer is
+returned with the flag off and the reason. No rule-based check judges an
+answer: every judgment is a model reading (VCO-D15).
+
+Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D1,
+D7-D9, D15); framework mechanisms: m1 D8 (checklist verifiers), m1 D9 (the
+System One route judge) and the m11 D8 replica amendment.
 
 | Layer | What runs here |
 |---|---|
 | L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). OpenJev (DiffusionGemma 26B-A4B NVFP4) on GPU 6 and GPU 7, published image unchanged, read only through System One. |
-| L2 | `verified.yaml`: extraction, requirement confirmation, generator, Validator, state builder, OpenJev reads, Conductor, repair (at most 2), fallback. |
-| L3 | One public model `kairyu-verified`; `kairyu_verification` on every answer; the answer page on :3013. |
+| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, generator, adoption read, coverage read, repair (at most 2), fallback. |
+| L3 | Public models `kairyu-verified` (routed) and `kairyu-verified-always`; `kairyu_verification` on every verified answer; the answer page on :3013. |
+
+## L2: how an answer is made
+
+### 1. The DAG
+
+Roles run in waves; roles in one wave run in parallel. DeepSeek writes,
+OpenJev only returns probabilities through System One, and Kairyu L2 runs
+every transition, the list edits and the threshold rule.
 
 ```text
-request ──► extract (DeepSeek, JSON) ──► requirements_check (checks + OpenJev) ─┐ re-extract once
-        └─► generator (DeepSeek, request only) ─► draft                         │
-                                                   ▼                            ▼
-             Validator (checks) ─FAIL─► repair (DeepSeek, ≤2) ─► Validator ...   checklist
-                 │PASS                                                         (curated)
-                 ▼
-             state builder (DeepSeek) ─► OpenJev reads ─► Conductor: every p ≥ τ_hi?
-                                              │ unavailable        │ yes        │ no
-                                              ▼                    ▼            ▼
-                                     draft, unverified      guaranteed     repair / limit
+request
+  │
+  ▼
+profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► deepseek_think (DeepSeek) ─► answer, no flag
+  │ VERIFIED (or kairyu-verified-always)
+  ▼
+┌─ wave 1 (parallel, DeepSeek) ───────────────────────────────────────────────────────┐
+│ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
+│ implicit   implicit points   {"points": [{"id": "I1", "point": ...}]}  at most four  │
+│ generator  the draft         from the conversation only, never from the points       │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+┌─ wave 2 ─────────────────────────────────────────────────────────────────────────────┐
+│ history    DeepSeek, no thinking: a summary of every message except the system /     │
+│            developer messages and the latest user message (earlier turns, tool       │
+│            calls, tool results)                                                      │
+│   └─ adopt  Jev, 1 request: is each point necessary to answer the request?           │
+│             p < 0.5 → the point leaves its list (extract or implicit)                │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+  │ adopted points
+  ▼
+┌─ wave 3 ─────────────────────────────────────────────────────────────────────────────┐
+│ answer     = the generator's draft, unchanged (no model call)                        │
+│   └─ checklist  Jev, 1 request: does the answer contain each adopted point?          │
+│                 a missed point → repair (DeepSeek), judged again, at most twice      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+With tools in the request (an agent loop), the answer is one assistant
+message whose tool calls the caller runs before asking again. The extractors
+then list what this one message must do now (call a tool instead of
+describing it, build on the latest tool results, move the task forward),
+never the completion of the whole task. The generator and every repair carry
+the caller's tools, so a tool call is returned as a structured `tool_calls`
+entry.
+
+### 2. The two Jev requests
+
+Each stage sends all of its questions in one System One request; every
+question is a `noul` (yes/no) read that returns P(yes).
+
+```text
+adopt (necessity)                              checklist (coverage)
+──────────────────────────────────────────    ──────────────────────────────────────────
+state:                                         state:
+  request: [system/developer messages,           answer: the reply exactly as it will be
+            latest user message]  (verbatim)             sent (a tool call in its text form)
+  history: the summary from `history`
+questions, one per point of both lists:        questions, one per adopted point:
+  "Is this point necessary to answer the         "Does the answer contain this point?"
+   request?"                                      yes: covers it fully
+  yes: an answer leaving it out would not         no:  leaves it out or covers it partly
+       answer the request as asked              threshold: τ_hi (calibrated, InFoBench)
+  no:  the request is answered fully without it
+threshold: drop below 0.5 (default)
+```
+
+### 3. Outcomes
+
+```text
+checklist read
+  ├─ every point p ≥ τ_hi ────────────────────────► guaranteed: true
+  ├─ some point missed ──► repair (DeepSeek, the missed points) ──► checklist read again
+  │                         └─ still missed after 2 repairs ───► the last non-empty answer,
+  │                                                              guaranteed: false (refinement_limit)
+  └─ Jev unavailable or a list unreadable ────────► the draft,
+                                                    guaranteed: false (judge_unavailable /
+                                                    checklist_unavailable)
 ```
 
 ## Run
@@ -51,40 +124,31 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 
 `kairyu_verification`:
 
-- `guaranteed: true` — every requirement passed; `requirements[]` lists each
-  one with `p`, its source instruction units and kind. Stated conditions
-  carry `origin: explicit`; conditions the situation presupposes (from a
-  second extractor, kept only when OpenJev judges them expected) carry
-  `origin: implicit`. Items tagged `guarantee: advisory` (G1-source:
-  OpenJev's support of each material-based claim) are shown with their `p`
-  but never block the flag: they failed calibration on human labels
-  (VCO-D11).
+- `guaranteed: true`: the answer contains every adopted point.
+  `requirements[]` lists each point with its `id` (`E…` explicit, `I…`
+  implicit), `proposition` (the point), `tags.origin` (`explicit` or
+  `implicit`), `p` and `passed`.
 - `guaranteed: false` with `reason`:
-  - `refinement_limit`: two repairs did not pass; the newest version that
-    passed the deterministic checks is returned.
+  - `refinement_limit`: two repairs still missed a point; the last
+    non-empty answer is returned with the points it misses.
   - `judge_unavailable`: neither OpenJev replica answered (down or
     overloaded); the generator's draft is returned as-is.
-  - `checklist_unavailable`: the checklist could not be built or exceeded
-    OpenJev's input window; the draft is returned.
-  - `requirements_unconfirmed`: the requirement checklist still left an
-    instruction unit uncovered after re-extraction and curation, so passing
-    it would prove nothing; the answer is returned without a guarantee.
+  - `checklist_unavailable`: a point list could not be read or the read
+    exceeded OpenJev's input window; the draft is returned.
+  - `budget`: the step budget ran out; the draft is returned.
 
 The answer page (`http://<host>:3013`) shows the badge, the reason and the
-requirement table; internal stages are folded below the answer.
+point table; internal stages are folded below the answer.
 
 ## Limits
 
 - A verified answer is not streamed before its checklist finishes.
-- Tool calls are judged as text: a requirement such as "calls bash" is read
-  semantically, not checked against the call's structure.
-- Only τ_hi is calibrated (InFoBench, α = 0.10); the 0.5 thresholds of the
-  requirement confirmation are defaults.
-- Claim-level groundedness is advisory: no threshold met α = 0.10 on
-  RAGTruth, PRM800K or FEVER (MEASUREMENTS.md), so a guaranteed answer can
-  still contain an unsupported claim that the deterministic checks
-  (G1-excerpts, G2, G3) do not catch. Reasoning and general-knowledge claims
-  are not listed at all (VCO-D12).
-- Latency: p50 about 5 minutes on long InFoBench requests (target 3
-  minutes, VCO-D12); a request that passes on the first attempt takes about
-  2-3 minutes.
+- Only τ_hi is calibrated (InFoBench, α = 0.10); the 0.5 necessity cut of
+  the adoption read is a default.
+- The guarantee covers what the request needs (the adopted points), not the
+  truth of every claim in the answer.
+- An extractor cut off before its JSON closes leaves its list unreadable;
+  the answer is then returned unverified (`checklist_unavailable`).
+- With tools, each assistant message is judged on its own points; whether
+  the whole agent run solves the task is not part of the flag.
+- Latency: measured in `MEASUREMENTS.md`.
