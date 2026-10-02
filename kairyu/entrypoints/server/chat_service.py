@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import re
 import time
 import uuid
@@ -63,8 +62,14 @@ from kairyu.sampling_params import (
     SamplingParams,
     resolve_parallel_tool_calls,
 )
+from kairyu.tool_call_markup import (
+    GENERIC_TOOL_CALL,
+    strict_json_loads,
+    tool_call_payload,
+)
 
-_TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_TOOL_CALL_PATTERN = GENERIC_TOOL_CALL
+_strict_json_loads = strict_json_loads
 _QWEN_FUNCTION_PATTERN = re.compile(
     r"\s*<function=([^>\n]+)>(.*?)</function>\s*", re.DOTALL
 )
@@ -1187,59 +1192,11 @@ def chat_error_from_upstream_client_error(
     )
 
 
-def _reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-finite JSON number {value!r}")
-
-
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-
-def _validate_finite_json(value: object) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError("JSON numbers must be finite")
-    if isinstance(value, Mapping):
-        for nested in value.values():
-            _validate_finite_json(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _validate_finite_json(nested)
-
-
-def _strict_json_loads(value: str) -> object:
-    parsed = json.loads(
-        value,
-        parse_constant=_reject_json_constant,
-        object_pairs_hook=_reject_duplicate_json_keys,
-    )
-    _validate_finite_json(parsed)
-    return parsed
-
-
 def _tool_call_from_payload(payload: object) -> ToolCall | None:
-    if not isinstance(payload, dict):
+    call = tool_call_payload(payload)
+    if call is None:
         return None
-    name = payload.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    arguments = payload.get("arguments", payload.get("parameters", {}))
-    if not isinstance(arguments, (dict, str)):
-        return None
-    try:
-        if isinstance(arguments, dict):
-            serialized_arguments = json.dumps(arguments, allow_nan=False)
-        else:
-            parsed_arguments = _strict_json_loads(arguments)
-            if not isinstance(parsed_arguments, dict):
-                return None
-            serialized_arguments = arguments
-    except (TypeError, ValueError, RecursionError):
-        return None
+    name, serialized_arguments = call
     return ToolCall(
         id=f"call_{uuid.uuid4().hex[:12]}",
         function=FunctionCall(name=name, arguments=serialized_arguments),

@@ -289,7 +289,11 @@ What a checklist does now:
 - Analysing roles may read `{tools}`, the caller's tool definitions, beside
   `{response_format}`.
 - A role output holding Kairyu's tool-call markup enters the state as
-  `{text, tool_calls}`, so the judge reads the calls as calls.
+  `{text, tool_calls}` (within the section's `max_chars`), so the judge reads
+  the calls as calls; only calls the public API would publish count, by the
+  rules shared with it in `kairyu/tool_call_markup.py`.
+- A state section may read `tools`, the caller's tool definitions.
+- A verdict with no item to judge is unavailable, never a pass.
 
 ### D9. System One profile judge (2026-10-01)
 

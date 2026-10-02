@@ -2338,6 +2338,7 @@ class Conductor:
                 self._decision_workers.get(verifier.worker),
                 {**run.outputs, target.name: text},
                 query,
+                self._final_tools,
             )
         except BaseException:
             run.budget = run.budget.release(unknown_cost=unknown_cost)

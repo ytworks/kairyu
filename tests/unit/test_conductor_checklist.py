@@ -504,3 +504,90 @@ async def test_a_judged_tool_call_reaches_the_judge_as_a_call():
         "text": "Look first.",
         "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}],
     }
+
+
+async def test_the_judge_reads_as_calls_only_what_the_api_publishes():
+    # PR #618 review: the public API does not publish this payload as a call.
+    payload = '{"name":"bash","arguments":[]}'
+    backend = RoutedBackend({"generator": [f"Look.<tool_call>{payload}</tool_call>"]})
+    judge = FakeSystemOne()
+    conductor = Conductor(_answer_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
+
+    assert judge.bodies[0]["state"]["answer"] == f"Look.<tool_call>{payload}</tool_call>"
+
+
+async def test_a_structured_tool_output_keeps_its_character_bound():
+    # PR #618 review: structuring bypassed max_chars, so a long text with one
+    # call exceeded max_state_chars and the checklist was never judged.
+    call = '<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>'
+    backend = RoutedBackend({"generator": ["x" * 6500 + call]})
+    roles = _answer_roles()
+    config = roles[2].checklist
+    roles = (
+        *roles[:2],
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=config.questions,
+                state=(StateSection("answer", "answer", max_chars=500),),
+                max_state_chars=1000,
+            ),
+        ),
+    )
+    judge = FakeSystemOne()
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
+
+    answer = judge.bodies[0]["state"]["answer"]
+    assert answer["tool_calls"] == [{"name": "bash", "arguments": {"command": "ls"}}]
+    assert len(json.dumps(answer)) <= 500
+
+
+async def test_a_checklist_with_nothing_to_judge_never_guarantees():
+    # DeepSWE (PR #618): adoption dropped every point and the answer was
+    # "guaranteed" without a single judged item.
+    roles = (
+        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            prompt="[answer] {query}",
+            depends_on=("points",),
+        ),
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role="points", path="points"),
+                    ),
+                ),
+                state=(StateSection("answer", "answer"),),
+                on_unavailable="publish_unverified",
+            ),
+        ),
+    )
+    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["Done."]})
+    judge = FakeSystemOne()
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("q", budget=Budget(max_steps=8))
+
+    assert result.verification.guaranteed is False
+    assert result.verification.reason == "checklist_unavailable"
+    assert judge.bodies == []

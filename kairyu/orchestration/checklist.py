@@ -33,6 +33,7 @@ from kairyu.orchestration.request import (
     bounded_conversation,
     conversation_messages,
 )
+from kairyu.tool_call_markup import generic_tool_calls
 
 # A JSON value as produced by json.loads.
 JSONValue = object
@@ -140,6 +141,8 @@ class ChecklistQuestion:
 
 # State sources read from the request rather than from a role output.
 _REQUEST_SOURCES = frozenset({"query", "request"})
+# The caller's tool definitions ("none" without tools).
+_TOOLS_SOURCE = "tools"
 
 
 @dataclass(frozen=True)
@@ -148,8 +151,10 @@ class StateSection:
 
     ``source`` is ``query`` (the whole request: its role-tagged messages when
     the query is Kairyu's chat transcript), ``request`` (only the system and
-    developer messages plus the latest user message, verbatim) or a role
-    name (its output, embedded as a JSON value when it parses as JSON). A
+    developer messages plus the latest user message, verbatim), ``tools``
+    (the caller's tool definitions, or "none") or a role name (its output,
+    embedded as a JSON value when it parses as JSON; tool-call markup becomes
+    ``{text, tool_calls}``). A
     text value longer than ``max_chars`` is cut with an explicit marker.
     ``max_total_chars`` bounds the messages of a ``query`` or ``request``
     section (``bounded_conversation``); the omitted middle is counted in
@@ -263,7 +268,9 @@ class ChecklistConfig:
 
         names = {question.foreach.role for question in self.questions if question.foreach}
         names.update(
-            section.source for section in self.state if section.source not in _REQUEST_SOURCES
+            section.source
+            for section in self.state
+            if section.source not in _REQUEST_SOURCES and section.source != _TOOLS_SOURCE
         )
         if self.curate is not None:
             names.update(target.role for target in self.curate.targets)
@@ -589,6 +596,7 @@ async def judge(
     backend: DecisionBackend | None,
     outputs: Mapping[str, str],
     query: str,
+    tools: Sequence[Mapping[str, object]] = (),
 ) -> ChecklistVerdict:
     """One verdict: every question in one System One request."""
 
@@ -597,7 +605,8 @@ async def judge(
     except TemplateError as error:
         raise ChecklistUnavailable("checklist_unavailable", str(error)) from error
     if not pending:
-        return ChecklistVerdict(passed=True, items=(), text=feedback_text(config, ()))
+        # A verdict over nothing vouches for nothing: no item, no pass.
+        raise ChecklistUnavailable("checklist_unavailable", "no items to judge")
     if backend is None:
         raise ChecklistUnavailable("judge_unavailable", "no decision backend")
     if len(pending) > config.max_questions:
@@ -605,7 +614,7 @@ async def judge(
             "checklist_unavailable",
             f"{len(pending)} questions exceed the limit of {config.max_questions}",
         )
-    state = build_state(config.state, outputs, query)
+    state = build_state(config.state, outputs, query, tools)
     size = len(json.dumps(state, ensure_ascii=False))
     if config.max_state_chars is not None and size > config.max_state_chars:
         raise ChecklistUnavailable(
@@ -629,30 +638,32 @@ def _cut(text: str, limit: int | None) -> str:
     return f"{text[:limit]}\n[... {len(text) - limit} more characters cut ...]"
 
 
-# Kairyu's backend-neutral form of a native tool call in a role's text
-# (kairyu.engine.openai_backend._message_text).
-_TOOL_CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-
-
-def _with_tool_calls(text: str) -> dict[str, object] | None:
+def _with_tool_calls(text: str, max_chars: int | None) -> dict[str, object] | None:
     """A role output holding tool calls as ``{text, tool_calls}``, else None.
 
-    The judge then reads the calls as calls the caller will execute, not as
-    markup inside prose.
+    Only calls the public API would publish become calls (the shared rules in
+    :mod:`kairyu.tool_call_markup`), so the judge reads them as calls the
+    caller will execute. ``max_chars`` still bounds the result: the text is cut
+    first; output still too long falls back to the cut raw text.
     """
 
-    calls: list[object] = []
-    for match in _TOOL_CALL.finditer(text):
-        try:
-            call = json.loads(match.group(1))
-        except ValueError:
-            return None
-        if not isinstance(call, Mapping):
-            return None
-        calls.append({"name": call.get("name"), "arguments": call.get("arguments")})
+    remaining, calls = generic_tool_calls(text)
     if not calls:
         return None
-    return {"text": _TOOL_CALL.sub("", text).strip(), "tool_calls": calls}
+    structured: dict[str, object] = {"text": remaining.strip(), "tool_calls": calls}
+    if max_chars is None:
+        return structured
+    size = len(json.dumps(structured, ensure_ascii=False))
+    if size <= max_chars:
+        return structured
+    # Leave room for the cut marker _cut appends.
+    room = max_chars - (size - len(json.dumps(structured["text"], ensure_ascii=False))) - 64
+    if room <= 0:
+        return None
+    structured["text"] = _cut(str(structured["text"]), room)
+    if len(json.dumps(structured, ensure_ascii=False)) > max_chars:
+        return None
+    return structured
 
 
 def _request_messages(messages: list[object]) -> list[object]:
@@ -678,6 +689,7 @@ def build_state(
     sections: Sequence[StateSection],
     outputs: Mapping[str, str],
     query: str,
+    tools: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """The System One state object: one field per section.
 
@@ -689,6 +701,9 @@ def build_state(
 
     state: dict[str, object] = {}
     for section in sections:
+        if section.source == _TOOLS_SOURCE:
+            state[section.key] = [dict(tool) for tool in tools] or "none"
+            continue
         if section.source in _REQUEST_SOURCES:
             messages = conversation_messages(query)
             if messages is not None:
@@ -714,7 +729,7 @@ def build_state(
                 continue
             except ValueError:
                 pass
-            structured = _with_tool_calls(raw)
+            structured = _with_tool_calls(raw, section.max_chars)
             if structured is not None:
                 state[section.key] = structured
                 continue
