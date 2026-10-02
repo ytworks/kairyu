@@ -172,8 +172,9 @@ front-ends; the Conductor consumes only the spec.
 ### D8. Checklist verifiers: deterministic checks and System One probabilities (2026-10-01)
 
 Status: accepted by the owner (2026-10-01, framework scope for the
-checklist-verified example); CPU tests in `tests/unit/test_conductor_checklist.py`,
-`tests/unit/test_checks.py`, `tests/server/test_orchestration_usage_trace.py`;
+checklist-verified example; rule-based checks removed 2026-10-02, see the
+amendment below); CPU tests in `tests/unit/test_conductor_checklist.py`,
+`tests/server/test_orchestration_usage_trace.py`;
 GPU evidence in `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`.
 
 A verifier may declare a `checklist:` instead of a generation prompt. It judges
@@ -263,6 +264,30 @@ backend may check tool capability only there.
 as the route judge (`bounded_conversation`, omitted count in
 `<key>_omitted_messages`); per-message cuts alone left long agent
 conversations above `max_state_chars`, so every checklist was unavailable.
+
+Amendment (2026-10-02, PR #618, owner decision): no rule-based check judges
+an answer. The checklist's deterministic checks are removed with their
+library (`orchestration/checks.py`: regex, length, contains, json_valid,
+coverage, quotes_in_sources, items_in_sources, numbers_in_sources), along
+with pre/post stages, `semantic_fallback`, inline checklist-bound generation
+roles (the claim extractor), pair questions (`pairs_sharing`),
+`on_exhausted: latest_checks_passed`, curation merge/pad and the
+post-curation re-judgment (`guarantee_groups`, `requirements_unconfirmed`).
+Why: the guarantee is model-based to overcome the limits of rules; the rules
+were not requirements of any request and misread answer forms (tool-call
+JSON as quotations), failing every agent turn before any model read.
+
+What a checklist does now:
+- It sends every question of a verdict in one System One request
+  (`max_questions`, default 256, the server's cap; OpenJev groups questions
+  into canvas-sized reads internally).
+- A curation drops low-probability items from one or more upstream lists
+  (`curate.targets`), so one read can adopt several extractors' items. A
+  curation never edits the final unit.
+- A state section may read `request`: the system and developer messages plus
+  the latest user message, verbatim.
+- Analysing roles may read `{tools}`, the caller's tool definitions, beside
+  `{response_format}`.
 
 ### D9. System One profile judge (2026-10-01)
 

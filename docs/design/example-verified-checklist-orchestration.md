@@ -1,7 +1,7 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
-Status: **Accepted 2026-10-01; implemented and GPU-verified** (every gate PASS; see
-`examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
+Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15), GPU gates
+being re-run** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
 
@@ -41,6 +41,8 @@ Roles (owner, 2026-10-01):
    DAG: short requests are not exempt from the guarantee.
 
 ### VCO-D2 — Requirement set
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The extractor splits the request (system/developer instructions and the
 latest user message) into instruction units U1..Un and writes conditions
@@ -73,6 +75,8 @@ evidence must appear in the conversation, i.e. its tool call and result),
 G3 quotations in the answer appear in the conversation.
 
 ### VCO-D3 — Validator and Conductor
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The Validator is the deterministic half of `checklist`: extracted
 `deterministic` conditions (an unusable primitive falls back to an OpenJev
@@ -198,6 +202,8 @@ conditions are never merged; execution claims need tool-result evidence;
 `n > 1` is refused on the verified models.
 
 ### VCO-D11 — Per-claim G1 is advisory (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 Owner request: calibrate G1 on its own, per claim kind, at alpha = 0.10
 (95 %, answer level). `calibrate_g1.py` ran the production state builder
@@ -229,6 +235,8 @@ G3. Also observed: 12 of 1,800 state-builder outputs were truncated JSON
 (runaway newlines), which serving reports as `checklist_unavailable`.
 
 ### VCO-D12 — Latency target and the slimmer state builder (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 Owner target: p50 <= 3 minutes on long InFoBench requests (every DeepSeek
 step keeps the caller's effort, repairs stay at most two). Traced breakdown
@@ -244,6 +252,8 @@ builder 44 s / 5,109 tokens, guaranteed 1/8 -> 3/8. The floor is extraction
 state builder, about 70 s); repairs add about 70 s each.
 
 ### VCO-D13 — Instruction units read within the caller's format (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The structured gate's "Pick a European capital and describe it in exactly
 the requested JSON" (fields city, country, population_estimate) was not
@@ -315,16 +325,56 @@ their conversation state was 526,443-651,415 characters against
 `max_state_chars: 160000`. Every checklist's conversation section now sets
 `max_total_chars: 100000`, leaving 60,000 characters for the other sections.
 
+### VCO-D15 — Points, adoption and coverage, all read by models (2026-10-02, PR #618)
+
+Owner decision. The guarantee was LLM-based to overcome the limits of rules,
+yet the Validator added rule-based checks (G1-excerpts, G2, G3, extracted
+`deterministic` conditions, S0/S1 coverage). These were not requirements of
+any request, and on agent turns G3 misread tool-call JSON as quotations: all
+ten verified DeepSWE turns failed it, no OpenJev read ran, and two repairs
+were wasted per turn (305-554 s). Every rule-based check is removed from the
+example and from the framework (m1 D8 amendment).
+
+The goal is unchanged: the answer meets a requirement set that is MECE with
+respect to the request.
+
+1. **Points (mutually exclusive, collectively exhaustive).** `extract`
+   (explicit) and `implicit` (presupposed) run in parallel. Each writes a
+   list of points, one per issue, that together cover the request. The
+   requirements gate measures coverage of InFoBench's gold questions and
+   duplicate pairs.
+2. **Adoption (necessary).** One Jev request asks, for every point of both
+   lists, "is this point necessary to answer the request?". The state is the
+   request verbatim (system/developer messages plus the latest user message)
+   and `history`, a non-thinking DeepSeek summary of every other message
+   (earlier turns, tool calls and tool results). Summarizing these instead of
+   passing them verbatim keeps the read inside OpenJev's 65,536 tokens.
+   Points with p < 0.5 leave their list. `history` waits for both extractors
+   so that `adopt`, its verifier, reads both lists in one request.
+3. **Coverage.** One Jev request asks, for every adopted point, "does the
+   answer contain this point?". The state is the answer exactly as it will be
+   sent. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
+   at most twice; otherwise the last non-empty answer is returned as
+   `refinement_limit`.
+4. **Agent turns.** A request with `tools` is answered by one assistant
+   message, which may hold several tool calls. The extractors read the tool
+   definitions (`{tools}`) and list what this one message must do now, never
+   the completion of the task.
+
+tau_hi is recalibrated on InFoBench for the coverage question and its state
+(`calibrate.py`); the per-claim G1 calibration (`calibrate_g1.py`) is removed
+with G1.
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
   first token is the whole pipeline).
-- Tool-calling turns are served (VCO-D14), but the checklist reads a tool
-  call as `<tool_call>` text, so a requirement such as "calls bash" is judged
-  semantically, not by the call's structure.
 - The routing set is author-labelled with clear-cut categories; borderline
   requests are not measured by it.
-- Thresholds other than tau_hi (0.5 for necessity, sufficiency and
-  exclusivity) are defaults, not calibrated.
-- Claim-level groundedness is advisory (VCO-D11): a guaranteed answer can
-  still contain an unsupported claim that no deterministic check catches.
+- The 0.5 necessity cut of the adoption read is a default, not calibrated.
+- The guarantee covers the adopted points, not the truth of every claim in
+  the answer.
+- An extractor cut off before its JSON closes leaves its list unreadable and
+  the answer unverified (`checklist_unavailable`); there is no rewrite.
+- With tools, each assistant message is judged on its own points; whether
+  the whole agent run solves the task is not part of the flag.
