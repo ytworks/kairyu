@@ -646,8 +646,13 @@ async def judge(
     query: str,
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: object = None,
+    published: str | None = None,
 ) -> ChecklistVerdict:
-    """One verdict: every question in one System One request."""
+    """One verdict: every question in one System One request.
+
+    ``published`` names the output the API publishes (the judged attempt):
+    its tool calls enter the state as the API sends them.
+    """
 
     try:
         pending = _pending_questions(config, outputs)
@@ -663,7 +668,7 @@ async def judge(
             "checklist_unavailable",
             f"{len(pending)} questions exceed the limit of {config.max_questions}",
         )
-    state = build_state(config.state, outputs, query, tools, tool_choice)
+    state = build_state(config.state, outputs, query, tools, tool_choice, published)
     size = len(json.dumps(state, ensure_ascii=False))
     if config.max_state_chars is not None and size > config.max_state_chars:
         raise ChecklistUnavailable(
@@ -680,9 +685,17 @@ async def judge(
             usage=usage,
             reads=1,
         )
-    acceptance, accept_usage = await _accept(
-        backend, config, config.acceptance, items, outputs, query, tools, tool_choice
-    )
+    try:
+        acceptance, accept_usage = await _accept(
+            backend, config, config.acceptance, items, outputs, query, tools, tool_choice, published
+        )
+    except ChecklistUnavailable as unavailable:
+        # The coverage read completed and billed its tokens.
+        unavailable.usage = (
+            usage[0] + unavailable.usage[0],
+            usage[1] + unavailable.usage[1],
+        )
+        raise
     usage = (usage[0] + accept_usage[0], usage[1] + accept_usage[1])
     return ChecklistVerdict(
         passed=acceptance >= config.acceptance.threshold,
@@ -703,10 +716,11 @@ async def _accept(
     query: str,
     tools: Sequence[Mapping[str, object]],
     tool_choice: object,
+    published: str | None,
 ) -> tuple[float, tuple[int, int]]:
     """The acceptance read: one question over its state and the item results."""
 
-    state = build_state(acceptance.state, outputs, query, tools, tool_choice)
+    state = build_state(acceptance.state, outputs, query, tools, tool_choice, published)
     state[acceptance.results_key] = [
         {"id": item.id, "point": item.proposition, "p": round(item.p, 4), "passed": item.passed}
         for item in items
@@ -793,6 +807,7 @@ def build_state(
     query: str,
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: object = None,
+    published: str | None = None,
 ) -> dict[str, object]:
     """The System One state object: one field per section.
 
@@ -832,12 +847,13 @@ def build_state(
                 continue
             except ValueError:
                 pass
-            structured = _with_tool_calls(
-                raw, section.max_chars, tool_selection(tools, tool_choice)
-            )
-            if structured is not None:
-                state[section.key] = structured
-                continue
+            if section.source == published:
+                structured = _with_tool_calls(
+                    raw, section.max_chars, tool_selection(tools, tool_choice)
+                )
+                if structured is not None:
+                    state[section.key] = structured
+                    continue
         state[section.key] = _cut(raw, section.max_chars)
     return state
 

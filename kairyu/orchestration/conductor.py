@@ -2340,6 +2340,7 @@ class Conductor:
                 query,
                 self._final_tools,
                 self._final_tool_choice,
+                published=target.name,
             )
         except BaseException:
             run.budget = run.budget.release(unknown_cost=unknown_cost)

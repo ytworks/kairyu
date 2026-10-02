@@ -80,14 +80,16 @@ def _contains_42(state, question):
 
 def _answer_roles(**config_overrides) -> tuple[RoleSpec, ...]:
     config = ChecklistConfig(
-        questions=(ChecklistQuestion(id="R1", proposition="states the answer 42"),),
-        state=(StateSection("answer", "answer"),),
-        subject="the answer",
-        threshold=0.8,
-        max_refinements=2,
-        on_unavailable="publish_unverified",
-        unverified_from="generator",
-        **config_overrides,
+        **{
+            "questions": (ChecklistQuestion(id="R1", proposition="states the answer 42"),),
+            "state": (StateSection("answer", "answer"),),
+            "subject": "the answer",
+            "threshold": 0.8,
+            "max_refinements": 2,
+            "on_unavailable": "publish_unverified",
+            "unverified_from": "generator",
+            **config_overrides,
+        }
     )
     return (
         RoleSpec(name="generator", worker="gen", prompt="[generator] {query}"),
@@ -503,16 +505,22 @@ async def test_a_judged_tool_call_reaches_the_judge_as_the_api_publishes_it():
     call = '<tool_call>{"name":"bash","arguments":{"command":"ls -la"}}</tool_call>'
     backend = RoutedBackend({"generator": [f"Look first.{call}"]})
     judge = FakeSystemOne()
+    roles = _answer_roles(
+        state=(StateSection("answer", "answer"), StateSection("draft", "generator"))
+    )
     conductor = Conductor(
-        _answer_roles(), {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
+        roles, {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
     )
 
     await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
-    assert judge.bodies[0]["state"]["answer"] == {
+    state = judge.bodies[0]["state"]
+    assert state["answer"] == {
         "text": "",
         "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}],
     }
+    # Only the judged answer is published; other sections keep their context.
+    assert state["draft"] == f"Look first.{call}"
 
 
 @pytest.mark.parametrize(
@@ -634,6 +642,8 @@ def _accepting_roles(threshold: float = 0.5) -> tuple[RoleSpec, ...]:
                 state=config.state,
                 threshold=config.threshold,
                 max_refinements=2,
+                on_unavailable=config.on_unavailable,
+                unverified_from=config.unverified_from,
                 acceptance=AcceptanceConfig(
                     ask="May this answer be adopted?",
                     state=(StateSection("answer", "answer"),),
@@ -686,3 +696,23 @@ async def test_a_rejected_answer_is_repaired_on_its_missed_points_and_judged_aga
     repair = next(p for p in backend.prompts if p.startswith("[repair]"))
     assert "It is 41." in repair and "[R1] states the answer 42" in repair
     assert len(judge.bodies) == 4
+
+
+class _AcceptanceDown(FakeSystemOne):
+    async def decide(self, body: dict) -> SystemOneReply:
+        self._down = bool(self.bodies)
+        return await super().decide(body)
+
+
+async def test_an_unavailable_acceptance_read_still_bills_the_coverage_read():
+    usages = []
+    for judge in (FakeSystemOne(down=True), _AcceptanceDown()):
+        backend = RoutedBackend({"generator": ["It is 42."]})
+        conductor = Conductor(
+            _accepting_roles(), {"gen": backend}, decision_workers={"judge": judge}
+        )
+        result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+        assert result.verification.reason == "judge_unavailable"
+        usages.append(result.usage)
+
+    assert (usages[1][0] - usages[0][0], usages[1][1] - usages[0][1]) == (10, 1)
