@@ -97,7 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Frontier full-checkpoint 262K/1M correctness/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
-- Runner control plane: scale actuation (WP3.3), leader-token propagation to mutations (WP3.4), deployment wiring, durable Runner status, Kubernetes mutations and runtime instrumentation remain open; `kairyu/runners` has no serving caller yet
+- Runner autoscaling WP3.1–WP3.7 and model-cache WP4.1–WP4.7/D3.1–D3.20
+  are fail-closed and CPU-tested, including signed artifact identity, verified
+  node cache, fenced pre-stage/startup/admission, live PostgreSQL/Kubernetes/Kueue
+  authority, leader-fenced CRD publication, and production runtime assembly.
+  Deployment, runtime instrumentation, and live acceptance remain open.
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
@@ -106,6 +110,21 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
+- What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
+- Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
+- Refs: "Node execution and pins" in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Cache hits keep the residency generation (PR #615 re-review)
+- What: an identical `record_verified()` cache hit now advances only last access and the index revision, like `touch()`; the row generation moves only with verified state or verification source.
+- Why: owner re-review: a duplicate in-flight ensure of one command/claim reached the cache after its twin completed and invalidated that READY pre-stage's live evidence, although its own completion was rejected as stale.
+- Refs: `docs/design/node-model-cache-index-v1.md`; D3.1 in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Runner and model-cache authority review fixes (PR #615)
+- What: cache `touch()` keeps the residency generation; the live cache reader joins node evidence to the published inventory at the latest observation (hints live, inventory within the observation age); pre-stage pin owners name the ensure generation and an ensure drops lower-generation owners; actuation reauthorizes the leader after its last callback and rechecks evidence age before PATCH; Deployment claims accept the one-step generation advance.
+- Why: owner review reproduced five defects with CPU/HTTP mocks: a successful Runner-start verification invalidated its own binding, every current inventory was denied, a delayed release removed a successor's pin, an expired lease could still PATCH, and every first Deployment claim failed.
+- Refs: D3.1, D3.14 in `docs/design/node-model-cache-prestage-v1.md`; `docs/design/node-model-cache-index-v1.md`; `docs/design/runner-state-v1.md`; PR #615
 
 ### 2026-10-02 — [design] Verified-answers example: two-stage extraction, slimmer state builder (VCO-D8 am. 2, VCO-D12)
 - What: stated and implicit conditions come from two parallel extractors (implicit: at most four, Jev-kept); the state builder lists only source/action claims (G1-computation/general removed); step budget 16 -> 24 (worst case 18 published `reason: budget`). InFoBench c8 p50 492 -> 297 s. The requirements gate no longer reuses answers from another build; the implicit gate's judge thinks.
@@ -117,6 +136,12 @@ in `.claude/rules/progress-log.md`).
 - Why: owner choice (option A) — the flag must claim only what is calibrated; RAGTruth counts unsourced true additions, OpenJev misses math errors and false facts.
 - Refs: `docs/design/example-verified-checklist-orchestration.md` VCO-D11, example `calibrate_g1.py`, `MEASUREMENTS.md`, PR #616
 
+### 2026-10-01 — [progress] Runner and model-cache authority rebased on current main
+- What: rebased WP3.3–WP3.7 and WP4.1–WP4.7/D3.1–D3.20 onto current main,
+  retaining the fail-closed authority, cache, admission, lifecycle, and tests.
+- Refs: `docs/design/runner-state-v1.md`;
+  `docs/design/node-model-cache-prestage-v1.md`; `kairyu/runners/`
+
 ### 2026-10-01 — [design] Checklist verifiers in L2; checklist-verified answers example
 - What: m1 D8: a verifier may judge with deterministic checks plus System One `noul` reads (Kairyu converts requirements into Jev questions with yes/no criteria and a JSON state), threshold verdicts, seeded targets with `refine_prompt`, inline claim roles, `on_unavailable: publish_unverified`, curation, internal `response_format`, `{conversation}`, and `kairyu_verification` on responses. m11 D8: System One `base_urls` replicas. New example `deepseek-v4.1-openjev-verified-8gpu`.
 - Why: owner request (requirement-checklist guarantee); L2 could only branch on generated PASS/FAIL text and could not call System One. Jev-shaped requests beat free text (AUROC 0.830 vs 0.814); alpha amended 0.05 -> 0.10 because InFoBench expert labels disagree at 9-10 %.
@@ -126,27 +151,3 @@ in `.claude/rules/progress-log.md`).
 - What: `/v1/systemone` normalizes `samples`/`think`/`steps` ("32", 32.0) before reserving and forwarding (422 otherwise) and reserves `sequential` reads' repeated schema. The OpenJev overlay ends a thought cut at 512 with a budget sentence (budget forcing): empty answers after a cut thought 13/40 → 0/40; `l1` 8/8. Overlay re-pinned `5e8e2e08`; every gate passes.
 - Why: owner re-review: type changes and `sequential` still slipped past the reservation, and an answer pass could reopen a thought and return empty. vLLM refuses token bans for diffusion models, so the thought is closed in text.
 - Refs: m11 D8 metering; example `MEASUREMENTS.md` "Second review-fix rerun"
-
-### 2026-10-01 — [amendment] System One review fixes (PR #614)
-- What: `/v1/systemone` reserves the billed upper bound (questions as separate reads, think × samples), enforces each model's body limit, 502s unless both usage counts are valid, and tenant 429s use Jev's shape. The OpenJev overlay refuses empty `stop`/out-of-range `top_logprobs` before the thought; preflight exempts only the GPU the L1 holds; playground fixes. Gates pass on overlay `46530fa7`; `l1` thought-cut-then-answer fails intermittently (2/4, answer pass reopens a thought) — open finding.
-- Why: owner review: the old bound let one request bill 13× a tenant's bucket, and answer-only refusals after the thought ejected the only replica.
-- Refs: m11 D8 metering; example `MEASUREMENTS.md` "Review-fix rerun"
-
-### 2026-10-01 — [design] System One API through Kairyu; OpenJev example GPU-verified
-- What: Kairyu serves `POST /v1/systemone` (Jev wire API) via `HTTPSystemOneBackend`, not a pool member; `/v1/models` adds Jev's `models` list. The OpenJev example serves System One through Kairyu with a Jev-style playground, fixes the prefill template for vLLM's `openai` content format, pins the overlay, adopts 32 generations in flight + 8 queued (+32 % c32 tok/s), and passes every GPU gate including OpenJev's own live suite against Kairyu.
-- Why: owner request (Web UI following Jev, served by Kairyu). System One is a public wire format with several servers, so auth/tenancy/metering/admission belong in Kairyu; a pool member would let a System One 529 eject the chat replica.
-- Refs: m11 D8 (`docs/design/m11-product.md`); FN-D9 OpenJev amendment; example `MEASUREMENTS.md`; PR #614
-
-### 2026-10-01 — [design] OpenJev DiffusionGemma on one GPU, think = 512
-- What: new example `openjev-diffusiongemma-26b-1gpu`: one OpenJev replica (DiffusionGemma 26B-A4B NVFP4 on vLLM) behind the single-replica L2/L3. Every chat completion thinks first with a fixed 512-token thought, through an example-owned two-pass overlay on the published OpenJev image. `kairyu/` is unchanged. CPU tests and CPU evidence pass; GPU gates are pending.
-- Why: owner request. DiffusionGemma's `DiffusionSampler` does not apply vLLM's `thinking_token_budget`, and OpenJev's chat route has no budget, so OpenJev's own System One `think` method is applied to chat.
-- Refs: FN-D9 OpenJev one-GPU amendment in `docs/design/frontier-native-runtime.md`; plan `docs/superpowers/plans/2026-10-01-openjev-diffusiongemma-1gpu-example.md`; example `MEASUREMENTS.md`
-
-### 2026-10-01 — [progress] V4.1 ensemble example GPU gates pass on the amended DTO-D17
-- What: readiness, vision, tool-calling, generic and coding matrices, and the browser smoke pass. Ensemble TTFT gate PASS at c1/c8/c16/c32 (8.7/7.7/39.6/95.8 % of 2× direct). Judge timeouts 3/269, all served by `deepseek_think`. 4/128 coding requests exceed 900 s after two audit refinements.
-- Refs: example `MEASUREMENTS.md` (runs `fb-*`); DTO-D17 in `docs/design/example-dual-track-orchestration.md`; PR #613
-
-### 2026-10-01 — [amendment] V4.1 ensemble example: judge fallback is deepseek_think (DTO-D17)
-- What: a judge timeout, backend error, or unparseable verdict now routes to `deepseek_think`, not the ensemble (`profile_judge.fallback`). `kairyu/` is unchanged. Every GPU gate is re-run.
-- Why: owner decision. A slow or failed judge says nothing about difficulty; escalating to the heavier route on a 5 s timeout added load when the system was busiest.
-- Refs: DTO-D17 second amendment in `docs/design/example-dual-track-orchestration.md`; PR #613

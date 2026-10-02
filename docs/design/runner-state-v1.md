@@ -9,8 +9,9 @@ This slice fixes the controller-neutral contract, a read-only Kubernetes
 observation/reconciliation boundary, a fence-bound drain/termination handshake,
 bounded failure-domain backoff/quarantine, and a lease-fenced single-writer
 boundary. It also defines the immutable model-class scaling policy, observation
-window, and durable decision-log boundary. Durable Runner-state persistence,
-Kubernetes termination writes, and scale actuation remain later work.
+window, durable decision-log boundary, and leader-fenced scale actuation.
+Durable Runner-state persistence and Kubernetes termination writes remain later
+work.
 
 ## Identity and snapshot rules
 
@@ -277,10 +278,22 @@ The authority check never holds the coordination store lock while application
 code runs, so an expired leader cannot prevent takeover by hanging. Therefore
 the authority token must be persisted with any external decision and checked
 atomically by its mutation target; output from a callback that outlives its
-lease is stale even if the local function returns normally. WP3.4 remains
-responsible for propagating this token into the scale decision generation/CAS
-boundary. The current slice performs no Kubernetes mutation and does not add
-cluster RBAC.
+lease is stale even if the local function returns normally. WP3.4 implements
+that boundary as `claim_authority() -> observe/decide -> append ->
+apply_fenced()`. A successor first advances the token on the workload with a
+JSON Patch resourceVersion/UID CAS. That claim response must keep replicas and
+the Pod template; its generation follows the workload kind (Deployment advances
+it by one on any annotation change, StatefulSet keeps it), and the claim records
+the returned generation for the decision fence (review amendment, PR #615). The
+actuator then accepts a decision only
+when that exact token is still present. Both claim and actuation require one
+more store-authoritative reauthorization immediately before PATCH, so expiry
+detected by that final pre-PATCH check fails closed even before a successor
+claim. Review amendment (PR #615): actuation takes that check after its last
+quota, prewarm, startup-binding, or drain callback, and re-evaluates the
+freshness of the evidence those callbacks returned against the final authority;
+nothing runs between that check and the PATCH. Cluster RBAC
+and admission policy remain deployment concerns.
 
 ## Model-class scaling policy
 
@@ -342,7 +355,13 @@ optional resource/startup evidence when present) and the copied policy's
 freshness lease; the persisted boolean and reason must agree with that result.
 Stale input may hold or perform a policy-step-bounded scale-up, but can never
 authorize scale-down. A canonical record fingerprint makes an exact retry
-idempotent and a changed retry under the same decision ID a conflict.
+idempotent and a changed retry under the same decision ID a conflict. The log
+atomically allocates a per-model `decision_generation` when a scale-up/down
+draft is first appended and binds it into that fingerprint. The same record
+also embeds the claimed election/token and exact workload kind, namespace,
+name, UID, generation, release, and model revision used to decide. HOLD records
+are explicitly generation-free and do not consume the mutation sequence. A
+caller cannot assign a generation to a new decision.
 
 If a newly resolved policy puts the currently observed replica count outside
 its bounds, one decision may remain outside the new range only while moving by
@@ -358,9 +377,13 @@ in-memory implementation is a bounded, thread-safe reference backend only.
 `PostgresScalingDecisionLog` is the shared production backend: an environment
 uses an explicit store ID, and that store durably fixes its capacity so two
 controllers cannot silently apply different bounds. A row lock on the registry
-serializes capacity checks and inserts. The primary key provides exactly-once
-decision IDs; reads revalidate both the JSON payload and its duplicated indexed
-metadata/fingerprint before returning it.
+serializes capacity checks, per-model mutation-generation allocation, and
+inserts. The primary key provides exactly-once decision IDs; reads revalidate
+both the JSON payload and its duplicated indexed metadata/fingerprint before
+returning it. Replaying either the original unallocated draft or the returned
+allocated record resolves to the same durable record. Optional WP3.4/WP3.5
+fields are omitted from the canonical fingerprint when absent, preserving the
+fingerprint and readability of older schema-v1 rows.
 
 PostgreSQL objects live in the explicitly qualified `public` schema. Startup
 fails closed unless ordered columns, nullability, primary/foreign/check
@@ -370,10 +393,231 @@ and rechecked after reconnect. The schema is append-only through the public API;
 retention/export policy is deliberately deferred until evidence establishes an
 operational horizon.
 
-## Next integration boundary
+## Kubernetes scale actuation and next integration boundary
 
-WP3.3 should consume these validated records to calculate and apply a bounded
-desired replica count, without yet weakening the single-writer fence. WP3.4
-then propagates the leader fencing token through the decision/CAS mutation
-boundary. Durable Runner-status persistence and Kubernetes deletion remain
-separate changes.
+WP3.3 consumes a validated decision record and applies its bounded desired
+replica count through the Deployment or StatefulSet `scale` subresource. The
+actuator reads the live `Scale`, skips exact retries and hold decisions, and
+uses its `resourceVersion` for a single idempotent write. Conflicts and malformed
+responses fail closed. WP3.4 adds the production ordering contract: callers
+enter through `mutate_autoscaler()`, persist the returned authority with
+`claim_authority()` before observing decision inputs, append the decision to
+obtain its durable generation, and call `apply_fenced()`. The parent workload
+JSON Patch tests resourceVersion, UID, workload generation, claimed authority,
+and live replicas while atomically changing replicas and recording decision
+generation, ID, and canonical fingerprint. Exact retries require the entire
+decision identity; later generations may supersede unapplied decisions but
+cannot move backwards. Stale leaders, reused generations, changed release
+or model revision, and malformed responses fail closed. The actuator also
+resolves the supplied decision by ID from its configured durable log and
+requires the complete fingerprint, so a caller-created generation is not an
+actuation capability. Parent workload PATCH is broader than scale-subresource
+RBAC, so deployment must use a dedicated service account and constrain the
+permitted workload/fields with admission policy.
+The legacy `apply()` scale-subresource primitive is disabled by default and can
+only be enabled explicitly for isolated verification; the production runtime
+must use `apply_fenced()`.
+
+## Quota and Kueue admission fence
+
+WP3.5 keeps quota allocation in the component that owns the complete tenant and
+cluster view. Kairyu does not duplicate Kueue cohort borrowing, lending, fair
+sharing, or preemption. `parse_kueue_scaling_admission()` instead converts one
+Kueue Workload v1beta1/v1beta2 response into an immutable admission identity:
+namespace/name/UID/generation/resourceVersion, LocalQueue, ClusterQueue,
+pod-set name/count, ResourceFlavor, GPU resource quantity, and full workload
+priority-class identity. Four required `kairyu.ai/scale-target-{kind,namespace,
+name,uid}` Workload annotations bind that reservation to exactly one Deployment
+or StatefulSet; the binding must equal the decision target revision before a
+write. The Workload's immutable `metadata.name` must additionally equal
+`kairyu-scale-<sha256(kind NUL namespace NUL name NUL uid)>`; changing only the
+annotations therefore cannot rebind an admitted reservation during a later
+decision, and a recreated target UID requires a new Workload. The admitted pod
+count and GPU quantity must match the target's immutable
+GPUs-per-replica shape. An inactive Workload, absent
+`Admitted=True` condition, or absent admission assignment produces a
+zero-capacity result. Ambiguous pod-set assignments, fractional GPU quantities,
+unsupported API versions, incomplete identity, or an `Admitted=True` condition
+whose `observedGeneration` does not equal the Workload generation fail closed.
+Kueue priority uses its native ordering where the higher integer has precedence.
+
+`ScalingQuotaSnapshot` combines that exact Kueue admission with three canonical
+nested budgets: cluster, model family, and tenant/model. Each budget records its
+hard GPU limit, usage excluding the target, and capacity reserved for
+higher-priority workloads. `target_reserved_gpus` is not an advisory local
+counter: it must equal the GPU quantity atomically admitted for the target
+Kueue Workload and fit the available capacity of every nested budget. Cluster,
+model-family, and tenant/model limits must therefore be projections of the same
+Kueue-owned reservation, with the deployment's ClusterQueue/cohort hierarchy
+encoding those budgets. They must never be produced by independent read/check
+logic. This makes Kueue the serialization point for simultaneous scale-ups of
+different models; Kairyu only derives independently auditable total replica
+ceilings from that reservation after dividing by the immutable GPUs-per-replica
+value.
+
+`admit_scaling_quota()` clamps a requested scale-up to the minimum cluster,
+family, tenant/model, and Kueue ceiling. It never converts exhausted quota into
+a scale-down: capacity below the live replica count yields HOLD. Every limiting
+scope is persisted in `ScalingQuotaAdmission`; a constrained decision must use
+the `budget_limit` reason unless stale-observation safety takes precedence,
+while an unconstrained decision cannot claim a budget limit. The decision
+validator binds the quota snapshot ID/revision and
+tenant/model capacity evidence to the observed current replicas, policy
+max/step, model class, and freshness window. `apply_fenced()` refuses a
+production scale-up without this durable admission and requires a fresh quota
+reauthorization immediately before PATCH. The refreshed nested limits must
+still admit the desired count and the Kueue Workload, queue, flavor, resource,
+and priority identity must be unchanged. Its observation timestamp is checked
+again against the just-refreshed leader authority and the policy freshness
+window, so replaying an unchanged but old admission cannot authorize a delayed
+PATCH. Quota revisions may advance but cannot roll back. Revocation,
+reassignment, a target-binding change, stale observation, revision rollback, or
+a lower ceiling fails closed. The decision fingerprint prevents replacing the
+original evidence after append.
+
+Kueue CRD installation, ClusterQueue/LocalQueue/ResourceFlavor definitions,
+the global reservation snapshot producer, and RBAC belong to deployment wiring
+in private-ai-cloud-iac. Durable Runner-status storage remains separate wiring.
+
+## Cache-aware staged scale-out
+
+WP3.6 makes cache locality an explicit, fail-closed scale-out input instead of
+letting a newly created Runner discover a cold model after scheduling. A
+`ScalingPrewarmSnapshot` identifies one immutable model class, model revision,
+artifact digest, and deployment-owned placement binding plus a monotonic cache revision. Its canonical placement
+inventory records node and ResourceFlavor, an approved hardware profile and
+compatibility record, assignment/health/schedulability gates, and one of
+`absent`, `filling`, `ready`, or `failed`. Placements are replica-sized units;
+an implementation may publish multiple units for a node only when that
+capacity is independently schedulable.
+
+`plan_cache_aware_scale_up()` receives the final quota-admitted target and its
+Kueue ResourceFlavor. It selects only unassigned, healthy, schedulable
+placements of that flavor, then deterministically splits the delta into:
+
+1. ready placements that may start Runners immediately;
+2. filling placements that remain pending;
+3. absent placements that require cache-fill commands; and
+4. unplanned replicas for which no eligible placement exists.
+
+The returned `ScalingPrewarmPlan` persists all four outcomes in the append-only
+decision. The quota target remains the eventual capacity goal while
+`runner_target_replicas` is the only immediately actuated count. A plan with no
+ready placement produces a `cache_prewarm` HOLD rather than a cold Runner; a
+mixed plan can start ready capacity while retaining its remaining cache-fill
+intent. In WP3.6 those placement IDs are durable desired-work evidence, not an
+executable cache-agent command. A production consumer must not dispatch them
+directly from a HOLD record. WP4.7 now converts them into commands carrying a
+leader/target/artifact fence and monotonic generation, then uses placement-level
+claim/CAS, idempotent replay, verified fill/pin, and a completion record. It
+publishes a later monotonic snapshot as placements move through `filling` to `ready`, and
+reconciliation creates a new scaling decision rather than editing the earlier
+record. This boundary prevents a stale HOLD decision from becoming an
+unfenced cache mutation before the cache-agent protocol exists.
+
+Cache locality never overrides health, schedulability, the explicit hardware
+compatibility approval, or Kueue quota. The decision validator binds the plan's
+model class, model revision, current replica count, final quota target, and
+ResourceFlavor to the observation, target revision, and Kueue admission. It
+also includes the cache observation timestamp in the conservative freshness
+calculation. Startup phase EMA and p95 evidence remains in the same durable
+observation window, so the post-deployment 0→50 acceptance run can correlate
+each cache stage with image pull, model fetch, model load, compile, and warmup
+without reconstructing inputs from mutable telemetry.
+
+Production scale-up additionally requires `reauthorize_prewarm()` immediately
+before the Kubernetes JSON Patch, after leader and quota reauthorization. The
+refreshed inventory may advance in time and revision, but cannot roll back or
+change model/artifact/flavor/target identity. Every placement that justified
+the durable Runner delta must still be ready and eligible, and the refreshed
+plan must retain enough ready capacity for that delta. Staleness, eviction,
+failure, reassignment, artifact change, or capacity loss aborts before the
+workload mutation. The final refreshed quota target and prewarm target must
+still be identical; retaining only enough quota for the immediate partial
+scale cannot leave a larger cache-fill intent authorized. The parent workload
+must also carry `kairyu.ai/cache-placement-binding` equal to the plan's binding
+ID. The actuator tests that annotation in the atomic JSON Patch and requires it
+unchanged in the response. The deployment scheduler/admission integration owns
+that binding and must constrain new Pods to the selected cache topology; a
+missing or mismatched binding fails before scale-out. Its concrete scheduler,
+DaemonSet, PVC/local-storage, affinity, RBAC, Kueue, and binding wiring belongs
+to private-ai-cloud-iac and is a deployment gate before enabling production
+autoscaling. D3.1-D3.4 now provide the library-side exact binding, atomic
+scale-from-zero Pod-template constraint, inherited-binding observation, and
+Runner-owned full-digest startup proof, plus a linearizable CREATE-admission
+claim contract that maps each incremental Pod name to one exact placement and
+injects its node affinity before persistence. Cache-bound Runners remain `WARMING`
+and routing-ineligible until the proof matches the actual Pod UID/node and every
+bound decision/artifact/generation identity. The highly available webhook and
+shared claim-store deployment remain external wiring; changing a shared
+template while replicas exist remains prohibited because it could roll existing
+Pods.
+
+WP4.4 now supplies the library-side producer for this input. A node publishes a
+short-lived, verified-only, path-free hint from its WP4.3 index, and
+`build_cache_placement_snapshot()` joins exact digest/revision matches to the
+controller-owned placement inventory. Missing, expired, future, or non-exact
+hints remain `absent`; cache locality does not alter health, schedulability,
+assignment, ResourceFlavor, profile, or compatibility facts. The transport,
+durable global revision CAS, and scheduler binding remain the deployment gate
+described above. See `docs/design/node-model-cache-placement-hints-v1.md`.
+
+## Drain-authorized deterministic scale-down
+
+WP3.7 connects the WP2.4 drain proof to the production scaling actuator without
+letting a replica-count write choose an unverified victim. Each candidate first
+stops queue intake and leaves routing through `ReplicaPoolDrainController`, then
+records authoritative post-fence `active_requests=0` evidence and an exact
+`RunnerTerminationAuthorization`. Before authorization, deployment-side drain
+integration must install the `kairyu.ai/scale-down-drain` Pod finalizer and RBAC
+must reserve removal of that deletion hold to the leader-fenced scale actuator;
+that installer remains part of the deferred runtime wiring. A
+`ScalingDrainSnapshot` binds those immutable
+Runner and Pod identities to one StatefulSet UID, generation, release, model
+revision, and monotonic drain revision. `plan_statefulset_scale_down()` selects
+exactly the ordinal interval `[desired_replicas, current_replicas)`, which is the
+highest-ordinal suffix removed by an ordinary StatefulSet replica reduction.
+Missing authorization for any selected ordinal fails closed. This version
+supports the standard zero start ordinal only; a StatefulSet configured with a
+non-zero `spec.ordinals.start` is rejected until that offset is part of the
+durable plan contract.
+
+The append-only scale decision persists that complete `ScalingDrainPlan`; its
+fingerprint, oldest selected Runner observation time, current count, desired
+count, and target revision are validated with the other decision inputs. A new
+outer snapshot timestamp therefore cannot launder stale `active_requests=0`
+evidence. Immediately before mutation, `reauthorize_drain()` must return a
+fresh, non-rollback snapshot with the same target and exact candidate Runner,
+Pod, ordinal, and termination-authorization evidence. The actuator then reads
+each selected Pod and verifies its UID, StatefulSet owner, deletion hold, and
+non-deleting state. The finalizer prevents that exact Pod from disappearing and
+being replaced between this check and the parent replica-count patch.
+
+After the parent StatefulSet PATCH commits, Kairyu issues DELETE for every
+selected Pod with a UID precondition and removes only its own finalizer through
+a UID/finalizer JSON Patch. Finalizers are released one ordinal at a time from
+highest to lowest. A lower ordinal remains held until every higher selected Pod
+is absent. The actuator waits up to 30 seconds for each zero-grace deletion; a
+timeout returns an explicit cleanup-pending error, and the standard controller
+retry resumes the same durable decision. This lets the StatefulSet controller
+preserve ordered termination while completing the already-authorized removal
+without a replacement-UID race.
+Existing decision annotations and parent resourceVersion/generation tests retain
+concurrent-write behavior. If the actuator crashes after committing the parent
+scale but before releasing every Pod, an exact retry uses the durable plan to
+release only surviving held UIDs; already absent ordinals are read-only no-ops.
+If leadership changes in that interval, a successor with the same election ID
+and a strictly newer fencing token may perform only this cleanup after proving
+the exact decision fingerprint, applied generation, and desired count on the
+parent; it cannot reuse the old decision for another parent mutation.
+The watcher/reconciler later observes each Pod disappearance and records the
+corresponding terminal Runner state.
+
+Deployment scale-down remains disabled in the fenced production path. A
+Deployment replica decrease permits its controller to choose victims, while
+pod-deletion-cost and similar hints do not provide the exact deletion guarantee
+required by a drain authorization. Supporting Deployment shrink therefore
+requires a future targeted-eviction adapter with equivalent identity, fencing,
+and idempotency semantics. Kubernetes runtime wiring, durable status inventory,
+and the live drain/scale acceptance run remain deployment gates and are deferred
+to the consolidated Phase 3 environment verification.

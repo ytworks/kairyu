@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
@@ -10,22 +12,41 @@ from pydantic import ValidationError
 
 from kairyu.runners import (
     InMemoryScalingDecisionLog,
+    KueueScalingAdmission,
+    ModelCachePlacement,
+    ModelCachePlacementState,
     RunnerStartupPhase,
+    RunnerState,
+    RunnerStatus,
+    RunnerTerminationAuthorization,
     ScalingDecisionAction,
     ScalingDecisionCapacityError,
     ScalingDecisionConflictError,
+    ScalingDecisionGenerationError,
     ScalingDecisionLog,
     ScalingDecisionReason,
     ScalingDecisionRecord,
+    ScalingDecisionTargetRevision,
+    ScalingDrainCandidate,
+    ScalingDrainSnapshot,
     ScalingObservation,
     ScalingObservationWindow,
     ScalingPolicy,
+    ScalingPrewarmSnapshot,
     ScalingQueueSnapshot,
+    ScalingQuotaLimit,
+    ScalingQuotaScope,
+    ScalingQuotaSnapshot,
     ScalingResourceSnapshot,
     ScalingRunnerSnapshot,
     ScalingStartupPhaseMetrics,
     ScalingStartupSnapshot,
+    admit_scaling_quota,
+    kueue_scaling_workload_name,
+    plan_cache_aware_scale_up,
+    plan_statefulset_scale_down,
 )
+from kairyu.runners.postgres_scaling_log import PostgresScalingDecisionLog
 
 NOW = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
 
@@ -142,6 +163,191 @@ def _record(
     }
     values.update(updates)
     return ScalingDecisionRecord(**values)
+
+
+def _quota_admission(
+    *,
+    requested: int,
+    tenant_limit: int = 50,
+    observed_at: datetime = NOW,
+):
+    snapshot = ScalingQuotaSnapshot(
+        snapshot_id="quota-snapshot-1",
+        quota_revision=7,
+        observed_at=observed_at,
+        tenant_id="tenant-a",
+        model_class="interactive-14b",
+        model_family="qwen",
+        gpus_per_replica=1,
+        target_reserved_gpus=tenant_limit,
+        limits=(
+            ScalingQuotaLimit(
+                scope=ScalingQuotaScope.CLUSTER,
+                quota_name="cluster",
+                hard_limit_gpus=100,
+                used_gpus_excluding_target=0,
+            ),
+            ScalingQuotaLimit(
+                scope=ScalingQuotaScope.MODEL_FAMILY,
+                quota_name="qwen",
+                hard_limit_gpus=50,
+                used_gpus_excluding_target=0,
+            ),
+            ScalingQuotaLimit(
+                scope=ScalingQuotaScope.TENANT_MODEL,
+                quota_name="tenant-a/interactive-14b",
+                hard_limit_gpus=tenant_limit,
+                used_gpus_excluding_target=0,
+            ),
+        ),
+        kueue=KueueScalingAdmission(
+            api_version="kueue.x-k8s.io/v1beta2",
+            namespace="tenant-a",
+            workload_name=kueue_scaling_workload_name(
+                target_kind="Deployment",
+                target_namespace="model-serving",
+                target_name="interactive-14b-runners",
+                target_uid="target-workload-uid",
+            ),
+            workload_uid="kueue-workload-uid",
+            workload_generation=2,
+            resource_version="99",
+            target_kind="Deployment",
+            target_namespace="model-serving",
+            target_name="interactive-14b-runners",
+            target_uid="target-workload-uid",
+            local_queue="serving",
+            cluster_queue="tenant-a-gpu",
+            pod_set_name="runners",
+            resource_flavor="h100-sxm",
+            priority_class_name="interactive-serving",
+            priority_class_group="kueue.x-k8s.io",
+            priority_class_kind="WorkloadPriorityClass",
+            priority=1000,
+            admitted=True,
+            admitted_pods=tenant_limit,
+            admitted_gpus=tenant_limit,
+        ),
+    )
+    return admit_scaling_quota(
+        snapshot,
+        current_replicas=3,
+        requested_replicas=requested,
+    )
+
+
+def _prewarm_plan(
+    *,
+    quota_target: int,
+    states: tuple[ModelCachePlacementState, ...],
+    observed_at: datetime = NOW,
+    resource_flavor: str = "h100-sxm",
+):
+    placements = tuple(
+        ModelCachePlacement(
+            placement_id=f"placement-{index:02d}",
+            node_name=f"gpu-node-{index:02d}",
+            resource_flavor=resource_flavor,
+            profile_id="h100-sxm-tp1",
+            compatibility_approval_id="compat-h100-qwen-v1",
+            state=state,
+        )
+        for index, state in enumerate(states)
+    )
+    snapshot = ScalingPrewarmSnapshot(
+        snapshot_id="prewarm-snapshot-1",
+        cache_revision=3,
+        observed_at=observed_at,
+        model_class="interactive-14b",
+        model_revision="model-revision-a",
+        artifact_digest="sha256:model-artifact-a",
+        placement_binding_id="binding-interactive-h100-a",
+        placements=placements,
+    )
+    return plan_cache_aware_scale_up(
+        snapshot,
+        current_replicas=3,
+        quota_target_replicas=quota_target,
+        resource_flavor=resource_flavor,
+    )
+
+
+def _target_revision(**updates) -> ScalingDecisionTargetRevision:
+    values = {
+        "target_kind": "StatefulSet",
+        "namespace": "model-serving",
+        "name": "interactive-14b-runners",
+        "election_id": "election-a",
+        "fencing_token": 11,
+        "workload_uid": "target-workload-uid",
+        "workload_generation": 7,
+        "release_id": "release-a",
+        "model_revision": "model-revision-a",
+    }
+    values.update(updates)
+    return ScalingDecisionTargetRevision(**values)
+
+
+def _drain_plan(
+    *,
+    current: int = 3,
+    desired: int = 2,
+    observed_at: datetime = NOW,
+    status_observed_at: datetime | None = None,
+):
+    status_observed_at = status_observed_at or observed_at
+    candidates = []
+    for ordinal in range(desired, current):
+        authorization = RunnerTerminationAuthorization(
+            runner_id=f"runner-{ordinal}",
+            pod_uid=f"pod-uid-{ordinal}",
+            fence_id=f"fence-{ordinal}",
+            fence_sequence=ordinal + 1,
+            drain_state_version=6,
+            replica_generation=f"replica-generation-{ordinal}",
+            dispatch_stopped_at=status_observed_at - timedelta(seconds=2),
+            routing_excluded_at=status_observed_at - timedelta(seconds=2),
+            activity_observed_at=status_observed_at - timedelta(seconds=1),
+            authorized_at=status_observed_at - timedelta(seconds=1),
+        )
+        status = RunnerStatus(
+            runner_id=f"runner-{ordinal}",
+            release_id="release-a",
+            model_id="qwen",
+            model_revision="model-revision-a",
+            state=RunnerState.TERMINATING,
+            state_version=7,
+            state_changed_at=status_observed_at - timedelta(seconds=1),
+            observed_at=status_observed_at,
+            pod_uid=f"pod-uid-{ordinal}",
+            active_requests=0,
+            termination_authorization=authorization,
+        )
+        candidates.append(
+            ScalingDrainCandidate(
+                pod_name=f"interactive-14b-runners-{ordinal}",
+                workload_ordinal=ordinal,
+                status=status,
+            )
+        )
+    snapshot = ScalingDrainSnapshot(
+        snapshot_id="drain-snapshot-1",
+        drain_revision=7,
+        observed_at=observed_at,
+        model_class="interactive-14b",
+        namespace="model-serving",
+        statefulset_name="interactive-14b-runners",
+        workload_uid="target-workload-uid",
+        workload_generation=7,
+        release_id="release-a",
+        model_revision="model-revision-a",
+        candidates=tuple(candidates),
+    )
+    return plan_statefulset_scale_down(
+        snapshot,
+        current_replicas=current,
+        desired_replicas=desired,
+    )
 
 
 def test_observation_captures_all_planned_input_families() -> None:
@@ -264,6 +470,370 @@ def test_decision_persists_exact_window_policy_revision_and_reason() -> None:
     assert ScalingDecisionRecord.model_validate_json(record.model_dump_json()) == record
 
 
+def test_legacy_schema_v1_fingerprint_and_postgres_row_remain_readable() -> None:
+    record = _record()
+    legacy_payload = record.model_dump(mode="json")
+    for optional_field in (
+        "decision_generation",
+        "target_revision",
+        "quota_admission",
+        "prewarm_plan",
+        "drain_plan",
+    ):
+        legacy_payload.pop(optional_field)
+    legacy_fingerprint = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    row = (
+        record.decision_id,
+        record.policy.model_class,
+        record.decided_at,
+        record.window.started_at,
+        record.window.ended_at,
+        record.catalog_revision,
+        record.policy.policy_revision,
+        record.action.value,
+        legacy_fingerprint,
+        legacy_payload,
+    )
+
+    assert record.fingerprint == legacy_fingerprint
+    assert PostgresScalingDecisionLog._record(row) == record
+
+
+def test_legacy_prewarm_placement_fingerprint_and_postgres_row_remain_readable() -> None:
+    quota = _quota_admission(requested=6)
+    prewarm = _prewarm_plan(
+        quota_target=quota.admitted_replicas,
+        states=(
+            ModelCachePlacementState.FILLING,
+            ModelCachePlacementState.ABSENT,
+            ModelCachePlacementState.ABSENT,
+        ),
+    )
+    record = _record(
+        quota_admission=quota,
+        prewarm_plan=prewarm,
+        action=ScalingDecisionAction.HOLD,
+        reason=ScalingDecisionReason.CACHE_PREWARM,
+    )
+    legacy_payload = record.model_dump(mode="json")
+    for optional_field in (
+        "decision_generation",
+        "target_revision",
+        "quota_admission",
+        "prewarm_plan",
+        "drain_plan",
+    ):
+        if legacy_payload[optional_field] is None:
+            legacy_payload.pop(optional_field)
+    placements = legacy_payload["prewarm_plan"]["snapshot"]["placements"]
+    for placement in placements:
+        placement.pop("cache_hint_observed_at")
+        placement.pop("cache_hint_valid_until")
+        placement.pop("cache_hint_index_revision")
+    legacy_fingerprint = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    row = (
+        record.decision_id,
+        record.policy.model_class,
+        record.decided_at,
+        record.window.started_at,
+        record.window.ended_at,
+        record.catalog_revision,
+        record.policy.policy_revision,
+        record.action.value,
+        legacy_fingerprint,
+        legacy_payload,
+    )
+
+    assert record.fingerprint == legacy_fingerprint
+    assert PostgresScalingDecisionLog._record(row) == record
+
+
+def test_scale_down_persists_exact_drain_plan_and_target_binding() -> None:
+    drain = _drain_plan()
+    decision = _record(
+        target_revision=_target_revision(),
+        drain_plan=drain,
+        action=ScalingDecisionAction.SCALE_DOWN,
+        reason=ScalingDecisionReason.LOW_UTILIZATION,
+        desired_replicas=2,
+        target_delta=-1,
+    )
+
+    assert decision.drain_plan == drain
+    assert decision.drain_plan.candidate_runner_ids == ("runner-2",)
+    assert decision.drain_plan.snapshot.workload_uid == (decision.target_revision.workload_uid)
+
+
+@pytest.mark.parametrize(
+    ("record_updates", "message"),
+    [
+        (
+            {"drain_plan": _drain_plan(current=4, desired=2)},
+            "observed current replicas",
+        ),
+        (
+            {
+                "action": ScalingDecisionAction.HOLD,
+                "reason": ScalingDecisionReason.NO_CHANGE,
+                "desired_replicas": 3,
+                "target_delta": 0,
+            },
+            "scale-down decisions",
+        ),
+        (
+            {"target_revision": _target_revision(workload_uid="other-uid")},
+            "decision target revision",
+        ),
+    ],
+)
+def test_drain_plan_rejects_wrong_decision_or_target_binding(
+    record_updates: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "target_revision": _target_revision(),
+        "drain_plan": _drain_plan(),
+        "action": ScalingDecisionAction.SCALE_DOWN,
+        "reason": ScalingDecisionReason.LOW_UTILIZATION,
+        "desired_replicas": 2,
+        "target_delta": -1,
+    }
+    values.update(record_updates)
+
+    with pytest.raises(ValidationError, match=message):
+        _record(**values)
+
+
+def test_stale_drain_evidence_is_a_decision_source_and_cannot_scale_down() -> None:
+    stale_drain = _drain_plan(observed_at=NOW - timedelta(seconds=31))
+
+    with pytest.raises(ValidationError, match="policy freshness limit"):
+        _record(
+            target_revision=_target_revision(),
+            drain_plan=stale_drain,
+            action=ScalingDecisionAction.SCALE_DOWN,
+            reason=ScalingDecisionReason.LOW_UTILIZATION,
+            desired_replicas=2,
+            target_delta=-1,
+        )
+
+    with pytest.raises(ValidationError, match="cannot authorize scale-down"):
+        _record(
+            target_revision=_target_revision(),
+            drain_plan=stale_drain,
+            action=ScalingDecisionAction.SCALE_DOWN,
+            reason=ScalingDecisionReason.STALE_OBSERVATIONS,
+            inputs_stale=True,
+            desired_replicas=2,
+            target_delta=-1,
+        )
+
+
+def test_fresh_drain_snapshot_cannot_launder_stale_runner_evidence() -> None:
+    stale_inner = _drain_plan(
+        observed_at=NOW,
+        status_observed_at=NOW - timedelta(seconds=31),
+    )
+
+    assert stale_inner.snapshot.observed_at == NOW
+    assert stale_inner.source_observed_at == NOW - timedelta(seconds=31)
+    with pytest.raises(ValidationError, match="policy freshness limit"):
+        _record(
+            target_revision=_target_revision(),
+            drain_plan=stale_inner,
+            action=ScalingDecisionAction.SCALE_DOWN,
+            reason=ScalingDecisionReason.LOW_UTILIZATION,
+            desired_replicas=2,
+            target_delta=-1,
+        )
+
+
+def test_decision_persists_unconstrained_quota_and_kueue_admission() -> None:
+    quota = _quota_admission(requested=6)
+    decision = _record(
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.QUEUE_PRESSURE,
+        quota_admission=quota,
+        desired_replicas=6,
+        target_delta=3,
+    )
+
+    assert decision.quota_admission == quota
+    assert decision.quota_admission.snapshot.kueue.cluster_queue == "tenant-a-gpu"
+
+
+def test_cache_fill_stage_holds_runner_start_and_persists_full_plan() -> None:
+    quota = _quota_admission(requested=6)
+    prewarm = _prewarm_plan(
+        quota_target=quota.admitted_replicas,
+        states=(
+            ModelCachePlacementState.FILLING,
+            ModelCachePlacementState.ABSENT,
+            ModelCachePlacementState.ABSENT,
+        ),
+    )
+
+    decision = _record(
+        quota_admission=quota,
+        prewarm_plan=prewarm,
+        action=ScalingDecisionAction.HOLD,
+        reason=ScalingDecisionReason.CACHE_PREWARM,
+    )
+
+    assert decision.desired_replicas == 3
+    assert decision.prewarm_plan is not None
+    assert decision.prewarm_plan.cache_fill_placement_ids == (
+        "placement-01",
+        "placement-02",
+    )
+
+
+def test_runner_start_stage_uses_only_ready_cache_capacity() -> None:
+    quota = _quota_admission(requested=6)
+    prewarm = _prewarm_plan(
+        quota_target=quota.admitted_replicas,
+        states=(
+            ModelCachePlacementState.READY,
+            ModelCachePlacementState.READY,
+            ModelCachePlacementState.ABSENT,
+        ),
+    )
+
+    decision = _record(
+        quota_admission=quota,
+        prewarm_plan=prewarm,
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.QUEUE_PRESSURE,
+        desired_replicas=5,
+        target_delta=2,
+    )
+
+    assert decision.prewarm_plan is not None
+    assert decision.prewarm_plan.quota_target_replicas == 6
+    assert decision.desired_replicas == 5
+    assert decision.prewarm_plan.runner_start_placement_ids == (
+        "placement-00",
+        "placement-01",
+    )
+
+
+def test_prewarm_plan_requires_quota_flavor_and_current_replica_binding() -> None:
+    quota = _quota_admission(requested=6)
+    wrong_flavor = _prewarm_plan(
+        quota_target=quota.admitted_replicas,
+        states=(ModelCachePlacementState.READY,),
+        resource_flavor="l40s-pcie",
+    )
+
+    with pytest.raises(ValidationError, match="Kueue resource flavor"):
+        _record(
+            quota_admission=quota,
+            prewarm_plan=wrong_flavor,
+            action=ScalingDecisionAction.SCALE_UP,
+            reason=ScalingDecisionReason.QUEUE_PRESSURE,
+            desired_replicas=4,
+            target_delta=1,
+        )
+
+
+def test_stale_prewarm_evidence_cannot_hide_behind_cache_hold() -> None:
+    quota = _quota_admission(requested=6)
+    prewarm = _prewarm_plan(
+        quota_target=quota.admitted_replicas,
+        states=(ModelCachePlacementState.ABSENT,) * 3,
+        observed_at=NOW - timedelta(seconds=31),
+    )
+
+    decision = _record(
+        quota_admission=quota,
+        prewarm_plan=prewarm,
+        action=ScalingDecisionAction.HOLD,
+        reason=ScalingDecisionReason.STALE_OBSERVATIONS,
+        inputs_stale=True,
+    )
+
+    assert decision.inputs_stale is True
+
+
+def test_budget_limit_reason_is_derived_from_quota_clamp() -> None:
+    quota = _quota_admission(requested=8, tenant_limit=5)
+    decision = _record(
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.BUDGET_LIMIT,
+        quota_admission=quota,
+        demand_replicas=5,
+        buffered_target_replicas=8,
+        desired_replicas=5,
+        target_delta=2,
+    )
+
+    assert decision.quota_admission is not None
+    assert decision.quota_admission.requested_replicas == 8
+    assert decision.desired_replicas == 5
+    with pytest.raises(ValidationError, match="budget-limit reason"):
+        _record(
+            action=ScalingDecisionAction.SCALE_UP,
+            reason=ScalingDecisionReason.QUEUE_PRESSURE,
+            quota_admission=quota,
+            demand_replicas=5,
+            buffered_target_replicas=8,
+            desired_replicas=5,
+            target_delta=2,
+        )
+
+
+def test_stale_quota_evidence_cannot_authorize_scale_up() -> None:
+    quota = _quota_admission(
+        requested=6,
+        observed_at=NOW - timedelta(seconds=31),
+    )
+
+    with pytest.raises(ValidationError, match="stale quota evidence"):
+        _record(
+            action=ScalingDecisionAction.SCALE_UP,
+            reason=ScalingDecisionReason.QUEUE_PRESSURE,
+            quota_admission=quota,
+            desired_replicas=6,
+            target_delta=3,
+        )
+
+
+def test_stale_observation_reason_takes_precedence_over_quota_constraint() -> None:
+    quota = _quota_admission(
+        requested=8,
+        tenant_limit=5,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    decision = _record(
+        decided_at=NOW + timedelta(seconds=31),
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.STALE_OBSERVATIONS,
+        inputs_stale=True,
+        quota_admission=quota,
+        demand_replicas=5,
+        buffered_target_replicas=8,
+        desired_replicas=5,
+        target_delta=2,
+    )
+
+    assert decision.quota_admission is not None
+    assert decision.quota_admission.constrained is True
+    assert decision.reason is ScalingDecisionReason.STALE_OBSERVATIONS
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
@@ -356,9 +926,7 @@ def test_out_of_range_decisions_cannot_move_away_or_overshoot(
         model_class="interactive-14b",
         started_at=NOW - timedelta(seconds=30),
         ended_at=NOW,
-        observations=(
-            _observation("outside", observed_at=NOW, current_replicas=current),
-        ),
+        observations=(_observation("outside", observed_at=NOW, current_replicas=current),),
     )
     with pytest.raises(ValidationError, match=message):
         _record(
@@ -424,9 +992,7 @@ def test_staleness_is_derived_from_all_latest_source_times() -> None:
 
     fresh_window = _window()
     latest = fresh_window.observations[-1]
-    old_resources = latest.resources.model_copy(
-        update={"observed_at": NOW - timedelta(seconds=60)}
-    )
+    old_resources = latest.resources.model_copy(update={"observed_at": NOW - timedelta(seconds=60)})
     stale_observation = latest.model_copy(update={"resources": old_resources})
     stale_window = fresh_window.model_copy(
         update={
@@ -457,6 +1023,74 @@ def test_in_memory_log_is_idempotent_and_detects_conflicts() -> None:
     assert log.get(record.decision_id) == record
     with pytest.raises(ScalingDecisionConflictError):
         log.append(_record(reason=ScalingDecisionReason.HYSTERESIS))
+
+
+def test_log_allocates_mutation_generations_and_hold_does_not_consume() -> None:
+    log = InMemoryScalingDecisionLog()
+    first_draft = _record(
+        "scale-1",
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.QUEUE_PRESSURE,
+        desired_replicas=4,
+        target_delta=1,
+    )
+    first = log.append(first_draft)
+    hold = log.append(_record("hold-1"))
+    second = log.append(
+        _record(
+            "scale-2",
+            action=ScalingDecisionAction.SCALE_UP,
+            reason=ScalingDecisionReason.QUEUE_PRESSURE,
+            desired_replicas=4,
+            target_delta=1,
+        )
+    )
+
+    assert first.decision_generation == 1
+    assert hold.decision_generation is None
+    assert second.decision_generation == 2
+    assert log.append(first_draft) == first
+    assert log.append(first) == first
+
+
+def test_new_decision_cannot_forge_a_durable_generation() -> None:
+    log = InMemoryScalingDecisionLog()
+    draft = _record(
+        "scale-1",
+        action=ScalingDecisionAction.SCALE_UP,
+        reason=ScalingDecisionReason.QUEUE_PRESSURE,
+        desired_replicas=4,
+        target_delta=1,
+    )
+    forged = ScalingDecisionRecord.model_validate(
+        draft.model_copy(update={"decision_generation": 9}).model_dump()
+    )
+
+    with pytest.raises(ScalingDecisionGenerationError, match="must not supply"):
+        log.append(forged)
+
+
+def test_mutation_generation_allocation_is_atomic_per_model_class() -> None:
+    log = InMemoryScalingDecisionLog()
+    drafts = tuple(
+        _record(
+            f"scale-{index}",
+            action=ScalingDecisionAction.SCALE_UP,
+            reason=ScalingDecisionReason.QUEUE_PRESSURE,
+            desired_replicas=4,
+            target_delta=1,
+        )
+        for index in range(1, 17)
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = tuple(pool.map(log.append, drafts))
+
+    assert {record.decision_generation for record in results} == set(range(1, 17))
+
+
+def test_hold_cannot_be_labeled_with_a_mutation_generation() -> None:
+    with pytest.raises(ValidationError, match="cannot consume"):
+        _record(decision_generation=1)
 
 
 def test_in_memory_log_lists_newest_with_filters_and_limit() -> None:

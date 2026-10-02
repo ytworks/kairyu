@@ -22,6 +22,12 @@ from kairyu.runners.observation import (
     RunnerPodObservation,
     RunnerRuntimeObservation,
 )
+from kairyu.runners.startup_binding import RunnerCacheStartupBinding
+from kairyu.runners.startup_metadata import (
+    RUNNER_CACHE_STARTUP_PLACEMENT_ANNOTATION,
+    RUNNER_CACHE_STARTUP_TARGET_ANNOTATION,
+    parse_runner_cache_startup_binding_annotations,
+)
 
 RELEASE_ID_ANNOTATION = "kairyu.ai/release-id"
 MODEL_ID_ANNOTATION = "kairyu.ai/model-id"
@@ -49,6 +55,8 @@ class KubernetesRunnerPodSnapshot:
     model_id: str
     model_revision: str
     pod: RunnerPodObservation
+    cache_startup_binding: RunnerCacheStartupBinding | None = None
+    cache_startup_placement_id: str | None = None
 
 
 def _required_string(mapping: Mapping[str, Any], key: str, *, owner: str) -> str:
@@ -79,6 +87,12 @@ def _gpu_uuids(annotations: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
         raise ValueError(f"{GPU_UUIDS_ANNOTATION!r} must contain a JSON string array")
     return tuple(values)
+
+
+def _cache_startup_binding(
+    annotations: Mapping[str, Any],
+) -> RunnerCacheStartupBinding | None:
+    return parse_runner_cache_startup_binding_annotations(annotations)
 
 
 def _status_entries(status: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
@@ -182,6 +196,36 @@ def parse_runner_pods(payload: Any) -> dict[str, KubernetesRunnerPodSnapshot]:
             MODEL_REVISION_ANNOTATION,
             owner=f"Pod {uid!r} annotations",
         )
+        cache_startup_binding = _cache_startup_binding(annotations)
+        if cache_startup_binding is not None and (
+            cache_startup_binding.model_id != model_id
+            or cache_startup_binding.model_revision != model_revision
+        ):
+            raise ValueError("Pod identity does not match cache startup binding")
+        cache_startup_target = annotations.get(RUNNER_CACHE_STARTUP_TARGET_ANNOTATION)
+        cache_startup_placement_id = annotations.get(
+            RUNNER_CACHE_STARTUP_PLACEMENT_ANNOTATION
+        )
+        if cache_startup_binding is None:
+            if cache_startup_target is not None or cache_startup_placement_id is not None:
+                raise ValueError("Pod has incremental placement metadata without a binding")
+        elif cache_startup_target is not None or cache_startup_placement_id is not None:
+            if (
+                not isinstance(cache_startup_target, str)
+                or cache_startup_target != cache_startup_binding.target_id
+                or not isinstance(cache_startup_placement_id, str)
+            ):
+                raise ValueError("Pod incremental placement metadata is incomplete or invalid")
+            selected = tuple(
+                placement
+                for placement in cache_startup_binding.placements
+                if placement.placement_id == cache_startup_placement_id
+            )
+            if len(selected) != 1:
+                raise ValueError("Pod placement is absent from cache startup binding")
+            node_name = spec.get("nodeName")
+            if node_name is not None and node_name != selected[0].node_name:
+                raise ValueError("Pod node does not match its selected cache placement")
         conditions = status.get("conditions", [])
         if not isinstance(conditions, list):
             raise ValueError("Pod status conditions must be a list")
@@ -237,10 +281,12 @@ def parse_runner_pods(payload: Any) -> dict[str, KubernetesRunnerPodSnapshot]:
         if uid in result:
             raise ValueError(f"Pod response contains duplicate uid {uid!r}")
         result[uid] = KubernetesRunnerPodSnapshot(
-            release_id,
-            model_id,
-            model_revision,
-            pod,
+            release_id=release_id,
+            model_id=model_id,
+            model_revision=model_revision,
+            pod=pod,
+            cache_startup_binding=cache_startup_binding,
+            cache_startup_placement_id=cache_startup_placement_id,
         )
     return result
 
@@ -427,6 +473,10 @@ class KubernetesRunnerWatcher:
                     model_revision=pods[runner_id].model_revision,
                     observed_at=observed_at,
                     pod=pods[runner_id].pod,
+                    cache_startup_binding=pods[runner_id].cache_startup_binding,
+                    cache_startup_placement_id=(
+                        pods[runner_id].cache_startup_placement_id
+                    ),
                     endpoint_ready=runner_id in ready_uids,
                     runtime=runtime.get(runner_id),
                 )
