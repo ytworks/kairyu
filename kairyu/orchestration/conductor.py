@@ -2328,10 +2328,14 @@ class Conductor:
         if run.decision_unavailable is not None:
             raise ChecklistUnavailable(run.decision_unavailable)
         unknown_cost = run.budget.budget.max_cost_usd is not None
-        reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
+        # One step per System One read of the verdict.
+        reads = 1 if config.acceptance is None else 2
+        reserved = run.budget.try_reserve(reads, unknown_cost=unknown_cost)
         if reserved is None:
             raise ChecklistUnavailable("budget", "no budget for the decision reads")
         run.budget = reserved
+        # Only the selected final unit is published; internal outputs keep their text.
+        published = target.name if target.name == self._selected_final_unit().name else None
         try:
             verdict = await judge(
                 config,
@@ -2340,12 +2344,12 @@ class Conductor:
                 query,
                 self._final_tools,
                 self._final_tool_choice,
-                published=target.name,
+                published=published,
             )
         except BaseException:
-            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            run.budget = run.budget.release(reads, unknown_cost=unknown_cost)
             raise
-        run.budget = run.budget.reconcile_success(cost=0.0, unknown_cost=unknown_cost)
+        run.budget = run.budget.reconcile_success(reads, cost=0.0, unknown_cost=unknown_cost)
         if verdict.usage != (0, 0):
             run.usage[0] += verdict.usage[0]
             run.usage[1] += verdict.usage[1]

@@ -397,8 +397,9 @@ default_reasoning_effort: high
 internal_max_tokens: 65536
 expose_intermediate_outputs: true
 budget:
-  # Worst case 10 steps: extract, implicit, history, adopt, generator, and
-  # checklist x3 with two repairs of the answer. A step budget below that
+  # Worst case 13 steps: extract, implicit, history, adopt, generator, and
+  # three checklist verdicts (coverage and acceptance reads, a step each)
+  # with two repairs of the answer. A step budget below that
   # publishes an unverified answer (reason: budget).
-  max_steps: 12
+  max_steps: 15
   max_refine_depth: 2

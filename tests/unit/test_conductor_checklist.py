@@ -74,6 +74,9 @@ class FakeSystemOne:
         )
 
 
+QUOTED_CALL = '<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>'
+
+
 def _contains_42(state, question):
     return 0.99 if "42" in str(state.get("answer", "")) else 0.1
 
@@ -271,7 +274,7 @@ async def test_two_point_lists_are_adopted_in_one_read_over_the_request():
         {
             "explicit": [_points("E", "names a colour", "cites a poem")],
             "implicit": [_points("I", "is one word", "uses French")],
-            "history": ["The user asked an old question."],
+            "history": [f"The user asked an old question; {QUOTED_CALL} failed."],
             "answer": ["Red"],
         }
     )
@@ -330,14 +333,17 @@ async def test_two_point_lists_are_adopted_in_one_read_over_the_request():
             depends_on=("history",),
         ),
     )
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+    conductor = Conductor(
+        roles, {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
+    )
 
     await conductor.run(_chat_query(turns), budget=Budget(max_steps=8))
 
     (body,) = judge.bodies
     assert len(body["questions"]) == 4
     assert body["state"]["request"] == [turns[0], turns[-1]]
-    assert body["state"]["history"] == "The user asked an old question."
+    # An internal output is never published: a quoted call keeps its context.
+    assert body["state"]["history"] == f"The user asked an old question; {QUOTED_CALL} failed."
     answer_prompt = next(p for p in backend.prompts if p.startswith("[answer]"))
     assert "names a colour" in answer_prompt and "is one word" in answer_prompt
     assert "poem" not in answer_prompt and "French" not in answer_prompt
@@ -716,3 +722,13 @@ async def test_an_unavailable_acceptance_read_still_bills_the_coverage_read():
         usages.append(result.usage)
 
     assert (usages[1][0] - usages[0][0], usages[1][1] - usages[0][1]) == (10, 1)
+
+
+async def test_the_acceptance_read_needs_its_own_budget_step():
+    backend = RoutedBackend({"generator": ["It is 42."]})
+    judge = FakeSystemOne()
+    conductor = Conductor(_accepting_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=2))
+
+    assert judge.bodies == [] and result.verification.reason == "budget"
