@@ -59,7 +59,7 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
 │ answer     = the generator's draft, unchanged (no model call)                        │
 │   └─ checklist  Jev, request 1: does the answer fully do each adopted point?         │
 │                 Jev, request 2: given those results, the original prompt and the     │
-│                 answer, may the answer be adopted as the official reply?             │
+│                 answer, can it be adopted as the reply the user expects?             │
 │                 not adopted → repair (DeepSeek), judged again, at most twice         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -101,10 +101,13 @@ state:
   prompt:    the request, verbatim
   answer:    the reply exactly as it will be sent
   checklist: [{id, point, p, passed}] from the coverage read
-question: "May this answer be adopted as the official reply to the prompt?"
-  yes: it answers the prompt, the point results considered
-  no:  part of what the prompt asks is unanswered or wrong
-threshold: τ_accept, calibrated on InFoBench (see MEASUREMENTS.md)
+question: "Reading the prompt, the candidate answer and how well each point
+           is met, can this answer be adopted as the reply the user expects?"
+  yes: it can be adopted as is as the reply the user expects
+  no:  it cannot be adopted as the reply the user expects
+threshold: τ_accept = 0.99 (owner choice; InFoBench held-out: 7 of 43
+           accepted answers miss a labelled requirement, 16.3 %, upper
+           bound 28.4 %; no threshold meets α = 0.10, see MEASUREMENTS.md)
 ```
 
 The coverage read's τ_hi only selects the missed points that the repair

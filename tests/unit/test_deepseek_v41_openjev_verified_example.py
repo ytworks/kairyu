@@ -100,7 +100,7 @@ def _openjev(
         if question["type"] == "choice":
             other = next(label for label in question["criteria"] if label != route)
             return {"type": "choice", "probabilities": {route: 0.9, other: 0.1}}
-        if "adopted as the official reply" in text:
+        if "adopted as the reply the user expects" in text:
             return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
         if "Must the reply the assistant gives now meet this point" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}

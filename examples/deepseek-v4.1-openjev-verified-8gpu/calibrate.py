@@ -12,9 +12,11 @@ threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
 upper bound on the violation rate <= alpha on the calibration half; the
 held-out half is reported unchanged.
 
-tau_accept (VCO-D15 item 7) is chosen the same way for the acceptance read,
-one per response, labelled acceptable when every requirement label is yes;
-the checklist runs whole (coverage then acceptance), as in serving.
+The acceptance read (VCO-D15 item 7) is measured the same way, one read per
+response, labelled acceptable when every requirement label is yes; the
+checklist runs whole (coverage then acceptance), as in serving. No threshold
+meets alpha there (MEASUREMENTS.md); the report gives the evidence for the
+owner's tau_accept.
 
 Usage: ./verify.sh calibrate   (after ./run.sh up)
 """

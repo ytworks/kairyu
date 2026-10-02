@@ -49,6 +49,34 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## Acceptance read for VCO-D15 item 7 (2026-10-03, `cf4ad653`)
+
+InFoBench (249 answers; an answer is acceptable when every expert label is
+yes: 125), the same split as below, cached per-point p from the coverage
+calibration (`judged-coverage-v2.jsonl`). One acceptance read per answer:
+the prompt, the answer and the point results `{id, point, p, passed}`.
+Variants differ in the question and state (`calibrate.py` runs production).
+
+| variant | AUROC | best calibration upper bound (response level) |
+|---|---|---|
+| "May this answer be adopted as the official reply?" + results | 0.787 | 0.339 |
+| same question, no results | 0.786 | 0.326 |
+| point statements only, "meets every point?" | 0.799 | 0.377 |
+| strict "does everything the prompt asks?" + results | 0.789 | 0.348 |
+| missed points only | 0.795 | 0.379 |
+| **"can it be adopted as the reply the user expects?" + results (production)** | **0.809** | **0.259** |
+| reference: every point p >= tau_hi (no acceptance read) | 0.800 (min p) | 0.396 |
+
+No variant and no threshold meets alpha 0.10 at 95 % at the response level.
+Production thresholds (held-out half, 125 answers):
+
+| tau_accept | guaranteed | missing a requirement | rate | upper bound |
+|---|---|---|---|---|
+| 0.5 | 59 | 14 | 23.7 % | 34.6 % |
+| 0.9 | 52 | 10 | 19.2 % | 30.4 % |
+| **0.99 (owner choice)** | **43** | **7** | **16.3 %** | **28.4 %** |
+| 0.999 | 24 | 4 | 16.7 % | 34.2 % |
+
 ## Coverage calibration for VCO-D15 (2026-10-02, 23:33-00:05 JST)
 
 InFoBench expert labels (249 answers, 1,129 labels, 239 violations), the same

@@ -373,16 +373,18 @@ roles:
       # Acceptance (VCO-D15): the point results, the answer and the original
       # prompt go to Jev, which decides whether the answer may be adopted.
       acceptance:
-        ask: May this answer be adopted as the official reply to the prompt?
-        criteria_true: >-
-          The answer does what the prompt asks, and the point results show
-          nothing the prompt needs is missing or wrong
-        criteria_false: Something the prompt needs is missing or wrong in the answer
+        ask: >-
+          Reading the prompt, the candidate answer and how well each point is
+          met, can this answer be adopted as the reply the user expects?
+        criteria_true: It can be adopted as is as the reply the user expects
+        criteria_false: It cannot be adopted as the reply the user expects
         state:
           - {key: prompt, source: request, max_total_chars: 100000}
           - {key: answer, source: answer}
-        # Calibrated on InFoBench answers (calibrate.py).
-        threshold: 0.5
+        # Owner choice on InFoBench response labels (MEASUREMENTS.md): no
+        # threshold meets alpha 0.10; 0.99 has the lowest error rate (held-out
+        # 7 of 43, 16.3 %, upper bound 28.4 %).
+        threshold: 0.99
       max_refinements: 2
       on_unavailable: publish_unverified
       unverified_from: generator
