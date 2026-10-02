@@ -2526,6 +2526,9 @@ class Conductor:
         if config.curate is not None:
             for role, curated in curate(config.curate, run.outputs, published.items).items():
                 run.outputs[role] = curated
+                # A later seed republishes completions with the text; the
+                # stored ones still hold the dropped items.
+                run.role_completions.pop(role, None)
         if is_final_unit:
             run.verification = verdict_report(
                 published,

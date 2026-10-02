@@ -435,3 +435,56 @@ def test_a_final_checklist_cannot_curate_what_it_publishes():
     )
     with pytest.raises(ValueError, match="cannot curate"):
         Conductor(roles, {"gen": RoutedBackend({})}, decision_workers={"judge": FakeSystemOne()})
+
+
+async def test_a_seed_republishes_the_curated_list_not_the_generated_one():
+    # PR #618 review: curation rewrote the text but a later seed published
+    # the stored completions, which still held the dropped item.
+    backend = RoutedBackend({"draft": [_points("E", "keep me", "drop me")]})
+
+    def necessity(state, question):
+        return 0.1 if "drop me" in question else 0.9
+
+    roles = (
+        RoleSpec(name="draft", worker="gen", prompt="[draft] {query}"),
+        RoleSpec(
+            name="adopt",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="draft",
+            depends_on=("draft",),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role="draft", path="points"),
+                        group="necessity",
+                        threshold=0.0,
+                    ),
+                ),
+                state=(StateSection("draft", "draft"),),
+                max_refinements=0,
+                curate=CurationConfig(
+                    targets=(CurationTarget("draft", "points"),), drop_group="necessity"
+                ),
+            ),
+        ),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            prompt="",
+            depends_on=("draft",),
+            seed_from="draft",
+            refine_prompt="[repair] {previous}",
+        ),
+    )
+    conductor = Conductor(
+        roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne(necessity)}
+    )
+
+    result = await conductor.run("q", budget=Budget(max_steps=8))
+
+    assert "drop me" not in result.final_text
+    assert result.completions[0].text == result.final_text
