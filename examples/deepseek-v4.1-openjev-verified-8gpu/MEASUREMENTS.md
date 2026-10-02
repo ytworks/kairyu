@@ -77,6 +77,25 @@ Production thresholds (held-out half, 125 answers):
 | **0.99 (owner choice)** | **43** | **7** | **16.3 %** | **28.4 %** |
 | 0.999 | 24 | 4 | 16.7 % | 34.2 % |
 
+### Point results in the acceptance read: with (X) or without (Y) (2026-10-03, 08:43-08:44 JST)
+
+Same 249 answers and split, measured back to back. X is production (prompt,
+candidate answer and point results); Y gives the prompt and the candidate
+answer only ("Reading the prompt and the candidate answer, can this answer
+be adopted as the reply the user expects?"). The owner kept X.
+
+| | AUROC | best calibration upper bound | held-out at 0.99 |
+|---|---|---|---|
+| X (rerun) | 0.805 | 0.238 | 45 guaranteed, 7 missing a requirement (15.6 %, upper 27.2 %) |
+| Y | 0.754 | 0.416 | 62 guaranteed, 20 missing a requirement (32.3 %, upper 43.3 %) |
+
+Caveat: in this calibration the points whose results X reads are
+InFoBench's own labelled requirements (rewritten as statements), the same
+items the response label is built from; in serving the points come from the
+extractors. X's advantage here may be larger than in serving. "Missing a
+requirement" means at least one expert label is no; it stands in for "not
+the reply the user expects", which InFoBench does not label directly.
+
 ## Coverage calibration for VCO-D15 (2026-10-02, 23:33-00:05 JST)
 
 InFoBench expert labels (249 answers, 1,129 labels, 239 violations), the same
