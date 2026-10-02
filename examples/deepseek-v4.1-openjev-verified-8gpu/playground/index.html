@@ -103,8 +103,16 @@ $("send").onclick = async () => {
     const response = await fetch("/v1/chat/completions", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || response.status);
+    // A proxy error (502/504 while the server restarts or times out) is an
+    // HTML page, not JSON: report the status instead of a parse error.
+    const text = await response.text();
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new Error(`HTTP ${response.status} ${response.statusText}: the server did not return JSON`);
+    }
+    if (!response.ok) throw new Error(body.error?.message || `HTTP ${response.status}`);
     render(body, (performance.now() - started) / 1000);
     $("status").textContent = "";
   } catch (error) {

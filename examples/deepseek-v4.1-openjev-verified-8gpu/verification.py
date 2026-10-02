@@ -399,20 +399,28 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
     judged = [entry for entry in coverage if entry["covered"] is not None]
     recall = sum(entry["covered"] for entry in judged) / max(1, sum(e["gold"] for e in judged))
     duplicates = sum(entry["duplicate_pairs"] for entry in judged)
+    with_duplicates = sum(1 for entry in judged if entry["duplicate_pairs"] > 0)
+    duplicate_share = with_duplicates / max(1, len(judged))
     summary = {
         **_summary(results),
         "gold_recall": round(recall, 4),
         "duplicate_pairs_per_request": round(duplicates / max(1, len(judged)), 3),
+        "requests_with_duplicates": round(duplicate_share, 4),
         "judged": len(judged),
     }
     _print_rows(results)
     print(json.dumps(summary, indent=2), flush=True)
-    passed = recall >= 0.9 and len(judged) == len(rows)
+    # MECE: exhaustive (gold recall) and exclusive (few requests with a
+    # duplicate pair), with the same 10 % tolerance on both.
+    passed = recall >= 0.9 and duplicate_share <= 0.10 and len(judged) == len(rows)
     _write(
         "requirements",
         {"passed": passed, "summary": summary, "coverage": coverage, "rows": results},
     )
-    print(f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f}, gate 0.90)")
+    print(
+        f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f} >= 0.90, "
+        f"requests with duplicates {duplicate_share:.3f} <= 0.10)"
+    )
     if not passed:
         raise SystemExit(1)
 
