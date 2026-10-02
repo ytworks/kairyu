@@ -2336,6 +2336,19 @@ class Conductor:
         run.budget = reserved
         # Only the selected final unit is published; internal outputs keep their text.
         published = target.name if target.name == self._selected_final_unit().name else None
+        completed = 0
+
+        def on_read(usage: tuple[int, int]) -> None:
+            # A returned read is spent and billed at once, even if the verdict
+            # then fails or the run is cancelled.
+            nonlocal completed
+            completed += 1
+            run.budget = run.budget.reconcile_success(cost=0.0)
+            if usage != (0, 0):
+                run.usage[0] += usage[0]
+                run.usage[1] += usage[1]
+                self._observe_usage(run)
+
         try:
             verdict = await judge(
                 config,
@@ -2345,15 +2358,10 @@ class Conductor:
                 self._final_tools,
                 self._final_tool_choice,
                 published=published,
+                on_read=on_read,
             )
-        except BaseException:
-            run.budget = run.budget.release(reads, unknown_cost=unknown_cost)
-            raise
-        run.budget = run.budget.reconcile_success(reads, cost=0.0, unknown_cost=unknown_cost)
-        if verdict.usage != (0, 0):
-            run.usage[0] += verdict.usage[0]
-            run.usage[1] += verdict.usage[1]
-            self._observe_usage(run)
+        finally:
+            run.budget = run.budget.release(reads - completed, unknown_cost=unknown_cost)
         return verdict
 
     def _publish_attempt(

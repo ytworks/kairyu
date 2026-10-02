@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from string import Formatter
 from typing import Protocol
@@ -552,8 +552,13 @@ async def _decide(
     config: ChecklistConfig,
     state: dict[str, object],
     questions: Sequence[_PendingQuestion],
+    on_read: Callable[[tuple[int, int]], None] | None = None,
 ) -> tuple[list[float], tuple[int, int]]:
-    """Ask every question in one System One request; P(yes) per question and usage."""
+    """Ask every question in one System One request; P(yes) per question and usage.
+
+    With ``on_read``, the usage of a read that returned is reported there as
+    soon as it returns, and never again on an error.
+    """
 
     from kairyu.engine.systemone import (
         SystemOneCapacityError,
@@ -579,10 +584,13 @@ async def _decide(
     if reply.status != 200:
         raise ChecklistUnavailable("judge_unavailable", f"System One status {reply.status}")
     usage = (reply.input_tokens or 0, reply.output_tokens or 0)
+    if on_read is not None:
+        on_read(usage)
     try:
         probabilities = _read_probabilities(reply.body, keys)
     except ChecklistUnavailable as error:
-        raise ChecklistUnavailable(error.reason, error.detail, usage) from error
+        billed = (0, 0) if on_read is not None else usage
+        raise ChecklistUnavailable(error.reason, error.detail, billed) from error
     return [probabilities[key] for key in keys], usage
 
 
@@ -647,11 +655,13 @@ async def judge(
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: object = None,
     published: str | None = None,
+    on_read: Callable[[tuple[int, int]], None] | None = None,
 ) -> ChecklistVerdict:
     """One verdict: every question in one System One request.
 
     ``published`` names the output the API publishes (the judged attempt):
-    its tool calls enter the state as the API sends them.
+    its tool calls enter the state as the API sends them. ``on_read``
+    receives each returned read's usage as it returns (see ``_decide``).
     """
 
     try:
@@ -675,7 +685,7 @@ async def judge(
             "checklist_unavailable",
             f"state of {size} characters exceeds {config.max_state_chars}",
         )
-    yes, usage = await _decide(backend, config, state, pending)
+    yes, usage = await _decide(backend, config, state, pending, on_read)
     items = tuple(_aggregate(pending, yes))
     if config.acceptance is None:
         return ChecklistVerdict(
@@ -687,14 +697,24 @@ async def judge(
         )
     try:
         acceptance, accept_usage = await _accept(
-            backend, config, config.acceptance, items, outputs, query, tools, tool_choice, published
+            backend,
+            config,
+            config.acceptance,
+            items,
+            outputs,
+            query,
+            tools,
+            tool_choice,
+            published,
+            on_read,
         )
     except ChecklistUnavailable as unavailable:
-        # The coverage read completed and billed its tokens.
-        unavailable.usage = (
-            usage[0] + unavailable.usage[0],
-            usage[1] + unavailable.usage[1],
-        )
+        if on_read is None:
+            # The coverage read completed and billed its tokens.
+            unavailable.usage = (
+                usage[0] + unavailable.usage[0],
+                usage[1] + unavailable.usage[1],
+            )
         raise
     usage = (usage[0] + accept_usage[0], usage[1] + accept_usage[1])
     return ChecklistVerdict(
@@ -717,6 +737,7 @@ async def _accept(
     tools: Sequence[Mapping[str, object]],
     tool_choice: object,
     published: str | None,
+    on_read: Callable[[tuple[int, int]], None] | None,
 ) -> tuple[float, tuple[int, int]]:
     """The acceptance read: one question over its state and the item results."""
 
@@ -746,7 +767,7 @@ async def _accept(
             threshold=acceptance.threshold,
         )
     ]
-    (p,), usage = await _decide(backend, config, state, pending)
+    (p,), usage = await _decide(backend, config, state, pending, on_read)
     return p, usage
 
 

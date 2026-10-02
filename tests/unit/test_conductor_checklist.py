@@ -1,6 +1,7 @@
 """Checklist verifiers: System One reads in one request, curation of upstream
 lists, and the guarantee report published with the final answer."""
 
+import asyncio
 import json
 
 import pytest
@@ -710,8 +711,8 @@ class _AcceptanceDown(FakeSystemOne):
         return await super().decide(body)
 
 
-async def test_an_unavailable_acceptance_read_still_bills_the_coverage_read():
-    usages = []
+async def test_an_unavailable_acceptance_read_still_spends_the_coverage_read():
+    usages, steps = [], []
     for judge in (FakeSystemOne(down=True), _AcceptanceDown()):
         backend = RoutedBackend({"generator": ["It is 42."]})
         conductor = Conductor(
@@ -720,8 +721,42 @@ async def test_an_unavailable_acceptance_read_still_bills_the_coverage_read():
         result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
         assert result.verification.reason == "judge_unavailable"
         usages.append(result.usage)
+        steps.append(result.budget_state.steps_used)
 
     assert (usages[1][0] - usages[0][0], usages[1][1] - usages[0][1]) == (10, 1)
+    assert steps[1] - steps[0] == 1
+
+
+class _AcceptanceHangs(FakeSystemOne):
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = asyncio.Event()
+
+    async def decide(self, body: dict) -> SystemOneReply:
+        if self.bodies:
+            self.waiting.set()
+            await asyncio.Event().wait()
+        return await super().decide(body)
+
+
+async def test_a_cancelled_acceptance_read_keeps_the_coverage_usage_observed():
+    # Disconnect metering reads the usage observer, not the result.
+    observed = []
+    judge = _AcceptanceHangs()
+    conductor = Conductor(
+        _accepting_roles(),
+        {"gen": RoutedBackend({"generator": ["It is 42."]})},
+        decision_workers={"judge": judge},
+        usage_observer=observed.append,
+    )
+    task = asyncio.create_task(conductor.run("What is six?", budget=Budget(max_steps=12)))
+    await judge.waiting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The generator reports no usage; the coverage read billed (10, 1).
+    assert observed and (observed[-1].prompt_tokens, observed[-1].completion_tokens) == (10, 1)
 
 
 async def test_the_acceptance_read_needs_its_own_budget_step():

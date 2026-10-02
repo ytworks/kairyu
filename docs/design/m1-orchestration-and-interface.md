@@ -301,9 +301,9 @@ What a checklist does now:
   threshold, and the failing items still feed the refinement. Judged tool
   calls follow the public API: the caller's `tool_choice` and declared
   names select them, and the text is dropped when calls are published; this
-  applies only to the judged attempt (other sections keep their text). A
-  failed acceptance read still bills the completed item read; each read of a
-  verdict reserves its own budget step.
+  applies only to the judged final unit (other sections and internal targets
+  keep their text). A verdict reserves a budget step per read, and each read that returns is
+  spent and billed at once, even if the verdict then fails or is cancelled.
   Why: a verdict that is the conjunction of per-item reads fails on any
   single misread item; a holistic read informed by the item results is a
   reusable gate for any checklist (the question and state stay in the YAML).
