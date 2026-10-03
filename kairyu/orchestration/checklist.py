@@ -927,7 +927,9 @@ def verdict_report(
             None
             if verdict.passed
             else "not_accepted"
-            if verdict.acceptance is not None and not any(not i.passed for i in verdict.items)
+            if verdict.acceptance is not None
+            and verdict.acceptance < threshold
+            and all(item.passed for item in verdict.items)
             else "refinement_limit"
         ),
         threshold=threshold,

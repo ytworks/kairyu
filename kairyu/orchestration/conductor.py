@@ -2352,12 +2352,12 @@ class Conductor:
                     unavailable.reason, depth + 1, config.threshold
                 )
             return True
-        if (
+        empty_final = (
             is_final_unit
-            and verdict.passed
             and not self._has_public_output(text, completions)
             and not self._head_committed_text(run).strip()
-        ):
+        )
+        if empty_final and verdict.passed:
             # An empty final answer can pass vacuously; accepting it fails the
             # request although an earlier attempt may have an answer (issue
             # #617). An intermediate role's empty output stays governed by its
@@ -2376,7 +2376,14 @@ class Conductor:
         failing = [item for item in verdict.items if not item.passed]
         # An acceptance FAIL with every item met names nothing to repair; a
         # repair would rewrite a sound answer, so it is published unverified.
-        if verdict.acceptance is not None and verdict.items and not failing:
+        # An empty final answer is always repaired.
+        if (
+            config.acceptance is not None
+            and verdict.acceptance is not None
+            and verdict.acceptance < config.acceptance.threshold
+            and not failing
+            and not empty_final
+        ):
             can_refine = False
         run.trace.append(
             self._trace_event(

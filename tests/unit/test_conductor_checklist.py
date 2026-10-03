@@ -452,6 +452,29 @@ async def test_a_rejection_with_every_point_met_is_published_unverified_without_
     assert report["guaranteed"] is False and report["reason"] == "not_accepted"
 
 
+async def test_an_empty_repair_is_repaired_again_even_when_every_point_is_met():
+    # Issue #617 with the acceptance read: an empty reply meets every point
+    # vacuously; whether or not it is accepted, it is repaired, never kept
+    # (the first empty reply is retried as an empty output, the second judged).
+    for acceptance in (0.1, 0.9):
+        backend = RoutedBackend({"answer": ["It is 41."], "repair": ["", "", "The answer is 42."]})
+
+        def rule(state, question, acceptance=acceptance):
+            empty = state["answer"] == ""
+            if "adopted" in question:
+                return acceptance if empty else _contains_42(state, question)
+            return 0.99 if empty else _contains_42(state, question)
+
+        conductor = Conductor(
+            _accepting_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne(rule)}
+        )
+
+        result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+        assert result.final_text == "The answer is 42.", acceptance
+        assert result.verification.guaranteed is True
+
+
 async def test_a_failed_read_cancels_its_siblings_and_keeps_their_usage():
     from kairyu.orchestration.checklist import ChecklistUnavailable, judge
 
