@@ -50,15 +50,12 @@ def _deepseek(
     implicit: list[dict] | None = None,
     repair: str = "Paris",
     draft_finish: str = "stop",
-    reextracted: list[dict] | None = None,
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         seen.append(body)
         text = _text(body)
-        if text.startswith("[extract]") and "Previous attempt:" in text:
-            answer = json.dumps({"points": reextracted})
-        elif text.startswith("[extract]"):
+        if text.startswith("[extract]"):
             answer = json.dumps({"points": EXPLICIT if explicit is None else explicit})
         elif text.startswith("[implicit]"):
             answer = json.dumps({"points": IMPLICIT if implicit is None else implicit})
@@ -94,19 +91,12 @@ def _openjev(
     down: bool = False,
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
-    uncovered_points: bool = False,
 ):
     """Necessity is low only for ``unneeded``; a point in ``covered_by`` is
-    contained only in an answer holding the mapped text; with
-    ``uncovered_points`` the first explicit list misses part of the request."""
+    contained only in an answer holding the mapped text."""
 
     def answer(question: dict, state: dict) -> dict:
         text = json.dumps(question)
-        if "Taken together, do the points cover everything" in text:
-            first = state["points"]["points"] == EXPLICIT
-            return {"noul": 0.1 if uncovered_points and first else 0.9999}
-        if "Does the request ask the reply given now" in text:
-            return {"noul": 0.9999}
         if question["type"] == "choice":
             other = next(label for label in question["criteria"] if label != route)
             return {"type": "choice", "probabilities": {route: 0.9, other: 0.1}}
@@ -148,8 +138,6 @@ def _orchestrator(
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
     draft_finish: str = "stop",
-    reextracted: list[dict] | None = None,
-    uncovered_points: bool = False,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
@@ -165,7 +153,6 @@ def _orchestrator(
                     implicit=implicit,
                     repair=repair,
                     draft_finish=draft_finish,
-                    reextracted=reextracted,
                 )
             ),
         )
@@ -182,7 +169,6 @@ def _orchestrator(
                     down=jev_down,
                     unneeded=unneeded,
                     covered_by=covered_by,
-                    uncovered_points=uncovered_points,
                 )
             ),
         )
@@ -244,11 +230,7 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
     assert "--- EXPLICIT POINTS ---" in _text(by_role["implicit"])
     assert EXPLICIT[0]["point"] in _text(by_role["implicit"])
     # One System One request per verdict, on the OpenJev replicas.
-    points_check, adopt, coverage, acceptance = reads
-    # Points check: each explicit point needed, and the list sufficient,
-    # against the request verbatim.
-    assert set(points_check["state"]) == {"request", "tools", "points"}
-    assert len(points_check["questions"]) == len(EXPLICIT) + 1
+    adopt, coverage, acceptance = reads
     assert {read["replica"] for read in reads} <= {"openjev-0", "openjev-1"}
     # Adoption: only the implicit points are judged (explicit ones are what
     # the user asked for), against the request verbatim (system/developer +
@@ -418,23 +400,3 @@ async def test_an_unverified_draft_keeps_its_finish_reason() -> None:
     assert result.verification.reason == "judge_unavailable"
     assert result.completions[0].finish_reason == "length"
 
-
-async def test_explicit_points_that_miss_part_of_the_request_are_extracted_again() -> None:
-    seen: list[dict] = []
-    reads: list[dict] = []
-    reextracted = [*EXPLICIT, {"id": "E3", "point": "names the country, France"}]
-    orchestrator = _orchestrator(
-        seen, reads, draft="Paris", reextracted=reextracted, uncovered_points=True
-    )
-
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
-
-    extracts = [_text(body) for body in seen if _text(body).startswith("[extract]")]
-    assert len(extracts) == 2
-    assert "not necessary and sufficient for the request" in extracts[1]
-    assert "the points together cover everything the request asks" in extracts[1]
-    # The re-extracted list is the one every later stage reads.
-    implicit = next(_text(body) for body in seen if _text(body).startswith("[implicit]"))
-    assert "names the country, France" in implicit
-    judged = {item.proposition for item in result.verification.items}
-    assert "names the country, France" in judged

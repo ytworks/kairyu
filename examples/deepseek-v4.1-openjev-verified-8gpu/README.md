@@ -16,7 +16,7 @@ System One route judge) and the m11 D8 replica amendment.
 | Layer | What runs here |
 |---|---|
 | L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). OpenJev (DiffusionGemma 26B-A4B NVFP4) on GPU 6 and GPU 7, published image unchanged, read only through System One. |
-| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, points check (re-extraction once), generator, adoption read, coverage read, acceptance read, repair (at most 2), fallback. |
+| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, generator, adoption read, coverage read, acceptance read, repair (at most 2), fallback. |
 | L3 | Public models `kairyu-verified` (routed) and `kairyu-verified-always`; `kairyu_verification` on every verified answer; the answer page on :3013. |
 
 ## L2: how an answer is made
@@ -34,12 +34,8 @@ request
 profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► deepseek_think (DeepSeek) ─► answer, no flag
   │ VERIFIED (or kairyu-verified-always)
   ▼
-┌─ wave 1 (DeepSeek, Jev) ─────────────────────────────────────────────────────────────┐
+┌─ wave 1 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
-│   └─ points_check  Jev, 1 request: is each point asked for by the request, and       │
-│                    do the points cover the whole request?                            │
-│                    any no → extract again with the failed checks (once), then        │
-│                    the last list is used                                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │ explicit points
   ▼

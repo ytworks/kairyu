@@ -347,18 +347,17 @@ respect to the request.
    owner decision: run in parallel, the two lists overlapped and 23 of 40
    InFoBench requests had a duplicate pair, against the gate's 10 %; the
    cost is the implicit extraction time before adoption). Each point is one
-   issue, and together they cover the request. `points_check` (amendment
-   2026-10-03, owner decision) asks Jev in one request whether each explicit
-   point is asked for by the request (necessary) and whether the list covers
-   the whole request (sufficient). Any failed question re-extracts the whole
-   list once with the failed checks; the last list is then used. An overlap
-   question per point was dropped (owner decision): on 13 InFoBench requests
-   Jev failed it on nearly every point although the gate's duplicate judge
-   found no duplicate, forcing a re-extraction every time and losing gold
-   requirements in three. Exclusivity stays with the extractor's
-   instructions and the requirements gate. Adoption with no implicit point
-   is skipped (`on_empty: pass`); before, it was unavailable and the whole
-   run unverified (3 of 13). The 0.5 cuts are defaults until calibrated. The requirements gate
+   issue, and together they cover the request. A Jev check of the explicit
+   list (necessary per point, sufficient for the list, re-extracting once
+   on a failure) was tried and removed (owner decision, 2026-10-03): an
+   overlap question failed nearly every point with no duplicate found, and
+   on 80 InFoBench requests the sufficiency question did not track gold
+   coverage (AUROC 0.41; at 0.5 it re-extracted 20 lists, 18 already
+   complete, and passed 7 of the 9 incomplete ones). The first lists
+   already covered 96.2 % of the gold requirements; the recall loss came
+   from adoption dropping explicit points (item 2). Adoption with no
+   implicit point is skipped (`on_empty: pass`); before, it was unavailable
+   and the whole run unverified (14 of 66). The requirements gate
    measures coverage of InFoBench's gold questions and duplicate pairs.
 2. **Adoption (necessary).** One Jev request asks, for every implicit
    point, "is this point necessary to answer the request?"; explicit points

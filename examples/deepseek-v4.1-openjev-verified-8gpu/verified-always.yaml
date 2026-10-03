@@ -99,51 +99,6 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
-  # Points check (VCO-D15 item 1): one Jev request on whether each explicit
-  # point is asked for by the request (necessary) and whether the list covers
-  # the request (sufficient). Any failed question re-extracts the whole list
-  # once, with the failed checks; after that the last list is used (owner
-  # decision). An overlap question was dropped: Jev read related points as
-  # overlapping on every list (InFoBench, 13 of 13 re-extracted, none with a
-  # duplicate). The 0.5 cuts are defaults, calibrated on GPU.
-  - name: points_check
-    worker: jev
-    role_type: verifier
-    verifies: extract
-    depends_on: [extract]
-    checklist:
-      questions:
-        - id: "{item[id]}-needed"
-          group: necessary
-          proposition: "{item[id]} is asked for by the request: {item[point]}"
-          foreach: {role: extract, path: points}
-          ask: Does the request ask the reply given now to meet this point?
-          criteria_true: The request asks for what this point states
-          criteria_false: The request does not ask for this point, or asks for less
-          context:
-            point: "{item[point]}"
-        - id: ALL-covered
-          group: sufficient
-          proposition: the points together cover everything the request asks
-          ask: >-
-            Taken together, do the points cover everything the request asks
-            the reply given now to contain or do?
-          criteria_true: Everything the request asks is required by some point of the list
-          criteria_false: The request asks for something no point of the list requires
-      state:
-        - {key: request, source: request, max_total_chars: 100000}
-        - {key: tools, source: tools}
-        - {key: points, source: extract}
-      threshold: 0.5
-      max_refinements: 1
-      on_unavailable: publish_unverified
-      feedback_header: >-
-        The explicit points are not necessary and sufficient for the request.
-        Rewrite the whole list: every point must be asked for by the request,
-        no two points may overlap, and together they must cover everything
-        the request asks. These checks failed:
-      feedback_item: "- {proposition} (p={p})"
-
   # Implicit points (VCO-D8, amendment 3): a second extractor, after extract,
   # lists only what the situation presupposes and no explicit point already
   # requires, so the two lists stay mutually exclusive.
@@ -443,10 +398,9 @@ default_reasoning_effort: high
 internal_max_tokens: 65536
 expose_intermediate_outputs: true
 budget:
-  # Worst case 16 steps: extract, points_check, one re-extraction and its
-  # check, implicit, history, adopt, generator, and three checklist verdicts
-  # (coverage and acceptance reads, a step each) with two repairs of the
-  # answer. A step budget below that publishes an unverified answer
-  # (reason: budget).
-  max_steps: 18
+  # Worst case 13 steps: extract, implicit, history, adopt, generator, and
+  # three checklist verdicts (coverage and acceptance reads, a step each)
+  # with two repairs of the answer. A step budget below that publishes an
+  # unverified answer (reason: budget).
+  max_steps: 15
   max_refine_depth: 2

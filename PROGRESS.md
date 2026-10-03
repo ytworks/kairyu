@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: explicit-points check removed
+- What: `points_check` is removed from the example (max_steps 18 -> 15); adoption keeps `on_empty: pass`.
+- Why: owner decision on 80 InFoBench requests: its sufficiency question did not track gold coverage (AUROC 0.41, 18 of 20 re-extractions needless, 7 of 9 incomplete lists passed); first lists already covered 96.2 %.
+- Refs: VCO-D15 item 1, MEASUREMENTS.md; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: points_check without the overlap question; empty adoption passes
 - What: points_check asks only necessary (per point) and sufficient (list); a curation checklist may declare `on_empty: pass` (framework), used by adoption when there is no implicit point.
 - Why: owner decision on the first 13 calibration requests: the overlap question failed nearly every point with no duplicate found (re-extraction every time, three lost gold requirements); an empty implicit list made 3 of 13 runs unverified.

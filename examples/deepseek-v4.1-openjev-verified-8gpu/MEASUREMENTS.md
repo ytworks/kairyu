@@ -49,6 +49,24 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## Explicit-points check, tried and removed (2026-10-03, 10:24-11:10 JST, `3c96d9a8`)
+
+InFoBench rows 40-119 (the requirements gate uses rows 0-39), production API,
+8 concurrent. Label: the gate's coverage judge on the first explicit list
+(all gold questions covered: 71 of 80). The first lists covered 96.2 % of
+the gold questions (after one re-extraction 95.2 %); 3 had a duplicate pair.
+
+| sufficiency cut | re-extracted | of them already complete | incomplete lists passed |
+|---|---|---|---|
+| 0.1 | 2 | 2 | 9 of 9 |
+| 0.5 | 20 | 18 | 7 of 9 |
+| 0.9 | 44 | 41 | 6 of 9 |
+
+Sufficiency AUROC 0.41. The per-point necessity question has no gold label
+(at 0.5 it failed 98 of 483 points, in 25 lists, 23 of them complete). The
+owner removed the check. The same run showed adoption with no implicit point
+unavailable (14 of 66 runs unverified), fixed by `on_empty: pass`.
+
 ## Acceptance read for VCO-D15 item 7 (2026-10-03, `cf4ad653`)
 
 InFoBench (249 answers; an answer is acceptable when every expert label is
