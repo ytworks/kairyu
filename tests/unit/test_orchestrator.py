@@ -2325,3 +2325,42 @@ def test_auto_admission_bound_charges_tool_definitions_copied_into_stages() -> N
 
     # Three private stages and the final request each carry the 8,192 bytes.
     assert bound_for(8_193) - bound_for(1) >= 4 * 8_192
+    # With no private stage, the final request carries the expansion as well
+    # as its own tools (Codex review).
+    single = (RoleSpec(name="answer", worker="tier1", prompt="[answer] {query} {tools}"),)
+    orchestrator = _orchestrator(roles=single, budget=Budget(max_steps=1))
+    assert bound_for(8_193) - bound_for(1) >= 2 * 8_192
+
+
+async def test_exposed_stages_publish_the_answer_after_its_inline_reasoning() -> None:
+    # Codex review (PR #618): exposing stages replaces reasoning_content, so
+    # the API no longer split <think> from the final text; a call written in
+    # the reasoning was published while the judge read "Done.".
+    think = '<think>maybe <tool_call>{"name":"bash","arguments":{}}</tool_call></think>Done.'
+
+    class Thinking(MockBackend):
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(CompletionOutput(index=0, text=think, token_ids=()),),
+            )
+
+    roles = (RoleSpec(name="answer", worker="tier1", role_type="publisher", prompt="{query}"),)
+    orchestrator = _orchestrator(
+        engines={"tier1": Thinking(), "tier2": Thinking()},
+        roles=roles,
+        expose_intermediate_outputs=True,
+    )
+    bash = {"type": "function", "function": {"name": "bash"}}
+
+    result = await orchestrator.run(
+        OrchestrationRequest(
+            prompt=COMPLEX,
+            sampling_params=SamplingParams(max_tokens=64),
+            tools=(bash,),
+            reasoning_effort="low",
+        )
+    )
+
+    assert result.completions[0].text == "Done."
