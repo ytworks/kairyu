@@ -111,6 +111,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: Jev checks the explicit points are necessary, sufficient and MECE
+- What: `points_check` (one Jev request) asks whether each explicit point is asked for and overlaps no other, and whether the list covers the request; any failure re-extracts once with the failed checks, then the last list is used. max_steps 15 -> 18. Cuts 0.5 pending calibration.
+- Why: owner decision; explicit points are no longer judged by adoption, so their necessity and MECE are checked on the list itself (the original requirement).
+- Refs: VCO-D15 item 1; PR #618
+
+### 2026-10-03 — [amendment] VCO-D15: explicit points always stay; history at the caller's effort
+- What: adoption judges only implicit points; explicit points are never dropped. `history` runs at the caller's effort like every DeepSeek step.
+- Why: owner decision after the dd9015ff gates: adoption dropped stated requirements (gold recall 0.891 < 0.90; 0.972 before VCO-D15 judged explicit points) and the effort gate found `history` without the caller's effort (VCO-D9).
+- Refs: VCO-D15 item 2, VCO-D9; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: implicit extraction reads the explicit points
 - What: `implicit` runs after `extract` and lists only presupposed points no explicit point already requires (example YAML only).
 - Why: owner decision. The MECE gate on e9b86f60 failed on duplicates (23/40 requests, gate <= 10 %; recall 0.906 passed): the parallel extractors overlapped. All GPU gates re-run from the start.

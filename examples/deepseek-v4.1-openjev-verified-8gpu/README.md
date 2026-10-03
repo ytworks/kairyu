@@ -16,7 +16,7 @@ System One route judge) and the m11 D8 replica amendment.
 | Layer | What runs here |
 |---|---|
 | L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). OpenJev (DiffusionGemma 26B-A4B NVFP4) on GPU 6 and GPU 7, published image unchanged, read only through System One. |
-| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, generator, adoption read, coverage read, acceptance read, repair (at most 2), fallback. |
+| L2 | `verified.yaml`: route judge, point extraction (explicit and implicit), history summary, points check (re-extraction once), generator, adoption read, coverage read, acceptance read, repair (at most 2), fallback. |
 | L3 | Public models `kairyu-verified` (routed) and `kairyu-verified-always`; `kairyu_verification` on every verified answer; the answer page on :3013. |
 
 ## L2: how an answer is made
@@ -34,8 +34,12 @@ request
 profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► deepseek_think (DeepSeek) ─► answer, no flag
   │ VERIFIED (or kairyu-verified-always)
   ▼
-┌─ wave 1 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
+┌─ wave 1 (DeepSeek, Jev) ─────────────────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
+│   └─ points_check  Jev, 1 request: is each point asked for by the request and        │
+│                    free of overlap, and do the points cover the whole request?       │
+│                    any no → extract again with the failed checks (once), then        │
+│                    the last list is used                                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │ explicit points
   ▼
@@ -47,11 +51,12 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
   │
   ▼
 ┌─ wave 3 ─────────────────────────────────────────────────────────────────────────────┐
-│ history    DeepSeek, no thinking: a summary of every message except the system /     │
+│ history    DeepSeek, caller's effort: a summary of every message except the system / │
 │            developer messages and the latest user message (earlier turns, tool       │
 │            calls, tool results)                                                      │
-│   └─ adopt  Jev, 1 request: is each point necessary to answer the request?           │
-│             p < 0.5 → the point leaves its list (extract or implicit)                │
+│   └─ adopt  Jev, 1 request: is each implicit point necessary now?                    │
+│             (implicit points only; explicit points always stay)                      │
+│             p < 0.5 → the implicit point leaves its list                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │ adopted points
   ▼
@@ -92,7 +97,7 @@ state:                                         state:
   history: the summary from `history`            answer:  the reply exactly as it will be
   tools:   the caller's tool definitions
                                                           sent ({text, tool_calls} when it calls a tool)
-questions, one per point of both lists:        questions, one per adopted point:
+questions, one per implicit point:             questions, one per adopted point:
   "Must the reply the assistant gives now        "Does the answer fully and correctly do
    meet this point?"                              what this point requires?"
   yes: a reply missing it is not the reply        yes: every part met as the point states

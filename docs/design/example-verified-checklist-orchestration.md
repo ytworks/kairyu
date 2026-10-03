@@ -347,12 +347,23 @@ respect to the request.
    owner decision: run in parallel, the two lists overlapped and 23 of 40
    InFoBench requests had a duplicate pair, against the gate's 10 %; the
    cost is the implicit extraction time before adoption). Each point is one
-   issue, and together they cover the request. The requirements gate
+   issue, and together they cover the request. `points_check` (amendment
+   2026-10-03, owner decision) asks Jev in one request whether each explicit
+   point is asked for by the request (necessary), overlaps no other point
+   (mutually exclusive), and whether the list covers the whole request
+   (sufficient, collectively exhaustive). Any failed question re-extracts
+   the whole list once with the failed checks; the last list is then used.
+   The 0.5 cuts are defaults until calibrated on InFoBench. The requirements gate
    measures coverage of InFoBench's gold questions and duplicate pairs.
-2. **Adoption (necessary).** One Jev request asks, for every point of both
-   lists, "is this point necessary to answer the request?". The state is the
-   request verbatim (system/developer messages plus the latest user message)
-   and `history`, a non-thinking DeepSeek summary of every other message
+2. **Adoption (necessary).** One Jev request asks, for every implicit
+   point, "is this point necessary to answer the request?"; explicit points
+   are what the user asked for and always stay (amendment 2026-10-03, owner
+   decision: judging them too dropped stated requirements, e.g. an
+   obituary's name, age and date at p 0.16-0.47, and InFoBench gold recall
+   fell from 0.972 to 0.891). The state is the request verbatim
+   (system/developer messages plus the latest user message) and `history`, a
+   DeepSeek summary at the caller's effort (amendment 2026-10-03, VCO-D9:
+   the effort gate found it the one step without it) of every other message
    (earlier turns, tool calls and tool results). Summarizing these instead of
    passing them verbatim keeps the read inside OpenJev's 65,536 tokens.
    Points with p < 0.5 leave their list. `history` waits for both extractors

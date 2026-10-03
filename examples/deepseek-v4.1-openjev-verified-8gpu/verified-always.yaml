@@ -99,6 +99,60 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
+  # Points check (VCO-D15 item 1): one Jev request on whether the explicit
+  # points are necessary and sufficient and MECE for the request. Any failed
+  # question re-extracts the whole list once, with the failed checks; after
+  # that the last list is used (owner decision). The 0.5 cuts are defaults,
+  # calibrated on GPU.
+  - name: points_check
+    worker: jev
+    role_type: verifier
+    verifies: extract
+    depends_on: [extract]
+    checklist:
+      questions:
+        - id: "{item[id]}-needed"
+          group: necessary
+          proposition: "{item[id]} is asked for by the request: {item[point]}"
+          foreach: {role: extract, path: points}
+          ask: Does the request ask the reply given now to meet this point?
+          criteria_true: The request asks for what this point states
+          criteria_false: The request does not ask for this point, or asks for less
+          context:
+            point: "{item[point]}"
+        - id: "{item[id]}-distinct"
+          group: exclusive
+          proposition: "{item[id]} overlaps no other point: {item[point]}"
+          foreach: {role: extract, path: points}
+          ask: >-
+            Is this point free of overlap with every other point of the list,
+            so that no other point already requires any part of it?
+          criteria_true: No other point of the list requires any part of this point
+          criteria_false: Another point of the list already requires some part of this point
+          context:
+            point: "{item[point]}"
+        - id: ALL-covered
+          group: sufficient
+          proposition: the points together cover everything the request asks
+          ask: >-
+            Taken together, do the points cover everything the request asks
+            the reply given now to contain or do?
+          criteria_true: Everything the request asks is required by some point of the list
+          criteria_false: The request asks for something no point of the list requires
+      state:
+        - {key: request, source: request, max_total_chars: 100000}
+        - {key: tools, source: tools}
+        - {key: points, source: extract}
+      threshold: 0.5
+      max_refinements: 1
+      on_unavailable: publish_unverified
+      feedback_header: >-
+        The explicit points are not necessary and sufficient and MECE for the
+        request. Rewrite the whole list: every point must be asked for by the
+        request, no two points may overlap, and together they must cover
+        everything the request asks. These checks failed:
+      feedback_item: "- {proposition} (p={p})"
+
   # Implicit points (VCO-D8, amendment 3): a second extractor, after extract,
   # lists only what the situation presupposes and no explicit point already
   # requires, so the two lists stay mutually exclusive.
@@ -231,10 +285,13 @@ roles:
   - name: history
     worker: deepseek
     depends_on: [extract, implicit]
+    # The caller's effort, like every DeepSeek step (VCO-D9).
+    reasoning_effort: inherit
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 2048
+      max_tokens: 32768
+      max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
     prompt: |-
       [history] The conversation below is a JSON list of role-tagged
       messages. Summarize every message except the system and developer
@@ -249,10 +306,11 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
-  # Adoption (VCO-D15): one Jev request over every point of both lists,
-  # with the request verbatim, the history summary and the caller's tools. A
+  # Adoption (VCO-D15): one Jev request over every implicit point, with the
+  # request verbatim, the history summary and the caller's tools. An implicit
   # point the reply needed now does not need (p < 0.5) leaves its list before
-  # the draft is written. Never repairs; an unavailable judge keeps every point (the final
+  # the draft is written. Explicit points are what the user asked for and are
+  # always kept. Never repairs; an unavailable judge keeps every point (the final
   # checklist is then unjudgeable too and the answer is unverified).
   - name: adopt
     worker: jev
@@ -261,18 +319,6 @@ roles:
     depends_on: [history]
     checklist:
       questions:
-        - id: "{item[id]}"
-          group: necessity
-          proposition: "{item[point]}"
-          threshold: 0.0
-          foreach: {role: extract, path: points}
-          ask: Must the reply the assistant gives now meet this point?
-          criteria_true: >-
-            A reply given now that misses this point is not the reply this
-            conversation needs at this step
-          criteria_false: The reply needed now can be complete and correct without this point
-          context:
-            point: "{item[point]}"
         - id: "{item[id]}"
           group: necessity
           proposition: "{item[point]}"
@@ -295,7 +341,6 @@ roles:
       on_unavailable: publish_unverified
       curate:
         targets:
-          - {role: extract, items_path: points}
           - {role: implicit, items_path: points}
         drop_group: necessity
         # Default, not calibrated.
@@ -405,9 +450,10 @@ default_reasoning_effort: high
 internal_max_tokens: 65536
 expose_intermediate_outputs: true
 budget:
-  # Worst case 13 steps: extract, implicit, history, adopt, generator, and
-  # three checklist verdicts (coverage and acceptance reads, a step each)
-  # with two repairs of the answer. A step budget below that
-  # publishes an unverified answer (reason: budget).
-  max_steps: 15
+  # Worst case 16 steps: extract, points_check, one re-extraction and its
+  # check, implicit, history, adopt, generator, and three checklist verdicts
+  # (coverage and acceptance reads, a step each) with two repairs of the
+  # answer. A step budget below that publishes an unverified answer
+  # (reason: budget).
+  max_steps: 18
   max_refine_depth: 2
