@@ -472,7 +472,11 @@ with no failing point) triggered repairs.
 2. **Routing.** The Jev route judge gains the label STEP (tools offered, an
    ongoing task, the reply is the next action) for the `verified_step`
    profile; `kairyu-verified` offers THINK/STEP/VERIFIED and
-   `kairyu-verified-always` STEP/VERIFIED (fallback: the answer DAG).
+   `kairyu-verified-always` STEP/VERIFIED (fallback: the answer DAG). The
+   VERIFIED floor rises from 0.3 to 0.5 (owner decision), so VERIFIED is
+   preferred only when it is also the most probable route and never takes
+   a step from STEP; on the routing set no accuracy-critical conversation
+   read below 0.987.
 3. **verified_step.** `step_extract` lists the step's points from the task
    and the latest tool results (facts the step must take into account, what
    moves the task forward, and whether submission is allowed — only when the

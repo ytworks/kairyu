@@ -416,7 +416,12 @@ profile_judge:
     The verified route checks the answer against every requirement before
     replying and is slower; the step route checks one step of an ongoing
     tool-using task; the think route answers directly.
-  prefer: {label: VERIFIED, min_probability: 0.3}
+  # At 0.5 VERIFIED is preferred only when it is also the most probable
+  # route, so it never takes a turn from STEP. On the routing set (80
+  # conversations, 2026-10-03) every accuracy-critical conversation read
+  # p >= 0.987 and every everyday one p <= 0.009: no miss at any value up to
+  # 0.98 (was 0.3).
+  prefer: {label: VERIFIED, min_probability: 0.5}
   choices:
     - profile: deepseek_think
       label: THINK
