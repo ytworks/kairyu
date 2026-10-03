@@ -1686,6 +1686,38 @@ class Conductor:
             for completion in completions
         )
 
+    def _published_attempt(
+        self,
+        text: str,
+        completions: tuple[CompletionOutput, ...],
+    ) -> tuple[str, tuple[CompletionOutput, ...]]:
+        """A final-unit attempt as the public API publishes it.
+
+        With the caller's effort and no separate reasoning, inline reasoning
+        moves to reasoning_content before anything reads the attempt, so the
+        judge, the empty-answer rule, the fallback choice, the stream and the
+        response all see the published text (``published_text``).
+        """
+
+        effort = self._public_reasoning_effort
+        reasoning = completions[0].reasoning_content if completions else None
+        public = published_text(text, reasoning, effort)[1]
+        if public == text:
+            return text, completions
+        split = []
+        for completion in completions:
+            inline, body = published_text(completion.text, completion.reasoning_content, effort)
+            split.append(
+                replace(
+                    completion,
+                    text=body,
+                    reasoning_content=inline,
+                    text_delta=None,
+                    text_offset=None,
+                )
+            )
+        return public, tuple(split)
+
     @staticmethod
     def _has_public_output(
         text: str,
@@ -2349,12 +2381,6 @@ class Conductor:
         run.budget = reserved
         # Only the selected final unit is published; internal outputs keep their text.
         published = target.name if target.name == self._selected_final_unit().name else None
-        if published is not None:
-            # The judge reads the text the API publishes: inline reasoning is
-            # split off first, as in the public response (and its tool calls
-            # with it).
-            reasoning = completions[0].reasoning_content if completions else None
-            text = published_text(text, reasoning, self._public_reasoning_effort)[1]
         completed = 0
 
         def on_read(usage: tuple[int, int]) -> None:
@@ -2716,6 +2742,8 @@ class Conductor:
                 observed.text,
                 observed.completions,
             )
+            if is_final_unit:
+                text, completions = self._published_attempt(text, completions)
             if (
                 is_final_unit
                 and not empty_retry_used

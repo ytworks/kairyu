@@ -704,7 +704,7 @@ async def test_async_prepare_rejects_noninitial_final_sampling_policy() -> None:
     assert tier2.generated == []
 
 
-async def test_async_prepare_validates_a_dependent_seed_with_its_own_sampling() -> None:
+async def test_async_prepare_validates_a_dependent_seed_with_its_own_intent() -> None:
     # PR #618 re-review: the seed is generated with its own sampling, so
     # preflight must not hold it to the final role's (temperature 1.5 here).
     events: list[tuple[str, str]] = []
@@ -746,9 +746,7 @@ async def test_async_prepare_validates_a_dependent_seed_with_its_own_sampling() 
 
     assert any(r.sampling_params.temperature == 0.5 for r in tier2.validated)
 
-
-async def test_async_prepare_refuses_a_dependent_seed_whose_upstream_rejects_tools() -> None:
-    # PR #618 re-review: the vLLM backend checks tool capability only in full
+    # And the vLLM backend checks tool capability only in full
     # preparation, not in its structural pre-check; a dependent seed's intent
     # must still be refused before the planner generates.
     calls: list[str] = []

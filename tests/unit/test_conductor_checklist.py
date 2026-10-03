@@ -840,3 +840,31 @@ async def test_a_checklist_with_nothing_to_judge_passes_only_a_declared_curation
         assert len(judge.bodies) == reads  # the final checklist's read only
         if not guaranteed:
             assert result.verification.reason == "checklist_unavailable"
+
+
+async def test_a_reasoning_only_repair_never_replaces_the_published_draft():
+    # Codex review (PR #618): with the caller's effort, a repair holding only
+    # <think> is empty once published; it must not replace the draft, and the
+    # stream must carry the same text as the unary result.
+    texts = []
+    for streamed in (False, True):
+        backend = RoutedBackend(
+            {"generator": ["It is 41."], "repair": ["<think>maybe 42</think>"] * 4}
+        )
+        conductor = Conductor(
+            _answer_roles(),
+            {"gen": backend},
+            decision_workers={"judge": FakeSystemOne(_contains_42)},
+            public_reasoning_effort="low",
+        )
+        if streamed:
+            stream = conductor.stream("What is six times seven?", budget=Budget(max_steps=12))
+            events = [e async for e in stream]
+            result = events[-1].result
+            assert "".join(e.text for e in events if e.kind == "delta") == result.final_text
+        else:
+            result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+        assert result.verification.guaranteed is False
+        texts.append(result.final_text)
+
+    assert texts == ["It is 41.", "It is 41."]

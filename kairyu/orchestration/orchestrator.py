@@ -67,7 +67,6 @@ from kairyu.orchestration.trace import (
 )
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
-from kairyu.tool_call_markup import published_text
 
 _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs (M8)
 
@@ -75,34 +74,18 @@ _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs
 def _public_multistage_completions(
     completions: tuple[CompletionOutput, ...],
     reasoning_content: str | None = None,
-    reasoning_effort: str | None = None,
 ) -> tuple[CompletionOutput, ...]:
-    """Keep final text while replacing final-stage reasoning with policy output.
+    """Keep final text while replacing final-stage reasoning with policy output."""
 
-    Inline reasoning is split from the text first, as the public API does for
-    the caller's ``reasoning_effort`` (``published_text``): the replacement
-    reasoning would otherwise stop the API's split and publish what was
-    written inside ``<think>`` (a checklist judges the split text).
-    """
-
-    public = []
-    for completion in completions:
-        inline, text = published_text(
-            completion.text, completion.reasoning_content, reasoning_effort
+    return tuple(
+        replace(
+            completion,
+            reasoning_content=reasoning_content,
+            reasoning_delta=None,
+            reasoning_offset=None,
         )
-        if text != completion.text:
-            completion = replace(completion, text=text, text_delta=None, text_offset=None)
-        own = inline if completion.reasoning_content is None else None
-        public.append(
-            replace(
-                completion,
-                reasoning_content=reasoning_content if reasoning_content is not None else own,
-                reasoning_delta=None,
-                reasoning_offset=None,
-            )
-        )
-    return tuple(public)
-
+        for completion in completions
+    )
 
 _DEFAULT_ROLES = (
     RoleSpec(
@@ -2564,7 +2547,6 @@ class Orchestrator:
                 completions=_public_multistage_completions(
                     result.completions,
                     result.reasoning_content,
-                    call.reasoning_effort,
                 ),
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
@@ -3427,7 +3409,6 @@ class Orchestrator:
                     completions=_public_multistage_completions(
                         conductor_result.completions,
                         conductor_result.reasoning_content,
-                        call.reasoning_effort,
                     ),
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
@@ -3465,7 +3446,6 @@ class Orchestrator:
                 completions=_public_multistage_completions(
                     conductor_result.completions,
                     conductor_result.reasoning_content,
-                    call.reasoning_effort,
                 ),
                 prompt_tokens=conductor_result.usage[0],
                 completion_tokens=conductor_result.usage[1],
