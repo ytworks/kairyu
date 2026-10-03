@@ -33,6 +33,7 @@ EXPLICIT = [
     {"id": "E2", "point": "answers in one word"},
 ]
 IMPLICIT = [{"id": "I1", "point": "the answer is a proper noun"}]
+BASH = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}
 
 
 def _text(body: dict) -> str:
@@ -50,6 +51,7 @@ def _deepseek(
     implicit: list[dict] | None = None,
     repair: str = "Paris",
     draft_finish: str = "stop",
+    step: list[dict] | None = None,
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -59,9 +61,13 @@ def _deepseek(
             answer = json.dumps({"points": EXPLICIT if explicit is None else explicit})
         elif text.startswith("[implicit]"):
             answer = json.dumps({"points": IMPLICIT if implicit is None else implicit})
-        elif text.startswith("[history]"):
+        elif text.startswith("[step_extract]"):
+            answer = json.dumps({"points": step or []})
+        elif text.startswith("[step_implicit]"):
+            answer = json.dumps({"points": []})
+        elif text.startswith(("[history]", "[step_history]")):
             answer = "none"
-        elif text.startswith("[repair]"):
+        elif "--- MISSED POINTS ---" in text:
             answer = repair
         else:
             answer = draft
@@ -91,22 +97,31 @@ def _openjev(
     down: bool = False,
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
+    partial: str | None = None,
 ):
     """Necessity is low only for ``unneeded``; a point in ``covered_by`` is
-    contained only in an answer holding the mapped text."""
+    contained only in an answer holding the mapped text; ``partial`` is read
+    at p 0.7."""
 
     def answer(question: dict, state: dict) -> dict:
         text = json.dumps(question)
         if question["type"] == "choice":
-            other = next(label for label in question["criteria"] if label != route)
-            return {"type": "choice", "probabilities": {route: 0.9, other: 0.1}}
-        if "adopted as the reply the user expects" in text:
+            labels = list(question["criteria"])
+            rest = 0.1 / max(1, len(labels) - 1)
+            return {
+                "type": "choice",
+                "probabilities": {label: 0.9 if label == route else rest for label in labels},
+            }
+        if any(ask in text for ask in ("adopted as the reply", "adopted as a sound next step")):
             return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
         if "Must the reply the assistant gives now meet this point" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
+        if partial is not None and partial in text:
+            return {"noul": 0.7}
+        reply = str(state.get("answer", state.get("reply")))
         for point, needed in (covered_by or {}).items():
             if point in text:
-                return {"noul": 0.9999 if needed in state["answer"] else 0.0}
+                return {"noul": 0.9999 if needed in reply else 0.0}
         return {"noul": 0.9999}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -138,6 +153,8 @@ def _orchestrator(
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
     draft_finish: str = "stop",
+    step: list[dict] | None = None,
+    partial: str | None = None,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
@@ -153,6 +170,7 @@ def _orchestrator(
                     implicit=implicit,
                     repair=repair,
                     draft_finish=draft_finish,
+                    step=step,
                 )
             ),
         )
@@ -169,6 +187,7 @@ def _orchestrator(
                     down=jev_down,
                     unneeded=unneeded,
                     covered_by=covered_by,
+                    partial=partial,
                 )
             ),
         )
@@ -270,10 +289,11 @@ async def test_a_missing_point_is_repaired_then_guaranteed() -> None:
 
     assert result.text == "Paris"
     assert result.verification.guaranteed and result.verification.attempts == 2
-    repair = next(_text(body) for body in seen if _text(body).startswith("[repair]"))
+    repair = next(_text(body) for body in seen if "--- MISSED POINTS ---" in _text(body))
     assert "[E1] names Paris" in repair and "[E2]" not in repair
+    # B1: the same reply written again in the draft's frame.
     assert "It is the city on the Seine." in repair
-    assert "--- ORIGINAL PROMPT ---" in repair
+    assert repair.startswith("Kairyu L2") and "--- POINTS STATED IN THE REQUEST ---" in repair
 
 
 async def test_a_point_the_request_does_not_need_is_never_judged() -> None:
@@ -325,11 +345,15 @@ def test_compose_gpus_match_the_allocation() -> None:
     assert [*gpus("openjev-0"), *gpus("openjev-1")] == spec["allocation"]["openjev"]["gpu_ids"]
 
 
-def test_both_models_share_one_verified_dag() -> None:
+def test_both_models_share_the_verified_dags_and_always_verify() -> None:
     routed = yaml.safe_load((EXAMPLE / "verified.yaml").read_text())
     always = yaml.safe_load((EXAMPLE / "verified-always.yaml").read_text())
     assert routed["roles"] == always["roles"]
-    assert "profile_judge" not in always and not always.get("profiles")
+    step = next(p for p in routed["profiles"] if p["name"] == "verified_step")
+    assert always["profiles"] == [step]
+    # kairyu-verified-always never routes to the think answer.
+    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["STEP", "VERIFIED"]
+    assert always["profile_judge"]["fallback"] == "primary"
 
 
 @pytest.mark.parametrize(("route", "served"), [("VERIFIED", "verified"), ("THINK", "think")])
@@ -381,3 +405,64 @@ async def test_the_longest_path_fits_the_step_budget() -> None:
 
     assert result.verification.attempts == 3
     assert result.verification.reason == "refinement_limit"
+
+
+async def test_a_tool_turn_is_judged_and_repaired_as_one_step() -> None:
+    # A0 (PR #619): an agent turn is one step of solving the task. Jev routes
+    # it to verified_step, which judges the reply as a next step over the
+    # task, the recent work verbatim and the summary; only a clearly unmet
+    # point (p < 0.5) reaches the repair, which rewrites the same message.
+    seen: list[dict] = []
+    reads: list[dict] = []
+    orchestrator = _orchestrator(
+        seen,
+        reads,
+        draft="Everything is fixed. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        repair="The test fails in setup.py; reading it next. cat setup.py",
+        spec="verified.yaml",
+        route="STEP",
+        step=[
+            {"id": "S1", "point": "reads setup.py named in the error"},
+            {"id": "S2", "point": "names the failing test"},
+        ],
+        covered_by={"reads setup.py": "cat setup.py"},
+        partial="names the failing test",
+    )
+    chat = ChatCompletionRequest(
+        model="kairyu-verified",
+        messages=[
+            {"role": "user", "content": "Fix the failing test."},
+            {
+                "role": "assistant",
+                "content": "Running the tests.",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "pytest"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "ImportError in setup.py"},
+        ],
+        tools=[BASH],
+    )
+    call = OrchestrationRequest(
+        prompt=validate_orchestration_chat_input(chat).prompt,
+        sampling_params=SamplingParams(max_tokens=4096),
+        tools=(BASH,),
+        tool_choice="auto",
+    )
+
+    call = await orchestrator.judge_role_profile(call)
+    result = await orchestrator.run(call)
+
+    assert result.text == "The test fails in setup.py; reading it next. cat setup.py"
+    assert result.verification.guaranteed and result.verification.attempts == 2
+    coverage = next(read for read in reads if "reply" in read["state"])
+    assert set(coverage["state"]) == {"request", "recent", "history", "reply"}
+    assert coverage["state"]["recent"][-1]["content"] == "ImportError in setup.py"
+    repair = next(_text(body) for body in seen if "--- MISSED POINTS ---" in _text(body))
+    missed = repair.split("--- MISSED POINTS ---")[1]
+    assert "[S1] reads setup.py" in missed and "names the failing test" not in missed
+    assert "--- POINTS FOR THIS STEP ---" in repair and "COMPLETE_TASK" in repair

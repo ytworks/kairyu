@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [design] Verified example judges an agent turn as one step (PR #619 S3)
+- What: new profile `verified_step` and Jev route label STEP (kairyu-verified: THINK/STEP/VERIFIED; kairyu-verified-always: STEP/VERIFIED, no think route). Step points come from the task and the latest tool results; coverage and acceptance ask whether the reply is a sound next step (A0) over request, recent conversation (bounded `query`), summary and reply. Repairs in both profiles rewrite the same message in the draft's frame (B1); a step repair gets only points read below 0.5 (B2). Extractors may use 65,536 tokens (C2). STEP thresholds are placeholders until labelled DeepSWE turns (V3).
+- Why: complete-answer criteria failed sound mid-task turns and their repairs drifted to submission (closed PR #618: 73/83 turns hit the refinement limit).
+- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (A0, B1, B2, C2); example `verified.yaml`, `verified-always.yaml`
+
 ### 2026-10-03 — [design] Checklist verifier minimised to what Jev verification needs (PR #619 S2)
 - What: removed from L2 rule-based checks (`checks.py`, inline claim roles, `on_exhausted`), `seed_from` (the answer role writes the draft itself), multi-list curation (one list: the verifier's target) and guarantee groups; kept Jev questions over JSON state (`request`/`tools` sources, conversation bounds), main's `max_questions_per_call`, the acceptance read with per-read accounting, and no guarantee for an empty answer. New: an acceptance FAIL with every point met is not repaired; it publishes unverified (`reason: not_accepted`).
 - Why: owner decision: the framework keeps only shared contracts; the removed parts served one example's workflow. A repair with no unmet point rewrote sound DeepSWE turns.
