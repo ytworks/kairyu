@@ -1913,6 +1913,18 @@ class Orchestrator:
         ]
         role_prompt = max(templates, key=expanded_bytes, default="")
         role_bytes = expanded_bytes(role_prompt)
+        # A checklist read copies the definitions into its state once per
+        # ``tools`` section; each read is one private step.
+        for role in call_roles:
+            checklist = role.checklist
+            if checklist is None:
+                continue
+            for state in (
+                checklist.state,
+                checklist.acceptance.state if checklist.acceptance is not None else (),
+            ):
+                copies = sum(1 for section in state if section.source == "tools")
+                role_bytes = max(role_bytes, copies * tool_bytes)
         if call.tools and "{tools}" in role_prompt:
             # The final request carries the expanded definitions too.
             role_prompt = role_prompt.replace(

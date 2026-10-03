@@ -2237,3 +2237,27 @@ def test_auto_admission_bound_charges_tool_definitions_copied_into_stages() -> N
     ):
         orchestrator = _orchestrator(roles=single, budget=Budget(max_steps=1))
         assert bound_for(8_193) - bound_for(1) >= 2 * 8_192
+
+    # A checklist state section copies them into each System One read
+    # (Codex review, PR #619): three reads and the final request.
+    from kairyu.orchestration.checklist import ChecklistConfig, ChecklistQuestion, StateSection
+
+    checked = (
+        RoleSpec(name="answer", worker="tier1", prompt="[answer] {query}"),
+        RoleSpec(
+            name="check",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=(ChecklistQuestion(id="R1", proposition="ok"),),
+                state=(StateSection("tools", "tools"),),
+            ),
+        ),
+    )
+    orchestrator = _orchestrator(
+        roles=checked, budget=Budget(max_steps=4), decision_workers={"judge": object()}
+    )
+    assert bound_for(8_193) - bound_for(1) >= 4 * 8_192
