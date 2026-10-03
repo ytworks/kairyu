@@ -347,7 +347,12 @@ respect to the request.
    owner decision: run in parallel, the two lists overlapped and 23 of 40
    InFoBench requests had a duplicate pair, against the gate's 10 %; the
    cost is the implicit extraction time before adoption). Each point is one
-   issue, and together they cover the request. A Jev check of the explicit
+   issue, and together they cover the request. Both prompts name the
+   overlaps the requirements gate found (amendment 2026-10-03, owner
+   decision, after 6 of 40 requests had a duplicate): a requirement restated
+   from another angle (a heading and its section's content, a table's
+   columns and rows) is one point, and an implicit point never restates an
+   explicit one or its converse. A Jev check of the explicit
    list (necessary per point, sufficient for the list, re-extracting once
    on a failure) was tried and removed (owner decision, 2026-10-03): an
    overlap question failed nearly every point with no duplicate found, and

@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: extraction prompts name the overlaps to avoid
+- What: extract writes a requirement restated from another angle (heading/content, columns/rows) as one point; implicit never restates an explicit point or its converse. Gates on 0bf8bb11: requirements failed on duplicates (6/40, gate 10 %), the other five passed.
+- Why: owner decision; the duplicate share moved around the gate (3/40 then 6/40) with unchanged settings.
+- Refs: VCO-D15 item 1; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: Jev reads use four denoise passes; tau_hi 0.99894
 - What: adopt, coverage and acceptance reads set `steps: 4`; recalibrated tau_hi 0.99894 (held-out upper 7.84 %), tau_accept stays 0.99 (held-out 15.2 %).
 - Why: owner decision. With one pass, an 11-point DeepSWE turn misread a present bash call (p 0.37-0.67); four passes read it at 0.90-0.99.

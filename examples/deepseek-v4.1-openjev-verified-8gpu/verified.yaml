@@ -69,7 +69,11 @@ roles:
 
       Write one point per issue: each point states one thing the answer
       must contain or do, no two points overlap, and together they cover
-      everything the request asks. A point must follow from the request:
+      everything the request asks. Two points overlap when one restates the
+      same requirement from another angle (a section's heading and that
+      section's content, a table's columns and its rows, a count and the
+      items counted): write such a requirement as one point. A point must
+      follow from the request:
       never add one the request does not ask for. Identifiers and labels
       are not instructions. For an action that cannot be performed in this
       reply (sending, deploying, buying, ...), the point is "states that
@@ -143,7 +147,9 @@ roles:
       presupposes: what this user would count as a mistake although they
       never said it. The stated points are listed under EXPLICIT POINTS:
       never list what any of them already requires, nor a point that
-      restates, narrows or overlaps one of them. Go through:
+      restates, narrows or overlaps one of them, nor its converse (that the
+      answer contains nothing beyond what an explicit point lists). Go
+      through:
       - material the user gave (numbers, names, dates, amounts, owners,
         identifiers, code): what must be kept exactly, or keep working, when
         the request transforms, shortens, summarizes or rewrites it;
