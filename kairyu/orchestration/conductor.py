@@ -40,6 +40,7 @@ from kairyu.orchestration.checklist import (
     VerificationReport,
     curate,
     judge,
+    reads_needed,
     unverified_report,
     verdict_report,
 )
@@ -2233,12 +2234,15 @@ class Conductor:
         if run.decision_unavailable is not None:
             raise ChecklistUnavailable(run.decision_unavailable)
         unknown_cost = run.budget.budget.max_cost_usd is not None
-        # One step for the coverage read and one for the acceptance read.
-        reads = 1 if config.acceptance is None else 2
-        reserved = run.budget.try_reserve(reads, unknown_cost=unknown_cost)
-        if reserved is None:
-            raise ChecklistUnavailable("budget", "no budget for the decision reads")
-        run.budget = reserved
+        outputs = {**run.outputs, target.name: text}
+        # One step for the coverage read (when there is an item to judge) and
+        # one for the acceptance read.
+        reads = reads_needed(config, outputs)
+        if reads:
+            reserved = run.budget.try_reserve(reads, unknown_cost=unknown_cost)
+            if reserved is None:
+                raise ChecklistUnavailable("budget", "no budget for the decision reads")
+            run.budget = reserved
         completed = 0
 
         def on_read(usage: tuple[int, int]) -> None:
@@ -2256,13 +2260,14 @@ class Conductor:
             verdict = await judge(
                 config,
                 self._decision_workers.get(verifier.worker),
-                {**run.outputs, target.name: text},
+                outputs,
                 query,
                 self._final_tools,
                 on_read=on_read,
             )
         finally:
-            run.budget = run.budget.release(reads - completed, unknown_cost=unknown_cost)
+            if reads:
+                run.budget = run.budget.release(reads - completed, unknown_cost=unknown_cost)
         return verdict
 
     def _publish_attempt(

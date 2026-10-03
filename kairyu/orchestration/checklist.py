@@ -680,6 +680,16 @@ def feedback_text(
     return "\n".join(lines)
 
 
+def reads_needed(config: ChecklistConfig, outputs: Mapping[str, str]) -> int:
+    """System One reads ``judge`` sends for these outputs (budget steps)."""
+
+    try:
+        coverage = bool(_pending_questions(config, outputs))
+    except TemplateError:
+        coverage = True  # judge reports the error before any read
+    return int(coverage) + int(config.acceptance is not None)
+
+
 async def judge(
     config: ChecklistConfig,
     backend: DecisionBackend | None,
@@ -868,7 +878,13 @@ def build_state(
             state[section.key] = raw
             continue
         else:
-            raw = outputs.get(section.source, "")
+            if section.source not in outputs:
+                # A role that failed leaves the judge without context it was
+                # configured to read: no verdict over the rest.
+                raise ChecklistUnavailable(
+                    "checklist_unavailable", f"state source {section.source!r} has no output"
+                )
+            raw = outputs[section.source]
             try:
                 state[section.key] = parse_json_output(raw)
                 continue
@@ -963,6 +979,7 @@ __all__ = [
     "curate",
     "feedback_text",
     "judge",
+    "reads_needed",
     "json_path",
     "parse_json_output",
     "requirement_question",

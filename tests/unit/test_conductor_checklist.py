@@ -630,9 +630,26 @@ async def test_a_failed_read_cancels_its_siblings_and_keeps_their_usage():
 async def test_the_acceptance_read_decides_even_with_no_point_to_judge():
     # Codex review (PR #619): an empty point list skipped the acceptance read
     # and published a guarantee nobody gave.
+    roles = _empty_list_roles()
+    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["It is 41."]})
+    judge = FakeSystemOne(lambda state, question: 0.1)
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    (body,) = judge.bodies
+    assert body["state"]["checklist"] == []
+    assert result.final_text == "It is 41."
+    assert result.verification.guaranteed is False
+    assert result.verification.reason == "not_accepted"
+
+
+def _empty_list_roles() -> tuple[RoleSpec, ...]:
+    """Acceptance roles whose only point list comes from ``points``."""
+
     roles = _accepting_roles()
     config = roles[1].checklist
-    roles = (
+    return (
         RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
         replace(roles[0], depends_on=("points",)),
         replace(
@@ -649,17 +666,43 @@ async def test_the_acceptance_read_decides_even_with_no_point_to_judge():
             ),
         ),
     )
-    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["It is 41."]})
-    judge = FakeSystemOne(lambda state, question: 0.1)
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+
+async def test_an_acceptance_only_verdict_needs_one_budget_step():
+    # Codex review (PR #619): two steps were reserved for one read.
+    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["It is 42."]})
+    judge = FakeSystemOne()
+    conductor = Conductor(_empty_list_roles(), {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=3))
+
+    assert len(judge.bodies) == 1 and result.verification.guaranteed is True
+
+
+async def test_a_failed_state_role_leaves_the_answer_unverified():
+    # Codex review (PR #619): a failed summary role was judged as empty
+    # context, and the answer still got a guarantee.
+    answer, check = _answer_roles()
+    roles = (
+        RoleSpec(name="history", worker="gen", prompt="[history] {query}"),
+        replace(answer, depends_on=("history",)),
+        replace(
+            check,
+            depends_on=("answer", "history"),
+            checklist=replace(
+                check.checklist,
+                state=(*check.checklist.state, StateSection("history", "history")),
+            ),
+        ),
+    )
+    backend = RoutedBackend({"answer": ["It is 42."]})  # no "history" reply: it fails
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne()})
 
     result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
 
-    (body,) = judge.bodies
-    assert body["state"]["checklist"] == []
-    assert result.final_text == "It is 41."
+    assert result.final_text == "It is 42."
     assert result.verification.guaranteed is False
-    assert result.verification.reason == "not_accepted"
+    assert result.verification.reason == "checklist_unavailable"
 
 
 class _AcceptanceDown(FakeSystemOne):
