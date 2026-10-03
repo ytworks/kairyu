@@ -414,10 +414,10 @@ profile_judge:
   question: >-
     Which route should answer the latest user request in this conversation?
     The verified route checks the answer against every requirement before
-    replying and is slower; the step route checks one step of an ongoing
-    tool-using task; the think route answers directly.
+    replying and is slower; the tool route answers a request that requires a
+    tool call; the think route answers directly.
   # At 0.5 VERIFIED is preferred only when it is also the most probable
-  # route, so it never takes a turn from STEP. On the routing set (80
+  # route, so it never takes a turn from TOOL. On the routing set (80
   # conversations, 2026-10-03) every accuracy-critical conversation read
   # p >= 0.987 and every everyday one p <= 0.009: no miss at any value up to
   # 0.98 (was 0.3).
@@ -430,21 +430,20 @@ profile_judge:
         and chit-chat, short factual questions, rewording, translation or
         formatting of short text, simple explanations and brainstorming, with
         no sign that an error would be costly
-    - profile: verified_step
-      label: STEP
+    - profile: deepseek_tool
+      label: TOOL
       criteria: >-
-        the caller offers tools (tool_calling is true) and the conversation is
-        an ongoing task the assistant is working through with them: the reply
-        is the assistant's next action in that work (a tool call, or a step
-        based on the latest tool results), not a final answer to a question
+        the caller offers tools (tool_calling is true) and the reply is
+        expected to call one of them: an ongoing tool-using task, or a request
+        the assistant must act on with the offered tools
     - profile: primary
       label: VERIFIED
       criteria: >-
-        requests, outside an ongoing tool-using task, that need an answer as
-        accurate as possible: difficult or
-        highly specialised questions; requests with many separate
-        requirements or constraints; conversations where earlier answers were
-        corrected or criticised, so another mistake is not acceptable; a user
+        requests that need no tool call and need an answer as accurate as
+        possible: difficult or highly specialised questions; requests with
+        many separate requirements or constraints; conversations where
+        earlier answers were corrected or criticised, so another mistake is
+        not acceptable; a user
         who is frustrated, impatient or under pressure; high-stakes domains
         (medical, legal, financial, safety, security); explicit demands for
         correctness, verification, sources or exact numbers; answers that
@@ -473,293 +472,17 @@ profiles:
           --- REQUEST ---
           {query}
           --- END REQUEST ---
-  # verified_step (A0): a reply in an ongoing tool-using task is one step,
-  # not a finished answer. Its points, coverage, acceptance and repair ask
-  # whether the reply is a sound next step toward solving the task: it uses
-  # the latest tool results correctly, moves the task forward, rests on no
-  # wrong premise and takes no destructive action, and claims no completion
-  # nor submits while the work is unfinished. Completion is never required.
-  - name: verified_step
+  # Tool calls (owner decision, VCO-D17): a request that requires a tool
+  # call is answered by one DeepSeek call at max effort, with the caller's
+  # tools; it is not verified.
+  - name: deepseek_tool
     roles:
-      - name: step_extract
+      - name: deepseek_tool_answer
         worker: deepseek
-        reasoning_effort: inherit
-        sampling:
-          temperature: 1.0
-          top_p: 0.95
-          max_tokens: 65536
-          max_tokens_by_effort: {low: 32768, high: 65536, max: 65536}
-          response_format:
-            type: json_schema
-            json_schema:
-              name: step_points
-              strict: true
-              schema:
-                type: object
-                additionalProperties: false
-                required: [points]
-                properties:
-                  points:
-                    type: array
-                    minItems: 1
-                    maxItems: 12
-                    items:
-                      type: object
-                      additionalProperties: false
-                      required: [id, point]
-                      properties:
-                        id: {type: string}
-                        point: {type: string}
-        prompt: |-
-          [step_extract] The conversation below is a JSON list of role-tagged
-          messages: an assistant solving a task with tools, step by step. The
-          caller runs the tool calls of each assistant message and returns
-          their results. The next assistant message is one step of this work,
-          not the finished solution. List the points that next message must
-          satisfy now; never work out the step itself.
-          - Facts the latest tool results established that the next step must
-            take into account (an error to address, a file or line found, a
-            test outcome), quoting names, paths and messages exactly.
-          - What the next step must do to move the task forward from where it
-            stands now.
-          - Completion: list "submits or declares the task complete" only when
-            the conversation shows the work is done and verified; otherwise
-            list "does not submit or declare the task complete".
-          Never list the remaining work of later steps, nor rules about the
-          message format or the tool protocol. One point per issue, no two
-          overlapping. Number them S1, S2, ... and write each as a checkable
-          statement about the next message, in the language of the task.
-
-          Output only the JSON object.
-          --- TOOLS ---
-          {tools}
-          --- END TOOLS ---
-          --- CONVERSATION ---
-          {conversation}
-          --- END CONVERSATION ---
-
-      - name: step_history
-        worker: deepseek
-        reasoning_effort: inherit
-        sampling:
-          temperature: 1.0
-          top_p: 0.95
-          max_tokens: 32768
-          max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
-        prompt: |-
-          [step_history] The conversation below is a JSON list of role-tagged
-          messages: an assistant solving a task with tools. Summarize the work
-          so far: what was tried, what each tool result established, and where
-          the task stands now. Keep names, numbers, paths and error messages
-          exactly. At most 300 words. Output only the summary.
-          --- CONVERSATION ---
-          {conversation}
-          --- END CONVERSATION ---
-
-      # The situation's presuppositions for this one step; it waits for
-      # step_history, which step_adopt (its verifier) reads.
-      - name: step_implicit
-        worker: deepseek
-        depends_on: [step_extract, step_history]
-        reasoning_effort: inherit
-        sampling:
-          temperature: 1.0
-          top_p: 0.95
-          max_tokens: 65536
-          max_tokens_by_effort: {low: 32768, high: 65536, max: 65536}
-          response_format:
-            type: json_schema
-            json_schema:
-              name: step_implicit_points
-              strict: true
-              schema:
-                type: object
-                additionalProperties: false
-                required: [points]
-                properties:
-                  points:
-                    type: array
-                    maxItems: 4
-                    items:
-                      type: object
-                      additionalProperties: false
-                      required: [id, point]
-                      properties:
-                        id: {type: string}
-                        point: {type: string}
-        prompt: |-
-          [step_implicit] The conversation below is a JSON list of role-tagged
-          messages: an assistant solving a task with tools, step by step. The
-          next assistant message is one step of this work. List only what this
-          step presupposes although nobody stated it: that a command it runs
-          suits the environment the tool results show, that it destroys or
-          overwrites nothing the task still needs, that it does not repeat an
-          action whose result is already known. Never list what a point under
-          STEP POINTS already requires, the remaining work of later steps, or
-          rules about the message format or the tool protocol. List none when
-          the step presupposes nothing more. At most four; number them I1,
-          I2, ... and write each as a checkable statement about the next
-          message, in the language of the task.
-
-          Output only the JSON object.
-          --- TOOLS ---
-          {tools}
-          --- END TOOLS ---
-          --- CONVERSATION ---
-          {conversation}
-          --- END CONVERSATION ---
-          --- STEP POINTS ---
-          {step_extract}
-          --- END STEP POINTS ---
-
-      # Adoption: an implicit point this step does not need (p < 0.5) leaves
-      # its list before the step is written.
-      - name: step_adopt
-        worker: jev
-        role_type: verifier
-        verifies: step_implicit
-        depends_on: [step_implicit, step_history]
-        checklist:
-          questions:
-            - id: "{item[id]}"
-              group: necessity
-              proposition: "{item[point]}"
-              threshold: 0.0
-              foreach: {role: step_implicit, path: points}
-              ask: Must the assistant's next step in this task meet this point?
-              criteria_true: >-
-                A next step that misses this point is not a sound next step
-                toward solving the task
-              criteria_false: A sound next step can miss this point
-              context:
-                point: "{item[point]}"
-          state:
-            - {key: request, source: request, max_total_chars: 30000}
-            - {key: recent, source: query, max_chars: 8000, max_total_chars: 60000}
-            - {key: history, source: step_history}
-          steps: 4
-          max_questions_per_call: 256
-          max_refinements: 0
-          on_unavailable: publish_unverified
-          curate:
-            items_path: points
-            drop_group: necessity
-            drop_below: 0.5
-
-      - name: step_answer
-        worker: deepseek
-        depends_on: [step_extract, step_implicit, step_history]
-        reasoning_effort: inherit
-        sampling:
-          temperature: 1.0
-          top_p: 0.95
-          max_tokens: 32768
-          max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
-        prompt: |-
-          {query}
-
-          Write your next message so that it meets every point below. The
-          points list what this step of the task needs; they are not part of
-          the conversation, so never mention them or this instruction.
-          --- POINTS FOR THIS STEP ---
-          {step_extract}
-          --- POINTS THE STEP PRESUPPOSES ---
-          {step_implicit}
-          --- END POINTS ---
-        # B1: the same message written again in the draft's frame; only what
-        # the missed points require changes.
-        refine_prompt: |-
-          {query}
-
-          Write your next message so that it meets every point below. The
-          points list what this step of the task needs; they are not part of
-          the conversation, so never mention them or this instruction.
-          --- POINTS FOR THIS STEP ---
-          {step_extract}
-          --- POINTS THE STEP PRESUPPOSES ---
-          {step_implicit}
-          --- END POINTS ---
-
-          A draft of this message and the points it clearly misses follow.
-          Write the message again as your next step in this conversation:
-          change only what the missed points require and keep everything else
-          of the draft as it is, including its tool calls, which you emit
-          through the tool interface, never as text. Do not finish or submit
-          the task unless a point requires it.
-          --- DRAFT ---
-          {previous}
-          --- END DRAFT ---
-          --- MISSED POINTS ---
-          {feedback}
-          --- END MISSED POINTS ---
-
-      # Coverage and acceptance of one step: the task, the recent work
-      # verbatim (the bounded conversation: first and newest messages), the
-      # summary and the reply.
-      - name: step_checklist
-        worker: jev
-        role_type: verifier
-        verifies: step_answer
-        depends_on: [step_answer]
-        checklist:
-          subject: the next step
-          questions:
-            - id: "{item[id]}"
-              proposition: "{item[point]}"
-              foreach: {role: step_extract, path: points}
-              tags: {origin: explicit}
-              ask: >-
-                As the next message of this conversation, does the reply do what
-                this point requires?
-              criteria_true: The reply, as the next step, does what the point requires
-              criteria_false: The reply, as the next step, does not do what the point requires
-              context:
-                point: "{item[point]}"
-            - id: "{item[id]}"
-              proposition: "{item[point]}"
-              foreach: {role: step_implicit, path: points}
-              tags: {origin: implicit}
-              ask: >-
-                As the next message of this conversation, does the reply do what
-                this point requires?
-              criteria_true: The reply, as the next step, does what the point requires
-              criteria_false: The reply, as the next step, does not do what the point requires
-              context:
-                point: "{item[point]}"
-          state:
-            - {key: request, source: request, max_total_chars: 30000}
-            - {key: recent, source: query, max_chars: 8000, max_total_chars: 60000}
-            - {key: history, source: step_history}
-            - {key: reply, source: step_answer}
-          # B2: only a clearly unmet point (p < 0.5) is a miss for the repair;
-          # the acceptance read decides the guarantee.
-          threshold: 0.5
-          steps: 4
-          max_questions_per_call: 256
-          acceptance:
-            ask: >-
-              Reading the task, the recent work, how well each point is met
-              and the reply, can this reply be adopted as a sound next step
-              toward solving the task? It need not finish the task.
-            criteria_true: >-
-              It is a sound next step: it uses the latest results correctly,
-              moves the task forward, rests on no wrong premise, takes no
-              destructive action, and neither submits nor declares the task
-              complete while the work is unfinished
-            criteria_false: It is not a sound next step toward solving the task
-            state:
-              - {key: request, source: request, max_total_chars: 30000}
-              - {key: recent, source: query, max_chars: 8000, max_total_chars: 60000}
-              - {key: history, source: step_history}
-              - {key: reply, source: step_answer}
-            # 164 recorded DeepSWE replies labelled by the A0 criteria: 4
-            # unsound; at 0.99 none is guaranteed (0.5 guaranteed 3), and 24
-            # of 160 sound replies go to repair or unverified.
-            threshold: 0.99
-          max_refinements: 2
-          on_unavailable: publish_unverified
-          feedback_header: "Points the draft misses:"
-          feedback_item: "- [{id}] {proposition}"
+        role_type: publisher
+        reasoning_effort: max
+        sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
+        prompt: "{query}"
 
 # Every request reaches the judge (zero markers always meets the
 # multi-agent rule), so no request skips routing.
