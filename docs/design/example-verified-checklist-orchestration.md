@@ -418,6 +418,14 @@ respect to the request.
    lowest measured error: held-out 43 of 125 answers guaranteed, 7 missing a
    labelled requirement (16.3 %, upper bound 28.4 %). The guarantee is
    therefore the judge's adoption at 0.99, not an alpha-bounded claim.
+8. **Four denoise passes (amendment 2026-10-03, owner decision).** Every
+   Jev checklist read (adopt, coverage, acceptance) sets `steps: 4`:
+   OpenJev re-reads each answer slot with the other slots' current answers
+   in place, instead of filling every slot at once. With one pass, an agent
+   turn with 11 points read a present bash call at p 0.37-0.67 (0.99 with
+   four questions); with four passes, 0.90-0.99. Recalibrated on InFoBench:
+   tau_hi 0.99894 (calibration upper bound 9.78 %, held-out 7.84 %);
+   tau_accept stays 0.99 (held-out 7 of 46, 15.2 %; acceptance AUROC 0.794).
 
 tau_hi is recalibrated on InFoBench for the coverage question and its state
 (`calibrate.py`, alpha = 0.10 at 95 %); the per-claim G1 calibration

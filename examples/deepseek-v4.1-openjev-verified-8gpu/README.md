@@ -99,7 +99,7 @@ questions, one per implicit point:             questions, one per adopted point:
    meet this point?"                              what this point requires?"
   yes: a reply missing it is not the reply        yes: every part met as the point states
        this conversation needs at this step       no:  missing, partial or incorrect
-  no:  the reply needed now is complete and     threshold: τ_hi = 0.9895 (InFoBench)
+  no:  the reply needed now is complete and     threshold: τ_hi = 0.99894 (InFoBench)
        correct without it
 threshold: drop below 0.5 (default)
 
@@ -113,9 +113,10 @@ question: "Reading the prompt, the candidate answer and how well each point
            is met, can this answer be adopted as the reply the user expects?"
   yes: it can be adopted as is as the reply the user expects
   no:  it cannot be adopted as the reply the user expects
-threshold: τ_accept = 0.99 (owner choice; InFoBench held-out: 7 of 43
-           accepted answers miss a labelled requirement, 16.3 %, upper
-           bound 28.4 %; no threshold meets α = 0.10, see MEASUREMENTS.md)
+threshold: τ_accept = 0.99 (owner choice; InFoBench held-out: 7 of 46
+           accepted answers miss a labelled requirement, 15.2 %, upper
+           bound 26.7 %; no threshold meets α = 0.10, see MEASUREMENTS.md)
+Jev reads (adopt, coverage, acceptance) use four denoise passes (steps: 4).
 ```
 
 The coverage read's τ_hi only selects the missed points that the repair

@@ -283,6 +283,9 @@ roles:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
         - {key: tools, source: tools}
+      # Four OpenJev denoise passes (owner decision, VCO-D15): each answer slot
+      # is re-read with the other slots' current answers in place.
+      steps: 4
       max_refinements: 0
       on_unavailable: publish_unverified
       # No implicit point (a short factual question) leaves nothing to adopt.
@@ -363,10 +366,15 @@ roles:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
         - {key: answer, source: answer}
-      # tau_hi (InFoBench expert labels, alpha = 0.10 at 95 % confidence;
-      # calibration upper bound 0.0999, held-out 0.0865) marks a point as
-      # missed for the repair; the acceptance read decides the guarantee.
-      threshold: 0.9895
+      # tau_hi (InFoBench expert labels, four denoise passes, alpha = 0.10 at
+      # 95 % confidence; calibration upper bound 0.0978, held-out 0.0784)
+      # marks a point as missed for the repair; the acceptance read decides
+      # the guarantee.
+      threshold: 0.99894
+      # Four OpenJev denoise passes, for this read and the acceptance read
+      # (owner decision): with one pass, a 10-14 point agent turn read even a
+      # present bash call at p 0.07-0.77.
+      steps: 4
       # Acceptance (VCO-D15): the point results, the answer and the original
       # prompt go to Jev, which decides whether the answer may be adopted.
       acceptance:
@@ -379,8 +387,8 @@ roles:
           - {key: prompt, source: request, max_total_chars: 100000}
           - {key: answer, source: answer}
         # Owner choice on InFoBench response labels (MEASUREMENTS.md): no
-        # threshold meets alpha 0.10; 0.99 has the lowest error rate (held-out
-        # 7 of 43, 16.3 %, upper bound 28.4 %).
+        # threshold meets alpha 0.10; 0.99 has the lowest error rate (four
+        # denoise passes: held-out 7 of 46, 15.2 %, upper bound 26.7 %).
         threshold: 0.99
       max_refinements: 2
       on_unavailable: publish_unverified

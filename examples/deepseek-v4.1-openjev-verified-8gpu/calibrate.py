@@ -314,19 +314,30 @@ def main() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     roles = _roles()
-    # VCO-D15 question and state; reads of earlier formats are not reused.
-    cache = directory / "judged-coverage-v2.jsonl"
+    # VCO-D15 question and state with four denoise passes; reads of earlier
+    # formats are not reused, but their DeepSeek point statements and history
+    # summaries are (the same prompts at temperature 0).
+    cache = directory / "judged-coverage-v3.jsonl"
     done = {}
     if cache.is_file():
         for line in cache.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             done[(row["id"], row["model"])] = row
+    earlier = {}
+    for name in ("judged-coverage-v2.jsonl",):
+        if (directory / name).is_file():
+            for line in (directory / name).read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                earlier[(row["id"], row["model"])] = row
 
     def work(sample: dict) -> dict:
         key = (sample["id"], sample["model"])
         if key in done:
             return done[key]
-        prepared = prepare(sample, l1_url, roles)
+        if key in earlier:
+            prepared = {**sample, **{k: earlier[key][k] for k in ("statements", "history")}}
+        else:
+            prepared = prepare(sample, l1_url, roles)
         return {**prepared, "p": judge(prepared, api_url, roles)}
 
     pending = [row for row in rows if (row["id"], row["model"]) not in done]
@@ -366,7 +377,7 @@ def main() -> None:
     (directory / "tau.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
 
-    accept_cache = directory / "judged-acceptance-v1.jsonl"
+    accept_cache = directory / "judged-acceptance-v2.jsonl"
     accepted = {}
     if accept_cache.is_file():
         for line in accept_cache.read_text(encoding="utf-8").splitlines():

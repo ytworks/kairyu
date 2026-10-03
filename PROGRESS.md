@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: Jev reads use four denoise passes; tau_hi 0.99894
+- What: adopt, coverage and acceptance reads set `steps: 4`; recalibrated tau_hi 0.99894 (held-out upper 7.84 %), tau_accept stays 0.99 (held-out 15.2 %).
+- Why: owner decision. With one pass, an 11-point DeepSWE turn misread a present bash call (p 0.37-0.67); four passes read it at 0.90-0.99.
+- Refs: VCO-D15 item 8, MEASUREMENTS.md; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: explicit-points check removed
 - What: `points_check` is removed from the example (max_steps 18 -> 15); adoption keeps `on_empty: pass`.
 - Why: owner decision on 80 InFoBench requests: its sufficiency question did not track gold coverage (AUROC 0.41, 18 of 20 re-extractions needless, 7 of 9 incomplete lists passed); first lists already covered 96.2 %.

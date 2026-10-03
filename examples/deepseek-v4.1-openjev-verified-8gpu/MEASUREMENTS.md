@@ -49,6 +49,31 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## Recalibration with four denoise passes (2026-10-03, 12:16 JST)
+
+Owner decision: every Jev checklist read uses `steps: 4`. Same InFoBench
+answers, split and DeepSeek point statements as below; only the Jev reads
+are new (`judged-coverage-v3.jsonl`, `judged-acceptance-v2.jsonl`).
+
+| | tau | calibration accepted / violations / upper | held-out accepted / violations / upper |
+|---|---|---|---|
+| coverage (per point) | **0.99894** | 340 / 24 / 9.78 % | 381 / 21 / 7.84 % |
+
+Held-out answers passing every point: 39 of 125 (4 violated). Acceptance
+read (AUROC 0.794), held-out half:
+
+| tau_accept | guaranteed | missing a requirement | rate | upper bound |
+|---|---|---|---|---|
+| 0.5 | 62 | 15 | 24.2 % | 34.8 % |
+| 0.9 | 56 | 10 | 17.9 % | 28.4 % |
+| **0.99 (kept)** | **46** | **7** | **15.2 %** | **26.7 %** |
+| 0.999 | 23 | 4 | 17.4 % | 35.5 % |
+
+Why: a DeepSWE agent turn (11 points) read with one pass gave a present bash
+call p 0.37-0.67 and "executes a command" 0.11-0.38; with four questions
+0.99 / 0.92; with `steps: 4` and all 11 questions 0.90-0.99 / 0.92-0.99 on
+both replicas (`think` and `samples` did not help).
+
 ## Explicit-points check, tried and removed (2026-10-03, 10:24-11:10 JST, `3c96d9a8`)
 
 InFoBench rows 40-119 (the requirements gate uses rows 0-39), production API,
