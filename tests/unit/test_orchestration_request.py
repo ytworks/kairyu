@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 
 import pytest
 
@@ -12,7 +13,11 @@ from kairyu.engine.backend import (
 from kairyu.orchestration.conductor import Conductor
 from kairyu.orchestration.moa import run_moa, stream_moa
 from kairyu.orchestration.orchestrator import Orchestrator
-from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.orchestration.request import (
+    OrchestrationRequest,
+    bounded_conversation,
+    bounded_text,
+)
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
@@ -420,3 +425,39 @@ async def test_concurrent_calls_do_not_mix_request_intent():
     assert by_prompt["second"].sampling_params.n == 3
     assert len(first_result.completions) == 2
     assert len(second_result.completions) == 3
+
+
+def test_bounded_conversation_never_exceeds_its_bound():
+    # PR #618 review: the bound held only for the omitted middle.
+    cases = [
+        ([{"role": "user", "content": "u" * 4000}], 1500),
+        (
+            [
+                {"role": "user", "content": "u" * 4000},
+                {"role": "assistant", "content": "a"},
+                {"role": "user", "content": "v" * 4000},
+            ],
+            1500,
+        ),
+        (
+            [
+                {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "", "reasoning_content": "r" * 150_000},
+            ],
+            120_000,
+        ),
+        # Escaped characters (Codex review, PR #619): the cut keeps a prefix.
+        ([{"role": "user", "content": "Summarize this log:\n" + "entry\n" * 1500}], 1500),
+    ]
+    for messages, max_chars in cases:
+        bounded, omitted = bounded_conversation(messages, max_chars)
+
+        assert len(json.dumps(bounded, ensure_ascii=False)) <= max_chars
+        assert bounded[0]["role"] == messages[0]["role"]
+        assert bounded[-1]["role"] == messages[-1]["role"]
+        assert omitted == len(messages) - len(bounded)
+        assert len(json.dumps(bounded[-1], ensure_ascii=False)) > max_chars // 4
+
+    text = "Summarize this log:\n" + "entry\n" * 1500
+    cut = bounded_text(text, 1000)
+    assert len(json.dumps(cut)) <= 1000 and cut.startswith("Summarize this log:")

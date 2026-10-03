@@ -1,4 +1,4 @@
-"""Checklist-verified answers: DeepSeek-V4.1 six-GPU + OpenJev x 2 example (VCO-D1).
+"""Checklist-verified answers: DeepSeek-V4.1 six-GPU + OpenJev x 2 example (VCO-D15).
 
 The example's own kairyu.yaml / verified.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
@@ -28,29 +28,12 @@ from kairyu.sampling_params import SamplingParams
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-openjev-verified-8gpu"
 
-CHECKLIST = {
-    "units": [
-        {"id": "U1", "text": "Name the capital of France"},
-        {"id": "U2", "text": "in one word"},
-    ],
-    "requirements": [
-        {
-            "id": "R1",
-            "proposition": "names Paris",
-            "kind": "semantic",
-            "origin": "explicit",
-            "sources": ["U1"],
-        },
-        {
-            "id": "R2",
-            "proposition": "the answer is one word",
-            "kind": "deterministic",
-            "origin": "explicit",
-            "sources": ["U2"],
-            "check": {"primitive": "regex", "params": {"pattern": "^\\s*\\S+\\s*$"}},
-        },
-    ],
-}
+EXPLICIT = [
+    {"id": "E1", "point": "names Paris"},
+    {"id": "E2", "point": "answers in one word"},
+]
+IMPLICIT = [{"id": "I1", "point": "the answer is a proper noun"}]
+BASH = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}
 
 
 def _text(body: dict) -> str:
@@ -64,36 +47,23 @@ def _deepseek(
     seen: list[dict],
     *,
     draft: str,
-    checklist: dict | None = None,
+    explicit: list[dict] | None = None,
     implicit: list[dict] | None = None,
-    implicit_texts: list[str] | None = None,
+    repair: str = "Paris",
     draft_finish: str = "stop",
 ):
-    replies = list(implicit_texts or [])
-
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         seen.append(body)
         text = _text(body)
         if text.startswith("[extract]"):
-            answer = json.dumps(checklist or CHECKLIST)
+            answer = json.dumps({"points": EXPLICIT if explicit is None else explicit})
         elif text.startswith("[implicit]"):
-            answer = replies.pop(0) if replies else json.dumps({"requirements": implicit or []})
-        elif text.startswith("[state_builder]"):
-            answer = json.dumps(
-                {
-                    "claims": [
-                        {
-                            "id": "c1",
-                            "text": "The answer names the capital of France",
-                            "basis": "source",
-                            "evidence": "Name the capital of France",
-                        }
-                    ]
-                }
-            )
-        elif text.startswith("[repair]"):
-            answer = "Paris"
+            answer = json.dumps({"points": IMPLICIT if implicit is None else implicit})
+        elif text.startswith("[history]"):
+            answer = "none"
+        elif "--- MISSED POINTS ---" in text:
+            answer = repair
         else:
             answer = draft
         finish = draft_finish if answer == draft else "stop"
@@ -119,33 +89,29 @@ def _openjev(
     reads: list[dict],
     *,
     route: str = "VERIFIED",
-    implicit: float = 0.9999,
     down: bool = False,
-    sufficiency: float = 0.9999,
-    needs: str | None = None,
     unneeded: str | None = None,
-    claim: float = 0.9999,
-    unmet: str | None = None,
+    covered_by: dict[str, str] | None = None,
 ):
+    """Necessity is low only for ``unneeded``; a point in ``covered_by`` is
+    contained only in an answer holding the mapped text."""
+
     def answer(question: dict, state: dict) -> dict:
         text = json.dumps(question)
         if question["type"] == "choice":
-            other = next(label for label in question["criteria"] if label != route)
-            return {"type": "choice", "probabilities": {route: 0.9, other: 0.1}}
-        if "same thing" in text:
-            return {"noul": 0.0001}
-        if "did not say it" in text:
-            return {"noul": implicit}
-        if "fully cover this instruction unit" in text:
-            if needs is not None:
-                return {"noul": 0.9999 if needs in json.dumps(state) else 0.0}
-            return {"noul": sufficiency}
-        if unneeded is not None and unneeded in text and "ask for this condition" in text:
-            return {"noul": 0.4}
-        if "Is this claim of the answer supported?" in text:
-            return {"noul": claim}
-        if unmet is not None and unmet in text and "satisfy the requirement" in text:
-            return {"noul": 0.0}
+            labels = list(question["criteria"])
+            rest = 0.1 / max(1, len(labels) - 1)
+            return {
+                "type": "choice",
+                "probabilities": {label: 0.9 if label == route else rest for label in labels},
+            }
+        if "adopted as the reply the user expects" in text:
+            return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
+        if "Is this point necessary to answer the request" in text:
+            return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
+        for point, needed in (covered_by or {}).items():
+            if point in text:
+                return {"noul": 0.9999 if needed in state["answer"] else 0.0}
         return {"noul": 0.9999}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -170,17 +136,13 @@ def _orchestrator(
     draft: str,
     spec: str = "verified-always.yaml",
     route: str = "VERIFIED",
-    implicit: float = 0.9999,
-    checklist: dict | None = None,
-    implicit_conditions: list[dict] | None = None,
-    implicit_texts: list[str] | None = None,
+    explicit: list[dict] | None = None,
+    implicit: list[dict] | None = None,
+    repair: str = "Paris",
     jev_down: bool = False,
-    sufficiency: float = 0.9999,
-    needs: str | None = None,
     unneeded: str | None = None,
+    covered_by: dict[str, str] | None = None,
     draft_finish: str = "stop",
-    claim: float = 0.9999,
-    unmet: str | None = None,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
@@ -192,9 +154,9 @@ def _orchestrator(
                 _deepseek(
                     seen,
                     draft=draft,
-                    checklist=checklist,
-                    implicit=implicit_conditions,
-                    implicit_texts=implicit_texts,
+                    explicit=explicit,
+                    implicit=implicit,
+                    repair=repair,
                     draft_finish=draft_finish,
                 )
             ),
@@ -209,13 +171,9 @@ def _orchestrator(
                 _openjev(
                     reads,
                     route=route,
-                    implicit=implicit,
                     down=jev_down,
-                    sufficiency=sufficiency,
-                    needs=needs,
                     unneeded=unneeded,
-                    claim=claim,
-                    unmet=unmet,
+                    covered_by=covered_by,
                 )
             ),
         )
@@ -249,7 +207,7 @@ def test_gateway_builds_from_the_example_configs(tmp_path: Path) -> None:
     build_app_from_spec(load_deployment_spec(raw, resolve_credentials=False), EXAMPLE)
 
 
-async def test_a_one_word_draft_is_published_with_a_guarantee() -> None:
+async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarantee() -> None:
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(seen, reads, draft="Paris")
@@ -259,70 +217,89 @@ async def test_a_one_word_draft_is_published_with_a_guarantee() -> None:
     assert result.text == "Paris"
     report = result.verification.as_dict()
     assert report["guaranteed"] is True
-    assert {item["id"] for item in report["requirements"]} == {
-        "R1",
-        "R2",
-        "G1-source",
-        "G1-excerpts",
-        "G2",
-        "G3",
-    }
+    assert [(item["id"], item["tags"]["origin"]) for item in report["requirements"]] == [
+        ("E1", "explicit"),
+        ("E2", "explicit"),
+        ("I1", "implicit"),
+    ]
     by_role = {_text(body).split("]", 1)[0].lstrip("["): body for body in seen}
-    # The generator sees only the conversation, never the checklist, and the
-    # draft is published as-is (no repair call).
-    generator = next(body for body in seen if _text(body).startswith("Kairyu L2"))
-    assert "names Paris" not in _text(generator) and "[repair]" not in by_role
-    # Extraction and claim lists are grammar-constrained; reads used both OpenJev replicas'
-    # pool (System One) and never a chat endpoint.
-    # The extractor analyses the user's request, not Kairyu's answer contract.
+    # The draft is published as-is (no repair call).
+    assert "repair" not in by_role
+    # The extractors analyse the user's request, not Kairyu's answer contract.
     extract_text = _text(by_role["extract"])
     assert "Name the capital of France in one word." in extract_text
     assert "Return only the assistant response body" not in extract_text
     assert by_role["extract"]["response_format"]["type"] == "json_schema"
-    assert by_role["state_builder"]["response_format"]["type"] == "json_schema"
-    # Every DeepSeek step thinks at the request's effort (default high).
-    for role in ("state_builder", "extract"):
-        assert by_role[role]["reasoning_effort"] == "high"
-        assert "chat_template_kwargs" not in by_role[role]
+    assert by_role["implicit"]["response_format"]["type"] == "json_schema"
+    # The implicit extractor reads the explicit points, so it lists none of them.
+    assert "--- EXPLICIT POINTS ---" in _text(by_role["implicit"])
+    assert EXPLICIT[0]["point"] in _text(by_role["implicit"])
+    # One System One request per verdict, on the OpenJev replicas.
+    adopt, coverage, acceptance = reads
     assert {read["replica"] for read in reads} <= {"openjev-0", "openjev-1"}
-    # The judge gets the conversation as role-tagged messages and the
-    # answer's checklist as JSON values, never as one escaped text blob.
-    answer_read = next(read for read in reads if "answer" in read["state"])
-    assert answer_read["state"]["conversation"][-1]["role"] == "user"
-    assert answer_read["state"]["checklist"]["requirements"][0]["id"] == "R1"
+    # Adoption: only the implicit points are judged (explicit ones are what
+    # the user asked for), against the request verbatim (system/developer +
+    # latest user) and the history summary.
+    assert len(adopt["questions"]) == 1
+    assert IMPLICIT[0]["point"] in json.dumps(adopt["questions"])
+    assert adopt["state"]["request"] == [
+        {"role": "user", "content": "Name the capital of France in one word."}
+    ]
+    assert adopt["state"]["history"] == "none"
+    # Coverage: every adopted point against the answer as it will be sent,
+    # in the context of the request and the history summary.
+    assert coverage["state"] == {
+        "request": adopt["state"]["request"],
+        "history": "none",
+        "answer": "Paris",
+    }
+    assert len(coverage["questions"]) == 3
+    # Acceptance: the point results, the answer and the original prompt.
+    assert set(acceptance["state"]) == {"prompt", "answer", "checklist"}
+    assert acceptance["state"]["prompt"] == adopt["state"]["request"]
 
 
-async def test_uncalibrated_claim_support_is_reported_but_never_blocks_the_guarantee() -> None:
-    # VCO-D11: OpenJev's per-claim G1 p failed calibration on human labels,
-    # so it is advisory: shown to the caller, never a repair or a lost flag.
+async def test_a_missing_point_is_repaired_then_guaranteed() -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, draft="Paris", claim=0.2)
-
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
-
-    report = result.verification.as_dict()
-    assert report["guaranteed"] is True and result.verification.attempts == 1
-    g1 = next(item for item in report["requirements"] if item["id"] == "G1-source")
-    assert g1["p"] == pytest.approx(0.2) and g1["tags"]["guarantee"] == "advisory"
-    assert not any(_text(body).startswith("[repair]") for body in seen)
-
-
-async def test_a_deterministic_violation_is_repaired_then_guaranteed() -> None:
-    seen: list[dict] = []
-    reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, draft="The capital of France is Paris.")
+    orchestrator = _orchestrator(
+        seen,
+        reads,
+        draft="It is the city on the Seine.",
+        covered_by={"names Paris": "Paris"},
+    )
 
     result = await orchestrator.run(_call("Name the capital of France in one word."))
 
     assert result.text == "Paris"
     assert result.verification.guaranteed and result.verification.attempts == 2
-    repair = next(_text(body) for body in seen if _text(body).startswith("[repair]"))
-    assert "[R2] the answer is one word" in repair
-    assert "The capital of France is Paris." in repair
+    repair = next(_text(body) for body in seen if "--- MISSED POINTS ---" in _text(body))
+    assert "[E1] names Paris" in repair and "[E2]" not in repair
+    # B1: the same reply written again in the draft's frame.
+    assert "It is the city on the Seine." in repair
+    assert repair.startswith("Kairyu L2") and "--- POINTS STATED IN THE REQUEST ---" in repair
 
 
-async def test_the_callers_response_format_constrains_draft_and_repair() -> None:
+async def test_a_point_the_request_does_not_need_is_never_judged() -> None:
+    # An unnecessary implicit point leaves its list before the answer is
+    # judged; the explicit points always stay.
+    unneeded = "the answer is a proper noun"
+    seen: list[dict] = []
+    reads: list[dict] = []
+    orchestrator = _orchestrator(seen, reads, draft="Paris", unneeded=unneeded)
+
+    result = await orchestrator.run(_call("Name the capital of France in one word."))
+
+    judged = {item.proposition for item in result.verification.items}
+    assert unneeded not in judged and len(judged) == 2
+    assert unneeded not in json.dumps(reads[-1]["questions"])
+    # The answer is written after adoption, to meet exactly the kept points.
+    answer = _text(next(body for body in seen if _text(body).startswith("Kairyu L2")))
+    assert "names Paris" in answer and unneeded not in answer
+    assert result.verification.guaranteed
+
+
+async def test_the_callers_response_format_constrains_draft_and_extraction() -> None:
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(seen, reads, draft="Paris")
@@ -332,8 +309,8 @@ async def test_the_callers_response_format_constrains_draft_and_repair() -> None
         _call("Name the capital of France in one word.", extra_args={"response_format": schema})
     )
 
-    generator = next(body for body in seen if _text(body).startswith("Kairyu L2"))
-    assert generator["response_format"] == schema
+    answer = next(body for body in seen if _text(body).startswith("Kairyu L2"))
+    assert answer["response_format"] == schema
     # The extractor reads the request within the caller's format, so it never
     # demands content the format cannot hold.
     extract = next(_text(body) for body in seen if _text(body).startswith("[extract]"))
@@ -352,11 +329,15 @@ def test_compose_gpus_match_the_allocation() -> None:
     assert [*gpus("openjev-0"), *gpus("openjev-1")] == spec["allocation"]["openjev"]["gpu_ids"]
 
 
-def test_both_models_share_one_verified_dag() -> None:
+def test_both_models_share_the_verified_dag_and_the_tool_route() -> None:
     routed = yaml.safe_load((EXAMPLE / "verified.yaml").read_text())
     always = yaml.safe_load((EXAMPLE / "verified-always.yaml").read_text())
     assert routed["roles"] == always["roles"]
-    assert "profile_judge" not in always and not always.get("profiles")
+    tool = next(p for p in routed["profiles"] if p["name"] == "verified_tool")
+    assert always["profiles"] == [tool]
+    # kairyu-verified-always never routes to the think answer.
+    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["VERIFIED_TOOL", "VERIFIED"]
+    assert always["profile_judge"]["fallback"] == "primary"
 
 
 @pytest.mark.parametrize(("route", "served"), [("VERIFIED", "verified"), ("THINK", "think")])
@@ -381,7 +362,8 @@ async def test_jev_routes_and_every_deepseek_call_thinks_at_the_callers_effort(
     else:
         assert result.verification is None
         assert [_text(body).split("]")[0] for body in seen] == ["[deepseek_think_answer"]
-    # One effort for every DeepSeek step, default high (75).
+    # One effort for every DeepSeek step, the history summary included,
+    # default high (VCO-D9).
     assert {body.get("reasoning_effort") for body in seen} == {effort or "high"}
 
 
@@ -396,198 +378,51 @@ async def test_an_unavailable_jev_routes_to_the_think_answer() -> None:
     assert [_text(body).split("]")[0] for body in seen] == ["[deepseek_think_answer"]
 
 
-@pytest.mark.parametrize(("p_expected", "kept"), [(0.9999, True), (0.05, False)])
-async def test_implicit_requirements_stay_only_when_jev_finds_them_expected(
-    p_expected, kept
-) -> None:
-    # A second extractor lists situational conditions (VCO-D8 amendment);
-    # the stated checklist stays the extractor's alone.
-    implicit_conditions = [
-        {
-            "id": "I1",
-            "proposition": "the answer is a proper noun",
-            "kind": "semantic",
-            "origin": "implicit",
-            "sources": ["Name the capital of France"],
-        }
-    ]
+async def test_the_longest_path_fits_the_step_budget() -> None:
+    # Two failed repairs are the longest path; it must end refinement_limit,
+    # never unverified for lack of steps (reason: budget).
+    orchestrator = _orchestrator(
+        [], [], draft="Lyon", repair="Lyon", covered_by={"names Paris": "Paris"}
+    )
+
+    result = await orchestrator.run(_call("Name the capital of France in one word."))
+
+    assert result.verification.attempts == 3
+    assert result.verification.reason == "refinement_limit"
+
+
+async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() -> None:
+    # VCO-D17 (owner decision): Jev routes a tool-using turn to the tool
+    # route, one DeepSeek call at max effort with the caller's tools, without
+    # verification.
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(
-        seen, reads, draft="Paris", implicit=p_expected, implicit_conditions=implicit_conditions
+        seen, reads, draft="Reading setup.py next.", spec="verified.yaml", route="VERIFIED_TOOL"
     )
-
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
-
-    implicit_questions = [
-        question
-        for read in reads
-        for question in read["questions"].values()
-        if "did not say it" in json.dumps(question)
-    ]
-    assert len(implicit_questions) == 1
-    assert "I1: the answer is a proper noun" in json.dumps(implicit_questions[0])
-    judged = {item.id for item in result.verification.items}
-    assert ("I1" in judged) is kept
-    assert result.verification.guaranteed
-
-
-async def test_an_unconfirmed_requirement_set_never_yields_a_guarantee() -> None:
-    # Review P1: the extractor never covers U1 sufficiently, even after the
-    # re-extraction, so the answer passing that checklist proves nothing.
-    seen: list[dict] = []
-    orchestrator = _orchestrator(seen, [], draft="Paris", sufficiency=0.0)
-
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
-
-    assert result.text == "Paris"
-    assert result.verification.guaranteed is False
-    assert result.verification.reason == "requirements_unconfirmed"
-
-
-async def test_a_cut_off_implicit_list_is_written_again() -> None:
-    # A thinking extractor that ran into max_tokens left the implicit list
-    # as broken JSON; the final checklist could not read it and the whole
-    # answer ended checklist_unavailable.
-    seen: list[dict] = []
-    orchestrator = _orchestrator(
-        seen, [], draft="Paris", implicit_texts=['{"requirements": [{"id": "I1", "propos']
-    )
-
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
-
-    assert sum(_text(body).startswith("[implicit]") for body in seen) == 2
-    assert result.verification.guaranteed
-
-
-async def test_the_longest_path_fits_the_step_budget() -> None:
-    # A re-extraction plus two failed repairs used to exhaust max_steps and
-    # publish the answer unverified (reason: budget) once the implicit
-    # extractor and its check joined the DAG.
-    checklist = {
-        **CHECKLIST,
-        "requirements": [
-            *CHECKLIST["requirements"],
-            {
-                "id": "R3",
-                "proposition": "explains the history of the city",
-                "kind": "semantic",
-                "origin": "explicit",
-                "sources": ["U1"],
-            },
+    chat = ChatCompletionRequest(
+        model="kairyu-verified",
+        messages=[
+            {"role": "user", "content": "Fix the failing test."},
+            {"role": "tool", "tool_call_id": "c1", "content": "ImportError in setup.py"},
         ],
-    }
-    implicit_conditions = [
-        {
-            "id": "I1",
-            "proposition": "the answer is a proper noun",
-            "kind": "semantic",
-            "origin": "implicit",
-            "sources": ["Name the capital of France"],
-        }
-    ]
-    seen: list[dict] = []
-    orchestrator = _orchestrator(
-        seen,
-        [],
-        draft="Paris",
-        checklist=checklist,
-        implicit_conditions=implicit_conditions,
-        # Jev drops the implicit condition, so its curated list is re-judged.
-        implicit=0.05,
-        needs="never-covered",
-        # Every attempt passes the checks, runs the state builder and then
-        # fails one semantic requirement: the longest repair path.
-        unmet="explains the history of the city",
+        tools=[BASH],
+    )
+    call = OrchestrationRequest(
+        prompt=validate_orchestration_chat_input(chat).prompt,
+        sampling_params=SamplingParams(max_tokens=4096),
+        tools=(BASH,),
+        tool_choice="auto",
+        # The caller's effort does not lower the verified-tool route's max.
+        reasoning_effort="low",
     )
 
-    result = await orchestrator.run(_call("Name the capital of France in one word."))
+    call = await orchestrator.judge_role_profile(call)
+    result = await orchestrator.run(call)
 
-    assert sum(_text(body).startswith("[extract]") for body in seen) == 2
-    assert result.verification.attempts == 3
-    assert result.verification.reason != "budget"
-
-
-async def test_duplicate_deterministic_conditions_keep_their_own_checks() -> None:
-    # Review P1: merging used to keep only the first check ("at most two
-    # words") and report "exactly two words" as passed for one word.
-    checklist = {
-        "units": [{"id": "U1", "text": "Answer in exactly two words"}],
-        "requirements": [
-            {
-                "id": "R1",
-                "proposition": "at most two words",
-                "kind": "deterministic",
-                "origin": "explicit",
-                "sources": ["U1"],
-                "check": {"primitive": "length", "params": {"max_words": 2}},
-            },
-            {
-                "id": "R2",
-                "proposition": "exactly two words",
-                "kind": "deterministic",
-                "origin": "explicit",
-                "sources": ["U1"],
-                "check": {"primitive": "length", "params": {"min_words": 2, "max_words": 2}},
-            },
-        ],
-    }
-    seen: list[dict] = []
-    orchestrator = _orchestrator(seen, [], draft="Paris", checklist=checklist)
-
-    result = await orchestrator.run(_call("Name the capital of France in exactly two words."))
-
-    by_id = {item.id: item for item in result.verification.items}
-    assert by_id["R2"].passed is False
-    assert result.verification.guaranteed is False
-
-
-async def test_a_passing_checklist_is_reconfirmed_after_curation_changes_it() -> None:
-    # Review P1 (round 2): curation drops R2 (necessity 0.4) from a set that
-    # passed; without R2 the unit is no longer covered.
-    checklist = {
-        "units": [{"id": "U1", "text": "Name the capital and the country"}],
-        "requirements": [
-            {
-                "id": "R1",
-                "proposition": "names Paris",
-                "kind": "semantic",
-                "origin": "explicit",
-                "sources": ["U1"],
-            },
-            {
-                "id": "R2",
-                "proposition": "names France",
-                "kind": "semantic",
-                "origin": "explicit",
-                "sources": ["U1"],
-            },
-        ],
-    }
-    orchestrator = _orchestrator(
-        [], [], draft="Paris", checklist=checklist, needs="names France", unneeded="names France"
-    )
-
-    result = await orchestrator.run(_call("Name the capital of France and the country."))
-
-    assert result.verification.guaranteed is False
-    assert result.verification.reason == "requirements_unconfirmed"
-
-
-async def test_n_greater_than_one_is_refused_on_the_real_dag() -> None:
-    # Review P2 (round 2): the final unit is the seeded answer, not the
-    # inline state builder.
-    orchestrator = _orchestrator([], [], draft="Paris")
-
-    with pytest.raises(ValueError, match="n > 1"):
-        await orchestrator.run(_call("Name the capital of France.", n=2))
-
-
-async def test_an_unverified_draft_keeps_its_finish_reason() -> None:
-    # Review P2 (round 2): the judge is down; the published draft was cut.
-    orchestrator = _orchestrator([], [], draft="Paris", jev_down=True, draft_finish="length")
-
-    result = await orchestrator.run(_call("Name the capital of France."))
-
-    assert result.verification.reason == "judge_unavailable"
-    assert result.completions[0].finish_reason == "length"
+    assert result.text == "Reading setup.py next."
+    assert result.verification is None
+    (route,) = reads
+    assert route["state"]["tool_calling"] is True
+    (body,) = seen
+    assert body["reasoning_effort"] == "max" and body["tools"] == [BASH]

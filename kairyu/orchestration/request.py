@@ -38,6 +38,99 @@ def conversation_messages(query: str) -> list[object] | None:
     return messages if isinstance(messages, list) else None
 
 
+# The smallest whole-conversation bound: room for the newest and first
+# messages' role tags and cut markers.
+MIN_CONVERSATION_CHARS = 1000
+
+
+def _json_chars(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _longest_fit(text: str, limit: int, render) -> object:
+    """``render(keep)`` for the longest prefix length ``keep`` of ``text``
+    whose JSON stays within ``limit`` characters (``keep`` 0 if none does).
+
+    Escaping makes the encoded size grow unevenly with ``keep``, so the
+    prefix is fitted by its own encoded size, not the whole text's.
+    """
+
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _json_chars(render(middle)) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return render(low)
+
+
+def _fit_message(message: object, limit: int) -> object:
+    """``message`` within ``limit`` JSON characters.
+
+    An oversized message (any field: content, reasoning, tool calls) becomes
+    its role plus a cut of its whole JSON text with an explicit marker.
+    """
+
+    if _json_chars(message) <= limit:
+        return message
+    full = json.dumps(message, ensure_ascii=False)
+    role = message.get("role") if isinstance(message, dict) else None
+    shell: dict[str, object] = {"role": role} if isinstance(role, str) else {}
+    return _longest_fit(
+        full,
+        limit,
+        lambda keep: {
+            **shell,
+            "content": f"{full[:keep]}\n[... {len(full) - keep} more characters cut ...]",
+        },
+    )
+
+
+def bounded_conversation(
+    messages: list[object],
+    max_chars: int,
+) -> tuple[list[object], int]:
+    """At most ``max_chars`` characters of JSON for a role-tagged conversation.
+
+    The newest message (the request being served) gets up to half, the first
+    message (the task) up to half of the rest, and the newest of the others
+    fill what remains; oversized kept messages are cut. Returns the messages
+    and how many were omitted from the middle.
+    """
+
+    if max_chars < MIN_CONVERSATION_CHARS:
+        raise ValueError(f"a conversation bound must be at least {MIN_CONVERSATION_CHARS}")
+    if not messages or _json_chars(messages) <= max_chars:
+        return list(messages), 0
+    budget = max_chars - 2  # the list brackets
+    if len(messages) == 1:
+        return [_fit_message(messages[0], budget)], 0
+    last = _fit_message(messages[-1], budget // 2)
+    budget -= _json_chars(last)
+    first = _fit_message(messages[0], (budget - 2) // 2)
+    budget -= _json_chars(first) + 2  # with its ", " separator
+    middle: list[object] = []
+    index = len(messages) - 2
+    while index >= 1 and _json_chars(messages[index]) + 2 <= budget:
+        budget -= _json_chars(messages[index]) + 2
+        middle.append(messages[index])
+        index -= 1
+    return [first, *reversed(middle), last], index
+
+
+def bounded_text(text: str, max_chars: int) -> str:
+    """``text`` within ``max_chars`` characters of JSON, cut with a marker."""
+
+    if _json_chars(text) <= max_chars:
+        return text
+    return _longest_fit(
+        text,
+        max_chars,
+        lambda keep: f"{text[:keep]}\n[... {len(text) - keep} more characters cut ...]",
+    )
+
+
 def conversation_text(query: str) -> str:
     """The ``{conversation}`` role placeholder: the request's role-tagged
     messages without the answer-contract wrapper, or the query itself."""

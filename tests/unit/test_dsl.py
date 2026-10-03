@@ -782,28 +782,22 @@ roles:
 
 _CHECKLIST_SPEC = """
 workers:
-  - {{name: gen, engine_ref: llm}}
-  - {{name: judge, {judge_ref}}}
+  - {name: gen, engine_ref: llm}
+  - {name: judge, engine_ref: llm}
 roles:
-  - {{name: answer, worker: gen, prompt: "{{query}}"}}
+  - {name: answer, worker: gen, prompt: "{query}"}
   - name: check
     worker: judge
     role_type: verifier
     verifies: answer
     depends_on: [answer]
     checklist:
-      checks: [{{id: R1, proposition: short, primitive: {primitive}, params: {{max_chars: 10}}}}]
+      questions: [{id: R1, proposition: short}]
+      state: [{key: answer, source: answer}]
 """
 
 
-@pytest.mark.parametrize(
-    ("judge_ref", "primitive", "error"),
-    [
-        ("engine_ref: llm", "length", "systemone_ref worker"),
-        ("systemone_ref: jev", "guess", "unknown check primitive"),
-    ],
-)
-def test_checklist_verifier_is_validated_at_load(judge_ref, primitive, error):
-    with pytest.raises((ValidationError, ValueError), match=error):
-        spec = load_spec(_CHECKLIST_SPEC.format(judge_ref=judge_ref, primitive=primitive))
+def test_a_checklist_verifier_needs_a_system_one_worker():
+    with pytest.raises((ValidationError, ValueError), match="systemone_ref worker"):
+        spec = load_spec(_CHECKLIST_SPEC)
         build_orchestrator(spec, engine_refs={"llm": object()}, systemone_refs={"jev": object()})

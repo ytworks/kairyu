@@ -1,7 +1,8 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
-Status: **Accepted 2026-10-01; implemented and GPU-verified** (every gate PASS; see
-`examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
+Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
+verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
+recorded DeepSWE turns pending** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
 
@@ -25,6 +26,8 @@ Roles (owner, 2026-10-01):
 
 ### VCO-D1 — DAG
 
+*Amended by VCO-D15 (2026-10-03): the generator writes after adoption, to meet the adopted points; by VCO-D16: the final `answer` role writes that draft itself (no seed).*
+
 `verified.yaml` (DSL only; no Python orchestration in the example):
 
 1. Wave 1: `extract` (DeepSeek, thinking high, JSON grammar) and
@@ -41,6 +44,8 @@ Roles (owner, 2026-10-01):
    DAG: short requests are not exempt from the guarantee.
 
 ### VCO-D2 — Requirement set
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The extractor splits the request (system/developer instructions and the
 latest user message) into instruction units U1..Un and writes conditions
@@ -73,6 +78,8 @@ evidence must appear in the conversation, i.e. its tool call and result),
 G3 quotations in the answer appear in the conversation.
 
 ### VCO-D3 — Validator and Conductor
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The Validator is the deterministic half of `checklist`: extracted
 `deterministic` conditions (an unusable primitive falls back to an OpenJev
@@ -112,6 +119,8 @@ Limitation: InFoBench has no source material, so G1 was not covered by this
 calibration; VCO-D11 measured it separately and made it advisory.
 
 ### VCO-D5 — Fallback
+
+*Amended by VCO-D16: on the repair limit the last non-empty attempt is published; an answer that met every point but was not accepted is published unverified (`not_accepted`).*
 
 - Repair limit: the newest attempt whose deterministic checks passed (else
   the draft), `guaranteed: false`, `reason: refinement_limit`.
@@ -174,7 +183,8 @@ Amendment 2 (2026-10-02, owner decision): extraction is two-stage. With
 both kinds in one prompt the extractor wrote fewer stated conditions (4.5
 vs 5.1 per InFoBench request) and InFoBench gold recall fell to 0.867. Now
 `extract` lists stated conditions only (origin `explicit`), and a separate
-`implicit` role, in parallel with it (no dependency, so no added latency),
+`implicit` role, in parallel with it (no dependency, so no added latency;
+superseded 2026-10-03 by VCO-D15 item 1: `implicit` now reads `extract`),
 lists at most four situational conditions with the request words they
 belong to; `implicit_check` asks Jev per condition and curation drops it
 below 0.5 without blocking the guarantee. The final checklist reads both.
@@ -198,6 +208,8 @@ conditions are never merged; execution claims need tool-result evidence;
 `n > 1` is refused on the verified models.
 
 ### VCO-D11 — Per-claim G1 is advisory (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 Owner request: calibrate G1 on its own, per claim kind, at alpha = 0.10
 (95 %, answer level). `calibrate_g1.py` ran the production state builder
@@ -229,6 +241,8 @@ G3. Also observed: 12 of 1,800 state-builder outputs were truncated JSON
 (runaway newlines), which serving reports as `checklist_unavailable`.
 
 ### VCO-D12 — Latency target and the slimmer state builder (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 Owner target: p50 <= 3 minutes on long InFoBench requests (every DeepSeek
 step keeps the caller's effort, repairs stay at most two). Traced breakdown
@@ -244,6 +258,8 @@ builder 44 s / 5,109 tokens, guaranteed 1/8 -> 3/8. The floor is extraction
 state builder, about 70 s); repairs add about 70 s each.
 
 ### VCO-D13 — Instruction units read within the caller's format (2026-10-02)
+*Superseded by VCO-D15 (2026-10-02): no rule-based check judges an answer.*
+
 
 The structured gate's "Pick a European capital and describe it in exactly
 the requested JSON" (fields city, country, population_estimate) was not
@@ -287,15 +303,273 @@ final checklist could not read it and the whole answer ended
 to work out the answer itself, and implicit_check writes a broken list once
 more (max_refinements 1; worst case 20 steps, budget 24).
 
+### VCO-D14 — The caller's tools reach the published draft (2026-10-02, issue #617)
+
+*Amended by VCO-D16: with no seed, the final role writes the draft under the caller's contract.*
+
+DeepSWE (mini-swe-agent, `tools=[bash]`) got HTTP 200 answers whose tool
+calls were plain text (`<invoke name="bash">`, `Tool: bash`), so the agent
+executed nothing; two turns ended HTTP 502 `EmptyFinalOutput`. Cause: only
+the final unit (`answer`) carried the caller's tools, but its attempt 0 is the
+generator's draft, which was generated without them; and `latest_checks_passed`
+published an empty last repair over a non-empty draft. Fix (m1 D8
+amendment): the seed of a seeded final unit is generated under the caller's
+tool contract, and exhaustion never chooses an empty attempt when a non-empty
+one exists. The repair prompt now tells DeepSeek to emit a tool call through
+the tool interface, never as text.
+
+Review amendment (PR #618): an empty repair that passes every item vacuously
+is not accepted, so the draft is published as `refinement_limit`. The same
+GPU rerun showed every later agent turn (about 42K-token conversations)
+falling back to deepseek_think: the route judge's state exceeded OpenJev's
+65,536-token context (HTTP 400). The judge now reads at most 120,000
+characters of conversation (`max_conversation_chars`, m1 D9 amendment): the
+first message plus the newest that fit; a 111-message DeepSWE conversation
+bounded this way is 37,716 OpenJev tokens.
+
+Second GPU rerun (5376ec73): no judge 400s, every response a structured tool
+call, but long turns on the verified route ended `checklist_unavailable`:
+their conversation state was 526,443-651,415 characters against
+`max_state_chars: 160000`. Every checklist's conversation section now sets
+`max_total_chars: 100000`, leaving 60,000 characters for the other sections.
+
+### VCO-D15 — Points, adoption and coverage, all read by models (2026-10-02, PR #618)
+
+*Amended by VCO-D17: items 5 and 6 (agent turns) no longer apply; tool requests take the verified-tool route.*
+
+*Amended by VCO-D16: an empty implicit list asks nothing and passes (no `on_empty`); the judge reads the reply's text with its calls (the Chat API returns both); a rejection with every point met is not repaired.*
+
+Owner decision. The guarantee was LLM-based to overcome the limits of rules,
+yet the Validator added rule-based checks (G1-excerpts, G2, G3, extracted
+`deterministic` conditions, S0/S1 coverage). These were not requirements of
+any request, and on agent turns G3 misread tool-call JSON as quotations: all
+ten verified DeepSWE turns failed it, no OpenJev read ran, and two repairs
+were wasted per turn (305-554 s). Every rule-based check is removed from the
+example and from the framework (m1 D8 amendment).
+
+The goal is unchanged: the answer meets a requirement set that is MECE with
+respect to the request.
+
+1. **Points (mutually exclusive, collectively exhaustive).** `extract`
+   lists the explicit points; then `implicit` reads them and lists only
+   presupposed points none of them already requires (amendment 2026-10-03,
+   owner decision: run in parallel, the two lists overlapped and 23 of 40
+   InFoBench requests had a duplicate pair, against the gate's 10 %; the
+   cost is the implicit extraction time before adoption). Each point is one
+   issue, and together they cover the request. Both prompts name the
+   overlaps the requirements gate found (amendment 2026-10-03, owner
+   decision, after 6 of 40 requests had a duplicate): a requirement restated
+   from another angle (a heading and its section's content, a table's
+   columns and rows) is one point, and an implicit point never restates an
+   explicit one or its converse. A Jev check of the explicit
+   list (necessary per point, sufficient for the list, re-extracting once
+   on a failure) was tried and removed (owner decision, 2026-10-03): an
+   overlap question failed nearly every point with no duplicate found, and
+   on 80 InFoBench requests the sufficiency question did not track gold
+   coverage (AUROC 0.41; at 0.5 it re-extracted 20 lists, 18 already
+   complete, and passed 7 of the 9 incomplete ones). The first lists
+   already covered 96.2 % of the gold requirements; the recall loss came
+   from adoption dropping explicit points (item 2). Adoption with no
+   implicit point is skipped (`on_empty: pass`); before, it was unavailable
+   and the whole run unverified (14 of 66). The requirements gate
+   measures coverage of InFoBench's gold questions and duplicate pairs.
+2. **Adoption (necessary).** One Jev request asks, for every implicit
+   point, "is this point necessary to answer the request?"; explicit points
+   are what the user asked for and always stay (amendment 2026-10-03, owner
+   decision: judging them too dropped stated requirements, e.g. an
+   obituary's name, age and date at p 0.16-0.47, and InFoBench gold recall
+   fell from 0.972 to 0.891). The state is the request verbatim
+   (system/developer messages plus the latest user message) and `history`, a
+   DeepSeek summary at the caller's effort (amendment 2026-10-03, VCO-D9:
+   the effort gate found it the one step without it) of every other message
+   (earlier turns, tool calls and tool results). Summarizing these instead of
+   passing them verbatim keeps the read inside OpenJev's 65,536 tokens.
+   Points with p < 0.5 leave their list. `history` waits for both extractors
+   so that `adopt`, its verifier, reads both lists in one request.
+3. **Coverage.** One Jev request asks, for every adopted point, "does the
+   answer fully and correctly do what this point requires?". The state is the
+   answer exactly as it will be sent (tool calls as `{text, tool_calls}`, so
+   the judge reads them as calls the caller executes), with the request
+   verbatim and the history summary. Every p >= tau_hi gives the guarantee. A miss is repaired by DeepSeek
+   at most twice; otherwise the last non-empty answer is returned as
+   `refinement_limit`.
+4. **Draft (amendment, owner decision).** `generator` runs after adoption and
+   writes the draft from the conversation plus the adopted points, told to
+   meet every point. This replaces VCO-D1's draft "from the conversation
+   only": the draft aims at the requirement set it is judged against. The
+   cost is the extraction and adoption time before the draft starts.
+5. **One unit for every stage (amendment, DeepSWE r2).** The extractors
+   list points about the reply given now, but adoption asked whether a point
+   was "necessary to answer the request" with only the request and history:
+   on agent turns the request is the whole task, so Jev dropped the step's
+   points (p 0.0-0.5) and four turns kept none. Adoption now asks "must the
+   reply the assistant gives now meet this point?" and also reads the
+   caller's tool definitions. A checklist with no item to judge is
+   unavailable, never a pass.
+6. **Agent turns.** A request with `tools` is answered by one assistant
+   message, which may hold several tool calls. The extractors read the tool
+   definitions (`{tools}`) and list what this one message must do now, never
+   the completion of the task.
+7. **Acceptance (amendment 2026-10-03, owner decision).** After the coverage
+   read, one more Jev request reads the coverage results (each point's p and
+   pass), the original prompt and the answer, and asks whether, reading
+   these, the answer can be adopted as the reply the user expects (owner
+   wording; "may it be adopted as the official reply" measured AUROC 0.787,
+   this 0.809). Its P(yes) against tau_accept decides
+   the guarantee; tau_hi only selects the missed points. A rejected answer is
+   repaired with the original prompt, the answer and the missed points, with
+   an explicit instruction to rewrite it to meet them. The judged answer is
+   what the API publishes: with tool calls, the text is dropped and only
+   calls the caller's tools and `tool_choice` allow count. Why: on DeepSWE r3
+   a point-wise conjunction failed on single misjudged points (a correct
+   bash call read at low p) and on points about text the API never
+   publishes, costing repairs; the owner wants the adoption decision made
+   by the judge over the whole answer, informed by the point results.
+   On InFoBench response labels (all labelled requirements met) no
+   threshold meets alpha = 0.10 at 95 % for any of six measured question and
+   state variants (best calibration-half upper bound 0.259); nor does the
+   point-wise conjunction (0.396). The owner set tau_accept = 0.99, the
+   lowest measured error: held-out 43 of 125 answers guaranteed, 7 missing a
+   labelled requirement (16.3 %, upper bound 28.4 %). The guarantee is
+   therefore the judge's adoption at 0.99, not an alpha-bounded claim.
+8. **Four denoise passes (amendment 2026-10-03, owner decision).** Every
+   Jev checklist read (adopt, coverage, acceptance) sets `steps: 4`:
+   OpenJev re-reads each answer slot with the other slots' current answers
+   in place, instead of filling every slot at once. With one pass, an agent
+   turn with 11 points read a present bash call at p 0.37-0.67 (0.99 with
+   four questions); with four passes, 0.90-0.99. Recalibrated on InFoBench:
+   tau_hi 0.99894 (calibration upper bound 9.78 %, held-out 7.84 %);
+   tau_accept stays 0.99 (held-out 7 of 46, 15.2 %; acceptance AUROC 0.794).
+
+tau_hi is recalibrated on InFoBench for the coverage question and its state
+(`calibrate.py`, alpha = 0.10 at 95 %); the per-claim G1 calibration
+(`calibrate_g1.py`) is removed with G1. The owner's first form (the answer
+alone, "does the answer contain this point?") reached AUROC 0.791 and failed
+alpha on the held-out half (upper bound 12.4 %). Five variants were measured on
+the same point statements; the owner chose the best, which adds the request
+and the history summary to the state and asks the stricter question: AUROC
+0.852 (the earlier design: 0.850), tau_hi 0.9895, held-out upper bound 8.6 %,
+45 of 125 held-out answers pass every point (MEASUREMENTS.md).
+
+DeepSeek runs with `disable_any_whitespace` (xgrammar): a grammar-constrained
+extractor once emitted whitespace inside its JSON until max_tokens, leaving
+its list unreadable and the turn `checklist_unavailable` (DeepSWE, PR #618).
+
+### VCO-D16 — An agent turn is verified as one step (2026-10-03, PR #619)
+
+*Superseded by VCO-D17 (2026-10-04): the step route and its verification are removed.*
+
+Owner decision. On closed PR #618's DeepSWE runs, 73 of 83 verified agent
+turns ended `refinement_limit` and repairs changed the agent's commands in 51
+of 74 repaired turns, once replacing an exploring step with the submission
+command. Causes: every stage judged a turn as a finished answer to the task;
+the Chat API dropped the reply's text next to its tool calls (fixed in L3,
+m1); the repair prompt framed DeepSeek as an editor outside the conversation;
+spurious misses (points read at p 0.998 against tau_hi 0.99894, rejections
+with no failing point) triggered repairs.
+
+1. **Criterion (A0).** A reply in an ongoing tool-using task is judged as
+   the next step: it uses the latest tool results correctly, moves the task
+   forward, rests on no wrong premise and takes no destructive action, and
+   neither submits nor declares completion while the work is unfinished.
+   Completion is never required. Answers without tools keep VCO-D15.
+2. **Routing.** The Jev route judge gains the label STEP (tools offered, an
+   ongoing task, the reply is the next action) for the `verified_step`
+   profile; `kairyu-verified` offers THINK/STEP/VERIFIED and
+   `kairyu-verified-always` STEP/VERIFIED (fallback: the answer DAG). The
+   VERIFIED floor rises from 0.3 to 0.5 (owner decision), so VERIFIED is
+   preferred only when it is also the most probable route and never takes
+   a step from STEP; on the routing set no accuracy-critical conversation
+   read below 0.987. The routing gate now applies the served three-way
+   rule and fails when 10 % or more of its conversations (none with tools)
+   go to STEP.
+3. **verified_step.** `step_extract` lists the step's points from the task
+   and the latest tool results (facts the step must take into account, what
+   moves the task forward, and whether submission is allowed — only when the
+   conversation shows the work done and verified); `step_implicit` what the
+   step presupposes (an environment-appropriate, non-destructive,
+   non-repeating action); `step_adopt` keeps the points the next step needs.
+   Coverage and acceptance both read the request, the recent conversation
+   verbatim (the bounded `query`: first and newest messages), the summary
+   of earlier work and the reply, and ask whether the reply, as the next step, does what
+   each point requires and is a sound next step.
+4. **Repairs (both profiles).** The repair is the same message written
+   again in the draft's frame (the conversation first, then every adopted
+   point), followed by the draft and its missed points, changing only what
+   they require and keeping the rest, tool calls included. For a step, a
+   missed point is one read below 0.5 (coverage threshold 0.5); the answer
+   profile keeps tau_hi. A rejection with every point met is published
+   unverified (`reason: not_accepted`, m1 D8 amendment).
+5. **Thresholds.** 164 recorded DeepSWE replies (82 turns, the replayed
+   reply and the recorded one) were labelled by the A0 criteria, blind to
+   Jev's probabilities: 4 unsound (three patches using a type the latest
+   results showed absent, one submission before any work). Acceptance 0.5
+   guaranteed 3 of them; 0.99 none, with 24 of 160 sound replies sent to
+   repair or published unverified (0.999: 72). Acceptance is 0.99; a missed
+   point stays p < 0.5. Asking Jev four direct problem questions instead
+   caught only the submission (1 of 4).
+6. **Framework.** The DAG keeps to the minimal L2 (m1 D8 amendment): the
+   `answer` role writes the draft itself; `adopt` verifies `implicit` and
+   curates that one list; `history` runs beside `extract`. The extractors may
+   use 65,536 tokens (six of 41 long-conversation turns had an empty implicit
+   list).
+
+Measured before a full run: the 83 recorded turns replayed (routing, how
+often repairs happen, every changed call mapped to a missed point, no lost
+call, no submission introduced by a repair, text present, no empty implicit
+list), latency p50 <= 180 s (VCO-D12), the GPU gates, and a DeepSWE subset
+where verified scores at least as think with no early submission.
+
+### VCO-D17 — A verified-tool route instead of step verification (2026-10-04, PR #619)
+
+Owner decision. The route judge offers a third route, VERIFIED_TOOL, for a request
+that requires a tool call (the caller offers tools and the reply is expected
+to call one: an agent loop's turn, or a request to act with the tools). It
+is answered by one DeepSeek call at max effort with the caller's tools and is
+not verified. `kairyu-verified` offers THINK/VERIFIED_TOOL/VERIFIED and
+`kairyu-verified-always` VERIFIED_TOOL/VERIFIED. VCO-D16's step profile and STEP
+route are removed. GPU gates: `routing` fails when 10 % or more of its
+tool-free conversations go to VERIFIED_TOOL; `verified-tool-routing` (40 conversations that
+offer tools, 20 requiring a call) needs at least 90 % of the requiring ones
+on VERIFIED_TOOL and under 10 % of the others; `verified-tool-route` needs every requiring
+conversation, unary and streamed at any caller effort, to return structured
+tool_calls from one DeepSeek call at max effort without verification;
+`fallback` adds a tool request with both judges down; `serving-routed` mixes
+both sets and bounds the verified-tool route's judge read at p50 2 s.
+
+Why: verifying a correct intermediate agent step against the request's
+requirements failed it, and its repair jumped to the final move (DeepSWE,
+closed PR #618); step verification did not remove that risk. Unverified
+direct tool answers at max effort are the baseline until a verification that
+lets correct intermediate steps pass is found.
+
+The verified DAG drops its agent-turn wording (owner decision): the
+extractors no longer read `{tools}` or list points for "this one message
+of a tool-using loop"; adoption asks again "is this point necessary to
+answer the request?" over the request and the summary (no tools); the
+summary covers earlier turns; the repair rewrites the reply without
+tool-call instructions; the extractors' limit returns to 32,768 tokens
+(16,384 low, 65,536 max).
+
+Recalibration after this change (owner decision, 2026-10-04): with every
+DeepSeek point statement and summary regenerated, tau_hi is 0.999733
+(calibration upper bound 9.66 %, held-out 9.26 %; was 0.99894, 9.78 % /
+7.84 %). 79 of 249 regenerated statements differed from the cached ones
+(temperature 0 is not reproducible); points with unchanged statements read
+the same (median |dp| 0.0002). Held-out responses passing every point fell
+from 39 to 23 of 125; acceptance 0.99 guaranteed 39 with 4 violating (10.3 %,
+was 46 and 7, 15.2 %).
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
   first token is the whole pipeline).
-- Tool-calling turns are not this example's surface: the published answer is
-  the generator's text; tools in the request are context only.
 - The routing set is author-labelled with clear-cut categories; borderline
   requests are not measured by it.
-- Thresholds other than tau_hi (0.5 for necessity, sufficiency and
-  exclusivity) are defaults, not calibrated.
-- Claim-level groundedness is advisory (VCO-D11): a guaranteed answer can
-  still contain an unsupported claim that no deterministic check catches.
+- The 0.5 necessity cut of the adoption read is a default, not calibrated.
+- The guarantee covers the adopted points, not the truth of every claim in
+  the answer.
+- An extractor cut off before its JSON closes leaves its list unreadable and
+  the answer unverified (`checklist_unavailable`); there is no rewrite.
+- With tools, each assistant message is judged as one step; whether the
+  whole agent run solves the task is not part of the flag.

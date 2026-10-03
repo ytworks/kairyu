@@ -15,8 +15,9 @@ stream and unary bodies are reconstructions of one shared parse.
 
 Documented divergences from the OpenAI-wire parse (``_parse_tool_calls``):
 
-- ``/v1/messages`` keeps text and tool_use blocks coexisting (the Anthropic
-  contract) where the OpenAI wire drops text when calls exist.
+- Both surfaces keep the model's prose next to its calls: ``/v1/messages``
+  as text and tool_use blocks, the OpenAI wire as ``content`` beside
+  ``tool_calls`` (the call envelopes removed from it).
 - QWEN/DSML retroactive invalidation (trailing prose voids every call in the
   unary rules) becomes an SSE ``error`` event on a stream that already
   committed a call; the unary fold keeps today's silent downgrade to text.

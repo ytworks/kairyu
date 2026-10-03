@@ -34,12 +34,13 @@ from kairyu.engine.prompt import (
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.checklist import (
     ChecklistConfig,
-    ChecklistRun,
     ChecklistUnavailable,
     ChecklistVerdict,
     DecisionBackend,
     VerificationReport,
     curate,
+    judge,
+    reads_needed,
     unverified_report,
     verdict_report,
 )
@@ -216,9 +217,6 @@ class RoleSpec:
     # A verifier judged by deterministic checks and System One probabilities
     # instead of a generation call (role_type "verifier" only).
     checklist: ChecklistConfig | None = None
-    # Attempt 0 publishes this upstream role's output unchanged instead of
-    # generating; the role's own worker only runs refinements.
-    seed_from: str | None = None
     # Refinement prompt template. Empty keeps the default (the base prompt
     # plus the previous attempt and the verifier feedback appended); a
     # template is rendered over the role outputs plus {previous} and
@@ -290,25 +288,13 @@ class RoleSpec:
             )
         if self.checklist is not None and self.role_type != "verifier":
             raise ValueError(f"role {self.name!r}: only a verifier can declare a checklist")
-        if self.seed_from is not None:
-            if self.role_type in {"verifier", "executor", "head"}:
-                raise ValueError(f"role {self.name!r}: a {self.role_type} cannot be seeded")
-            if self.seed_from not in self.depends_on:
-                raise ValueError(
-                    f"role {self.name!r} must depend on its seed {self.seed_from!r}"
-                )
-            if not self.refine_prompt:
-                raise ValueError(
-                    f"seeded role {self.name!r} needs a refine_prompt for its refinements"
-                )
 
 
 def inline_bound_roles(roles: tuple[RoleSpec, ...]) -> dict[str, str]:
     """Roles a verifier runs inline on every attempt, mapped to its target.
 
-    Executors a verifier depends on, and generation roles a checklist
-    verifier depends on that themselves depend on its target. They are not
-    DAG units: a dependency on one is a dependency on the target.
+    Executors a verifier depends on. They are not DAG units: a dependency on
+    one is a dependency on the target.
     """
 
     by_name = {role.name: role for role in roles}
@@ -320,11 +306,7 @@ def inline_bound_roles(roles: tuple[RoleSpec, ...]) -> dict[str, str]:
             role = by_name.get(dep)
             if role is None or dep == verifier.verifies:
                 continue
-            if role.role_type == "executor" or (
-                verifier.checklist is not None
-                and role.role_type not in {"verifier", "head"}
-                and verifier.verifies in role.depends_on
-            ):
+            if role.role_type == "executor":
                 bound[dep] = verifier.verifies
     return bound
 
@@ -587,11 +569,8 @@ class _RunState:
     # an unavailable judge on later stages).
     verification: VerificationReport | None = None
     decision_unavailable: str | None = None
-    # A non-final checklist whose curated output still fails a guarantee
-    # group: no answer of this run can be guaranteed.
-    guarantee_blocked: str | None = None
-    # Each role's latest public completions, so a seeded role republishes
-    # its seed's choice metadata (finish_reason) instead of inventing it.
+    # Each role's latest public completions, so an unverified fallback
+    # publishes its source's choice metadata (finish_reason).
     role_completions: dict[str, tuple[CompletionOutput, ...]] = field(default_factory=dict)
 
 
@@ -723,10 +702,6 @@ class Conductor:
         # instead of as an independent DAG unit.
         self._inline_executors: dict[str, tuple[RoleSpec, ...]] = {}
         self._inline_executor_target: dict[str, str] = {}
-        # Generation roles a checklist verifier depends on that themselves
-        # depend on its target (e.g. a claim extractor) run INLINE on every
-        # attempt too, so the checklist never reads a stale attempt's view.
-        self._inline_roles: dict[str, tuple[RoleSpec, ...]] = {}
         for verifier in self._verifier_for.values():
             bound = tuple(
                 self._by_name[dep]
@@ -736,19 +711,6 @@ class Conductor:
             if bound and verifier.verifies:
                 self._inline_executors[verifier.verifies] = bound
                 for spec in bound:
-                    self._inline_executor_target[spec.name] = verifier.verifies
-            inline = tuple(
-                self._by_name[dep]
-                for dep in verifier.depends_on
-                if verifier.checklist is not None
-                and dep in self._by_name
-                and dep != verifier.verifies
-                and self._by_name[dep].role_type not in {"executor", "verifier", "head"}
-                and verifier.verifies in self._by_name[dep].depends_on
-            )
-            if inline and verifier.verifies:
-                self._inline_roles[verifier.verifies] = inline
-                for spec in inline:
                     self._inline_executor_target[spec.name] = verifier.verifies
         assert set(self._inline_executor_target) == inline_bound_role_names(self._roles)
         self._units = tuple(
@@ -1220,32 +1182,27 @@ class Conductor:
                 continue
             target = verifier.verifies
             available = self._transitive_unit_closure(target) | {target}
-            inline = {spec.name for spec in self._inline_roles.get(target, ())}
-            for spec in self._inline_roles.get(target, ()):
-                for dep in spec.depends_on:
-                    if dep != target and dep not in available:
-                        raise ValueError(
-                            f"inline role {spec.name!r} depends on {dep!r}, which is not "
-                            f"complete before its verifier target {target!r}"
-                        )
             for name in config.referenced_roles():
-                if name not in available | inline:
+                if name not in available:
                     raise ValueError(
                         f"checklist verifier {verifier.name!r} reads {name!r}, which is "
-                        f"neither complete before {target!r} nor bound inline"
+                        f"not complete before {target!r}"
                     )
+            if (
+                config.curate is not None
+                and self._units
+                and target == self._selected_final_unit().name
+            ):
+                # A curation edits its target's list; the published answer
+                # is never rewritten after it was judged.
+                raise ValueError(
+                    f"checklist verifier {verifier.name!r} cannot curate the "
+                    f"final unit {target!r}"
+                )
             if config.unverified_from and config.unverified_from not in available:
                 raise ValueError(
                     f"checklist verifier {verifier.name!r} unverified_from "
                     f"{config.unverified_from!r} is not complete before {target!r}"
-                )
-        for role in self._roles:
-            if role.seed_from is not None and self._by_name[role.seed_from].role_type in {
-                "executor",
-                "verifier",
-            }:
-                raise ValueError(
-                    f"role {role.name!r} seed {role.seed_from!r} must be a generation role"
                 )
 
     def _validate_inline_executors(self) -> None:
@@ -1295,6 +1252,14 @@ class Conductor:
             requested = self._final_sampling_params.extra_args.get("response_format")
             values["response_format"] = (
                 "none" if requested is None else json.dumps(requested, ensure_ascii=False)
+            )
+        if "{tools}" in template and "tools" not in outputs:
+            # {tools}: the caller's tool definitions (JSON), so a role that
+            # analyses the request knows the answer may be tool calls.
+            values["tools"] = (
+                json.dumps(list(self._final_tools), ensure_ascii=False)
+                if self._final_tools
+                else "none"
             )
         body = template.format_map(values)
         return f"{self._shared_prefix}{body}"
@@ -2251,87 +2216,6 @@ class Conductor:
         outputs = {**run.outputs, "previous": previous, "feedback": feedback}
         return f"{self._render(spec.refine_prompt, query, outputs)}{spec.prompt_suffix}"
 
-    def _seed_observation(self, run: _RunState, spec: RoleSpec) -> _GenerationObservation:
-        """Attempt 0 of a seeded role: its seed's output, no model call."""
-
-        assert spec.seed_from is not None
-        text = run.outputs.get(spec.seed_from)
-        if text is None:
-            run.trace.append(
-                self._trace_event(
-                    spec,
-                    "failed",
-                    operation="generation",
-                    status="failed",
-                    attempt=0,
-                    detail="seed_missing",
-                    error=TraceError(type="SeedMissing"),
-                )
-            )
-            raise _ObservedGenerationError(f"seed {spec.seed_from!r} produced no output")
-        now = utc_now_iso()
-        return _GenerationObservation(
-            text=text,
-            completions=run.role_completions.get(spec.seed_from)
-            or (CompletionOutput(index=0, text=text, token_ids=(), finish_reason="stop"),),
-            timing=TraceTiming(queued_at=now, started_at=now, completed_at=now),
-            usage=None,
-            budget=TraceBudget.between(run.budget, run.budget),
-        )
-
-    async def _run_inline_role(
-        self,
-        run: _RunState,
-        session: str,
-        query: str,
-        spec: RoleSpec,
-        depth: int,
-        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
-    ) -> None:
-        """Run a checklist-bound generation role on the current attempt."""
-
-        rendered = await run_prompt_work(
-            self._rendered_role_prompt,
-            spec,
-            query,
-            dict(run.outputs),
-        )
-        try:
-            observed = await self._generate(
-                run,
-                session,
-                spec.name,
-                spec.worker,
-                rendered,
-                depth,
-                spec=spec,
-                operation="generation",
-            )
-        except _BudgetRefused:
-            raise ChecklistUnavailable("budget", f"no budget for {spec.name!r}") from None
-        except _ObservedGenerationError as error:
-            raise ChecklistUnavailable(
-                "checklist_unavailable", f"{spec.name!r} failed"
-            ) from error
-        text, _completions = self._unit_public_output(spec, observed.text, observed.completions)
-        run.outputs[spec.name] = text
-        run.trace.append(
-            self._trace_event(
-                spec,
-                "generated",
-                operation="generation",
-                status="success",
-                attempt=depth,
-                detail=f"attempt={depth}",
-                timing=observed.timing,
-                usage=observed.usage,
-                budget=observed.budget,
-            )
-        )
-        await self._emit_intermediate(
-            event_sink, self._record_intermediate(run, spec, depth, observed)
-        )
-
     async def _checklist_verdict(
         self,
         run: _RunState,
@@ -2343,38 +2227,47 @@ class Conductor:
         text: str,
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
     ) -> ChecklistVerdict:
-        """Judge one attempt: pre checks, inline roles, post checks, reads."""
+        """Judge one attempt with its System One reads."""
 
         config = verifier.checklist
         assert config is not None
-        if config.questions and run.decision_unavailable is not None:
+        if run.decision_unavailable is not None:
             raise ChecklistUnavailable(run.decision_unavailable)
-        checklist = ChecklistRun(config, target_text=text, sources=query)
-        if not checklist.checks("pre", dict(run.outputs)):
-            return checklist.early_verdict(dict(run.outputs))
-        for inline in self._inline_roles.get(target.name, ()):
-            await self._run_inline_role(run, session, query, inline, depth, event_sink)
-        if not checklist.checks("post", dict(run.outputs)):
-            return checklist.early_verdict(dict(run.outputs))
         unknown_cost = run.budget.budget.max_cost_usd is not None
-        reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
-        if reserved is None:
-            raise ChecklistUnavailable("budget", "no budget for the decision reads")
-        run.budget = reserved
+        outputs = {**run.outputs, target.name: text}
+        # One step for the coverage read (when there is an item to judge) and
+        # one for the acceptance read.
+        reads = reads_needed(config, outputs)
+        if reads:
+            reserved = run.budget.try_reserve(reads, unknown_cost=unknown_cost)
+            if reserved is None:
+                raise ChecklistUnavailable("budget", "no budget for the decision reads")
+            run.budget = reserved
+        completed = 0
+
+        def on_read(usage: tuple[int, int]) -> None:
+            # A returned read is spent and billed at once, even if the verdict
+            # then fails or the run is cancelled.
+            nonlocal completed
+            completed += 1
+            run.budget = run.budget.reconcile_success(cost=0.0)
+            if usage != (0, 0):
+                run.usage[0] += usage[0]
+                run.usage[1] += usage[1]
+                self._observe_usage(run)
+
         try:
-            verdict = await checklist.decide(
+            verdict = await judge(
+                config,
                 self._decision_workers.get(verifier.worker),
-                dict(run.outputs),
+                outputs,
                 query,
+                self._final_tools,
+                on_read=on_read,
             )
-        except BaseException:
-            run.budget = run.budget.release(unknown_cost=unknown_cost)
-            raise
-        run.budget = run.budget.reconcile_success(cost=0.0, unknown_cost=unknown_cost)
-        if verdict.usage != (0, 0):
-            run.usage[0] += verdict.usage[0]
-            run.usage[1] += verdict.usage[1]
-            self._observe_usage(run)
+        finally:
+            if reads:
+                run.budget = run.budget.release(reads - completed, unknown_cost=unknown_cost)
         return verdict
 
     def _publish_attempt(
@@ -2398,6 +2291,30 @@ class Conductor:
             # The backend count belonged to the last attempt, not this text;
             # public usage falls back to the m9 approximation.
             run.final_unit_completion_tokens = None
+
+    def _publish_last_answer(
+        self,
+        run: _RunState,
+        spec: RoleSpec,
+        attempts: list[tuple[str, tuple[CompletionOutput, ...], ChecklistVerdict | None]],
+    ) -> ChecklistVerdict | None:
+        """Publish the newest judged attempt with an answer over a later one.
+
+        A final unit never ends on an empty attempt while an earlier one
+        has an answer: that would fail the request (issue #617). Returns the
+        verdict of the attempt published, or None when nothing changed.
+        """
+
+        if self._head_committed_text(run).strip():
+            return None
+        visible = [
+            attempt for attempt in attempts if self._has_public_output(attempt[0], attempt[1])
+        ]
+        if not visible or visible[-1] is attempts[-1]:
+            return None
+        text, completions, verdict = visible[-1]
+        self._publish_attempt(run, spec, text, completions, is_final_unit=True)
+        return verdict
 
     async def _checklist_round(
         self,
@@ -2452,18 +2369,30 @@ class Conductor:
                 raise _ObservedGenerationError(unavailable.reason) from unavailable
             source = config.unverified_from
             if source and source in run.outputs:
-                self._publish_attempt(
-                    run,
-                    spec,
-                    run.outputs[source],
-                    run.role_completions.get(source, ()),
-                    is_final_unit=is_final_unit,
-                )
+                text, completions = run.outputs[source], run.role_completions.get(source, ())
+                self._publish_attempt(run, spec, text, completions, is_final_unit=is_final_unit)
+            if is_final_unit and not self._has_public_output(text, completions):
+                self._publish_last_answer(run, spec, [*attempts, (text, completions, None)])
             if is_final_unit:
                 run.verification = unverified_report(
                     unavailable.reason, depth + 1, config.threshold
                 )
             return True
+        empty_final = (
+            is_final_unit
+            and not self._has_public_output(text, completions)
+            and not self._head_committed_text(run).strip()
+        )
+        if empty_final and verdict.passed:
+            # An empty final answer can pass vacuously; accepting it fails the
+            # request although an earlier attempt may have an answer (issue
+            # #617). An intermediate role's empty output stays governed by its
+            # own checklist, and a committed head is itself public output.
+            verdict = replace(
+                verdict,
+                passed=False,
+                text=f"FAIL\n{config.feedback_header}\n- the answer is empty",
+            )
         attempts.append((text, completions, verdict))
         run.outputs[verifier.name] = verdict.text
         max_refinements = config.max_refinements
@@ -2471,6 +2400,17 @@ class Conductor:
             max_refinements is None or depth < max_refinements
         )
         failing = [item for item in verdict.items if not item.passed]
+        # An acceptance FAIL with every item met names nothing to repair; a
+        # repair would rewrite a sound answer, so it is published unverified.
+        # An empty final answer is always repaired.
+        if (
+            config.acceptance is not None
+            and verdict.acceptance is not None
+            and verdict.acceptance < config.acceptance.threshold
+            and not failing
+            and not empty_final
+        ):
+            can_refine = False
         run.trace.append(
             self._trace_event(
                 verifier,
@@ -2493,7 +2433,6 @@ class Conductor:
                 ),
                 metadata={
                     "pass": verdict.passed,
-                    "checks_passed": verdict.checks_passed,
                     "items": len(verdict.items),
                     "failing": len(failing),
                     "min_p": min((item.p for item in verdict.items), default=1.0),
@@ -2509,7 +2448,7 @@ class Conductor:
             lines = [verdict.text.splitlines()[0], ""]
             lines.extend(
                 f"- [{item.id}] p={item.p:.3f} {'PASS' if item.passed else 'FAIL'} "
-                f"({item.kind}) {item.proposition}"
+                f"{item.proposition}"
                 for item in verdict.items
             )
             output = IntermediateOutput(
@@ -2526,101 +2465,26 @@ class Conductor:
         if not verdict.passed and can_refine:
             return False
         published = verdict
-        if not verdict.passed and config.on_exhausted == "latest_checks_passed":
-            chosen = next(
-                (attempt for attempt in reversed(attempts) if attempt[2].checks_passed),
-                attempts[0],
-            )
-            self._publish_attempt(
-                run, spec, chosen[0], chosen[1], is_final_unit=is_final_unit
-            )
-            published = chosen[2]
-        changed = False
-        if config.curate is not None:
-            before = run.outputs[spec.name]
-            curated = curate(config.curate, before, published.items)
-            changed = curated != before
-            if changed:
+        if not verdict.passed and is_final_unit:
+            published = self._publish_last_answer(run, spec, attempts) or verdict
+        if config.curate is not None and spec.name in run.outputs:
+            curated = curate(config.curate, run.outputs[spec.name], published.items)
+            if curated != run.outputs[spec.name]:
+                # The stored completion follows the text: a later
+                # unverified_from must not publish the dropped items.
                 self._publish_attempt(run, spec, curated, (), is_final_unit=is_final_unit)
-        # A FAIL left as is, or any set the curation changed (dropped,
-        # merged or padded items), is judged again: the PASS was given to a
-        # different set than the one downstream roles will use.
-        if not is_final_unit and (not verdict.passed or changed):
-            await self._confirm_after_curation(
-                run, session, query, spec, verifier, depth, published, event_sink
-            )
         if is_final_unit:
             run.verification = verdict_report(
-                replace(published, passed=verdict.passed),
-                threshold=config.threshold,
+                published,
+                # The threshold that decided the guarantee.
+                threshold=(
+                    config.acceptance.threshold
+                    if config.acceptance is not None
+                    else config.threshold
+                ),
                 attempts=depth + 1,
             )
-            if run.guarantee_blocked is not None and run.verification.guaranteed:
-                # The answer passed, but the checklist it passed was never
-                # confirmed sufficient: a guarantee would be unfounded.
-                run.verification = replace(
-                    run.verification, guaranteed=False, reason="requirements_unconfirmed"
-                )
         return True
-
-    async def _confirm_after_curation(
-        self,
-        run: _RunState,
-        session: str,
-        query: str,
-        spec: RoleSpec,
-        verifier: RoleSpec,
-        depth: int,
-        published: ChecklistVerdict,
-        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
-    ) -> None:
-        """Re-judge a non-final checklist that ended without PASS.
-
-        Curation may resolve its failures (dropped, merged, padded items), so
-        the curated output is judged once more; any failure left in a
-        guarantee group blocks every guarantee of this run.
-        """
-
-        config = verifier.checklist
-        assert config is not None
-        if config.curate is None:
-            residual = published
-        else:
-            try:
-                residual = await self._checklist_verdict(
-                    run, session, query, spec, verifier, depth, run.outputs[spec.name], event_sink
-                )
-            except ChecklistUnavailable as unavailable:
-                if unavailable.usage != (0, 0):
-                    run.usage[0] += unavailable.usage[0]
-                    run.usage[1] += unavailable.usage[1]
-                    self._observe_usage(run)
-                if config.questions:
-                    run.decision_unavailable = run.decision_unavailable or unavailable.reason
-                return
-        failing = [
-            item
-            for item in residual.items
-            if not item.passed
-            and (config.guarantee_groups is None or item.group in config.guarantee_groups)
-        ]
-        run.trace.append(
-            self._trace_event(
-                verifier,
-                "verified:after_curation",
-                operation="verification",
-                status="success",
-                attempt=depth,
-                detail=f"attempt={depth} unresolved={len(failing)}",
-                metadata={
-                    "pass": not failing,
-                    "unresolved": len(failing),
-                    "reads": residual.reads,
-                },
-            )
-        )
-        if failing:
-            run.guarantee_blocked = run.guarantee_blocked or verifier.name
 
     async def _run_unit(
         self,
@@ -2703,25 +2567,21 @@ class Conductor:
         dispatch_spec = spec
         retry_max_tokens: int | None = None
         retry_prefill: str | None = None
-        seeded = spec.seed_from is not None
         checklist_attempts: list[tuple[str, tuple[CompletionOutput, ...], ChecklistVerdict]] = []
         while True:
             try:
-                if seeded and depth == 0:
-                    observed = self._seed_observation(run, spec)
-                else:
-                    observed = await self._generate(
-                        run,
-                        session,
-                        spec.name,
-                        spec.worker,
-                        prompt,
-                        depth + (1 if empty_retry_used else 0),
-                        spec=dispatch_spec,
-                        operation="generation",
-                        max_tokens_override=retry_max_tokens,
-                        assistant_prefill=retry_prefill,
-                    )
+                observed = await self._generate(
+                    run,
+                    session,
+                    spec.name,
+                    spec.worker,
+                    prompt,
+                    depth + (1 if empty_retry_used else 0),
+                    spec=dispatch_spec,
+                    operation="generation",
+                    max_tokens_override=retry_max_tokens,
+                    assistant_prefill=retry_prefill,
+                )
             except _BudgetRefused:
                 refused_attempt = depth + (1 if empty_retry_used else 0)
                 run.trace.append(
@@ -2764,7 +2624,6 @@ class Conductor:
             if (
                 is_final_unit
                 and not empty_retry_used
-                and not (seeded and depth == 0)
                 and not self._has_public_output(text, completions)
                 # A committed head makes an empty continuation a legitimate
                 # head-only answer (EO-D7) — unless a verifier is about to
@@ -3100,8 +2959,10 @@ class Conductor:
             await self._run_unit(run, session, query, spec, event_sink=event_sink)
         except _ObservedGenerationError:
             self._mark_failed_final_unit(run, spec)
+            self._mark_unjudged_checklist(run, spec)
         except Exception as error:
             self._mark_failed_final_unit(run, spec)
+            self._mark_unjudged_checklist(run, spec)
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3113,6 +2974,18 @@ class Conductor:
                     error=TraceError(type=type(error).__name__),
                 )
             )
+
+    def _mark_unjudged_checklist(self, run: _RunState, spec: RoleSpec) -> None:
+        """A failed unit leaves its checklist unjudged: no later guarantee.
+
+        A guarantee needs every checklist of the run judged; a target that
+        failed before its checklist ran is the same as an unjudgeable one.
+        """
+
+        verifier = self._verifier_for.get(spec.name)
+        if verifier is not None and verifier.checklist is not None:
+            if verifier.checklist.questions:
+                run.decision_unavailable = run.decision_unavailable or "checklist_unavailable"
 
     def _mark_failed_final_unit(self, run: _RunState, spec: RoleSpec) -> None:
         """A failed selected final unit must not fall back to internal stages.
