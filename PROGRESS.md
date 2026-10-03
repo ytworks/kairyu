@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: points_check without the overlap question; empty adoption passes
+- What: points_check asks only necessary (per point) and sufficient (list); a curation checklist may declare `on_empty: pass` (framework), used by adoption when there is no implicit point.
+- Why: owner decision on the first 13 calibration requests: the overlap question failed nearly every point with no duplicate found (re-extraction every time, three lost gold requirements); an empty implicit list made 3 of 13 runs unverified.
+- Refs: VCO-D15 item 1, m1 D8 amendment; PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: Jev checks the explicit points are necessary, sufficient and MECE
 - What: `points_check` (one Jev request) asks whether each explicit point is asked for and overlaps no other, and whether the list covers the request; any failure re-extracts once with the failed checks, then the last list is used. max_steps 15 -> 18. Cuts 0.5 pending calibration.
 - Why: owner decision; explicit points are no longer judged by adoption, so their necessity and MECE are checked on the list itself (the original requirement).

@@ -127,6 +127,7 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
         max_refinements=spec.max_refinements,
         on_unavailable=spec.on_unavailable,
         unverified_from=spec.unverified_from,
+        on_empty=spec.on_empty,
         curate=(
             None
             if spec.curate is None

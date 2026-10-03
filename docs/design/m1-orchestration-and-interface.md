@@ -295,7 +295,11 @@ What a checklist does now:
 - A state section may read `tools`, the caller's tool definitions.
 - A verdict with no item to judge is unavailable, never a pass; so is a
   checklist whose target failed to generate (later checklists of the run
-  report unverified).
+  report unverified). Amendment (2026-10-03, PR #618): a curation checklist
+  may declare `on_empty: pass`; with every list empty it passes without a
+  read, since there is nothing to drop (only with `curate`; a guarantee
+  still needs judged items). Why: an extractor that rightly lists nothing
+  made the curation read unavailable and voided the run's guarantee.
 - Amendment (2026-10-03, PR #618, owner decision): `checklist.acceptance`
   adds a second System One request to a verdict. Its state is the declared
   sections plus the item results (`[{id, point, p, passed}]` under

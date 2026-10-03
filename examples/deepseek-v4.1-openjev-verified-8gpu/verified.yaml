@@ -101,11 +101,13 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
-  # Points check (VCO-D15 item 1): one Jev request on whether the explicit
-  # points are necessary and sufficient and MECE for the request. Any failed
-  # question re-extracts the whole list once, with the failed checks; after
-  # that the last list is used (owner decision). The 0.5 cuts are defaults,
-  # calibrated on GPU.
+  # Points check (VCO-D15 item 1): one Jev request on whether each explicit
+  # point is asked for by the request (necessary) and whether the list covers
+  # the request (sufficient). Any failed question re-extracts the whole list
+  # once, with the failed checks; after that the last list is used (owner
+  # decision). An overlap question was dropped: Jev read related points as
+  # overlapping on every list (InFoBench, 13 of 13 re-extracted, none with a
+  # duplicate). The 0.5 cuts are defaults, calibrated on GPU.
   - name: points_check
     worker: jev
     role_type: verifier
@@ -120,17 +122,6 @@ roles:
           ask: Does the request ask the reply given now to meet this point?
           criteria_true: The request asks for what this point states
           criteria_false: The request does not ask for this point, or asks for less
-          context:
-            point: "{item[point]}"
-        - id: "{item[id]}-distinct"
-          group: exclusive
-          proposition: "{item[id]} overlaps no other point: {item[point]}"
-          foreach: {role: extract, path: points}
-          ask: >-
-            Is this point free of overlap with every other point of the list,
-            so that no other point already requires any part of it?
-          criteria_true: No other point of the list requires any part of this point
-          criteria_false: Another point of the list already requires some part of this point
           context:
             point: "{item[point]}"
         - id: ALL-covered
@@ -149,10 +140,10 @@ roles:
       max_refinements: 1
       on_unavailable: publish_unverified
       feedback_header: >-
-        The explicit points are not necessary and sufficient and MECE for the
-        request. Rewrite the whole list: every point must be asked for by the
-        request, no two points may overlap, and together they must cover
-        everything the request asks. These checks failed:
+        The explicit points are not necessary and sufficient for the request.
+        Rewrite the whole list: every point must be asked for by the request,
+        no two points may overlap, and together they must cover everything
+        the request asks. These checks failed:
       feedback_item: "- {proposition} (p={p})"
 
   # Implicit points (VCO-D8, amendment 3): a second extractor, after extract,
@@ -341,6 +332,8 @@ roles:
         - {key: tools, source: tools}
       max_refinements: 0
       on_unavailable: publish_unverified
+      # No implicit point (a short factual question) leaves nothing to adopt.
+      on_empty: pass
       curate:
         targets:
           - {role: implicit, items_path: points}

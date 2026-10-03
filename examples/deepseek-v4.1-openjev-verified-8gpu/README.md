@@ -36,8 +36,8 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
   ▼
 ┌─ wave 1 (DeepSeek, Jev) ─────────────────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
-│   └─ points_check  Jev, 1 request: is each point asked for by the request and        │
-│                    free of overlap, and do the points cover the whole request?       │
+│   └─ points_check  Jev, 1 request: is each point asked for by the request, and       │
+│                    do the points cover the whole request?                            │
 │                    any no → extract again with the failed checks (once), then        │
 │                    the last list is used                                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
@@ -55,6 +55,7 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
 │            developer messages and the latest user message (earlier turns, tool       │
 │            calls, tool results)                                                      │
 │   └─ adopt  Jev, 1 request: is each implicit point necessary now?                    │
+│             (no implicit point → nothing to adopt, skipped)                          │
 │             (implicit points only; explicit points always stay)                      │
 │             p < 0.5 → the implicit point leaves its list                             │
 └──────────────────────────────────────────────────────────────────────────────────────┘

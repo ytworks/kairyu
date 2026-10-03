@@ -349,11 +349,16 @@ respect to the request.
    cost is the implicit extraction time before adoption). Each point is one
    issue, and together they cover the request. `points_check` (amendment
    2026-10-03, owner decision) asks Jev in one request whether each explicit
-   point is asked for by the request (necessary), overlaps no other point
-   (mutually exclusive), and whether the list covers the whole request
-   (sufficient, collectively exhaustive). Any failed question re-extracts
-   the whole list once with the failed checks; the last list is then used.
-   The 0.5 cuts are defaults until calibrated on InFoBench. The requirements gate
+   point is asked for by the request (necessary) and whether the list covers
+   the whole request (sufficient). Any failed question re-extracts the whole
+   list once with the failed checks; the last list is then used. An overlap
+   question per point was dropped (owner decision): on 13 InFoBench requests
+   Jev failed it on nearly every point although the gate's duplicate judge
+   found no duplicate, forcing a re-extraction every time and losing gold
+   requirements in three. Exclusivity stays with the extractor's
+   instructions and the requirements gate. Adoption with no implicit point
+   is skipped (`on_empty: pass`); before, it was unavailable and the whole
+   run unverified (3 of 13). The 0.5 cuts are defaults until calibrated. The requirements gate
    measures coverage of InFoBench's gold questions and duplicate pairs.
 2. **Adoption (necessary).** One Jev request asks, for every implicit
    point, "is this point necessary to answer the request?"; explicit points

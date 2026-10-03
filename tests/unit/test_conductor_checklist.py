@@ -858,3 +858,49 @@ async def test_a_seed_keeps_the_callers_legacy_parallel_tool_restriction():
     await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
     assert backend.requests[0].parallel_tool_calls is False
+
+
+async def test_a_curation_read_over_an_empty_list_passes_when_declared():
+    # Codex/GPU (PR #618): an implicit extractor that rightly lists nothing
+    # left adoption with no item; the read was unavailable and the whole run
+    # lost its guarantee. `on_empty: pass` lets a curation read skip.
+    backend = RoutedBackend({"implicit": ['{"points": []}'], "generator": ["It is 42."]})
+    generator, *rest = _answer_roles()
+    roles = (
+        RoleSpec(name="implicit", worker="gen", prompt="[implicit] {query}"),
+        RoleSpec(
+            name="adopt",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="implicit",
+            depends_on=("implicit",),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role="implicit", path="points"),
+                        group="necessity",
+                        threshold=0.0,
+                    ),
+                ),
+                state=(StateSection("request", "request"),),
+                max_refinements=0,
+                on_unavailable="publish_unverified",
+                on_empty="pass",
+                curate=CurationConfig(
+                    targets=(CurationTarget("implicit", "points"),), drop_group="necessity"
+                ),
+            ),
+        ),
+        replace(generator, depends_on=("implicit",)),
+        *rest,
+    )
+    judge = FakeSystemOne()
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.verification.guaranteed is True
+    assert len(judge.bodies) == 1  # only the final checklist read

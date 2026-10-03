@@ -202,6 +202,7 @@ class ChecklistSpec(BaseModel):
     unverified_from: str = ""
     curate: CurationSpec | None = None
     acceptance: AcceptanceSpec | None = None
+    on_empty: Literal["unavailable", "pass"] = "unavailable"
 
 class ExecutionLimitsSpec(BaseModel):
     model_config = ConfigDict(frozen=True)

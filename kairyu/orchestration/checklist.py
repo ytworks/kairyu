@@ -271,6 +271,10 @@ class ChecklistConfig:
     unverified_from: str = ""
     curate: CurationConfig | None = None
     acceptance: AcceptanceConfig | None = None
+    # "unavailable": a verdict with no item vouches for nothing. "pass": a
+    # curation read whose lists are empty has nothing to drop and passes
+    # (curation checklists only; a guarantee still needs judged items).
+    on_empty: str = "unavailable"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "questions", tuple(self.questions))
@@ -286,6 +290,10 @@ class ChecklistConfig:
             raise ValueError("checklist threshold must be in [0, 1]")
         if self.on_unavailable not in {"error", "publish_unverified"}:
             raise ValueError("on_unavailable must be 'error' or 'publish_unverified'")
+        if self.on_empty not in {"unavailable", "pass"}:
+            raise ValueError("on_empty must be 'unavailable' or 'pass'")
+        if self.on_empty == "pass" and self.curate is None:
+            raise ValueError("on_empty: pass is for curation checklists (curate) only")
         if self.unverified_from and self.on_unavailable != "publish_unverified":
             raise ValueError("unverified_from requires on_unavailable: publish_unverified")
         if self.max_refinements is not None and self.max_refinements < 0:
@@ -669,6 +677,9 @@ async def judge(
     except TemplateError as error:
         raise ChecklistUnavailable("checklist_unavailable", str(error)) from error
     if not pending:
+        if config.on_empty == "pass":
+            # A curation read over empty lists has nothing to drop.
+            return ChecklistVerdict(passed=True, items=(), text="PASS", usage=(0, 0), reads=0)
         # A verdict over nothing vouches for nothing: no item, no pass.
         raise ChecklistUnavailable("checklist_unavailable", "no items to judge")
     if backend is None:

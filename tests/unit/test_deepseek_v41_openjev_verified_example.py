@@ -105,7 +105,7 @@ def _openjev(
         if "Taken together, do the points cover everything" in text:
             first = state["points"]["points"] == EXPLICIT
             return {"noul": 0.1 if uncovered_points and first else 0.9999}
-        if "Does the request ask the reply given now" in text or "free of overlap" in text:
+        if "Does the request ask the reply given now" in text:
             return {"noul": 0.9999}
         if question["type"] == "choice":
             other = next(label for label in question["criteria"] if label != route)
@@ -245,10 +245,10 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
     assert EXPLICIT[0]["point"] in _text(by_role["implicit"])
     # One System One request per verdict, on the OpenJev replicas.
     points_check, adopt, coverage, acceptance = reads
-    # Points check: each explicit point needed and distinct, and the list
-    # sufficient, against the request verbatim.
+    # Points check: each explicit point needed, and the list sufficient,
+    # against the request verbatim.
     assert set(points_check["state"]) == {"request", "tools", "points"}
-    assert len(points_check["questions"]) == 2 * len(EXPLICIT) + 1
+    assert len(points_check["questions"]) == len(EXPLICIT) + 1
     assert {read["replica"] for read in reads} <= {"openjev-0", "openjev-1"}
     # Adoption: only the implicit points are judged (explicit ones are what
     # the user asked for), against the request verbatim (system/developer +
@@ -431,7 +431,7 @@ async def test_explicit_points_that_miss_part_of_the_request_are_extracted_again
 
     extracts = [_text(body) for body in seen if _text(body).startswith("[extract]")]
     assert len(extracts) == 2
-    assert "not necessary and sufficient and MECE" in extracts[1]
+    assert "not necessary and sufficient for the request" in extracts[1]
     assert "the points together cover everything the request asks" in extracts[1]
     # The re-extracted list is the one every later stage reads.
     implicit = next(_text(body) for body in seen if _text(body).startswith("[implicit]"))
