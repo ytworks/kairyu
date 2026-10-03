@@ -731,7 +731,7 @@ def _routing_probabilities() -> list[dict[str, float] | None]:
     return asyncio.run(judge_all())
 
 
-def _route(probabilities: dict[str, float], tau: float) -> str:
+def _served_route(probabilities: dict[str, float], tau: float) -> str:
     # The served rule: VERIFIED when preferred (p >= tau), else the most
     # probable route.
     if probabilities["VERIFIED"] >= tau:
@@ -768,16 +768,16 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
     def miss_rate(subset: list[dict], tau: float) -> float:
         needed = [row for row in subset if row["label"] == "VERIFIED"]
-        missed = [row for row in needed if _route(row["p"], tau) != "VERIFIED"]
+        missed = [row for row in needed if _served_route(row["p"], tau) != "VERIFIED"]
         return len(missed) / len(needed)
 
     def easy_to_think(subset: list[dict], tau: float) -> float:
         easy = [row for row in subset if row["label"] == "THINK"]
-        return sum(1 for row in easy if _route(row["p"], tau) == "THINK") / len(easy)
+        return sum(1 for row in easy if _served_route(row["p"], tau) == "THINK") / len(easy)
 
     def to_step(subset: list[dict], tau: float) -> float:
         # The routing set has no tool-using task: a STEP route is a mistake.
-        return sum(1 for row in subset if _route(row["p"], tau) == "STEP") / len(subset)
+        return sum(1 for row in subset if _served_route(row["p"], tau) == "STEP") / len(subset)
 
     calibration = rows[0::2]
     holdout = rows[1::2]
