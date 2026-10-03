@@ -35,8 +35,8 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 65536
-      max_tokens_by_effort: {low: 32768, high: 65536, max: 65536}
+      max_tokens: 32768
+      max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
       response_format:
         type: json_schema
         json_schema:
@@ -80,23 +80,12 @@ roles:
       and write each as a checkable statement about the answer, in the
       language of the request.
 
-      The tools the caller lets this reply call are listed below ("none"
-      when there are none). With tools, the answer is one assistant message
-      of a tool-using loop: the caller runs its tool calls and asks again.
-      Then list the points this one message must satisfy now (for example
-      that it calls a tool instead of describing a call, that it builds on
-      the latest tool results, that its calls move the task forward), never
-      the completion of the whole task, which later messages finish.
-
       The caller fixed the answer's output format below ("none" when
       free). Read the request within it: write each point so that an
       answer in exactly this format can meet it, and add no point about
       the format itself.
 
       Output only the JSON object.
-      --- TOOLS ---
-      {tools}
-      --- END TOOLS ---
       --- RESPONSE FORMAT ---
       {response_format}
       --- END RESPONSE FORMAT ---
@@ -115,8 +104,8 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 65536
-      max_tokens_by_effort: {low: 32768, high: 65536, max: 65536}
+      max_tokens: 32768
+      max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
       response_format:
         type: json_schema
         json_schema:
@@ -179,22 +168,11 @@ roles:
       as a checkable statement about the answer, in the language of the
       request.
 
-      The tools the caller lets this reply call are listed below ("none"
-      when there are none). With tools, the answer is one assistant message
-      of a tool-using loop: list only what this one message presupposes
-      (for example that a command it runs is valid for the environment the
-      tool results show). Never list what later messages will do: the code
-      the task will eventually change, the language it is written in, tests
-      run at the end, branches or commits.
-
       The caller fixed the answer's output format below ("none" when
       free): write only points an answer in exactly this format can meet,
       and none about the format itself.
 
       Output only the JSON object.
-      --- TOOLS ---
-      {tools}
-      --- END TOOLS ---
       --- RESPONSE FORMAT ---
       {response_format}
       --- END RESPONSE FORMAT ---
@@ -207,8 +185,8 @@ roles:
 
   # What the request alone does not show: a summary of every message other
   # than the system/developer messages and the latest user message (earlier
-  # turns, and the tool calls and results of an agent loop), so the adoption
-  # read sees the situation without the whole transcript. It runs beside
+  # turns), so the adoption read sees the situation without the whole
+  # transcript. It runs beside
   # extract.
   - name: history
     worker: deepseek
@@ -222,8 +200,8 @@ roles:
     prompt: |-
       [history] The conversation below is a JSON list of role-tagged
       messages. Summarize every message except the system and developer
-      messages and the latest user message: earlier turns, and every tool
-      call and tool result, wherever they appear. A reader who sees only
+      messages and the latest user message: the earlier turns. A reader who
+      sees only
       the system messages and the latest user message must learn from the
       summary what has happened: what was asked before, what was tried, and
       what the results established. Keep names, numbers, paths and error
@@ -234,9 +212,8 @@ roles:
       --- END CONVERSATION ---
 
   # Adoption (VCO-D15): one Jev request over every implicit point, with the
-  # request verbatim, the history summary and the caller's tools. An implicit
-  # point the reply needed now does not need (p < 0.5) leaves its list before
-  # the draft is written. Explicit points are what the user asked for and are
+  # request verbatim and the history summary. An implicit point the request
+  # does not need (p < 0.5) leaves its list before the draft is written. Explicit points are what the user asked for and are
   # always kept. Never repairs; an unavailable judge keeps every point (the final
   # checklist is then unjudgeable too and the answer is unverified).
   - name: adopt
@@ -251,19 +228,16 @@ roles:
           proposition: "{item[point]}"
           threshold: 0.0
           foreach: {role: implicit, path: points}
-          ask: Must the reply the assistant gives now meet this point?
+          ask: Is this point necessary to answer the request?
           criteria_true: >-
-            A reply given now that misses this point is not the reply this
-            conversation needs at this step
-          criteria_false: The reply needed now can be complete and correct without this point
+            An answer that leaves this point out would not answer the request
+            as it was asked
+          criteria_false: The request can be answered fully without this point
           context:
             point: "{item[point]}"
-      # The same unit as the extractors: the one reply given now. The tools
-      # show when that reply is one step of a tool-using loop (VCO-D15).
       state:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
-        - {key: tools, source: tools}
       # Four OpenJev denoise passes (owner decision, VCO-D15): each answer slot
       # is re-read with the other slots' current answers in place.
       steps: 4
@@ -317,11 +291,9 @@ roles:
       --- END POINTS ---
 
       A draft of this reply and the points it misses follow. Write the reply
-      again as the next message of this conversation: change only what the
-      missed points require and keep everything else of the draft as it is,
-      including its tool calls, which you emit through the tool interface,
-      never as text. If the draft is cut off or degenerate (text repeating
-      without end), write the reply anew.
+      again: change only what the missed points require and keep everything
+      else of the draft as it is. If the draft is cut off or degenerate (text
+      repeating without end), write the reply anew.
       --- DRAFT ---
       {previous}
       --- END DRAFT ---
@@ -330,8 +302,7 @@ roles:
       --- END MISSED POINTS ---
 
   # Coverage (VCO-D15): one Jev request over every adopted point, with the
-  # answer exactly as it will be sent (tool calls as {text, tool_calls}), the
-  # request verbatim and the history summary.
+  # answer, the request verbatim and the history summary.
   - name: checklist
     worker: jev
     role_type: verifier
@@ -414,8 +385,8 @@ profile_judge:
   question: >-
     Which route should answer the latest user request in this conversation?
     The verified route checks the answer against every requirement before
-    replying and is slower; the verified-tool route answers a request that requires a
-    tool call; the think route answers directly.
+    replying and is slower; the verified-tool route answers a request that
+    requires a tool call; the think route answers directly.
   # At 0.5 VERIFIED is preferred only when it is also the most probable
   # route, so it never takes a turn from VERIFIED_TOOL. On the routing set (80
   # conversations, 2026-10-03) every accuracy-critical conversation read

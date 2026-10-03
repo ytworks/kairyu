@@ -42,8 +42,7 @@ profile_judge ── Jev, 1 request: THINK, VERIFIED_TOOL or VERIFIED? (kairyu-v
 ┌─ wave 1 (DeepSeek, in parallel) ───────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
 │ history    caller's effort: a summary of every message except the system /         │
-│            developer messages and the latest user message (earlier turns, tool     │
-│            calls, tool results)                                                    │
+│            developer messages and the latest user message (earlier turns)          │
 └────────────────────────────────────────────────────────────────────────────────────┘
   │ explicit points, history
   ▼
@@ -75,9 +74,7 @@ act with the offered tools) goes to the verified-tool route: one DeepSeek call a
 effort with the caller's tools, returned without verification (owner
 decision, VCO-D17).
 
-The answer and every repair carry the caller's tools, so a tool call is
-returned as a structured `tool_calls` entry next to the reply's text. A
-repair is the same message written again in the draft's frame: the
+A repair is the same reply written again in the draft's frame: the
 conversation and every adopted point, then the draft and its missed points,
 changing only what those points require.
 
@@ -92,12 +89,10 @@ adopt (necessity)                              checklist (coverage)
 state:                                         state:
   request: [system/developer messages,           request: the same, verbatim
             latest user message]  (verbatim)     history: the same summary
-  history: the summary from `history`            answer:  the reply exactly as it will be
-  tools:   the caller's tool definitions
-                                                          sent ({text, tool_calls} when it calls a tool)
+  history: the summary from `history`            answer:  the reply
 questions, one per implicit point:             questions, one per adopted point:
-  "Must the reply the assistant gives now        "Does the answer fully and correctly do
-   meet this point?"                              what this point requires?"
+  "Is this point necessary to answer the         "Does the answer fully and correctly do
+   request?"                                      what this point requires?"
   yes: a reply missing it is not the reply        yes: every part met as the point states
        this conversation needs at this step       no:  missing, partial or incorrect
   no:  the reply needed now is complete and     threshold: τ_hi = 0.99894 (InFoBench)
@@ -191,6 +186,6 @@ point table; internal stages are folded below the answer.
   truth of every claim in the answer.
 - An extractor cut off before its JSON closes leaves its list unreadable;
   the answer is then returned unverified (`checklist_unavailable`).
-- With tools, each assistant message is judged on its own points; whether
-  the whole agent run solves the task is not part of the flag.
+- A request that requires a tool call takes the verified-tool route and is
+  not verified.
 - Latency: measured in `MEASUREMENTS.md`.

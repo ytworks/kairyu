@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
+- What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.
+- Why: owner decision: tool requests take the verified-tool route, so the guarantee route assumes a complete answer.
+- Refs: VCO-D17 in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+
 ### 2026-10-04 — [design] Verified example: tool route replaces step verification (PR #619)
 - What: Jev routes a request that requires a tool call to TOOL: one DeepSeek call at max effort with the caller's tools, unverified (kairyu-verified THINK/TOOL/VERIFIED; kairyu-verified-always TOOL/VERIFIED). The STEP route and `verified_step` profile are removed.
 - Why: owner decision. Verification failed correct intermediate agent steps and repairs jumped to the final move; step verification did not remove that risk.

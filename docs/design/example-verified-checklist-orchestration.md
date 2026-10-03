@@ -335,6 +335,8 @@ their conversation state was 526,443-651,415 characters against
 
 ### VCO-D15 — Points, adoption and coverage, all read by models (2026-10-02, PR #618)
 
+*Amended by VCO-D17: items 5 and 6 (agent turns) no longer apply; tool requests take the verified-tool route.*
+
 *Amended by VCO-D16: an empty implicit list asks nothing and passes (no `on_empty`); the judge reads the reply's text with its calls (the Chat API returns both); a rejection with every point met is not repaired.*
 
 Owner decision. The guarantee was LLM-based to overcome the limits of rules,
@@ -540,6 +542,14 @@ requirements failed it, and its repair jumped to the final move (DeepSWE,
 closed PR #618); step verification did not remove that risk. Unverified
 direct tool answers at max effort are the baseline until a verification that
 lets correct intermediate steps pass is found.
+
+The verified DAG drops its agent-turn wording (owner decision): the
+extractors no longer read `{tools}` or list points for "this one message
+of a tool-using loop"; adoption asks again "is this point necessary to
+answer the request?" over the request and the summary (no tools); the
+summary covers earlier turns; the repair rewrites the reply without
+tool-call instructions; the extractors' limit returns to 32,768 tokens
+(16,384 low, 65,536 max).
 
 ## Limitations
 

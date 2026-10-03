@@ -107,7 +107,7 @@ def _openjev(
             }
         if "adopted as the reply the user expects" in text:
             return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
-        if "Must the reply the assistant gives now meet this point" in text:
+        if "Is this point necessary to answer the request" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
         for point, needed in (covered_by or {}).items():
             if point in text:
@@ -246,8 +246,6 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
         {"role": "user", "content": "Name the capital of France in one word."}
     ]
     assert adopt["state"]["history"] == "none"
-    # Without tools the reply needed now is the answer to the request.
-    assert adopt["state"]["tools"] == "none"
     # Coverage: every adopted point against the answer as it will be sent,
     # in the context of the request and the history summary.
     assert coverage["state"] == {
