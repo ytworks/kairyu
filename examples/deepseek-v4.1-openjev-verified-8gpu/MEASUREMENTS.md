@@ -49,6 +49,29 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## GPU gates on the final configuration (2026-10-03, `0bfbf46d`, 17:35-18:06 JST)
+
+VCO-D15 as served: explicit points always kept; implicit points read the
+explicit ones and only they are adopted (skipped when none); history at the
+caller's effort; every Jev checklist read with four denoise passes; tau_hi
+0.99894, tau_accept 0.99. Evidence in `model-volumes/<env>/results/`.
+
+| gate | result | detail |
+|---|---|---|
+| requirements (InFoBench 40, c8) | PASS | gold recall 0.989, requests with a duplicate 0 / 40; guaranteed 29 / 40 (11 `refinement_limit`), repaired 16; latency p50 213 s, p95 356 s; orchestration tokens 309,464 in / 830,403 out |
+| structured | PASS | |
+| fallback | PASS | |
+| routing (80 conversations) | PASS | held-out miss rate 0.0; everyday to THINK 1.0; judge wall 1.28 s |
+| think-route | PASS | 6 / 6 routed to THINK, p50 0.83 s, TTFT p50 0.74 s |
+| effort | PASS | every DeepSeek step, history included, carries the caller's effort |
+
+The run before on `0bf8bb11` (same code, extraction prompts without the
+overlap examples) failed requirements on duplicates: 6 / 40 requests (gate
+10 %; recall 0.989, guaranteed 28 / 40, p50 219 s, p95 426 s); the run on
+`c2a3d842` had 3 / 40. The prompts now name the overlaps found (a heading and
+its section's content, a table's columns and rows; an implicit restatement
+or converse of an explicit point).
+
 ## Recalibration with four denoise passes (2026-10-03, 12:16 JST)
 
 Owner decision: every Jev checklist read uses `steps: 4`. Same InFoBench
