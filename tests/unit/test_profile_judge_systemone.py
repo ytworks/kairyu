@@ -130,3 +130,10 @@ async def test_a_long_conversation_is_bounded_to_fit_the_judge():
     assert call.role_profile_judgment == "primary"
     state = jev.bodies[0]["state"]
     assert state["conversation_omitted_messages"] == len(turns) - len(state["conversation"])
+
+    # A plain prompt is bounded too (Codex review).
+    plain = await orchestrator.judge_role_profile(
+        OrchestrationRequest(prompt="z" * 4000, sampling_params=SamplingParams(max_tokens=8))
+    )
+    assert plain.role_profile_judgment == "primary"
+    assert len(json.dumps(jev.bodies[1]["state"]["conversation"])) <= 1500
