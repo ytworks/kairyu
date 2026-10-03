@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-02 — [amendment] Empty attempts never pass; seed tool preflight; bounded route-judge conversation (PR #618 review)
+- What: an empty attempt is never a checklist PASS and never published over a non-empty one; preflight validates a dependent seed's worker under the caller's tools; `profile_judge.max_conversation_chars` bounds the System One judge state (example: 120,000 chars).
+- Why: review reproduced 502 `EmptyFinalOutput` from a vacuous PASS and a post-generation tool rejection; the GPU rerun showed long DeepSWE turns overflowing OpenJev's 65,536-token context (HTTP 400) and falling back to deepseek_think.
+- Refs: m1 D8/D9 amendments, VCO-D14; PR #618, issue #617
+
+### 2026-10-02 — [amendment] Seeded final drafts carry the caller's tools; exhaustion never publishes an empty attempt (#617)
+- What: the seed role of a seeded final unit is generated under the caller's tool contract; `latest_checks_passed` chooses only attempts with visible text; unary empty output reports `EmptyFinalOutput`; verified example repair prompt emits tool calls via the tool interface.
+- Why: DeepSWE on `kairyu-verified` got HTTP 200 text-only pseudo tool calls (the published generator draft had no tools) and 502s when an empty last repair was published over a non-empty draft.
+- Refs: m1 D8 amendment, VCO-D14 in `docs/design/example-verified-checklist-orchestration.md`; issue #617
+
+### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
+- What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
+- Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
+- Refs: "Node execution and pins" in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Cache hits keep the residency generation (PR #615 re-review)
+- What: an identical `record_verified()` cache hit now advances only last access and the index revision, like `touch()`; the row generation moves only with verified state or verification source.
+- Why: owner re-review: a duplicate in-flight ensure of one command/claim reached the cache after its twin completed and invalidated that READY pre-stage's live evidence, although its own completion was rejected as stale.
+- Refs: `docs/design/node-model-cache-index-v1.md`; D3.1 in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Runner and model-cache authority review fixes (PR #615)
+- What: cache `touch()` keeps the residency generation; the live cache reader joins node evidence to the published inventory at the latest observation (hints live, inventory within the observation age); pre-stage pin owners name the ensure generation and an ensure drops lower-generation owners; actuation reauthorizes the leader after its last callback and rechecks evidence age before PATCH; Deployment claims accept the one-step generation advance.
+- Why: owner review reproduced five defects with CPU/HTTP mocks: a successful Runner-start verification invalidated its own binding, every current inventory was denied, a delayed release removed a successor's pin, an expired lease could still PATCH, and every first Deployment claim failed.
+- Refs: D3.1, D3.14 in `docs/design/node-model-cache-prestage-v1.md`; `docs/design/node-model-cache-index-v1.md`; `docs/design/runner-state-v1.md`; PR #615
+
 ### 2026-10-02 — [design] Verified-answers example: two-stage extraction, slimmer state builder (VCO-D8 am. 2, VCO-D12)
 - What: stated and implicit conditions come from two parallel extractors (implicit: at most four, Jev-kept); the state builder lists only source/action claims (G1-computation/general removed); step budget 16 -> 24 (worst case 18 published `reason: budget`). InFoBench c8 p50 492 -> 297 s. The requirements gate no longer reuses answers from another build; the implicit gate's judge thinks.
 - Why: one combined extractor lost stated conditions (gold recall 0.867) and re-extraction dropped implicit ones (gate recall 0.525-0.675); owner latency target p50 <= 3 min (not yet met).
