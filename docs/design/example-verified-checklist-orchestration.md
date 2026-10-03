@@ -476,16 +476,18 @@ with no failing point) triggered repairs.
    VERIFIED floor rises from 0.3 to 0.5 (owner decision), so VERIFIED is
    preferred only when it is also the most probable route and never takes
    a step from STEP; on the routing set no accuracy-critical conversation
-   read below 0.987.
+   read below 0.987. The routing gate now applies the served three-way
+   rule and fails when 10 % or more of its conversations (none with tools)
+   go to STEP.
 3. **verified_step.** `step_extract` lists the step's points from the task
    and the latest tool results (facts the step must take into account, what
    moves the task forward, and whether submission is allowed — only when the
    conversation shows the work done and verified); `step_implicit` what the
    step presupposes (an environment-appropriate, non-destructive,
    non-repeating action); `step_adopt` keeps the points the next step needs.
-   Coverage and acceptance read the request, the recent conversation
+   Coverage and acceptance both read the request, the recent conversation
    verbatim (the bounded `query`: first and newest messages), the summary
-   and the reply, and ask whether the reply, as the next step, does what
+   of earlier work and the reply, and ask whether the reply, as the next step, does what
    each point requires and is a sound next step.
 4. **Repairs (both profiles).** The repair is the same message written
    again in the draft's frame (the conversation first, then every adopted

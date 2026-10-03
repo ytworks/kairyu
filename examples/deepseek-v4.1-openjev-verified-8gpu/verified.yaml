@@ -751,6 +751,7 @@ profiles:
             state:
               - {key: request, source: request, max_total_chars: 30000}
               - {key: recent, source: query, max_chars: 8000, max_total_chars: 60000}
+              - {key: history, source: step_history}
               - {key: reply, source: step_answer}
             threshold: 0.5
           max_refinements: 2

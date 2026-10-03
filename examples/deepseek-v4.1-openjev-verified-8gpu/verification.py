@@ -675,8 +675,9 @@ def _dataset(name: str) -> list[dict]:
     return json.loads((DATASETS / name).read_text(encoding="utf-8"))
 
 
-def _routing_probabilities() -> list[float | None]:
-    """P(VERIFIED) for every routing-set conversation, through the served judge.
+def _routing_probabilities() -> list[dict[str, float] | None]:
+    """Every route's probability for each routing-set conversation, through
+    the served judge.
 
     The orchestrator is built from verified.yaml with the real System One
     backend pointed at both OpenJev replicas, so the request Jev reads is the
@@ -693,7 +694,7 @@ def _routing_probabilities() -> list[float | None]:
     from kairyu.orchestration.request import OrchestrationRequest
     from kairyu.sampling_params import SamplingParams
 
-    async def judge_all() -> list[float | None]:
+    async def judge_all() -> list[dict[str, float] | None]:
         backend = HTTPSystemOneBackend(
             base_urls=("http://127.0.0.1:8015", "http://127.0.0.1:8016"),
             upstream_model=SPEC["systemone"]["model"],
@@ -707,14 +708,20 @@ def _routing_probabilities() -> list[float | None]:
             systemone_refs={SPEC["systemone"]["model"]: backend},
         )
 
-        async def one(item: dict) -> float | None:
+        async def one(item: dict) -> dict[str, float] | None:
             chat = ChatCompletionRequest(model=ROUTED, messages=item["messages"])
             call = OrchestrationRequest(
                 prompt=validate_orchestration_chat_input(chat).prompt,
                 sampling_params=SamplingParams(max_tokens=1024),
             )
             judged = await orchestrator.judge_role_profile(call)
-            return judged.role_profile_judge_event.metadata.get("p_VERIFIED")
+            metadata = judged.role_profile_judge_event.metadata
+            probabilities = {
+                key.removeprefix("p_"): float(value)
+                for key, value in metadata.items()
+                if key.startswith("p_") and isinstance(value, (int, float))
+            }
+            return probabilities if "VERIFIED" in probabilities else None
 
         try:
             return await asyncio.gather(*(one(item) for item in _dataset("routing-set.json")))
@@ -724,9 +731,12 @@ def _routing_probabilities() -> list[float | None]:
     return asyncio.run(judge_all())
 
 
-def _routes_verified(p: float, tau: float) -> bool:
-    # VERIFIED when preferred (p >= tau) or simply more probable.
-    return p >= tau or p > 0.5
+def _route(probabilities: dict[str, float], tau: float) -> str:
+    # The served rule: VERIFIED when preferred (p >= tau), else the most
+    # probable route.
+    if probabilities["VERIFIED"] >= tau:
+        return "VERIFIED"
+    return max(probabilities, key=probabilities.__getitem__)
 
 
 def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
@@ -734,7 +744,9 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
     tau_route (prefer.min_probability) is the largest value whose miss rate
     on the calibration half (even items) stays below 10 %; the gate is the
-    held-out half (odd items) at the configured tau.
+    held-out half (odd items) at the configured tau. Routes are chosen as in
+    serving, from every label's probability; a conversation of the set (none
+    uses tools) routed to STEP counts against the gate.
     """
 
     deadline = Deadline("routing", budget_s)
@@ -742,12 +754,12 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     started = time.monotonic()
     probabilities = _routing_probabilities()
     judge_seconds = time.monotonic() - started
+    if any(p is None for p in probabilities):
+        raise SystemExit("routing: the judge did not answer every conversation")
     rows = [
-        {**item, "p_verified": p, "messages": len(item["messages"])}
+        {**item, "p": p, "p_verified": p["VERIFIED"], "messages": len(item["messages"])}
         for item, p in zip(items, probabilities, strict=True)
     ]
-    if any(row["p_verified"] is None for row in rows):
-        raise SystemExit("routing: the judge did not answer every conversation")
     import yaml
 
     configured = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
@@ -756,12 +768,16 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
     def miss_rate(subset: list[dict], tau: float) -> float:
         needed = [row for row in subset if row["label"] == "VERIFIED"]
-        missed = [row for row in needed if not _routes_verified(row["p_verified"], tau)]
+        missed = [row for row in needed if _route(row["p"], tau) != "VERIFIED"]
         return len(missed) / len(needed)
 
     def easy_to_think(subset: list[dict], tau: float) -> float:
         easy = [row for row in subset if row["label"] == "THINK"]
-        return sum(1 for row in easy if not _routes_verified(row["p_verified"], tau)) / len(easy)
+        return sum(1 for row in easy if _route(row["p"], tau) == "THINK") / len(easy)
+
+    def to_step(subset: list[dict], tau: float) -> float:
+        # The routing set has no tool-using task: a STEP route is a mistake.
+        return sum(1 for row in subset if _route(row["p"], tau) == "STEP") / len(subset)
 
     calibration = rows[0::2]
     holdout = rows[1::2]
@@ -782,6 +798,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         "calibration_miss_rate": round(miss_rate(calibration, configured), 4),
         "holdout_miss_rate": round(miss_rate(holdout, configured), 4),
         "everyday_to_think": round(easy_to_think(rows, configured), 4),
+        "to_step": round(to_step(rows, configured), 4),
         "p_verified_by_category": {
             category: {
                 "min": round(min(values), 4),
@@ -793,11 +810,16 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     }
     deadline.check()
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
-    passed = summary["holdout_miss_rate"] < 0.10 and summary["calibration_miss_rate"] < 0.10
+    # The same 10 % tolerance for conversations without tools sent to STEP.
+    passed = (
+        summary["holdout_miss_rate"] < 0.10
+        and summary["calibration_miss_rate"] < 0.10
+        and summary["to_step"] < 0.10
+    )
     _write("routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
         f"routing: {'PASS' if passed else 'FAIL'} "
-        f"(held-out miss rate {summary['holdout_miss_rate']})"
+        f"(held-out miss rate {summary['holdout_miss_rate']}, to STEP {summary['to_step']})"
     )
     if not passed:
         raise SystemExit(1)
