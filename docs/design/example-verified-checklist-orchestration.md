@@ -496,10 +496,14 @@ with no failing point) triggered repairs.
    missed point is one read below 0.5 (coverage threshold 0.5); the answer
    profile keeps tau_hi. A rejection with every point met is published
    unverified (`reason: not_accepted`, m1 D8 amendment).
-5. **Thresholds.** The step's coverage and acceptance thresholds (0.5) are
-   placeholders. They are set from about 150 recorded DeepSWE replies
-   labelled "sound next step" by the A0 criteria (owner spot-check of about
-   20), from the error and miss rates per threshold.
+5. **Thresholds.** 164 recorded DeepSWE replies (82 turns, the replayed
+   reply and the recorded one) were labelled by the A0 criteria, blind to
+   Jev's probabilities: 4 unsound (three patches using a type the latest
+   results showed absent, one submission before any work). Acceptance 0.5
+   guaranteed 3 of them; 0.99 none, with 24 of 160 sound replies sent to
+   repair or published unverified (0.999: 72). Acceptance is 0.99; a missed
+   point stays p < 0.5. Asking Jev four direct problem questions instead
+   caught only the submission (1 of 4).
 6. **Framework.** The DAG keeps to the minimal L2 (m1 D8 amendment): the
    `answer` role writes the draft itself; `adopt` verifies `implicit` and
    curates that one list; `history` runs beside `extract`. The extractors may

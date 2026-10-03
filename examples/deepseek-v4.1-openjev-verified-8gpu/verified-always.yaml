@@ -691,8 +691,7 @@ profiles:
             - {key: history, source: step_history}
             - {key: reply, source: step_answer}
           # B2: only a clearly unmet point (p < 0.5) is a miss for the repair;
-          # the acceptance read decides the guarantee. Both thresholds are
-          # placeholders until the labelled DeepSWE turns set them.
+          # the acceptance read decides the guarantee.
           threshold: 0.5
           steps: 4
           max_questions_per_call: 256
@@ -712,7 +711,10 @@ profiles:
               - {key: recent, source: query, max_chars: 8000, max_total_chars: 60000}
               - {key: history, source: step_history}
               - {key: reply, source: step_answer}
-            threshold: 0.5
+            # 164 recorded DeepSWE replies labelled by the A0 criteria: 4
+            # unsound; at 0.99 none is guaranteed (0.5 guaranteed 3), and 24
+            # of 160 sound replies go to repair or unverified.
+            threshold: 0.99
           max_refinements: 2
           on_unavailable: publish_unverified
           feedback_header: "Points the draft misses:"
