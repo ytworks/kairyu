@@ -2338,26 +2338,38 @@ async def test_the_answer_is_published_once_after_its_inline_reasoning() -> None
     from kairyu.entrypoints.server.chat_service import completion_response
     from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 
+    answer = RoleSpec(name="answer", worker="tier1", role_type="publisher", prompt="{query}")
+    # An empty head merges with the answer into one public completion.
+    head = RoleSpec(
+        name="head",
+        worker="tier1",
+        role_type="head",
+        prompt="[head] {query}",
+        sampling=RoleSamplingOverrides(max_tokens=8),
+    )
+    headed = (head, replace(answer, prompt="{query} {head}", depends_on=("head",)))
     cases = [
         ('<think>maybe <tool_call>{"name":"bash","arguments":{}}</tool_call></think>Done.',
-         True, "Done."),
+         True, "Done.", (answer,), True),
         ("<think>private</think>The closing tag is </think>.", False,
-         "The closing tag is </think>."),
+         "The closing tag is </think>.", (answer,), True),
+        ("<think>private</think>The closing tag is </think>.", False,
+         "The closing tag is </think>.", headed, False),
     ]
     bash = {"type": "function", "function": {"name": "bash"}}
-    for raw, expose, published in cases:
+    for raw, expose, published, roles, with_tools in cases:
 
         class Thinking(MockBackend):
             text = raw
 
             async def generate(self, request: GenerationRequest) -> GenerationResult:
+                text = "" if str(request.prompt).startswith("[head]") else self.text
                 return GenerationResult(
                     request_id=request.request_id,
                     prompt=request.prompt,
-                    completions=(CompletionOutput(index=0, text=self.text, token_ids=()),),
+                    completions=(CompletionOutput(index=0, text=text, token_ids=()),),
                 )
 
-        roles = (RoleSpec(name="answer", worker="tier1", role_type="publisher", prompt="{query}"),)
         orchestrator = _orchestrator(
             engines={"tier1": Thinking(), "tier2": Thinking()},
             roles=roles,
@@ -2367,14 +2379,14 @@ async def test_the_answer_is_published_once_after_its_inline_reasoning() -> None
             OrchestrationRequest(
                 prompt=COMPLEX,
                 sampling_params=SamplingParams(max_tokens=64),
-                tools=(bash,),
+                tools=(bash,) if with_tools else (),
                 reasoning_effort="low",
             )
         )
         request = ChatCompletionRequest(
             model="m",
             messages=[{"role": "user", "content": COMPLEX}],
-            tools=[bash],
+            tools=[bash] if with_tools else None,
             reasoning_effort="low",
         )
         message = completion_response(request, COMPLEX, result.completions).choices[0].message

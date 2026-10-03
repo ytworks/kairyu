@@ -3183,6 +3183,13 @@ class Conductor:
                 text=public_text,
                 token_ids=(),
                 finish_reason=finish_reason or "stop",
+                # The continuation's split reasoning: the merged text is
+                # already published form and must not be split again.
+                reasoning_content=(
+                    run.final_completions[0].reasoning_content
+                    if run.final_completions
+                    else None
+                ),
             ),
         )
 

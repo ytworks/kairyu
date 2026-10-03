@@ -76,6 +76,15 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
         "public_reasoning_effort",
         "public_tool_text",
     ]
+    # New request fields append too (a positional MultimodalPrompt must stay put).
+    assert list(inspect.signature(OrchestrationRequest).parameters)[-6:] == [
+        "multimodal_prompt",
+        "chat_template_kwargs",
+        "conversation_affinity_key",
+        "role_profile_judgment",
+        "role_profile_judge_event",
+        "tool_text_published",
+    ]
     assert list(inspect.signature(run_moa).parameters)[-3:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
