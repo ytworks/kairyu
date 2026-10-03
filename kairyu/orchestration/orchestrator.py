@@ -74,13 +74,25 @@ _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs
 def _public_multistage_completions(
     completions: tuple[CompletionOutput, ...],
     reasoning_content: str | None = None,
+    *,
+    split: bool = False,
 ) -> tuple[CompletionOutput, ...]:
-    """Keep final text while replacing final-stage reasoning with policy output."""
+    """Keep final text while replacing final-stage reasoning with policy output.
+
+    ``split``: the Conductor already split inline reasoning from the text.
+    Hidden reasoning then stays separated (an empty ``reasoning_content``, not
+    None), so the public API never splits ``<think>`` again (a literal
+    ``</think>`` in the answer would cut it).
+    """
 
     return tuple(
         replace(
             completion,
-            reasoning_content=reasoning_content,
+            reasoning_content=(
+                ""
+                if split and reasoning_content is None and completion.reasoning_content is not None
+                else reasoning_content
+            ),
             reasoning_delta=None,
             reasoning_offset=None,
         )
@@ -2547,6 +2559,7 @@ class Orchestrator:
                 completions=_public_multistage_completions(
                     result.completions,
                     result.reasoning_content,
+                    split=True,
                 ),
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
@@ -3409,6 +3422,7 @@ class Orchestrator:
                     completions=_public_multistage_completions(
                         conductor_result.completions,
                         conductor_result.reasoning_content,
+                        split=True,
                     ),
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
@@ -3446,6 +3460,7 @@ class Orchestrator:
                 completions=_public_multistage_completions(
                     conductor_result.completions,
                     conductor_result.reasoning_content,
+                    split=True,
                 ),
                 prompt_tokens=conductor_result.usage[0],
                 completion_tokens=conductor_result.usage[1],

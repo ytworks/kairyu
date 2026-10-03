@@ -2330,35 +2330,53 @@ def test_auto_admission_bound_charges_tool_definitions_copied_into_stages() -> N
     assert bound_for(8_193) - bound_for(1) >= 2 * 8_192
 
 
-async def test_exposed_stages_publish_the_answer_after_its_inline_reasoning() -> None:
-    # Codex review (PR #618): exposing stages replaces reasoning_content, so
-    # the API no longer split <think> from the final text; a call written in
-    # the reasoning was published while the judge read "Done.".
-    think = '<think>maybe <tool_call>{"name":"bash","arguments":{}}</tool_call></think>Done.'
+async def test_the_answer_is_published_once_after_its_inline_reasoning() -> None:
+    # Codex review (PR #618): the reasoning is split once, where the attempt
+    # is produced. Exposing stages must not undo that split (a call written in
+    # the reasoning was published), and hiding them must not split again (a
+    # "</think>" in the answer cut it to ".").
+    from kairyu.entrypoints.server.chat_service import completion_response
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 
-    class Thinking(MockBackend):
-        async def generate(self, request: GenerationRequest) -> GenerationResult:
-            return GenerationResult(
-                request_id=request.request_id,
-                prompt=request.prompt,
-                completions=(CompletionOutput(index=0, text=think, token_ids=()),),
-            )
-
-    roles = (RoleSpec(name="answer", worker="tier1", role_type="publisher", prompt="{query}"),)
-    orchestrator = _orchestrator(
-        engines={"tier1": Thinking(), "tier2": Thinking()},
-        roles=roles,
-        expose_intermediate_outputs=True,
-    )
+    cases = [
+        ('<think>maybe <tool_call>{"name":"bash","arguments":{}}</tool_call></think>Done.',
+         True, "Done."),
+        ("<think>private</think>The closing tag is </think>.", False,
+         "The closing tag is </think>."),
+    ]
     bash = {"type": "function", "function": {"name": "bash"}}
+    for raw, expose, published in cases:
 
-    result = await orchestrator.run(
-        OrchestrationRequest(
-            prompt=COMPLEX,
-            sampling_params=SamplingParams(max_tokens=64),
-            tools=(bash,),
+        class Thinking(MockBackend):
+            text = raw
+
+            async def generate(self, request: GenerationRequest) -> GenerationResult:
+                return GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(CompletionOutput(index=0, text=self.text, token_ids=()),),
+                )
+
+        roles = (RoleSpec(name="answer", worker="tier1", role_type="publisher", prompt="{query}"),)
+        orchestrator = _orchestrator(
+            engines={"tier1": Thinking(), "tier2": Thinking()},
+            roles=roles,
+            expose_intermediate_outputs=expose,
+        )
+        result = await orchestrator.run(
+            OrchestrationRequest(
+                prompt=COMPLEX,
+                sampling_params=SamplingParams(max_tokens=64),
+                tools=(bash,),
+                reasoning_effort="low",
+            )
+        )
+        request = ChatCompletionRequest(
+            model="m",
+            messages=[{"role": "user", "content": COMPLEX}],
+            tools=[bash],
             reasoning_effort="low",
         )
-    )
+        message = completion_response(request, COMPLEX, result.completions).choices[0].message
 
-    assert result.completions[0].text == "Done."
+        assert message.content == published and not message.tool_calls, raw
