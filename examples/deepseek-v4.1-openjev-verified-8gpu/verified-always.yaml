@@ -99,10 +99,12 @@ roles:
       {conversation}
       --- END CONVERSATION ---
 
-  # Implicit points (VCO-D8): a second extractor, in parallel with extract,
-  # lists only what the situation presupposes.
+  # Implicit points (VCO-D8, amendment 3): a second extractor, after extract,
+  # lists only what the situation presupposes and no explicit point already
+  # requires, so the two lists stay mutually exclusive.
   - name: implicit
     worker: deepseek
+    depends_on: [extract]
     reasoning_effort: inherit
     sampling:
       temperature: 1.0
@@ -137,8 +139,9 @@ roles:
 
       List only the points the request does not state but its situation
       presupposes: what this user would count as a mistake although they
-      never said it. Another step lists the stated points; do not repeat
-      what the request says. Go through:
+      never said it. The stated points are listed under EXPLICIT POINTS:
+      never list what any of them already requires, nor a point that
+      restates, narrows or overlaps one of them. Go through:
       - material the user gave (numbers, names, dates, amounts, owners,
         identifiers, code): what must be kept exactly, or keep working, when
         the request transforms, shortens, summarizes or rewrites it;
@@ -190,6 +193,9 @@ roles:
       --- CONVERSATION ---
       {conversation}
       --- END CONVERSATION ---
+      --- EXPLICIT POINTS ---
+      {extract}
+      --- END EXPLICIT POINTS ---
 
   # The draft (VCO-D15 amendment): the conversation, plus the adopted points
   # it must meet. It waits for adoption, so it reads only the kept points. A

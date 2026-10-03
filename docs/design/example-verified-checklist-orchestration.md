@@ -180,7 +180,8 @@ Amendment 2 (2026-10-02, owner decision): extraction is two-stage. With
 both kinds in one prompt the extractor wrote fewer stated conditions (4.5
 vs 5.1 per InFoBench request) and InFoBench gold recall fell to 0.867. Now
 `extract` lists stated conditions only (origin `explicit`), and a separate
-`implicit` role, in parallel with it (no dependency, so no added latency),
+`implicit` role, in parallel with it (no dependency, so no added latency;
+superseded 2026-10-03 by VCO-D15 item 1: `implicit` now reads `extract`),
 lists at most four situational conditions with the request words they
 belong to; `implicit_check` asks Jev per condition and curation drops it
 below 0.5 without blocking the guarantee. The final checklist reads both.
@@ -341,10 +342,13 @@ The goal is unchanged: the answer meets a requirement set that is MECE with
 respect to the request.
 
 1. **Points (mutually exclusive, collectively exhaustive).** `extract`
-   (explicit) and `implicit` (presupposed) run in parallel. Each writes a
-   list of points, one per issue, that together cover the request. The
-   requirements gate measures coverage of InFoBench's gold questions and
-   duplicate pairs.
+   lists the explicit points; then `implicit` reads them and lists only
+   presupposed points none of them already requires (amendment 2026-10-03,
+   owner decision: run in parallel, the two lists overlapped and 23 of 40
+   InFoBench requests had a duplicate pair, against the gate's 10 %; the
+   cost is the implicit extraction time before adoption). Each point is one
+   issue, and together they cover the request. The requirements gate
+   measures coverage of InFoBench's gold questions and duplicate pairs.
 2. **Adoption (necessary).** One Jev request asks, for every point of both
    lists, "is this point necessary to answer the request?". The state is the
    request verbatim (system/developer messages plus the latest user message)

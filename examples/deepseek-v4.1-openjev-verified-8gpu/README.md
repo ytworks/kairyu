@@ -34,13 +34,19 @@ request
 profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► deepseek_think (DeepSeek) ─► answer, no flag
   │ VERIFIED (or kairyu-verified-always)
   ▼
-┌─ wave 1 (parallel, DeepSeek) ───────────────────────────────────────────────────────┐
+┌─ wave 1 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
 │ extract    explicit points   {"points": [{"id": "E1", "point": ...}]}  one per issue │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+  │ explicit points
+  ▼
+┌─ wave 2 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
 │ implicit   implicit points   {"points": [{"id": "I1", "point": ...}]}  at most four  │
+│            reads the explicit points and lists none of what they already require     │
+│            (the two lists stay mutually exclusive)                                   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │
   ▼
-┌─ wave 2 ─────────────────────────────────────────────────────────────────────────────┐
+┌─ wave 3 ─────────────────────────────────────────────────────────────────────────────┐
 │ history    DeepSeek, no thinking: a summary of every message except the system /     │
 │            developer messages and the latest user message (earlier turns, tool       │
 │            calls, tool results)                                                      │
@@ -49,13 +55,13 @@ profile_judge ── Jev, 1 request: VERIFIED or THINK? ──THINK──► dee
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │ adopted points
   ▼
-┌─ wave 3 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
+┌─ wave 4 (DeepSeek) ──────────────────────────────────────────────────────────────────┐
 │ generator  the draft: the conversation plus the adopted points, written to meet      │
 │            every point (the caller's tools and response_format apply)                │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   │
   ▼
-┌─ wave 4 ─────────────────────────────────────────────────────────────────────────────┐
+┌─ wave 5 ─────────────────────────────────────────────────────────────────────────────┐
 │ answer     = the generator's draft, unchanged (no model call)                        │
 │   └─ checklist  Jev, request 1: does the answer fully do each adopted point?         │
 │                 Jev, request 2: given those results, the original prompt and the     │

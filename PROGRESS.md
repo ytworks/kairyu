@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [amendment] VCO-D15: implicit extraction reads the explicit points
+- What: `implicit` runs after `extract` and lists only presupposed points no explicit point already requires (example YAML only).
+- Why: owner decision. The MECE gate on e9b86f60 failed on duplicates (23/40 requests, gate <= 10 %; recall 0.906 passed): the parallel extractors overlapped. All GPU gates re-run from the start.
+- Refs: VCO-D15 item 1, VCO-D8 amendment 2 (superseded); PR #618
+
 ### 2026-10-03 — [amendment] VCO-D15: acceptance asks for the reply the user expects; tau_accept 0.99
 - What: the acceptance question asks whether, reading the prompt, the answer and how well each point is met, the answer can be adopted as the reply the user expects; tau_accept = 0.99. Codex review loop closed after six rounds (eleven fixes).
 - Why: owner decision. On InFoBench no question variant or threshold meets alpha 0.10 at the response level (best upper bound 0.259; point-wise conjunction 0.396); this wording is the best measured (AUROC 0.809) and 0.99 its lowest error (held-out 7/43, 16.3 %).

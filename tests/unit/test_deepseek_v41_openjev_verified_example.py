@@ -226,6 +226,9 @@ async def test_a_draft_covering_every_adopted_point_is_published_with_a_guarante
     assert "Return only the assistant response body" not in extract_text
     assert by_role["extract"]["response_format"]["type"] == "json_schema"
     assert by_role["implicit"]["response_format"]["type"] == "json_schema"
+    # The implicit extractor reads the explicit points, so it lists none of them.
+    assert "--- EXPLICIT POINTS ---" in _text(by_role["implicit"])
+    assert EXPLICIT[0]["point"] in _text(by_role["implicit"])
     # Two System One requests, one per stage, on the OpenJev replicas.
     adopt, coverage, acceptance = reads
     assert {read["replica"] for read in reads} <= {"openjev-0", "openjev-1"}
