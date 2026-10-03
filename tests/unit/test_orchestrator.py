@@ -2325,9 +2325,20 @@ def test_auto_admission_bound_charges_tool_definitions_copied_into_stages() -> N
     assert bound_for(8_193) - bound_for(1) >= 4 * 8_192
     # With no private stage, the final request carries the expansion as well
     # as its own tools (Codex review).
-    single = (RoleSpec(name="answer", worker="tier1", prompt="[answer] {query} {tools}"),)
-    orchestrator = _orchestrator(roles=single, budget=Budget(max_steps=1))
-    assert bound_for(8_193) - bound_for(1) >= 2 * 8_192
+    for single in (
+        (RoleSpec(name="answer", worker="tier1", prompt="[answer] {query} {tools}"),),
+        # Alternate templates expand too (Codex review).
+        (
+            RoleSpec(
+                name="answer",
+                worker="tier1",
+                prompt="[answer] {query}",
+                prompt_headless="{query}\n{tools}",
+            ),
+        ),
+    ):
+        orchestrator = _orchestrator(roles=single, budget=Budget(max_steps=1))
+        assert bound_for(8_193) - bound_for(1) >= 2 * 8_192
 
 
 async def test_the_answer_is_published_once_after_its_inline_reasoning() -> None:

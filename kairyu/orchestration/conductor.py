@@ -2770,7 +2770,9 @@ class Conductor:
                     # deliberation after a forced reasoning close, answering
                     # with the reserved public tokens; parser-classified
                     # reasoning on the closed span is reclaimed as public.
-                    reasoning = self._model_reasoning(observed.completions) or ""
+                    # The attempt as published: inline reasoning the caller's
+                    # effort split off is the captured deliberation too.
+                    reasoning = self._model_reasoning(completions) or ""
                     # Continue the attempt that ran dry — the refined prompt
                     # on a refinement attempt, not attempt 0's scaffold.
                     prompt, retry_prefill = self._think_close_continuation(

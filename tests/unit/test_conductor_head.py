@@ -1202,6 +1202,18 @@ def _floor_roles() -> tuple[RoleSpec, ...]:
     )
 
 
+def _scripted(backend, texts):
+    """generate() answering ``texts`` in order (and recording each request)."""
+
+    replies = list(texts)
+
+    async def generate(request):
+        backend.requests_seen.append(request)
+        return backend._result(request, replies.pop(0), finished=True)
+
+    return generate
+
+
 @pytest.mark.parametrize(
     ("caller_cap", "expected_attempt0_max", "expected_retry_max"),
     [
@@ -1232,6 +1244,22 @@ async def test_public_output_floor_reserves_answer_budget_and_closes_think(
     assert retry.sampling_params.max_tokens == expected_retry_max
     retry_events = [e for e in result.trace if e.kind == "retry:empty_output"]
     assert [e.metadata.get("continuation") for e in retry_events] == ["think_close"]
+
+    # Inline reasoning the caller's effort splits off (PR #618) is the same
+    # captured deliberation: the retry continues it.
+    inline = StreamScriptedBackend(["<think>deliberating..."])
+    inline.generate = _scripted(inline, ["<think>deliberating...", "The answer is 5."])
+    conductor = Conductor(
+        _floor_roles(),
+        {"cw": inline},
+        final_sampling_params=SamplingParams(max_tokens=caller_cap),
+        public_output_floor=64,
+        public_reasoning_effort="low",
+    )
+    result = await conductor.run("task")
+
+    assert result.final_text == "The answer is 5."
+    assert inline.requests_seen[1].prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
 
 @pytest.mark.parametrize("stream", [False, True])
 async def test_public_output_floor_uses_legacy_retry_for_multiple_choices(stream):

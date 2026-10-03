@@ -1940,17 +1940,24 @@ class Orchestrator:
             len(json.dumps(list(call.tools), ensure_ascii=False).encode()) if call.tools else 0
         )
 
-        def expanded_bytes(role: RoleSpec) -> int:
-            return len(role.prompt.encode("utf-8")) + role.prompt.count("{tools}") * tool_bytes
+        def expanded_bytes(template: str) -> int:
+            return len(template.encode("utf-8")) + template.count("{tools}") * tool_bytes
 
-        largest_role_prompt = max(call_roles, key=expanded_bytes, default=None)
-        role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
+        # Every template a role may dispatch: its prompt, the headless variant
+        # and the refinement prompt.
+        templates = [
+            template
+            for role in call_roles
+            for template in (role.prompt, role.prompt_headless, role.refine_prompt)
+            if template
+        ]
+        role_prompt = max(templates, key=expanded_bytes, default="")
+        role_bytes = expanded_bytes(role_prompt)
         if call.tools and "{tools}" in role_prompt:
             # The final request carries the expanded definitions too.
             role_prompt = role_prompt.replace(
                 "{tools}", json.dumps(list(call.tools), ensure_ascii=False)
             )
-        role_bytes = expanded_bytes(largest_role_prompt) if largest_role_prompt else 0
         supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
         stage_prompt = max(1, supplied_bytes + role_bytes + tool_bytes + 256)
         internal_output = internal.max_tokens
