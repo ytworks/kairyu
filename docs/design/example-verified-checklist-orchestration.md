@@ -1,7 +1,7 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
-verified as steps 2026-10-03 (VCO-D16), replaced by a tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
+verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
 recorded DeepSWE turns pending** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
@@ -518,22 +518,22 @@ call, no submission introduced by a repair, text present, no empty implicit
 list), latency p50 <= 180 s (VCO-D12), the GPU gates, and a DeepSWE subset
 where verified scores at least as think with no early submission.
 
-### VCO-D17 — A tool route instead of step verification (2026-10-04, PR #619)
+### VCO-D17 — A verified-tool route instead of step verification (2026-10-04, PR #619)
 
-Owner decision. The route judge offers a third route, TOOL, for a request
+Owner decision. The route judge offers a third route, VERIFIED_TOOL, for a request
 that requires a tool call (the caller offers tools and the reply is expected
 to call one: an agent loop's turn, or a request to act with the tools). It
 is answered by one DeepSeek call at max effort with the caller's tools and is
-not verified. `kairyu-verified` offers THINK/TOOL/VERIFIED and
-`kairyu-verified-always` TOOL/VERIFIED. VCO-D16's step profile and STEP
+not verified. `kairyu-verified` offers THINK/VERIFIED_TOOL/VERIFIED and
+`kairyu-verified-always` VERIFIED_TOOL/VERIFIED. VCO-D16's step profile and STEP
 route are removed. GPU gates: `routing` fails when 10 % or more of its
-tool-free conversations go to TOOL; `tool-routing` (40 conversations that
+tool-free conversations go to VERIFIED_TOOL; `verified-tool-routing` (40 conversations that
 offer tools, 20 requiring a call) needs at least 90 % of the requiring ones
-on TOOL and under 10 % of the others; `tool-route` needs every requiring
+on VERIFIED_TOOL and under 10 % of the others; `verified-tool-route` needs every requiring
 conversation, unary and streamed at any caller effort, to return structured
 tool_calls from one DeepSeek call at max effort without verification;
 `fallback` adds a tool request with both judges down; `serving-routed` mixes
-both sets and bounds the tool route's judge read at p50 2 s.
+both sets and bounds the verified-tool route's judge read at p50 2 s.
 
 Why: verifying a correct intermediate agent step against the request's
 requirements failed it, and its repair jumped to the final move (DeepSWE,

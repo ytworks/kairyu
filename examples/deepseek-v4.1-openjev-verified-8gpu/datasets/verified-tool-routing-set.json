@@ -1,7 +1,7 @@
 [
  {
   "id": "t01",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -32,7 +32,7 @@
  },
  {
   "id": "t02",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -71,7 +71,7 @@
  },
  {
   "id": "t03",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -102,7 +102,7 @@
  },
  {
   "id": "t04",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -133,7 +133,7 @@
  },
  {
   "id": "t05",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -164,7 +164,7 @@
  },
  {
   "id": "t06",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -203,7 +203,7 @@
  },
  {
   "id": "t07",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -234,7 +234,7 @@
  },
  {
   "id": "t08",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "first_turn",
   "messages": [
    {
@@ -265,7 +265,7 @@
  },
  {
   "id": "t09",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -315,7 +315,7 @@
  },
  {
   "id": "t10",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -365,7 +365,7 @@
  },
  {
   "id": "t11",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -415,7 +415,7 @@
  },
  {
   "id": "t12",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -465,7 +465,7 @@
  },
  {
   "id": "t13",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -515,7 +515,7 @@
  },
  {
   "id": "t14",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -591,7 +591,7 @@
  },
  {
   "id": "t15",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -641,7 +641,7 @@
  },
  {
   "id": "t16",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "mid_loop",
   "messages": [
    {
@@ -691,7 +691,7 @@
  },
  {
   "id": "t17",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "choose_tool",
   "messages": [
    {
@@ -828,7 +828,7 @@
  },
  {
   "id": "t18",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "choose_tool",
   "messages": [
    {
@@ -965,7 +965,7 @@
  },
  {
   "id": "t19",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "choose_tool",
   "messages": [
    {
@@ -1102,7 +1102,7 @@
  },
  {
   "id": "t20",
-  "label": "TOOL",
+  "label": "VERIFIED_TOOL",
   "category": "choose_tool",
   "messages": [
    {

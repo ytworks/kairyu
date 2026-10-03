@@ -335,10 +335,10 @@ def test_both_models_share_the_verified_dag_and_the_tool_route() -> None:
     routed = yaml.safe_load((EXAMPLE / "verified.yaml").read_text())
     always = yaml.safe_load((EXAMPLE / "verified-always.yaml").read_text())
     assert routed["roles"] == always["roles"]
-    tool = next(p for p in routed["profiles"] if p["name"] == "deepseek_tool")
+    tool = next(p for p in routed["profiles"] if p["name"] == "verified_tool")
     assert always["profiles"] == [tool]
     # kairyu-verified-always never routes to the think answer.
-    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["TOOL", "VERIFIED"]
+    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["VERIFIED_TOOL", "VERIFIED"]
     assert always["profile_judge"]["fallback"] == "primary"
 
 
@@ -400,7 +400,7 @@ async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() 
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(
-        seen, reads, draft="Reading setup.py next.", spec="verified.yaml", route="TOOL"
+        seen, reads, draft="Reading setup.py next.", spec="verified.yaml", route="VERIFIED_TOOL"
     )
     chat = ChatCompletionRequest(
         model="kairyu-verified",
@@ -415,7 +415,7 @@ async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() 
         sampling_params=SamplingParams(max_tokens=4096),
         tools=(BASH,),
         tool_choice="auto",
-        # The caller's effort does not lower the tool route's max.
+        # The caller's effort does not lower the verified-tool route's max.
         reasoning_effort="low",
     )
 

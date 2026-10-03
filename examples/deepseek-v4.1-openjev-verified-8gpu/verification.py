@@ -21,8 +21,10 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   think-route   everyday requests stream from deepseek_think at the default effort
   effort        the caller's effort reaches every DeepSeek step on both routes
   implicit      situational requirements are extracted and kept only when expected
-  tool-routing  Jev routes a request that requires a tool call to TOOL, and no other
-  tool-route    a TOOL request gets one DeepSeek call at max effort with tool_calls
+  verified-tool-routing  Jev routes a request that requires a tool call to
+                VERIFIED_TOOL, and no other
+  verified-tool-route    a VERIFIED_TOOL request gets one DeepSeek call at max
+                effort, returned as tool_calls
   serving-routed  kairyu-verified under load: route mix, latency, tokens per route
 """
 
@@ -218,7 +220,8 @@ def chat(
     output_tokens = usage.get("orchestration_output_tokens") or usage.get("completion_tokens") or 0
     trace_body = body.get("kairyu_trace_v2")
     route, p_verified = _route(trace_body, model)
-    verified_route = route.startswith("verified")
+    # The verified-tool route answers without verification.
+    verified_route = route.startswith("verified") and route != "verified_tool"
     return {
         "status": status,
         "seconds": round(elapsed, 2),
@@ -644,7 +647,9 @@ def gate_fallback(env: dict[str, str], *, budget_s: float = 5400) -> None:
         # A request that requires a tool call still gets one through the
         # think fallback.
         tool_item = next(
-            item for item in _dataset("tool-routing-set.json") if item["label"] == "TOOL"
+            item
+            for item in _dataset("verified-tool-routing-set.json")
+            if item["label"] == "VERIFIED_TOOL"
         )
         tool_down = chat(
             env,
@@ -806,7 +811,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     on the calibration half (even items) stays below 10 %; the gate is the
     held-out half (odd items) at the configured tau. Routes are chosen as in
     serving, from every label's probability; a conversation of the set (none
-    uses tools) routed to TOOL counts against the gate.
+    uses tools) routed to VERIFIED_TOOL counts against the gate.
     """
 
     deadline = Deadline("routing", budget_s)
@@ -835,9 +840,11 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         easy = [row for row in subset if row["label"] == "THINK"]
         return sum(1 for row in easy if _served_route(row["p"], tau) == "THINK") / len(easy)
 
-    def to_tool(subset: list[dict], tau: float) -> float:
-        # The routing set has no tool-using task: a TOOL route is a mistake.
-        return sum(1 for row in subset if _served_route(row["p"], tau) == "TOOL") / len(subset)
+    def to_verified_tool(subset: list[dict], tau: float) -> float:
+        # The routing set has no tool-using task: a VERIFIED_TOOL route is a mistake.
+        return sum(1 for row in subset if _served_route(row["p"], tau) == "VERIFIED_TOOL") / len(
+            subset
+        )
 
     calibration = rows[0::2]
     holdout = rows[1::2]
@@ -858,7 +865,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         "calibration_miss_rate": round(miss_rate(calibration, configured), 4),
         "holdout_miss_rate": round(miss_rate(holdout, configured), 4),
         "everyday_to_think": round(easy_to_think(rows, configured), 4),
-        "to_tool": round(to_tool(rows, configured), 4),
+        "to_verified_tool": round(to_verified_tool(rows, configured), 4),
         "p_verified_by_category": {
             category: {
                 "min": round(min(values), 4),
@@ -870,23 +877,24 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     }
     deadline.check()
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
-    # The same 10 % tolerance for conversations without tools sent to TOOL.
+    # The same 10 % tolerance for conversations without tools sent to VERIFIED_TOOL.
     passed = (
         summary["holdout_miss_rate"] < 0.10
         and summary["calibration_miss_rate"] < 0.10
-        and summary["to_tool"] < 0.10
+        and summary["to_verified_tool"] < 0.10
     )
     _write("routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
         f"routing: {'PASS' if passed else 'FAIL'} "
-        f"(held-out miss rate {summary['holdout_miss_rate']}, to TOOL {summary['to_tool']})"
+        f"(held-out miss rate {summary['holdout_miss_rate']}, "
+        f"to VERIFIED_TOOL {summary['to_verified_tool']})"
     )
     if not passed:
         raise SystemExit(1)
 
 
-def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
-    """Jev routes a request that requires a tool call to TOOL, and no other.
+def gate_verified_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
+    """Jev routes a request that requires a tool call to VERIFIED_TOOL, and no other.
 
     The tool-routing set offers tools in every conversation: 20 require a
     call (first turn, mid-loop after a tool result, a choice among tools), 20
@@ -894,13 +902,13 @@ def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     answers, chit-chat). Routes are chosen as in serving.
     """
 
-    deadline = Deadline("tool-routing", budget_s)
-    items = _dataset("tool-routing-set.json")
+    deadline = Deadline("verified-tool-routing", budget_s)
+    items = _dataset("verified-tool-routing-set.json")
     started = time.monotonic()
-    probabilities = _routing_probabilities("tool-routing-set.json")
+    probabilities = _routing_probabilities("verified-tool-routing-set.json")
     judge_seconds = time.monotonic() - started
     if any(p is None for p in probabilities):
-        raise SystemExit("tool-routing: the judge did not answer every conversation")
+        raise SystemExit("verified-tool-routing: the judge did not answer every conversation")
     import yaml
 
     tau = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
@@ -916,7 +924,7 @@ def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         }
         for item, p in zip(items, probabilities, strict=True)
     ]
-    needed = [row for row in rows if row["label"] == "TOOL"]
+    needed = [row for row in rows if row["label"] == "VERIFIED_TOOL"]
     not_needed = [row for row in rows if row["label"] == "NO_TOOL"]
     by_category = {}
     for row in rows:
@@ -925,9 +933,11 @@ def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     summary = {
         "conversations": len(rows),
         "judge_wall_s": round(judge_seconds, 2),
-        "needed_to_tool": round(sum(r["route"] == "TOOL" for r in needed) / len(needed), 4),
-        "not_needed_to_tool": round(
-            sum(r["route"] == "TOOL" for r in not_needed) / len(not_needed), 4
+        "needed_to_verified_tool": round(
+            sum(r["route"] == "VERIFIED_TOOL" for r in needed) / len(needed), 4
+        ),
+        "not_needed_to_verified_tool": round(
+            sum(r["route"] == "VERIFIED_TOOL" for r in not_needed) / len(not_needed), 4
         ),
         "routes_by_category": by_category,
     }
@@ -935,29 +945,35 @@ def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     for row in rows:
         print(f"  {row['id']} {row['label']:8} {row['category']:20} -> {row['route']} {row['p']}")
     print(json.dumps(summary, indent=2), flush=True)
-    passed = summary["needed_to_tool"] >= 0.90 and summary["not_needed_to_tool"] < 0.10
-    _write("tool-routing", {"passed": passed, "summary": summary, "rows": rows})
+    passed = (
+        summary["needed_to_verified_tool"] >= 0.90 and summary["not_needed_to_verified_tool"] < 0.10
+    )
+    _write("verified-tool-routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
-        f"tool-routing: {'PASS' if passed else 'FAIL'} (needed to TOOL "
-        f"{summary['needed_to_tool']} >= 0.90, not needed to TOOL "
-        f"{summary['not_needed_to_tool']} < 0.10)"
+        f"verified-tool-routing: {'PASS' if passed else 'FAIL'} (needed to VERIFIED_TOOL "
+        f"{summary['needed_to_verified_tool']} >= 0.90, not needed to VERIFIED_TOOL "
+        f"{summary['not_needed_to_verified_tool']} < 0.10)"
     )
     if not passed:
         raise SystemExit(1)
 
 
-def gate_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
-    """A TOOL request gets one DeepSeek call at max effort, returned as tool_calls.
+def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
+    """A VERIFIED_TOOL request gets one DeepSeek call at max effort, returned as tool_calls.
 
     Every tool-requiring conversation of the tool-routing set is sent unary
     and streamed, with the caller's effort cycling through none, low, high
-    and max: each must route to TOOL, return 200 with structured tool_calls
+    and max: each must route to VERIFIED_TOOL, return 200 with structured tool_calls
     (finish_reason tool_calls) and no kairyu_verification, and run exactly
     one DeepSeek generation at max effort.
     """
 
-    deadline = Deadline("tool-route", budget_s)
-    items = [item for item in _dataset("tool-routing-set.json") if item["label"] == "TOOL"]
+    deadline = Deadline("verified-tool-route", budget_s)
+    items = [
+        item
+        for item in _dataset("verified-tool-routing-set.json")
+        if item["label"] == "VERIFIED_TOOL"
+    ]
     efforts = [None, "low", "high", "max"]
     findings = []
     rows = []
@@ -982,7 +998,7 @@ def gate_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
             problems = []
             if row["status"] != 200:
                 problems.append(f"status {row['status']}")
-            if row["route"] != "deepseek_tool":
+            if row["route"] != "verified_tool":
                 problems.append(f"route {row['route']}")
             if not row["tool_calls"] or row["finish_reason"] != "tool_calls":
                 problems.append(
@@ -1021,10 +1037,10 @@ def gate_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
     }
     print(json.dumps(summary, indent=2), flush=True)
     _write(
-        "tool-route",
+        "verified-tool-route",
         {"passed": not findings, "findings": findings, "summary": summary, "rows": rows},
     )
-    print(f"tool-route: {'PASS' if not findings else 'FAIL'} {findings}")
+    print(f"verified-tool-route: {'PASS' if not findings else 'FAIL'} {findings}")
     if findings:
         raise SystemExit(1)
 
@@ -1191,7 +1207,7 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
 
     deadline = Deadline("serving-routed", budget_s)
     # Tool-free conversations and conversations that offer tools, mixed.
-    items = _dataset("routing-set.json") + _dataset("tool-routing-set.json")
+    items = _dataset("routing-set.json") + _dataset("verified-tool-routing-set.json")
     random.Random(3).shuffle(items)
     plan = {1: 8, 4: 16, 8: 16, 16: 32}
     report = {}
@@ -1240,8 +1256,8 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
         name
         for name, entry in report.items()
         if entry["summary"]["ok"] != entry["summary"]["requests"]
-        # The tool route adds only the judge's read (p50 at most 2 s).
-        or (entry["summary"]["per_route"].get("deepseek_tool", {}).get("judge_p50_s") or 0) > 2.0
+        # The verified-tool route adds only the judge's read (p50 at most 2 s).
+        or (entry["summary"]["per_route"].get("verified_tool", {}).get("judge_p50_s") or 0) > 2.0
     ]
     _write("serving-routed", {"passed": not failures, "failed": failures, "report": report})
     print(f"serving-routed: {'PASS' if not failures else 'FAIL'}")
@@ -1261,8 +1277,8 @@ GATES = {
     "think-route": gate_think_route,
     "effort": gate_effort,
     "implicit": gate_implicit,
-    "tool-routing": gate_tool_routing,
-    "tool-route": gate_tool_route,
+    "verified-tool-routing": gate_verified_tool_routing,
+    "verified-tool-route": gate_verified_tool_route,
     "serving-routed": gate_serving_routed,
 }
 

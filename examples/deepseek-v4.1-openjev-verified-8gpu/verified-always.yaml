@@ -1,7 +1,7 @@
 # Checklist-verified answers (VCO-D1, D8, D9, D15; docs/design/example-verified-checklist-orchestration.md).
 # Model kairyu-verified-always: every request that needs no tool call is
 # verified (this DAG); Jev sends a request that requires a tool call to
-# deepseek_tool (one DeepSeek call at max effort, unverified).
+# verified_tool (one DeepSeek call at max effort, unverified).
 #
 #   wave 1  extract   (DeepSeek, JSON)  explicit points, one per issue
 #           history   (DeepSeek)        summary of every message but the request
@@ -398,7 +398,7 @@ roles:
       feedback_header: "Points the answer misses:"
       feedback_item: "- [{id}] {proposition} (p={p})"
 
-# Jev route judge without the think route: VERIFIED (this DAG) or TOOL.
+# Jev route judge without the think route: VERIFIED (this DAG) or VERIFIED_TOOL.
 profile_judge:
   worker: jev
   timeout_seconds: 10.0
@@ -410,8 +410,8 @@ profile_judge:
     The verified route checks the answer against every requirement; the tool
     route answers a request that requires a tool call.
   choices:
-    - profile: deepseek_tool
-      label: TOOL
+    - profile: verified_tool
+      label: VERIFIED_TOOL
       criteria: >-
         the caller offers tools (tool_calling is true) and the reply is
         expected to call one of them: an ongoing tool-using task, or a request
@@ -434,9 +434,9 @@ profiles:
   # Tool calls (owner decision, VCO-D17): a request that requires a tool
   # call is answered by one DeepSeek call at max effort, with the caller's
   # tools; it is not verified.
-  - name: deepseek_tool
+  - name: verified_tool
     roles:
-      - name: deepseek_tool_answer
+      - name: verified_tool_answer
         worker: deepseek
         role_type: publisher
         reasoning_effort: max

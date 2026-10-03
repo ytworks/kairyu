@@ -34,9 +34,9 @@ every transition, the list edits and the threshold rule.
 request
   │
   ▼
-profile_judge ── Jev, 1 request: THINK, TOOL or VERIFIED? (kairyu-verified-always: TOOL or VERIFIED)
+profile_judge ── Jev, 1 request: THINK, VERIFIED_TOOL or VERIFIED? (kairyu-verified-always: VERIFIED_TOOL or VERIFIED)
   │   THINK ──► deepseek_think (DeepSeek) ─► answer, no flag
-  │   TOOL  ──► deepseek_tool (DeepSeek, max effort, caller's tools) ─► reply, no flag
+  │   VERIFIED_TOOL  ──► verified_tool (DeepSeek, max effort, caller's tools) ─► reply, no flag
   │ VERIFIED
   ▼
 ┌─ wave 1 (DeepSeek, in parallel) ───────────────────────────────────────────────────┐
@@ -71,7 +71,7 @@ profile_judge ── Jev, 1 request: THINK, TOOL or VERIFIED? (kairyu-verified-a
 ```
 
 A request that requires a tool call (an agent loop's turn, or a request to
-act with the offered tools) goes to the tool route: one DeepSeek call at max
+act with the offered tools) goes to the verified-tool route: one DeepSeek call at max
 effort with the caller's tools, returned without verification (owner
 decision, VCO-D17).
 
