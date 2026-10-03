@@ -34,9 +34,9 @@ every transition, the list edits and the threshold rule.
 request
   │
   ▼
-profile_judge ── Jev, 1 request: THINK, TOOL or VERIFIED? (kairyu-verified-always: TOOL or VERIFIED)
+profile_judge ── Jev, 1 request: THINK, STEP or VERIFIED? (kairyu-verified-always: STEP or VERIFIED)
   │   THINK ──► deepseek_think (DeepSeek) ─► answer, no flag
-  │   TOOL  ──► deepseek_tool (DeepSeek, max effort, caller's tools) ─► reply, no flag
+  │   STEP  ──► verified_step (below) ─► one step of a tool-using task, flagged
   │ VERIFIED
   ▼
 ┌─ wave 1 (DeepSeek, in parallel) ───────────────────────────────────────────────────┐
@@ -70,10 +70,24 @@ profile_judge ── Jev, 1 request: THINK, TOOL or VERIFIED? (kairyu-verified-a
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-A request that requires a tool call (an agent loop's turn, or a request to
-act with the offered tools) goes to the tool route: one DeepSeek call at max
-effort with the caller's tools, returned without verification (owner
-decision, VCO-D17).
+With tools in the request (an agent loop), each reply is one assistant
+message whose tool calls the caller runs before asking again. The route
+judge sends such a turn to `verified_step`, which has the same shape with
+step criteria: the reply must be a sound next step toward solving the task
+(it uses the latest tool results correctly, moves the task forward, rests on
+no wrong premise, takes no destructive action, and neither submits nor
+declares completion while the work is unfinished), never the finished task.
+
+```text
+wave 1  step_extract   points for this step, from the task and the latest tool results
+        step_history   a summary of the work so far
+wave 2  step_implicit  what the step presupposes  └─ step_adopt (Jev): needed now?
+wave 3  step_answer    the next message           └─ step_checklist (Jev):
+                       coverage: as the next step, does the reply do each point?
+                       acceptance: is it a sound next step? (state: the task, the
+                       recent conversation verbatim, the summary, the reply)
+                       a point read below 0.5 → repair, at most twice
+```
 
 The answer and every repair carry the caller's tools, so a tool call is
 returned as a structured `tool_calls` entry next to the reply's text. A

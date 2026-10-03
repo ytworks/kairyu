@@ -51,6 +51,7 @@ def _deepseek(
     implicit: list[dict] | None = None,
     repair: str = "Paris",
     draft_finish: str = "stop",
+    step: list[dict] | None = None,
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -60,7 +61,11 @@ def _deepseek(
             answer = json.dumps({"points": EXPLICIT if explicit is None else explicit})
         elif text.startswith("[implicit]"):
             answer = json.dumps({"points": IMPLICIT if implicit is None else implicit})
-        elif text.startswith("[history]"):
+        elif text.startswith("[step_extract]"):
+            answer = json.dumps({"points": step or []})
+        elif text.startswith("[step_implicit]"):
+            answer = json.dumps({"points": []})
+        elif text.startswith(("[history]", "[step_history]")):
             answer = "none"
         elif "--- MISSED POINTS ---" in text:
             answer = repair
@@ -92,9 +97,11 @@ def _openjev(
     down: bool = False,
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
+    partial: str | None = None,
 ):
     """Necessity is low only for ``unneeded``; a point in ``covered_by`` is
-    contained only in an answer holding the mapped text."""
+    contained only in an answer holding the mapped text; ``partial`` is read
+    at p 0.7."""
 
     def answer(question: dict, state: dict) -> dict:
         text = json.dumps(question)
@@ -105,13 +112,16 @@ def _openjev(
                 "type": "choice",
                 "probabilities": {label: 0.9 if label == route else rest for label in labels},
             }
-        if "adopted as the reply the user expects" in text:
+        if any(ask in text for ask in ("adopted as the reply", "adopted as a sound next step")):
             return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
         if "Must the reply the assistant gives now meet this point" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
+        if partial is not None and partial in text:
+            return {"noul": 0.7}
+        reply = str(state.get("answer", state.get("reply")))
         for point, needed in (covered_by or {}).items():
             if point in text:
-                return {"noul": 0.9999 if needed in state["answer"] else 0.0}
+                return {"noul": 0.9999 if needed in reply else 0.0}
         return {"noul": 0.9999}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -143,6 +153,8 @@ def _orchestrator(
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
     draft_finish: str = "stop",
+    step: list[dict] | None = None,
+    partial: str | None = None,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
@@ -158,6 +170,7 @@ def _orchestrator(
                     implicit=implicit,
                     repair=repair,
                     draft_finish=draft_finish,
+                    step=step,
                 )
             ),
         )
@@ -174,6 +187,7 @@ def _orchestrator(
                     down=jev_down,
                     unneeded=unneeded,
                     covered_by=covered_by,
+                    partial=partial,
                 )
             ),
         )
@@ -335,10 +349,10 @@ def test_both_models_share_the_verified_dags_and_always_verify() -> None:
     routed = yaml.safe_load((EXAMPLE / "verified.yaml").read_text())
     always = yaml.safe_load((EXAMPLE / "verified-always.yaml").read_text())
     assert routed["roles"] == always["roles"]
-    tool = next(p for p in routed["profiles"] if p["name"] == "deepseek_tool")
-    assert always["profiles"] == [tool]
+    step = next(p for p in routed["profiles"] if p["name"] == "verified_step")
+    assert always["profiles"] == [step]
     # kairyu-verified-always never routes to the think answer.
-    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["TOOL", "VERIFIED"]
+    assert [c["label"] for c in always["profile_judge"]["choices"]] == ["STEP", "VERIFIED"]
     assert always["profile_judge"]["fallback"] == "primary"
 
 
@@ -393,19 +407,42 @@ async def test_the_longest_path_fits_the_step_budget() -> None:
     assert result.verification.reason == "refinement_limit"
 
 
-async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() -> None:
-    # VCO-D17 (owner decision): Jev routes a tool-using turn to the tool
-    # route, one DeepSeek call at max effort with the caller's tools, without
-    # verification.
+async def test_a_tool_turn_is_judged_and_repaired_as_one_step() -> None:
+    # A0 (PR #619): an agent turn is one step of solving the task. Jev routes
+    # it to verified_step, which judges the reply as a next step over the
+    # task, the recent work verbatim and the summary; only a clearly unmet
+    # point (p < 0.5) reaches the repair, which rewrites the same message.
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(
-        seen, reads, draft="Reading setup.py next.", spec="verified.yaml", route="TOOL"
+        seen,
+        reads,
+        draft="Everything is fixed. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        repair="The test fails in setup.py; reading it next. cat setup.py",
+        spec="verified.yaml",
+        route="STEP",
+        step=[
+            {"id": "S1", "point": "reads setup.py named in the error"},
+            {"id": "S2", "point": "names the failing test"},
+        ],
+        covered_by={"reads setup.py": "cat setup.py"},
+        partial="names the failing test",
     )
     chat = ChatCompletionRequest(
         model="kairyu-verified",
         messages=[
             {"role": "user", "content": "Fix the failing test."},
+            {
+                "role": "assistant",
+                "content": "Running the tests.",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "pytest"}'},
+                    }
+                ],
+            },
             {"role": "tool", "tool_call_id": "c1", "content": "ImportError in setup.py"},
         ],
         tools=[BASH],
@@ -420,9 +457,12 @@ async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() 
     call = await orchestrator.judge_role_profile(call)
     result = await orchestrator.run(call)
 
-    assert result.text == "Reading setup.py next."
-    assert result.verification is None
-    (route,) = reads
-    assert route["state"]["tool_calling"] is True
-    (body,) = seen
-    assert body["reasoning_effort"] == "max" and body["tools"] == [BASH]
+    assert result.text == "The test fails in setup.py; reading it next. cat setup.py"
+    assert result.verification.guaranteed and result.verification.attempts == 2
+    coverage = next(read for read in reads if "reply" in read["state"])
+    assert set(coverage["state"]) == {"request", "recent", "history", "reply"}
+    assert coverage["state"]["recent"][-1]["content"] == "ImportError in setup.py"
+    repair = next(_text(body) for body in seen if "--- MISSED POINTS ---" in _text(body))
+    missed = repair.split("--- MISSED POINTS ---")[1]
+    assert "[S1] reads setup.py" in missed and "names the failing test" not in missed
+    assert "--- POINTS FOR THIS STEP ---" in repair and "COMPLETE_TASK" in repair

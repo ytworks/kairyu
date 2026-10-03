@@ -746,7 +746,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     on the calibration half (even items) stays below 10 %; the gate is the
     held-out half (odd items) at the configured tau. Routes are chosen as in
     serving, from every label's probability; a conversation of the set (none
-    uses tools) routed to TOOL counts against the gate.
+    uses tools) routed to STEP counts against the gate.
     """
 
     deadline = Deadline("routing", budget_s)
@@ -775,9 +775,9 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         easy = [row for row in subset if row["label"] == "THINK"]
         return sum(1 for row in easy if _served_route(row["p"], tau) == "THINK") / len(easy)
 
-    def to_tool(subset: list[dict], tau: float) -> float:
-        # The routing set has no tool-using task: a TOOL route is a mistake.
-        return sum(1 for row in subset if _served_route(row["p"], tau) == "TOOL") / len(subset)
+    def to_step(subset: list[dict], tau: float) -> float:
+        # The routing set has no tool-using task: a STEP route is a mistake.
+        return sum(1 for row in subset if _served_route(row["p"], tau) == "STEP") / len(subset)
 
     calibration = rows[0::2]
     holdout = rows[1::2]
@@ -798,7 +798,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         "calibration_miss_rate": round(miss_rate(calibration, configured), 4),
         "holdout_miss_rate": round(miss_rate(holdout, configured), 4),
         "everyday_to_think": round(easy_to_think(rows, configured), 4),
-        "to_tool": round(to_tool(rows, configured), 4),
+        "to_step": round(to_step(rows, configured), 4),
         "p_verified_by_category": {
             category: {
                 "min": round(min(values), 4),
@@ -810,16 +810,16 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     }
     deadline.check()
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
-    # The same 10 % tolerance for conversations without tools sent to TOOL.
+    # The same 10 % tolerance for conversations without tools sent to STEP.
     passed = (
         summary["holdout_miss_rate"] < 0.10
         and summary["calibration_miss_rate"] < 0.10
-        and summary["to_tool"] < 0.10
+        and summary["to_step"] < 0.10
     )
     _write("routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
         f"routing: {'PASS' if passed else 'FAIL'} "
-        f"(held-out miss rate {summary['holdout_miss_rate']}, to TOOL {summary['to_tool']})"
+        f"(held-out miss rate {summary['holdout_miss_rate']}, to STEP {summary['to_step']})"
     )
     if not passed:
         raise SystemExit(1)
