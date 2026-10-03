@@ -698,7 +698,7 @@ async def judge(
         pending = _pending_questions(config, outputs)
     except TemplateError as error:
         raise ChecklistUnavailable("checklist_unavailable", str(error)) from error
-    if not pending:
+    if not pending and config.acceptance is None:
         # Nothing to judge (an empty list): nothing fails, no read is sent.
         return ChecklistVerdict(passed=True, items=(), text="PASS", usage=(0, 0), reads=0)
     if backend is None:
@@ -708,15 +708,18 @@ async def judge(
             "checklist_unavailable",
             f"{len(pending)} questions exceed the limit of {config.max_questions}",
         )
-    state = build_state(config.state, outputs, query, tools)
-    size = len(json.dumps(state, ensure_ascii=False))
-    if config.max_state_chars is not None and size > config.max_state_chars:
-        raise ChecklistUnavailable(
-            "checklist_unavailable",
-            f"state of {size} characters exceeds {config.max_state_chars}",
-        )
-    yes, usage = await _decide(backend, config, state, pending, on_read)
-    items = tuple(_aggregate(pending, yes))
+    items: tuple[ChecklistItem, ...] = ()
+    usage = (0, 0)
+    if pending:
+        state = build_state(config.state, outputs, query, tools)
+        size = len(json.dumps(state, ensure_ascii=False))
+        if config.max_state_chars is not None and size > config.max_state_chars:
+            raise ChecklistUnavailable(
+                "checklist_unavailable",
+                f"state of {size} characters exceeds {config.max_state_chars}",
+            )
+        yes, usage = await _decide(backend, config, state, pending, on_read)
+        items = tuple(_aggregate(pending, yes))
     if config.acceptance is None:
         return ChecklistVerdict(
             passed=all(item.passed for item in items),
@@ -725,6 +728,7 @@ async def judge(
             usage=usage,
             reads=1,
         )
+    # With no item, the acceptance read still decides (over no results).
     try:
         acceptance, accept_usage = await _accept(
             backend,
@@ -750,7 +754,7 @@ async def judge(
         items=items,
         text=feedback_text(config, items, acceptance),
         usage=usage,
-        reads=2,
+        reads=2 if pending else 1,
         acceptance=acceptance,
     )
 

@@ -201,7 +201,7 @@ budget accounting are unchanged. Supporting mechanisms:
   reads keep their usage.
 - **Items from JSON.** Questions can be expanded per item of an upstream
   role's JSON list (`foreach`) with str.format templates. A list with no item
-  asks nothing and passes.
+  asks nothing and passes; with an acceptance read, that read still decides.
 - **Acceptance read.** An optional `acceptance` asks one more question over
   its own state plus every item's result; its probability against its own
   threshold decides PASS. Each read is a budget step, and a returned read is

@@ -627,6 +627,41 @@ async def test_a_failed_read_cancels_its_siblings_and_keeps_their_usage():
     assert raised.value.usage == (7, 0)
 
 
+async def test_the_acceptance_read_decides_even_with_no_point_to_judge():
+    # Codex review (PR #619): an empty point list skipped the acceptance read
+    # and published a guarantee nobody gave.
+    roles = _accepting_roles()
+    config = roles[1].checklist
+    roles = (
+        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
+        replace(roles[0], depends_on=("points",)),
+        replace(
+            roles[1],
+            checklist=replace(
+                config,
+                questions=(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role="points", path="points"),
+                    ),
+                ),
+            ),
+        ),
+    )
+    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["It is 41."]})
+    judge = FakeSystemOne(lambda state, question: 0.1)
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    (body,) = judge.bodies
+    assert body["state"]["checklist"] == []
+    assert result.final_text == "It is 41."
+    assert result.verification.guaranteed is False
+    assert result.verification.reason == "not_accepted"
+
+
 class _AcceptanceDown(FakeSystemOne):
     async def decide(self, body: dict) -> SystemOneReply:
         self._down = bool(self.bodies)
