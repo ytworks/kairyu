@@ -1,7 +1,7 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
-verified as steps 2026-10-03 (VCO-D16, PR #619), GPU gates and the replay of
+verified as steps 2026-10-03 (VCO-D16), replaced by a tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
 recorded DeepSWE turns pending** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
@@ -455,6 +455,8 @@ its list unreadable and the turn `checklist_unavailable` (DeepSWE, PR #618).
 
 ### VCO-D16 — An agent turn is verified as one step (2026-10-03, PR #619)
 
+*Superseded by VCO-D17 (2026-10-04): the step route and its verification are removed.*
+
 Owner decision. On closed PR #618's DeepSWE runs, 73 of 83 verified agent
 turns ended `refinement_limit` and repairs changed the agent's commands in 51
 of 74 repaired turns, once replacing an exploring step with the submission
@@ -515,6 +517,23 @@ often repairs happen, every changed call mapped to a missed point, no lost
 call, no submission introduced by a repair, text present, no empty implicit
 list), latency p50 <= 180 s (VCO-D12), the GPU gates, and a DeepSWE subset
 where verified scores at least as think with no early submission.
+
+### VCO-D17 — A tool route instead of step verification (2026-10-04, PR #619)
+
+Owner decision. The route judge offers a third route, TOOL, for a request
+that requires a tool call (the caller offers tools and the reply is expected
+to call one: an agent loop's turn, or a request to act with the tools). It
+is answered by one DeepSeek call at max effort with the caller's tools and is
+not verified. `kairyu-verified` offers THINK/TOOL/VERIFIED and
+`kairyu-verified-always` TOOL/VERIFIED. VCO-D16's step profile and STEP
+route are removed. The routing gate fails when 10 % or more of its
+tool-free conversations go to TOOL.
+
+Why: verifying a correct intermediate agent step against the request's
+requirements failed it, and its repair jumped to the final move (DeepSWE,
+closed PR #618); step verification did not remove that risk. Unverified
+direct tool answers at max effort are the baseline until a verification that
+lets correct intermediate steps pass is found.
 
 ## Limitations
 
