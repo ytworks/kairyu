@@ -62,7 +62,8 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
     assert request.trace_requested is True
     assert request.parallel_tool_calls is None
 
-    assert list(inspect.signature(Conductor).parameters)[-9:] == [
+    # New parameters append after the existing positional ones.
+    assert list(inspect.signature(Conductor).parameters)[-10:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
         "expose_intermediate_outputs",
@@ -72,6 +73,7 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
         "reasoning_effort",
         "public_output_floor",
         "decision_workers",
+        "public_reasoning_effort",
     ]
     assert list(inspect.signature(run_moa).parameters)[-3:] == [
         "final_parallel_tool_calls",
@@ -423,10 +425,9 @@ async def test_concurrent_calls_do_not_mix_request_intent():
     assert len(second_result.completions) == 3
 
 
-@pytest.mark.parametrize(
-    ("messages", "max_chars"),
-    [
-        # PR #618 review: the bound held only for the omitted middle.
+def test_bounded_conversation_never_exceeds_its_bound():
+    # PR #618 review: the bound held only for the omitted middle.
+    cases = [
         ([{"role": "user", "content": "u" * 4000}], 1500),
         (
             [
@@ -443,12 +444,11 @@ async def test_concurrent_calls_do_not_mix_request_intent():
             ],
             120_000,
         ),
-    ],
-)
-def test_bounded_conversation_never_exceeds_its_bound(messages, max_chars):
-    bounded, omitted = bounded_conversation(messages, max_chars)
+    ]
+    for messages, max_chars in cases:
+        bounded, omitted = bounded_conversation(messages, max_chars)
 
-    assert len(json.dumps(bounded, ensure_ascii=False)) <= max_chars
-    assert bounded[0]["role"] == messages[0]["role"]
-    assert bounded[-1]["role"] == messages[-1]["role"]
-    assert omitted == len(messages) - len(bounded)
+        assert len(json.dumps(bounded, ensure_ascii=False)) <= max_chars
+        assert bounded[0]["role"] == messages[0]["role"]
+        assert bounded[-1]["role"] == messages[-1]["role"]
+        assert omitted == len(messages) - len(bounded)

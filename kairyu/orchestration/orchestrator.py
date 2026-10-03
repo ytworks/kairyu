@@ -2051,6 +2051,8 @@ class Orchestrator:
             final_tools_in_prompt=call.tools_in_prompt,
             final_structured_format_in_prompt=call.structured_format_in_prompt,
             final_parallel_tool_calls=call.parallel_tool_calls,
+            # The caller's own effort, as the public API reads it.
+            public_reasoning_effort=call.reasoning_effort,
             final_tool_call_protocol=call.tool_call_protocol,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(roles),

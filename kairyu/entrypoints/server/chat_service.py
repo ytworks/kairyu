@@ -65,6 +65,7 @@ from kairyu.sampling_params import (
 from kairyu.tool_call_markup import (
     GENERIC_TOOL_CALL,
     call_is_selected,
+    published_text,
     strict_json_loads,
     tool_call_payload,
 )
@@ -1461,15 +1462,7 @@ def _build_choice(
     reasoning_content: str | None = None,
     reasoning_effort: str | None = None,
 ) -> Choice:
-    if reasoning_content is None and reasoning_effort is not None:
-        candidate = text
-        has_opening = candidate.startswith("<think>")
-        if has_opening:
-            candidate = candidate[len("<think>") :]
-        if "</think>" in candidate:
-            reasoning_content, text = candidate.split("</think>", 1)
-        elif has_opening:
-            reasoning_content, text = candidate, ""
+    reasoning_content, text = published_text(text, reasoning_content, reasoning_effort)
     tool_calls = []
     if tool_choice.mode != "none":
         tool_calls = [

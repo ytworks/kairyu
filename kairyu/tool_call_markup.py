@@ -79,6 +79,42 @@ def tool_call_payload(payload: object) -> tuple[str, str] | None:
         return None
 
 
+def split_inline_reasoning(text: str) -> tuple[str | None, str]:
+    """``(reasoning, text)`` of a completion whose reasoning is inline.
+
+    A leading ``<think>`` opens the reasoning; ``</think>`` closes it. An
+    unclosed opening makes the whole text reasoning; without either marker
+    there is no reasoning.
+    """
+
+    candidate = text
+    has_opening = candidate.startswith("<think>")
+    if has_opening:
+        candidate = candidate[len("<think>") :]
+    if "</think>" in candidate:
+        reasoning, rest = candidate.split("</think>", 1)
+        return reasoning, rest
+    if has_opening:
+        return candidate, ""
+    return None, text
+
+
+def published_text(
+    text: str,
+    reasoning_content: str | None,
+    reasoning_effort: str | None,
+) -> tuple[str | None, str]:
+    """``(reasoning_content, text)`` as the public API publishes a completion.
+
+    With a caller effort and no separate reasoning, inline reasoning moves to
+    ``reasoning_content`` before tool calls are read from the text.
+    """
+
+    if reasoning_content is None and reasoning_effort is not None:
+        return split_inline_reasoning(text)
+    return reasoning_content, text
+
+
 def call_is_selected(
     name: str,
     mode: str,
@@ -149,6 +185,8 @@ def generic_tool_calls(
 __all__ = [
     "GENERIC_TOOL_CALL",
     "call_is_selected",
+    "published_text",
+    "split_inline_reasoning",
     "tool_selection",
     "generic_tool_calls",
     "strict_json_loads",

@@ -89,6 +89,7 @@ from kairyu.entrypoints.server.tool_stream import (
     tool_stream_scanner_for,
 )
 from kairyu.sse import escape_json_line_separators
+from kairyu.tool_call_markup import split_inline_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -701,16 +702,7 @@ def _tools_active(chat_request: ChatCompletionRequest) -> bool:
 def _strip_inline_reasoning(text: str) -> str:
     """Mirror ``_build_choice``'s inline ``<think>`` split for raw text."""
 
-    candidate = text
-    has_opening = candidate.startswith("<think>")
-    if has_opening:
-        candidate = candidate[len("<think>") :]
-    if "</think>" in candidate:
-        _reasoning, candidate = candidate.split("</think>", 1)
-        return candidate
-    if has_opening:
-        return ""
-    return text
+    return split_inline_reasoning(text)[1]
 
 
 def _enforce_tool_gates(

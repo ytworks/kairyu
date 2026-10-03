@@ -72,6 +72,7 @@ from kairyu.sampling_params import (
     SamplingParams,
     resolve_parallel_tool_calls,
 )
+from kairyu.tool_call_markup import published_text
 
 _PASS_PREFIX = "PASS"
 
@@ -648,6 +649,7 @@ class Conductor:
         reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
         decision_workers: Mapping[str, DecisionBackend] | None = None,
+        public_reasoning_effort: str | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -676,6 +678,9 @@ class Conductor:
         self._final_tools_in_prompt = final_tools_in_prompt
         self._final_structured_format_in_prompt = final_structured_format_in_prompt
         self._final_parallel_tool_calls = final_parallel_tool_calls
+        # The caller's own reasoning_effort (None when omitted), which the
+        # public API uses to split inline reasoning from the published text.
+        self._public_reasoning_effort = public_reasoning_effort
         self._final_tool_call_protocol = final_tool_call_protocol
         self._cost_model = cost_model
         self._usage_observer = usage_observer
@@ -2326,6 +2331,7 @@ class Conductor:
         verifier: RoleSpec,
         depth: int,
         text: str,
+        completions: tuple[CompletionOutput, ...],
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
     ) -> ChecklistVerdict:
         """Judge one attempt: every question in one System One request."""
@@ -2343,6 +2349,12 @@ class Conductor:
         run.budget = reserved
         # Only the selected final unit is published; internal outputs keep their text.
         published = target.name if target.name == self._selected_final_unit().name else None
+        if published is not None:
+            # The judge reads the text the API publishes: inline reasoning is
+            # split off first, as in the public response (and its tool calls
+            # with it).
+            reasoning = completions[0].reasoning_content if completions else None
+            text = published_text(text, reasoning, self._public_reasoning_effort)[1]
         completed = 0
 
         def on_read(usage: tuple[int, int]) -> None:
@@ -2415,7 +2427,7 @@ class Conductor:
         started_at = utc_now_iso()
         try:
             verdict = await self._checklist_verdict(
-                run, session, query, spec, verifier, depth, text, event_sink
+                run, session, query, spec, verifier, depth, text, completions, event_sink
             )
         except ChecklistUnavailable as unavailable:
             if unavailable.usage != (0, 0):

@@ -43,9 +43,10 @@
 <body>
 <main>
   <h1>Verified Answers</h1>
-  <p class="sub">Every request takes the verified path (model kairyu-verified-always). DeepSeek-V4.1 writes the answer and lists the points it must cover; OpenJev
-    keeps the points the request needs and checks that the answer contains each one; Kairyu publishes it with a guarantee
-    flag only when every point is covered.</p>
+  <p class="sub">Every request takes the verified path (model kairyu-verified-always). DeepSeek-V4.1 lists the points the answer must cover and writes the answer;
+    OpenJev checks each point against the answer, then reads those results, the prompt and the answer and decides whether
+    the answer can be adopted as the reply the user expects. The guarantee flag is that adoption decision (its p at or
+    above the threshold); a point marked ✗ is one a repair was asked to fix.</p>
   <textarea id="prompt" placeholder="Ask anything. Paste material (documents, tool output) into the request."></textarea>
   <div class="row">
     <button id="send">Send</button>
@@ -73,12 +74,13 @@ function render(body, seconds) {
     html += v.guaranteed
       ? '<span class="badge ok">Guaranteed</span>'
       : '<span class="badge no">Not guaranteed</span>';
-    html += ` <span class="sub">${v.attempts} attempt(s) · threshold ${v.threshold} · ${seconds.toFixed(1)} s</span>`;
+    const adoption = v.acceptance == null ? "not read" : Number(v.acceptance).toFixed(3);
+    html += ` <span class="sub">adoption p ${adoption} (threshold ${v.threshold}) · ${v.attempts} attempt(s) · ${seconds.toFixed(1)} s</span>`;
     if (!v.guaranteed) html += `<p class="sub">${esc(REASONS[v.reason] || v.reason)}</p>`;
   }
   html += `<div class="answer" style="margin-top:12px">${esc(message.content || "")}</div></div>`;
   if (v && v.requirements?.length) {
-    html += '<div class="card"><strong>Points</strong><div class="table-wrap"><table><tr><th>ID</th><th>Point</th><th>Origin</th><th>p</th></tr>';
+    html += '<div class="card"><strong>Points</strong> <span class="sub">(per-point check; ✗ = sent to the repair; the guarantee is the adoption decision above)</span><div class="table-wrap"><table><tr><th>ID</th><th>Point</th><th>Origin</th><th>p</th></tr>';
     for (const r of v.requirements) {
       html += `<tr class="${r.passed ? "" : "fail"}"><td>${esc(r.id)}</td><td>${esc(r.proposition)}</td>`
         + `<td>${esc(r.tags?.origin || "")}</td>`

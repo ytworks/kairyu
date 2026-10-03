@@ -390,22 +390,6 @@ async def test_a_long_conversation_is_bounded_so_the_checklist_is_judged():
     assert state["request_omitted_messages"] == len(turns) - len(state["request"])
 
 
-async def test_unavailable_judge_publishes_the_draft_unverified():
-    backend = RoutedBackend({"generator": ["The answer is 42."]})
-    conductor = Conductor(
-        _answer_roles(),
-        {"gen": backend},
-        decision_workers={"judge": FakeSystemOne(down=True)},
-    )
-
-    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
-
-    assert result.final_unit_ok
-    assert result.final_text == "The answer is 42."
-    assert result.verification.as_dict()["guaranteed"] is False
-    assert result.verification.reason == "judge_unavailable"
-
-
 async def test_a_seeded_answer_keeps_its_seeds_finish_reason():
     class LengthBackend(RoutedBackend):
         async def generate(self, request):
@@ -506,55 +490,42 @@ BASH = ({"type": "function", "function": {"name": "bash"}},)
 LOOKUP = ({"type": "function", "function": {"name": "lookup"}},)
 
 
-async def test_a_judged_tool_call_reaches_the_judge_as_the_api_publishes_it():
-    # DeepSWE (PR #618): as <tool_call> markup inside text, Jev doubted that a
-    # real call was present ("includes a bash call" p 0.74). Like the API, a
-    # reply that publishes calls carries no text, so the judge never credits
-    # text the caller will not receive.
+async def test_the_judge_reads_the_answer_exactly_as_the_api_publishes_it():
+    # PR #618 reviews and DeepSWE: the judge reads the published reply. Calls
+    # the API publishes arrive as calls with no text (Jev doubted calls given
+    # as markup); markup the API does not publish stays text: invalid
+    # arguments, an undeclared tool, tool_choice none, or a call inside
+    # inline reasoning the API moves to reasoning_content. Other state
+    # sections keep their text.
     call = '<tool_call>{"name":"bash","arguments":{"command":"ls -la"}}</tool_call>'
-    backend = RoutedBackend({"generator": [f"Look first.{call}"]})
-    judge = FakeSystemOne()
-    roles = _answer_roles(
-        state=(StateSection("answer", "answer"), StateSection("draft", "generator"))
-    )
-    conductor = Conductor(
-        roles, {"gen": backend}, decision_workers={"judge": judge}, final_tools=BASH
-    )
+    cases = [
+        (f"Look first.{call}", BASH, None, None,
+         {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}]}),
+        ('Look.<tool_call>{"name":"bash","arguments":[]}</tool_call>', BASH, None, None, None),
+        ('Look.<tool_call>{"name":"bash","arguments":{}}</tool_call>', LOOKUP, None, None, None),
+        ('Look.<tool_call>{"name":"bash","arguments":{}}</tool_call>', BASH, "none", None, None),
+        (f"<think>I might use {QUOTED_CALL}</think>Done.", BASH, None, "low", "Done."),
+    ]
+    for text, tools, tool_choice, effort, expected in cases:
+        backend = RoutedBackend({"generator": [text]})
+        judge = FakeSystemOne()
+        roles = _answer_roles(
+            state=(StateSection("answer", "answer"), StateSection("draft", "generator"))
+        )
+        conductor = Conductor(
+            roles,
+            {"gen": backend},
+            decision_workers={"judge": judge},
+            final_tools=tools,
+            final_tool_choice=tool_choice,
+            public_reasoning_effort=effort,
+        )
 
-    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
+        await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
 
-    state = judge.bodies[0]["state"]
-    assert state["answer"] == {
-        "text": "",
-        "tool_calls": [{"name": "bash", "arguments": {"command": "ls -la"}}],
-    }
-    # Only the judged answer is published; other sections keep their context.
-    assert state["draft"] == f"Look first.{call}"
-
-
-@pytest.mark.parametrize(
-    ("payload", "tools", "tool_choice"),
-    [
-        # PR #618 reviews: the public API publishes none of these as a call.
-        ('{"name":"bash","arguments":[]}', BASH, None),
-        ('{"name":"bash","arguments":{}}', LOOKUP, None),
-        ('{"name":"bash","arguments":{}}', BASH, "none"),
-    ],
-)
-async def test_the_judge_reads_as_calls_only_what_the_api_publishes(payload, tools, tool_choice):
-    backend = RoutedBackend({"generator": [f"Look.<tool_call>{payload}</tool_call>"]})
-    judge = FakeSystemOne()
-    conductor = Conductor(
-        _answer_roles(),
-        {"gen": backend},
-        decision_workers={"judge": judge},
-        final_tools=tools,
-        final_tool_choice=tool_choice,
-    )
-
-    await conductor.run("Fix the bug.", budget=Budget(max_steps=12))
-
-    assert judge.bodies[0]["state"]["answer"] == f"Look.<tool_call>{payload}</tool_call>"
+        state = judge.bodies[0]["state"]
+        assert state["answer"] == (text if expected is None else expected), text
+        assert state["draft"] == text
 
 
 async def test_a_structured_tool_output_keeps_its_character_bound():
@@ -590,48 +561,6 @@ async def test_a_structured_tool_output_keeps_its_character_bound():
     answer = judge.bodies[0]["state"]["answer"]
     assert answer["tool_calls"] == [{"name": "bash", "arguments": {"command": "ls"}}]
     assert len(json.dumps(answer)) <= 500
-
-
-async def test_a_checklist_with_nothing_to_judge_never_guarantees():
-    # DeepSWE (PR #618): adoption dropped every point and the answer was
-    # "guaranteed" without a single judged item.
-    roles = (
-        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
-        RoleSpec(
-            name="answer",
-            worker="gen",
-            prompt="[answer] {query}",
-            depends_on=("points",),
-        ),
-        RoleSpec(
-            name="checklist",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="answer",
-            depends_on=("answer",),
-            checklist=ChecklistConfig(
-                questions=(
-                    ChecklistQuestion(
-                        id="{item[id]}",
-                        proposition="{item[point]}",
-                        foreach=ItemSource(role="points", path="points"),
-                    ),
-                ),
-                state=(StateSection("answer", "answer"),),
-                on_unavailable="publish_unverified",
-            ),
-        ),
-    )
-    backend = RoutedBackend({"points": ['{"points": []}'], "answer": ["Done."]})
-    judge = FakeSystemOne()
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
-
-    result = await conductor.run("q", budget=Budget(max_steps=8))
-
-    assert result.verification.guaranteed is False
-    assert result.verification.reason == "checklist_unavailable"
-    assert judge.bodies == []
 
 
 def _accepting_roles(threshold: float = 0.5) -> tuple[RoleSpec, ...]:
@@ -721,7 +650,10 @@ async def test_an_unavailable_acceptance_read_still_spends_the_coverage_read():
             _accepting_roles(), {"gen": backend}, decision_workers={"judge": judge}
         )
         result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+        # An unavailable judge publishes the draft, unverified.
+        assert result.final_unit_ok and result.final_text == "It is 42."
         assert result.verification.reason == "judge_unavailable"
+        assert result.verification.guaranteed is False
         usages.append(result.usage)
         steps.append(result.budget_state.steps_used)
 
@@ -860,47 +792,51 @@ async def test_a_seed_keeps_the_callers_legacy_parallel_tool_restriction():
     assert backend.requests[0].parallel_tool_calls is False
 
 
-async def test_a_curation_read_over_an_empty_list_passes_when_declared():
-    # Codex/GPU (PR #618): an implicit extractor that rightly lists nothing
-    # left adoption with no item; the read was unavailable and the whole run
-    # lost its guarantee. `on_empty: pass` lets a curation read skip.
-    backend = RoutedBackend({"implicit": ['{"points": []}'], "generator": ["It is 42."]})
+async def test_a_checklist_with_nothing_to_judge_passes_only_a_declared_curation_read():
+    # DeepSWE (PR #618): a verdict over no item vouches for nothing, so it is
+    # unavailable and the run unguaranteed. An implicit extractor that rightly
+    # lists nothing left adoption with no item; `on_empty: pass` lets that
+    # curation read skip without voiding the guarantee.
     generator, *rest = _answer_roles()
-    roles = (
-        RoleSpec(name="implicit", worker="gen", prompt="[implicit] {query}"),
-        RoleSpec(
-            name="adopt",
-            worker="judge",
-            prompt="",
-            role_type="verifier",
-            verifies="implicit",
-            depends_on=("implicit",),
-            checklist=ChecklistConfig(
-                questions=(
-                    ChecklistQuestion(
-                        id="{item[id]}",
-                        proposition="{item[point]}",
-                        foreach=ItemSource(role="implicit", path="points"),
-                        group="necessity",
-                        threshold=0.0,
+    for on_empty, guaranteed, reads in (("unavailable", False, 0), ("pass", True, 1)):
+        backend = RoutedBackend({"implicit": ['{"points": []}'], "generator": ["It is 42."]})
+        roles = (
+            RoleSpec(name="implicit", worker="gen", prompt="[implicit] {query}"),
+            RoleSpec(
+                name="adopt",
+                worker="judge",
+                prompt="",
+                role_type="verifier",
+                verifies="implicit",
+                depends_on=("implicit",),
+                checklist=ChecklistConfig(
+                    questions=(
+                        ChecklistQuestion(
+                            id="{item[id]}",
+                            proposition="{item[point]}",
+                            foreach=ItemSource(role="implicit", path="points"),
+                            group="necessity",
+                            threshold=0.0,
+                        ),
+                    ),
+                    state=(StateSection("request", "request"),),
+                    max_refinements=0,
+                    on_unavailable="publish_unverified",
+                    on_empty=on_empty,
+                    curate=CurationConfig(
+                        targets=(CurationTarget("implicit", "points"),), drop_group="necessity"
                     ),
                 ),
-                state=(StateSection("request", "request"),),
-                max_refinements=0,
-                on_unavailable="publish_unverified",
-                on_empty="pass",
-                curate=CurationConfig(
-                    targets=(CurationTarget("implicit", "points"),), drop_group="necessity"
-                ),
             ),
-        ),
-        replace(generator, depends_on=("implicit",)),
-        *rest,
-    )
-    judge = FakeSystemOne()
-    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+            replace(generator, depends_on=("implicit",)),
+            *rest,
+        )
+        judge = FakeSystemOne()
+        conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
 
-    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+        result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
 
-    assert result.verification.guaranteed is True
-    assert len(judge.bodies) == 1  # only the final checklist read
+        assert result.verification.guaranteed is guaranteed, on_empty
+        assert len(judge.bodies) == reads  # the final checklist's read only
+        if not guaranteed:
+            assert result.verification.reason == "checklist_unavailable"

@@ -1,13 +1,16 @@
 # Checklist-verified answers: DeepSeek-V4.1 (6 GPUs) + OpenJev (2 GPUs)
 
-Every answer comes back with a guarantee flag. The flag is on only when the
-answer covers every point of a requirement set that is mutually exclusive
-and collectively exhaustive (MECE) with respect to the request: DeepSeek
-lists the points (one per issue, together covering the request), OpenJev
-keeps only the points the request needs, and OpenJev confirms that the
-answer contains each kept point. Otherwise the best available answer is
-returned with the flag off and the reason. No rule-based check judges an
-answer: every judgment is a model reading (VCO-D15).
+Every answer comes back with a guarantee flag. DeepSeek lists the points the
+request asks for (explicit) and presupposes (implicit), one per issue,
+together covering the request; OpenJev drops the implicit points the reply
+does not need. After the answer is written, OpenJev checks each point against
+it, then reads those results, the prompt and the answer and decides whether
+the answer can be adopted as the reply the user expects. The flag is that
+adoption decision: on when its p reaches the threshold (0.99), even if a
+point check failed; a failed point check sends the point to a repair.
+Otherwise the best available answer is returned with the flag off and the
+reason. No rule-based check judges an answer: every judgment is a model
+reading (VCO-D15).
 
 Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D1,
 D7-D9, D15); framework mechanisms: m1 D8 (checklist verifiers), m1 D9 (the
