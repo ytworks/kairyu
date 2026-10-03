@@ -18,7 +18,7 @@ from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.checklist import (
-    ChecklistCheck,
+    AcceptanceConfig,
     ChecklistConfig,
     ChecklistQuestion,
     CurationConfig,
@@ -90,7 +90,6 @@ def _item_source(source: ItemSourceSpec | None) -> ItemSource | None:
         role=source.role,
         path=source.path,
         where=source.where,
-        pairs_sharing=source.pairs_sharing,
     )
 
 
@@ -98,30 +97,11 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
     if spec is None:
         return None
     return ChecklistConfig(
-        checks=tuple(
-            ChecklistCheck(
-                id=check.id,
-                proposition=check.proposition,
-                primitive=check.primitive,
-                params=check.params,
-                foreach=_item_source(check.foreach),
-                primitive_key=check.primitive_key,
-                params_key=check.params_key,
-                sources_key=check.sources_key,
-                stage=check.stage,
-                group=check.group,
-                semantic_fallback=check.semantic_fallback,
-                tags=check.tags,
-            )
-            for check in spec.checks
-        ),
         questions=tuple(
             ChecklistQuestion(
                 id=question.id,
                 proposition=question.proposition,
                 foreach=_item_source(question.foreach),
-                sources_key=question.sources_key,
-                expect=question.expect,
                 threshold=question.threshold,
                 group=question.group,
                 subject=question.subject,
@@ -133,10 +113,7 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
             )
             for question in spec.questions
         ),
-        state=tuple(
-            StateSection(key=section.key, source=section.source, max_chars=section.max_chars)
-            for section in spec.state
-        ),
+        state=_state_sections(spec.state),
         subject=spec.subject,
         threshold=spec.threshold,
         samples=spec.samples,
@@ -148,15 +125,42 @@ def _checklist(spec: ChecklistSpec | None) -> ChecklistConfig | None:
         feedback_header=spec.feedback_header,
         feedback_item=spec.feedback_item,
         max_refinements=spec.max_refinements,
-        on_exhausted=spec.on_exhausted,
         on_unavailable=spec.on_unavailable,
         unverified_from=spec.unverified_from,
-        guarantee_groups=spec.guarantee_groups,
         curate=(
             None
             if spec.curate is None
-            else CurationConfig(**spec.curate.model_dump())
+            else CurationConfig(
+                items_path=spec.curate.items_path,
+                drop_group=spec.curate.drop_group,
+                drop_below=spec.curate.drop_below,
+                id_key=spec.curate.id_key,
+            )
         ),
+        acceptance=(
+            None
+            if spec.acceptance is None
+            else AcceptanceConfig(
+                ask=spec.acceptance.ask,
+                state=_state_sections(spec.acceptance.state),
+                criteria_true=spec.acceptance.criteria_true,
+                criteria_false=spec.acceptance.criteria_false,
+                threshold=spec.acceptance.threshold,
+                results_key=spec.acceptance.results_key,
+            )
+        ),
+    )
+
+
+def _state_sections(sections) -> tuple[StateSection, ...]:
+    return tuple(
+        StateSection(
+            key=section.key,
+            source=section.source,
+            max_chars=section.max_chars,
+            max_total_chars=section.max_total_chars,
+        )
+        for section in sections
     )
 
 
@@ -181,7 +185,6 @@ def role_spec(role: RoleNodeSpec) -> RoleSpec:
         reasoning_open_tag=role.reasoning_open_tag,
         requires=role.requires,
         checklist=_checklist(role.checklist),
-        seed_from=role.seed_from,
         refine_prompt=role.refine_prompt,
     )
 
@@ -331,6 +334,7 @@ def build_orchestrator(
                 else 0.5
             ),
             max_message_chars=spec.profile_judge.max_message_chars,
+            max_conversation_chars=spec.profile_judge.max_conversation_chars,
         )
         if spec.profile_judge is not None
         else None

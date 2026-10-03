@@ -3,7 +3,8 @@
 /**
  * Browser gate for this example's answer page (VCO-D6): send one request in
  * the page and require the answer, a guarantee badge, and — for a guaranteed
- * answer — a requirement table with every probability at or above threshold.
+ * answer — the adoption p at or above its threshold next to the badge, and
+ * the per-point table (VCO-D15 item 7: adoption decides the guarantee).
  */
 
 import { chromium } from 'playwright';
@@ -30,9 +31,10 @@ try {
 	if (!answer) throw new Error('the page shows no answer');
 	if (label === 'Guaranteed') {
 		const rows = await page.locator('table tr').count();
-		const failing = await page.locator('table tr.fail').count();
-		if (rows < 2 || failing !== 0) {
-			throw new Error(`guaranteed answer needs passing requirement rows (rows=${rows}, failing=${failing})`);
+		const detail = (await page.locator('.badge + .sub').textContent()) ?? '';
+		const match = detail.match(/adoption p ([0-9.]+) \(threshold ([0-9.]+)\)/);
+		if (rows < 2 || !match || Number(match[1]) < Number(match[2])) {
+			throw new Error(`guaranteed answer needs point rows and adoption p >= threshold (rows=${rows}, ${JSON.stringify(detail)})`);
 		}
 	} else if (label !== 'Not guaranteed') {
 		throw new Error(`unexpected badge ${JSON.stringify(label)}`);

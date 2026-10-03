@@ -3,13 +3,20 @@
 
 InFoBench's expert annotation pairs model answers with decomposed yes/no
 requirements and a human pass/fail label for each. Every requirement is
-judged through this example's own production path: DeepSeek turns the
-question into a condition statement (like the extractor writes), the
-example's state builder lists the answer's claims, and OpenJev reads the
-example's checklist state and question wording through Kairyu's System One
-API. tau_hi is the smallest threshold whose accepted requirements have a
-one-sided 95 % Clopper-Pearson upper bound on the violation rate <= alpha on
-the calibration half; the held-out half is reported unchanged.
+judged through this example's own production path (VCO-D15): DeepSeek turns
+the question into a point statement (like the extractor writes) and runs the
+example's history role, and OpenJev reads the example's coverage question for
+that point over the request, the history summary and the answer, through the
+same Kairyu checklist code as serving. tau_hi is the smallest
+threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
+upper bound on the violation rate <= alpha on the calibration half; the
+held-out half is reported unchanged.
+
+The acceptance read (VCO-D15 item 7) is measured the same way, one read per
+response, labelled acceptable when every requirement label is yes; the
+checklist runs whole (coverage then acceptance), as in serving. No threshold
+meets alpha there (MEASUREMENTS.md); the report gives the evidence for the
+owner's tau_accept.
 
 Usage: ./verify.sh calibrate   (after ./run.sh up)
 """
@@ -44,7 +51,8 @@ from kairyu.entrypoints.server.chat_service import (  # noqa: E402
     validate_orchestration_chat_input,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest  # noqa: E402
-from kairyu.orchestration.checklist import ChecklistConfig, ChecklistRun  # noqa: E402
+from kairyu.orchestration.checklist import ChecklistConfig  # noqa: E402
+from kairyu.orchestration.checklist import judge as judge_checklist  # noqa: E402
 from kairyu.orchestration.request import conversation_text  # noqa: E402
 
 SPEC = control.SPEC
@@ -163,79 +171,86 @@ _STATEMENT_PROMPT = (
 
 
 def prepare(sample: dict, l1_url: str, roles: dict[str, dict]) -> dict:
-    """Condition statements and the state builder's claims for one sample."""
+    """Point statements and the history summary for one sample."""
 
-    query = _query(sample["request"])
     statements = [
         _deepseek(l1_url, _STATEMENT_PROMPT.format(question=question)).strip()
         for question in sample["questions"]
     ]
-    builder = roles["state_builder"]
-    claims = _deepseek(
-        l1_url,
-        builder["prompt"].format_map(
-            {"query": query, "conversation": conversation_text(query), "answer": sample["answer"]}
-        ),
-        response_format=builder["sampling"]["response_format"],
-    )
-    return {**sample, "statements": statements, "claims": claims}
+    conversation = conversation_text(_query(sample["request"]))
+    history = _deepseek(
+        l1_url, roles["history"]["prompt"].format_map({"conversation": conversation})
+    ).strip()
+    return {**sample, "statements": statements, "history": history}
 
 
 def _requirement_checklist() -> ChecklistConfig:
-    """The production checklist reduced to its requirement questions.
+    """The production coverage checklist, reduced to its explicit-point question.
 
-    The same Kairyu code (ChecklistRun) builds the Jev state and questions
-    as in serving; only the deterministic checks and the per-claim G1
-    questions are left out, because InFoBench labels requirements only.
+    The same Kairyu code builds the Jev state and questions as in serving;
+    InFoBench's labelled requirements stand in for the explicit points.
     """
 
     spec = load_spec(HERE / "verified-always.yaml")
     node = next(role for role in spec.roles if role.name == "checklist")
     config = role_spec(node).checklist
     assert config is not None
-    requirement = next(question for question in config.questions if question.id == "{item[id]}")
-    return dataclasses.replace(config, checks=(), questions=(requirement,))
+    point = next(
+        question
+        for question in config.questions
+        if question.foreach is not None and question.foreach.role == "extract"
+    )
+    return dataclasses.replace(config, questions=(point,))
+
+
+def _outputs(sample: dict) -> tuple[list[dict], dict[str, str]]:
+    requirements = [
+        {"id": f"Q{index}", "point": text}
+        for index, text in enumerate(sample["statements"], start=1)
+    ]
+    outputs = {
+        "extract": json.dumps({"points": requirements}, ensure_ascii=False),
+        "answer": sample["answer"],
+        "history": sample["history"],
+    }
+    return requirements, outputs
+
+
+def _read(config: ChecklistConfig, sample: dict):
+    _requirements, outputs = _outputs(sample)
+
+    async def read():
+        # The serving path: the L2 reads both OpenJev replicas directly.
+        backend = HTTPSystemOneBackend(
+            base_urls=OPENJEV_URLS, upstream_model=SPEC["systemone"]["model"], timeout_s=600
+        )
+        try:
+            return await judge_checklist(config, backend, outputs, _query(sample["request"]))
+        finally:
+            await backend.shutdown()
+
+    return asyncio.run(read())
 
 
 def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
     """P(requirement satisfied) per requirement, via the production checklist."""
 
     del roles
+    config = dataclasses.replace(_requirement_checklist(), acceptance=None)
+    requirements, _ = _outputs(sample)
+    verdict = _read(config, sample)
+    by_id = {item.id: item.p for item in verdict.items}
+    return [by_id[item["id"]] for item in requirements]
+
+
+def accept(sample: dict) -> float:
+    """P(accepted as the reply), via the production checklist with acceptance."""
+
     config = _requirement_checklist()
-    requirements = [
-        {
-            "id": f"Q{index}",
-            "proposition": text,
-            "kind": "semantic",
-            "origin": "explicit",
-            "sources": ["U1"],
-        }
-        for index, text in enumerate(sample["statements"], start=1)
-    ]
-    outputs = {
-        "extract": json.dumps(
-            {"units": [{"id": "U1", "text": sample["request"]}], "requirements": requirements},
-            ensure_ascii=False,
-        ),
-        "answer": sample["answer"],
-        "state_builder": sample["claims"],
-    }
-    query = _query(sample["request"])
-
-    async def read() -> list[float]:
-        # The serving path: the L2 reads both OpenJev replicas directly.
-        backend = HTTPSystemOneBackend(
-            base_urls=OPENJEV_URLS, upstream_model=SPEC["systemone"]["model"], timeout_s=600
-        )
-        try:
-            run = ChecklistRun(config, target_text=sample["answer"], sources=query)
-            verdict = await run.decide(backend, outputs, query)
-        finally:
-            await backend.shutdown()
-        by_id = {item.id: item.p for item in verdict.items}
-        return [by_id[item["id"]] for item in requirements]
-
-    return asyncio.run(read())
+    assert config.acceptance is not None
+    verdict = _read(config, sample)
+    assert verdict.acceptance is not None
+    return verdict.acceptance
 
 
 def _binomial_cdf(k: int, n: int, p: float) -> float:
@@ -299,18 +314,30 @@ def main() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     roles = _roles()
-    cache = directory / "judged.jsonl"
+    # VCO-D15 question and state with four denoise passes; reads of earlier
+    # formats are not reused, but their DeepSeek point statements and history
+    # summaries are (the same prompts at temperature 0).
+    cache = directory / "judged-coverage-v3.jsonl"
     done = {}
     if cache.is_file():
         for line in cache.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             done[(row["id"], row["model"])] = row
+    earlier = {}
+    for name in ("judged-coverage-v2.jsonl",):
+        if (directory / name).is_file():
+            for line in (directory / name).read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                earlier[(row["id"], row["model"])] = row
 
     def work(sample: dict) -> dict:
         key = (sample["id"], sample["model"])
         if key in done:
             return done[key]
-        prepared = prepare(sample, l1_url, roles)
+        if key in earlier:
+            prepared = {**sample, **{k: earlier[key][k] for k in ("statements", "history")}}
+        else:
+            prepared = prepare(sample, l1_url, roles)
         return {**prepared, "p": judge(prepared, api_url, roles)}
 
     pending = [row for row in rows if (row["id"], row["model"]) not in done]
@@ -349,6 +376,39 @@ def main() -> None:
         report["holdout_responses"] = response_level(halves["holdout"], chosen["tau"])
     (directory / "tau.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+
+    accept_cache = directory / "judged-acceptance-v2.jsonl"
+    accepted = {}
+    if accept_cache.is_file():
+        for line in accept_cache.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            accepted[(row["id"], row["model"])] = row["acceptance"]
+    pending = [row for row in judged if (row["id"], row["model"]) not in accepted]
+    print(f"{len(pending)} responses to read for acceptance", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for row, value in zip(pending, pool.map(accept, pending), strict=True):
+            accepted[(row["id"], row["model"])] = value
+            with accept_cache.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps({"id": row["id"], "model": row["model"], "acceptance": value})
+                    + "\n"
+                )
+    responses = {
+        name: [(accepted[(row["id"], row["model"])], int(0 not in row["labels"])) for row in part]
+        for name, part in halves.items()
+    }
+    chosen = choose_tau(responses["calibration"], alpha, confidence)
+    acceptance = {
+        "responses": {name: len(values) for name, values in responses.items()},
+        "unacceptable": {
+            name: [label for _p, label in values].count(0) for name, values in responses.items()
+        },
+        "calibration": chosen,
+    }
+    if chosen["tau"] is not None:
+        acceptance["holdout"] = accepted_stats(responses["holdout"], chosen["tau"], confidence)
+    (directory / "tau-accept.json").write_text(json.dumps(acceptance, indent=2), encoding="utf-8")
+    print(json.dumps(acceptance, indent=2))
 
 
 if __name__ == "__main__":

@@ -105,48 +105,25 @@ class RoleSamplingSpec(BaseModel):
 
 
 class ItemSourceSpec(BaseModel):
-    """Items from a role's JSON output: a dotted ``path`` to a list of objects,
-    filtered by ``where``; ``pairs_sharing`` iterates item pairs instead."""
+    """Items from a role's JSON output: a dotted ``path`` to a list of
+    objects, filtered by ``where``."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: str = Field(min_length=1)
     path: str = ""
     where: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
-    pairs_sharing: str | None = Field(default=None, min_length=1)
-
-
-class ChecklistCheckSpec(BaseModel):
-    """A deterministic check (kairyu.orchestration.checks primitive)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    id: str = Field(min_length=1)
-    proposition: str = Field(min_length=1)
-    primitive: str = ""
-    params: dict = Field(default_factory=dict)
-    foreach: ItemSourceSpec | None = None
-    primitive_key: str = ""
-    params_key: str = ""
-    sources_key: str = ""
-    stage: Literal["pre", "post"] = "pre"
-    group: str = "checklist"
-    semantic_fallback: bool = False
-    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class ChecklistQuestionSpec(BaseModel):
     """A System One ``noul`` question. Without ``ask`` Kairyu builds it from
-    the requirement (does the subject satisfy the proposition?); ``expect``
-    names the passing answer."""
+    the requirement (does the subject satisfy the proposition?)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: str = Field(min_length=1)
     proposition: str = Field(min_length=1)
     foreach: ItemSourceSpec | None = None
-    sources_key: str = ""
-    expect: Literal["yes", "no"] = "yes"
     threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     group: str = "checklist"
     subject: str = ""
@@ -158,44 +135,50 @@ class ChecklistQuestionSpec(BaseModel):
 
 
 class StateSectionSpec(BaseModel):
-    """One field of the System One state: ``query`` or a role's output."""
+    """One field of the System One state: ``query``, ``request`` or a role's output."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     key: str = Field(min_length=1)
     source: str = Field(min_length=1)
     max_chars: int | None = Field(default=None, ge=1)
+    max_total_chars: int | None = Field(default=None, ge=1000)
 
 
 class CurationSpec(BaseModel):
-    """Drop / merge / pad the target's JSON list after the verdict."""
+    """Drop low-probability items from the target's JSON list after the verdict."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     items_path: str = Field(min_length=1)
-    id_key: str = "id"
-    sources_key: str = "sources"
-    proposition_key: str = "proposition"
-    drop_group: str = ""
+    drop_group: str = Field(min_length=1)
     drop_below: float = Field(default=0.5, ge=0.0, le=1.0)
-    merge_group: str = ""
-    merge_below: float = Field(default=0.5, ge=0.0, le=1.0)
-    merge_only_where: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
-    units_path: str = ""
-    unit_id_key: str = "id"
-    pad: dict = Field(default_factory=dict)
+    id_key: str = "id"
+
+
+class AcceptanceSpec(BaseModel):
+    """A final read on whether the target may be adopted as is (one noul
+    question over ``state`` plus the item results)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ask: str = Field(min_length=1)
+    state: tuple[StateSectionSpec, ...] = Field(min_length=1)
+    criteria_true: str = ""
+    criteria_false: str = ""
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    results_key: str = Field(default="checklist", min_length=1)
 
 
 class ChecklistSpec(BaseModel):
-    """A verifier judged without generation: deterministic checks, then
-    System One probabilities against ``threshold`` (see
+    """A verifier judged without generation: System One probabilities
+    against ``threshold``, all questions in one request (see
     kairyu.orchestration.checklist)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    checks: tuple[ChecklistCheckSpec, ...] = ()
-    questions: tuple[ChecklistQuestionSpec, ...] = ()
-    state: tuple[StateSectionSpec, ...] = ()
+    questions: tuple[ChecklistQuestionSpec, ...] = Field(min_length=1)
+    state: tuple[StateSectionSpec, ...] = Field(min_length=1)
     subject: str = "the state"
     threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     samples: int | None = Field(default=None, ge=1, le=32)
@@ -205,14 +188,12 @@ class ChecklistSpec(BaseModel):
     max_questions: int = Field(default=256, ge=1, le=4096)
     max_state_chars: int | None = Field(default=None, ge=1)
     feedback_header: str = "The following requirements are not met:"
-    feedback_item: str = "- [{id}] {proposition} (sources: {sources}; p={p}){detail}"
+    feedback_item: str = "- [{id}] {proposition} (p={p})"
     max_refinements: int | None = Field(default=None, ge=0)
-    on_exhausted: Literal["last", "latest_checks_passed"] = "last"
     on_unavailable: Literal["error", "publish_unverified"] = "error"
     unverified_from: str = ""
     curate: CurationSpec | None = None
-    guarantee_groups: tuple[str, ...] | None = None
-
+    acceptance: AcceptanceSpec | None = None
 
 class ExecutionLimitsSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -317,9 +298,6 @@ class RoleNodeSpec(BaseModel):
     # A verifier judged by deterministic checks and System One reads instead
     # of a generation call; its worker must be a systemone_ref worker.
     checklist: ChecklistSpec | None = None
-    # Attempt 0 publishes this upstream role's output unchanged; the role's
-    # own worker only generates refinements (from refine_prompt).
-    seed_from: str | None = Field(default=None, min_length=1)
     # Refinement prompt over the role outputs plus {previous} and {feedback};
     # empty keeps the default appended-feedback refinement.
     refine_prompt: str = ""
@@ -354,12 +332,10 @@ class RoleNodeSpec(BaseModel):
                     f"executor role {self.name!r} references roles outside its "
                     f"depends_on: {sorted(missing)}"
                 )
-        elif not self.prompt and self.checklist is None and self.seed_from is None:
+        elif not self.prompt and self.checklist is None:
             raise ValueError(f"role {self.name!r} requires a prompt")
         if self.checklist is not None and self.role_type != "verifier":
             raise ValueError(f"role {self.name!r}: only a verifier can declare a checklist")
-        if self.seed_from is not None and not self.refine_prompt:
-            raise ValueError(f"seeded role {self.name!r} requires a refine_prompt")
         for field_name in ("prompt", "prompt_headless", "refine_prompt"):
             _check_prompt_placeholders(self.name, field_name, getattr(self, field_name))
         if self.requires is not None and self.role_type in {"verifier", "executor"}:
@@ -484,6 +460,7 @@ class ProfileJudgeSpec(BaseModel):
     question: str = ""
     prefer: ProfileJudgePreferSpec | None = None
     max_message_chars: int = Field(default=4000, ge=1, le=1_000_000)
+    max_conversation_chars: int | None = Field(default=None, ge=1000, le=100_000_000)
 
     @model_validator(mode="after")
     def _choices_are_distinct(self) -> ProfileJudgeSpec:

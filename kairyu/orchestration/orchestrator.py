@@ -48,7 +48,9 @@ from kairyu.orchestration.execution import ExecutionBackend, ExecutorDescriptor
 from kairyu.orchestration.features import latest_user_view
 from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
+    MIN_CONVERSATION_CHARS,
     OrchestrationRequest,
+    bounded_conversation,
     conversation_messages,
     default_orchestration_request,
 )
@@ -222,11 +224,15 @@ class ProfileJudge:
     # decision worker: the route is read as one ``choice`` question over the
     # conversation. ``question`` is its instructions; ``prefer_label`` wins
     # whenever its probability reaches ``prefer_min_probability`` (else the
-    # most probable route); each message is cut to ``max_message_chars``.
+    # most probable route); each message is cut to ``max_message_chars``,
+    # and ``max_conversation_chars`` bounds the whole conversation so the
+    # read fits the judge's context (``bounded_conversation``), the omitted
+    # middle counted in ``conversation_omitted_messages``.
     question: str = ""
     prefer_label: str | None = None
     prefer_min_probability: float = 0.5
     max_message_chars: int = 4000
+    max_conversation_chars: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.choices) < 2:
@@ -239,6 +245,13 @@ class ProfileJudge:
             raise ValueError("profile_judge prefer_min_probability must be in [0, 1]")
         if self.max_message_chars < 1:
             raise ValueError("profile_judge max_message_chars must be positive")
+        if (
+            self.max_conversation_chars is not None
+            and self.max_conversation_chars < MIN_CONVERSATION_CHARS
+        ):
+            raise ValueError(
+                f"profile_judge max_conversation_chars must be at least {MIN_CONVERSATION_CHARS}"
+            )
         labels = [choice.label for choice in self.choices]
         if len(set(labels)) != len(labels):
             raise ValueError("profile_judge choice labels must be unique")
@@ -1020,14 +1033,28 @@ class Orchestrator:
                 else message
                 for message in messages
             ]
+        omitted = 0
+        if judge.max_conversation_chars is not None and isinstance(conversation, list):
+            conversation, omitted = bounded_conversation(
+                conversation, judge.max_conversation_chars
+            )
+        elif judge.max_conversation_chars is not None and isinstance(conversation, str):
+            # A plain prompt keeps its encoded size within the same bound.
+            limit = judge.max_conversation_chars
+            while len(json.dumps(conversation, ensure_ascii=False)) > limit:
+                excess = len(json.dumps(conversation, ensure_ascii=False)) - limit
+                conversation = conversation[: max(0, len(conversation) - excess)]
+        state: dict[str, object] = {
+            "conversation": conversation,
+            "tool_calling": bool(call.tools or call.tools_in_prompt),
+            "image_attached": call.multimodal_prompt is not None,
+        }
+        if omitted:
+            state["conversation_omitted_messages"] = omitted
         offered = self._offered_choices(call)
         return {
             "model": "",
-            "state": {
-                "conversation": conversation,
-                "tool_calling": bool(call.tools or call.tools_in_prompt),
-                "image_attached": call.multimodal_prompt is not None,
-            },
+            "state": state,
             "questions": {
                 "route": {
                     "type": "choice",
@@ -1174,18 +1201,6 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
-        if decision is None or decision.target == "multi_agent":
-            final = self._conductor_final_role(self._roles_for(call))
-            params = call.sampling_params
-            if final.seed_from is not None and (
-                params.n != 1 or params.best_of not in (None, 1)
-            ):
-                # A seeded final unit publishes one upstream draft; it cannot
-                # honour n independent choices, so refuse instead of silently
-                # returning one.
-                raise ValueError(
-                    "this orchestration publishes one verified draft and does not support n > 1"
-                )
         if call.multimodal_prompt is not None:
             if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
                 raise ValueError("multimodal orchestration does not support MoA sampling")
@@ -1870,13 +1885,29 @@ class Orchestrator:
             call.sampling_params.best_of or call.sampling_params.n,
         )
         call_roles = self._roles_for(call)
-        largest_role_prompt = max(
-            call_roles,
-            key=lambda role: len(role.prompt.encode("utf-8")),
-            default=None,
+        # {tools} copies the caller's tool definitions into a role prompt.
+        tool_bytes = (
+            len(json.dumps(list(call.tools), ensure_ascii=False).encode()) if call.tools else 0
         )
-        role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
-        role_bytes = len(role_prompt.encode("utf-8"))
+
+        def expanded_bytes(template: str) -> int:
+            return len(template.encode("utf-8")) + template.count("{tools}") * tool_bytes
+
+        # Every template a role may dispatch: its prompt, the headless variant
+        # and the refinement prompt.
+        templates = [
+            template
+            for role in call_roles
+            for template in (role.prompt, role.prompt_headless, role.refine_prompt)
+            if template
+        ]
+        role_prompt = max(templates, key=expanded_bytes, default="")
+        role_bytes = expanded_bytes(role_prompt)
+        if call.tools and "{tools}" in role_prompt:
+            # The final request carries the expanded definitions too.
+            role_prompt = role_prompt.replace(
+                "{tools}", json.dumps(list(call.tools), ensure_ascii=False)
+            )
         supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
         stage_prompt = max(1, supplied_bytes + role_bytes + 256)
         internal_output = internal.max_tokens

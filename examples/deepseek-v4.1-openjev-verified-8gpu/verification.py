@@ -8,9 +8,8 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   l1            DeepSeek grammar-constrained JSON on every DP rank (thinking and
                 chat) and System One on each OpenJev replica
   calibrate     tau_hi on InFoBench expert labels (calibrate.py)
-  calibrate-g1  can per-claim G1 be calibrated (RAGTruth / PRM800K / FEVER)? today:
-                no, so G1 is advisory (calibrate_g1.py, VCO-D11)
-  requirements  extracted checklists cover InFoBench's gold decomposed questions
+  requirements  the adopted points are MECE: they cover InFoBench's gold
+                decomposed questions and no two require the same thing
   repair        constraint-heavy requests: repairs happen and every guaranteed
                 answer meets the stated constraint (independent check)
   structured    a caller json_schema survives drafting and repair
@@ -304,13 +303,11 @@ def gate_calibrate(_env: dict[str, str]) -> None:
     subprocess.run([sys.executable, str(HERE / "calibrate.py")], check=True)
 
 
-def gate_calibrate_g1(_env: dict[str, str]) -> None:
-    subprocess.run([sys.executable, str(HERE / "calibrate_g1.py")], check=True)
-
-
 _COVERAGE_PROMPT = """For each GOLD question below, decide whether the CHECKLIST contains a \
-condition that requires what the question checks (alone or together with other conditions). \
-Answer as JSON {{"covered": [true/false per gold question, in order]}}.
+point that requires what the question checks (alone or together with other points). Then \
+count the pairs of CHECKLIST points that require the same thing (one makes the other \
+redundant). Answer as JSON {{"covered": [true/false per gold question, in order], \
+"duplicate_pairs": <number>}}.
 GOLD QUESTIONS:
 {gold}
 CHECKLIST:
@@ -330,7 +327,7 @@ def _build_key() -> str:
 
 
 def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float = 7200) -> None:
-    """Sufficiency: the judged checklist covers InFoBench's gold questions."""
+    """MECE: the adopted points cover InFoBench's gold questions, without duplicates."""
 
     deadline = Deadline("requirements", budget_s)
     rows = infobench(count, seed=1)
@@ -347,7 +344,7 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
     l1 = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     coverage = []
     for row, result in zip(rows, results, strict=True):
-        extracted = [item for item in result["requirements"] if not item["id"].startswith("G")]
+        extracted = result["requirements"]
         if result["status"] != 200 or not extracted:
             coverage.append(
                 {"id": row["id"], "covered": None, "gold": len(row["decomposed_questions"])}
@@ -377,9 +374,10 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
                         "schema": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["covered"],
+                            "required": ["covered", "duplicate_pairs"],
                             "properties": {
-                                "covered": {"type": "array", "items": {"type": "boolean"}}
+                                "covered": {"type": "array", "items": {"type": "boolean"}},
+                                "duplicate_pairs": {"type": "integer"},
                             },
                         },
                     },
@@ -387,27 +385,42 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
             },
             timeout_s=600,
         )
-        covered = json.loads(body["choices"][0]["message"]["content"]).get("covered") or []
+        verdict = json.loads(body["choices"][0]["message"]["content"])
+        covered = verdict.get("covered") or []
         coverage.append(
             {
                 "id": row["id"],
                 "gold": len(row["decomposed_questions"]),
                 "covered": sum(1 for value in covered if value is True),
                 "requirements": len(extracted),
-                "padded": sum(1 for item in extracted if item["id"].startswith("P_")),
+                "duplicate_pairs": int(verdict.get("duplicate_pairs") or 0),
             }
         )
     judged = [entry for entry in coverage if entry["covered"] is not None]
     recall = sum(entry["covered"] for entry in judged) / max(1, sum(e["gold"] for e in judged))
-    summary = {**_summary(results), "gold_recall": round(recall, 4), "judged": len(judged)}
+    duplicates = sum(entry["duplicate_pairs"] for entry in judged)
+    with_duplicates = sum(1 for entry in judged if entry["duplicate_pairs"] > 0)
+    duplicate_share = with_duplicates / max(1, len(judged))
+    summary = {
+        **_summary(results),
+        "gold_recall": round(recall, 4),
+        "duplicate_pairs_per_request": round(duplicates / max(1, len(judged)), 3),
+        "requests_with_duplicates": round(duplicate_share, 4),
+        "judged": len(judged),
+    }
     _print_rows(results)
     print(json.dumps(summary, indent=2), flush=True)
-    passed = recall >= 0.9 and len(judged) == len(rows)
+    # MECE: exhaustive (gold recall) and exclusive (few requests with a
+    # duplicate pair), with the same 10 % tolerance on both.
+    passed = recall >= 0.9 and duplicate_share <= 0.10 and len(judged) == len(rows)
     _write(
         "requirements",
         {"passed": passed, "summary": summary, "coverage": coverage, "rows": results},
     )
-    print(f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f}, gate 0.90)")
+    print(
+        f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f} >= 0.90, "
+        f"requests with duplicates {duplicate_share:.3f} <= 0.10)"
+    )
     if not passed:
         raise SystemExit(1)
 
@@ -891,9 +904,7 @@ def gate_implicit(env: dict[str, str], *, budget_s: float = 5400) -> None:
     spurious = []
     details = []
     for item, row in zip(items, rows, strict=True):
-        checklist = [
-            r for r in row["requirements"] if (r.get("tags") or {}).get("origin") != "common"
-        ]
+        checklist = row["requirements"]
         implicit = [r for r in checklist if (r.get("tags") or {}).get("origin") == "implicit"]
         entry = {"request": item["messages"][-1]["content"][:80], "implicit_kept": len(implicit)}
         if item["expected_implicit"]:
@@ -1000,7 +1011,6 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
 GATES = {
     "l1": gate_l1,
     "calibrate": gate_calibrate,
-    "calibrate-g1": gate_calibrate_g1,
     "requirements": gate_requirements,
     "repair": gate_repair,
     "structured": gate_structured,
