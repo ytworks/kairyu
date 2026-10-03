@@ -650,6 +650,7 @@ class Conductor:
         public_output_floor: int | None = None,
         decision_workers: Mapping[str, DecisionBackend] | None = None,
         public_reasoning_effort: str | None = None,
+        public_tool_text: bool = False,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -681,6 +682,8 @@ class Conductor:
         # The caller's own reasoning_effort (None when omitted), which the
         # public API uses to split inline reasoning from the published text.
         self._public_reasoning_effort = public_reasoning_effort
+        # Whether the caller's surface publishes text next to tool calls.
+        self._public_tool_text = public_tool_text
         self._final_tool_call_protocol = final_tool_call_protocol
         self._cost_model = cost_model
         self._usage_observer = usage_observer
@@ -2404,6 +2407,7 @@ class Conductor:
                 self._final_tool_choice,
                 published=published,
                 on_read=on_read,
+                tool_text_published=self._public_tool_text,
             )
         finally:
             run.budget = run.budget.release(reads - completed, unknown_cost=unknown_cost)

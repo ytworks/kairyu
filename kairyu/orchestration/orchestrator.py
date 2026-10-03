@@ -2069,6 +2069,7 @@ class Orchestrator:
             final_parallel_tool_calls=call.parallel_tool_calls,
             # The caller's own effort, as the public API reads it.
             public_reasoning_effort=call.reasoning_effort,
+            public_tool_text=call.tool_text_published,
             final_tool_call_protocol=call.tool_call_protocol,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(roles),

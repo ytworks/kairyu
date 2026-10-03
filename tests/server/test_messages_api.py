@@ -16,6 +16,7 @@ from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.router import RouteThresholds, RuleRouter
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
 
@@ -1098,6 +1099,56 @@ def test_undeclared_call_flushes_as_text(tmp_path):
     assert _blocks_from_events(_events(streamed.text)) == unary["content"]
 
 
+class _RecordingJudge:
+    """A System One judge that answers yes and keeps every request body."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    async def decide(self, body: dict):
+        from kairyu.engine.systemone import SystemOneReply
+
+        self.bodies.append(body)
+        answers = {key: {"noul": 0.99} for key in body["questions"]}
+        return SystemOneReply(
+            status=200,
+            body=json.dumps({"answers": answers}).encode(),
+            headers={},
+            input_tokens=10,
+            output_tokens=1,
+        )
+
+
+def _checked_roles():
+    from kairyu.orchestration.checklist import ChecklistConfig, ChecklistQuestion, StateSection
+    from kairyu.orchestration.conductor import RoleSpec
+
+    return (
+        RoleSpec(name="generator", worker="tier1", prompt="[generator] {query}"),
+        RoleSpec(
+            name="answer",
+            worker="tier1",
+            prompt="",
+            depends_on=("generator",),
+            seed_from="generator",
+            refine_prompt="[repair] {previous}",
+        ),
+        RoleSpec(
+            name="checklist",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer",),
+            checklist=ChecklistConfig(
+                questions=(ChecklistQuestion(id="R1", proposition="adds the numbers"),),
+                state=(StateSection("answer", "answer"),),
+                on_unavailable="publish_unverified",
+            ),
+        ),
+    )
+
+
 def test_orchestrated_tool_stream_unary_equivalence_and_gates(tmp_path):
     # AUTO models use the internal raw stream (#573 sentinel) for both modes;
     # public /v1/chat behavior is covered by its own untouched tests.
@@ -1105,7 +1156,22 @@ def test_orchestrated_tool_stream_unary_equivalence_and_gates(tmp_path):
         'Sure. <tool_call>{"name":"add","arguments":{"a":2,"b":3}}</tool_call>'
     )
     backend = _canned_backend(text)
-    client = TestClient(_auto_app(tmp_path, backend))
+    judge = _RecordingJudge()
+    client = TestClient(
+        create_legacy_app(
+            {},
+            orchestrators={
+                "kairyu-auto": Orchestrator(
+                    {"tier1": backend, "tier2": backend},
+                    roles=_checked_roles(),
+                    decision_workers={"judge": judge},
+                    # Every request takes the role DAG, as in the verified example.
+                    router=RuleRouter(RouteThresholds(multi_step_markers=0)),
+                )
+            },
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+    )
     request = _body(
         model="kairyu-auto",
         tools=[_tool()],
@@ -1116,6 +1182,12 @@ def test_orchestrated_tool_stream_unary_equivalence_and_gates(tmp_path):
     assert unary["content"][1]["input"] == {"a": 2, "b": 3}
     assert unary["stop_reason"] == "tool_use"
     assert unary["usage"]["input_tokens"] > 0
+    # A checklist judges the reply as Messages publishes it: the text block
+    # next to the call (Chat Completions would publish no text).
+    assert judge.bodies[0]["state"]["answer"] == {
+        "text": "Sure. ",
+        "tool_calls": [{"name": "add", "arguments": {"a": 2, "b": 3}}],
+    }
 
     streamed = client.post("/v1/messages", json={**request, "stream": True})
     events = _events(streamed.text)

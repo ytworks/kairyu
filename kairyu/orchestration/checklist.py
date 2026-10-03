@@ -664,6 +664,7 @@ async def judge(
     tool_choice: object = None,
     published: str | None = None,
     on_read: Callable[[tuple[int, int]], None] | None = None,
+    tool_text_published: bool = False,
 ) -> ChecklistVerdict:
     """One verdict: every question in one System One request.
 
@@ -689,7 +690,9 @@ async def judge(
             "checklist_unavailable",
             f"{len(pending)} questions exceed the limit of {config.max_questions}",
         )
-    state = build_state(config.state, outputs, query, tools, tool_choice, published)
+    state = build_state(
+        config.state, outputs, query, tools, tool_choice, published, tool_text_published
+    )
     size = len(json.dumps(state, ensure_ascii=False))
     if config.max_state_chars is not None and size > config.max_state_chars:
         raise ChecklistUnavailable(
@@ -718,6 +721,7 @@ async def judge(
             tool_choice,
             published,
             on_read,
+            tool_text_published,
         )
     except ChecklistUnavailable as unavailable:
         if on_read is None:
@@ -749,10 +753,13 @@ async def _accept(
     tool_choice: object,
     published: str | None,
     on_read: Callable[[tuple[int, int]], None] | None,
+    tool_text_published: bool = False,
 ) -> tuple[float, tuple[int, int]]:
     """The acceptance read: one question over its state and the item results."""
 
-    state = build_state(acceptance.state, outputs, query, tools, tool_choice, published)
+    state = build_state(
+        acceptance.state, outputs, query, tools, tool_choice, published, tool_text_published
+    )
     state[acceptance.results_key] = [
         {"id": item.id, "point": item.proposition, "p": round(item.p, 4), "passed": item.passed}
         for item in items
@@ -792,21 +799,25 @@ def _with_tool_calls(
     text: str,
     max_chars: int | None,
     selection: tuple[str, frozenset[str], str | None] | None,
+    text_published: bool = False,
 ) -> dict[str, object] | None:
     """A role output holding tool calls as ``{text, tool_calls}``, else None.
 
     Only calls the public API would publish become calls (the shared rules in
     :mod:`kairyu.tool_call_markup`, including the caller's tool choice), so the
-    judge reads them as calls the caller will execute. Like the API, a reply
-    that publishes calls carries no text. ``max_chars`` still bounds the
-    result: output too long falls back to the cut raw text.
+    judge reads them as calls the caller will execute. The text is what the
+    caller's surface publishes next to calls: none for Chat Completions, the
+    rest of the reply when ``text_published`` (Anthropic Messages). ``max_chars``
+    still bounds the result: output too long falls back to the cut raw text.
     """
 
-    _remaining, calls = generic_tool_calls(text, selection)
+    remaining, calls = generic_tool_calls(text, selection)
     if not calls:
         return None
-    # The public API drops the content of a reply that publishes calls.
-    structured: dict[str, object] = {"text": "", "tool_calls": calls}
+    structured: dict[str, object] = {
+        "text": remaining if text_published else "",
+        "tool_calls": calls,
+    }
     if max_chars is None:
         return structured
     if len(json.dumps(structured, ensure_ascii=False)) <= max_chars:
@@ -840,6 +851,7 @@ def build_state(
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: object = None,
     published: str | None = None,
+    tool_text_published: bool = False,
 ) -> dict[str, object]:
     """The System One state object: one field per section.
 
@@ -881,7 +893,7 @@ def build_state(
                 pass
             if section.source == published:
                 structured = _with_tool_calls(
-                    raw, section.max_chars, tool_selection(tools, tool_choice)
+                    raw, section.max_chars, tool_selection(tools, tool_choice), tool_text_published
                 )
                 if structured is not None:
                     state[section.key] = structured

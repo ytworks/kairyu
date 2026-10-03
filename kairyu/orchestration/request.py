@@ -135,6 +135,10 @@ class OrchestrationRequest:
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
+    # The caller's surface publishes a reply's text next to its tool calls
+    # (Anthropic Messages: text and tool_use blocks); Chat Completions nulls
+    # content when calls exist. A checklist judges the reply as published.
+    tool_text_published: bool = False
     multimodal_prompt: MultimodalPrompt | None = None
     chat_template_kwargs: Mapping[str, object] | None = None
     # Appended to preserve the positional constructor contract above.

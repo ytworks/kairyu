@@ -311,7 +311,9 @@ What a checklist does now:
   keep their text), after the API's inline-reasoning split (the caller's own
   effort and the completion's reasoning_content, shared in
   `kairyu/tool_call_markup.py`), so a call inside `<think>` is never judged
-  as published. A verdict reserves a budget step per read, and each read that returns is
+  as published. The text next to published calls follows the caller's
+  surface: none for Chat Completions, the rest of the reply for Anthropic
+  Messages (`OrchestrationRequest.tool_text_published`). A verdict reserves a budget step per read, and each read that returns is
   spent and billed at once, even if the verdict then fails or is cancelled.
   Why: a verdict that is the conjunction of per-item reads fails on any
   single misread item; a holistic read informed by the item results is a

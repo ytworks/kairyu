@@ -2423,6 +2423,11 @@ def create_app(
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
+                    tool_text_published=bool(
+                        getattr(
+                            http_request.state, _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY, False
+                        )
+                    ),
                     multimodal_prompt=validated_input.orchestration_multimodal_prompt,
                     chat_template_kwargs=(
                         request.chat_template_kwargs
