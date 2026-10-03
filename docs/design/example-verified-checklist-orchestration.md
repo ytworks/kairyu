@@ -551,6 +551,15 @@ summary covers earlier turns; the repair rewrites the reply without
 tool-call instructions; the extractors' limit returns to 32,768 tokens
 (16,384 low, 65,536 max).
 
+Recalibration after this change (owner decision, 2026-10-04): with every
+DeepSeek point statement and summary regenerated, tau_hi is 0.999733
+(calibration upper bound 9.66 %, held-out 9.26 %; was 0.99894, 9.78 % /
+7.84 %). 79 of 249 regenerated statements differed from the cached ones
+(temperature 0 is not reproducible); points with unchanged statements read
+the same (median |dp| 0.0002). Held-out responses passing every point fell
+from 39 to 23 of 125; acceptance 0.99 guaranteed 39 with 4 violating (10.3 %,
+was 46 and 7, 15.2 %).
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
