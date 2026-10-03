@@ -2341,6 +2341,27 @@ async def test_auto_and_omitted_emit_only_declared_calls(stream, tool_choice):
 
 
 @pytest.mark.parametrize("stream", [False, True])
+async def test_text_written_with_tool_calls_reaches_the_client(stream):
+    # The model's prose beside its calls is part of the reply (OpenAI allows
+    # content with tool_calls); agent frameworks ask for it every turn.
+    text = f"I will check the weather first.\n{TOOL_CALL_TEXT}"
+    engine = StubBackend(text=text, finish_reason="tool_calls")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body("weather", tools=[_WEATHER_TOOL], stream=stream)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert _tool_response_contract(response, stream) == (
+        "I will check the weather first.",
+        ["get_weather"],
+        "tool_calls",
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
 async def test_auto_suppresses_undeclared_model_function_names(stream):
     text = '<tool_call>{"name":"undeclared","arguments":{}}</tool_call>'
     engine = StubBackend(text=text, finish_reason="tool_calls")

@@ -111,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-03 — [progress] Chat API returns the reply's text with its tool calls (PR #619)
+- What: `/v1/chat/completions` publishes the model's prose as `content` beside `tool_calls` (well-formed call envelopes removed; malformed markup stays text; whole-text protocols unchanged). Stream and unary share the choice.
+- Why: `content` was nulled whenever calls existed, so agent frameworks never received the reasoning text they ask for every turn; a Jev judge of the reply then saw no text (DeepSWE, closed PR #618).
+- Refs: PR #619 S1; `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md`
+
 ### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
 - What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
 - Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
