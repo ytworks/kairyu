@@ -103,6 +103,22 @@ def bounded_conversation(
     return [first, *reversed(middle), last], index
 
 
+def bounded_text(text: str, max_chars: int) -> str:
+    """``text`` within ``max_chars`` characters of JSON, cut with a marker."""
+
+    keep = len(text)
+    while True:
+        cut = (
+            text
+            if keep == len(text)
+            else (f"{text[:keep]}\n[... {len(text) - keep} more characters cut ...]")
+        )
+        excess = _json_chars(cut) - max_chars
+        if excess <= 0 or keep == 0:
+            return cut
+        keep = max(0, keep - excess)
+
+
 def conversation_text(query: str) -> str:
     """The ``{conversation}`` role placeholder: the request's role-tagged
     messages without the answer-contract wrapper, or the query itself."""

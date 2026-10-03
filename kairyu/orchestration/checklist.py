@@ -32,6 +32,7 @@ from typing import Protocol
 from kairyu.orchestration.request import (
     MIN_CONVERSATION_CHARS,
     bounded_conversation,
+    bounded_text,
     conversation_messages,
 )
 
@@ -857,7 +858,11 @@ def build_state(
                         state[f"{section.key}_omitted_messages"] = omitted
                 state[section.key] = cut
                 continue
-            raw = query
+            raw = _cut(query, section.max_chars)
+            if section.max_total_chars is not None:
+                raw = bounded_text(raw, section.max_total_chars)
+            state[section.key] = raw
+            continue
         else:
             raw = outputs.get(section.source, "")
             try:

@@ -51,6 +51,7 @@ from kairyu.orchestration.request import (
     MIN_CONVERSATION_CHARS,
     OrchestrationRequest,
     bounded_conversation,
+    bounded_text,
     conversation_messages,
     default_orchestration_request,
 )
@@ -1040,10 +1041,7 @@ class Orchestrator:
             )
         elif judge.max_conversation_chars is not None and isinstance(conversation, str):
             # A plain prompt keeps its encoded size within the same bound.
-            limit = judge.max_conversation_chars
-            while len(json.dumps(conversation, ensure_ascii=False)) > limit:
-                excess = len(json.dumps(conversation, ensure_ascii=False)) - limit
-                conversation = conversation[: max(0, len(conversation) - excess)]
+            conversation = bounded_text(conversation, judge.max_conversation_chars)
         state: dict[str, object] = {
             "conversation": conversation,
             "tool_calling": bool(call.tools or call.tools_in_prompt),

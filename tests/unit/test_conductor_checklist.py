@@ -151,9 +151,7 @@ async def test_a_failed_item_is_repaired_and_judged_again():
 
 
 async def test_exhausted_refinements_publish_the_last_attempt_unguaranteed():
-    backend = RoutedBackend(
-        {"answer": ["It is 41."], "repair": ["It is 40.", "It is 43."]}
-    )
+    backend = RoutedBackend({"answer": ["It is 41."], "repair": ["It is 40.", "It is 43."]})
     conductor = Conductor(
         _answer_roles(), {"gen": backend}, decision_workers={"judge": FakeSystemOne(_contains_42)}
     )
@@ -473,6 +471,122 @@ async def test_an_empty_repair_is_repaired_again_even_when_every_point_is_met():
 
         assert result.final_text == "The answer is 42.", acceptance
         assert result.verification.guaranteed is True
+
+
+class _DownAfter(FakeSystemOne):
+    """Answers ``reads`` requests, then is down."""
+
+    def __init__(self, rule, reads: int) -> None:
+        super().__init__(rule)
+        self._reads = reads
+
+    async def decide(self, body: dict) -> SystemOneReply:
+        self._down = len(self.bodies) >= self._reads
+        return await super().decide(body)
+
+
+async def test_an_unjudgeable_empty_repair_never_replaces_the_answer():
+    # Codex review (PR #619): the judge went down after an empty repair, and
+    # the empty attempt was left as the answer.
+    backend = RoutedBackend({"answer": ["It is 41."], "repair": ["", ""]})
+    conductor = Conductor(
+        _answer_roles(),
+        {"gen": backend},
+        decision_workers={"judge": _DownAfter(_contains_42, reads=1)},
+    )
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.final_unit_ok and result.final_text == "It is 41."
+    assert result.verification.reason == "judge_unavailable"
+
+
+async def test_a_curated_list_published_unverified_carries_no_dropped_item():
+    # Codex review (PR #619): curation updated the text but not the stored
+    # completion, so a dropped item reappeared on the wire.
+    backend = RoutedBackend({"points": [_points("E", "keep me", "drop me")], "answer": ["x"]})
+
+    def rule(state, question):
+        if "drop me" in question:
+            return 0.1
+        return 0.99 if "keep me" in question else 0.1
+
+    roles = (
+        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
+        RoleSpec(
+            name="adopt",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="points",
+            depends_on=("points",),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource(role="points", path="points"),
+                        group="necessity",
+                        threshold=0.0,
+                    ),
+                ),
+                state=(StateSection("points", "points"),),
+                max_refinements=0,
+                curate=CurationConfig(items_path="points", drop_group="necessity"),
+            ),
+        ),
+        RoleSpec(name="answer", worker="gen", prompt="[answer] {points}", depends_on=("points",)),
+        RoleSpec(
+            name="check",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="answer",
+            depends_on=("answer", "points"),
+            checklist=ChecklistConfig(
+                questions=(ChecklistQuestion(id="R1", proposition="ok"),),
+                state=(StateSection("answer", "answer"),),
+                max_refinements=0,
+                on_unavailable="publish_unverified",
+                unverified_from="points",
+                max_state_chars=1,
+            ),
+        ),
+    )
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": FakeSystemOne(rule)})
+
+    result = await conductor.run("q", budget=Budget(max_steps=8))
+
+    assert result.verification.reason == "checklist_unavailable"
+    assert "drop me" not in result.final_text
+    assert result.completions[0].text == result.final_text
+
+
+async def test_a_plain_request_is_bounded_by_its_total_size():
+    # Codex review (PR #619): a plain-string request skipped max_total_chars.
+    roles = _answer_roles()
+    config = roles[1].checklist
+    roles = (
+        roles[0],
+        replace(
+            roles[1],
+            checklist=replace(
+                config,
+                state=(
+                    StateSection("request", "request", max_total_chars=1000),
+                    StateSection("answer", "answer"),
+                ),
+            ),
+        ),
+    )
+    judge = FakeSystemOne(_contains_42)
+    conductor = Conductor(
+        roles, {"gen": RoutedBackend({"answer": ["42"]})}, decision_workers={"judge": judge}
+    )
+
+    await conductor.run("x" * 8000, budget=Budget(max_steps=12))
+
+    assert len(json.dumps(judge.bodies[0]["state"]["request"])) <= 1000
 
 
 async def test_a_failed_read_cancels_its_siblings_and_keeps_their_usage():

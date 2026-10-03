@@ -2287,6 +2287,30 @@ class Conductor:
             # public usage falls back to the m9 approximation.
             run.final_unit_completion_tokens = None
 
+    def _publish_last_answer(
+        self,
+        run: _RunState,
+        spec: RoleSpec,
+        attempts: list[tuple[str, tuple[CompletionOutput, ...], ChecklistVerdict | None]],
+    ) -> ChecklistVerdict | None:
+        """Publish the newest judged attempt with an answer over a later one.
+
+        A final unit never ends on an empty attempt while an earlier one
+        has an answer: that would fail the request (issue #617). Returns the
+        verdict of the attempt published, or None when nothing changed.
+        """
+
+        if self._head_committed_text(run).strip():
+            return None
+        visible = [
+            attempt for attempt in attempts if self._has_public_output(attempt[0], attempt[1])
+        ]
+        if not visible or visible[-1] is attempts[-1]:
+            return None
+        text, completions, verdict = visible[-1]
+        self._publish_attempt(run, spec, text, completions, is_final_unit=True)
+        return verdict
+
     async def _checklist_round(
         self,
         run: _RunState,
@@ -2340,13 +2364,10 @@ class Conductor:
                 raise _ObservedGenerationError(unavailable.reason) from unavailable
             source = config.unverified_from
             if source and source in run.outputs:
-                self._publish_attempt(
-                    run,
-                    spec,
-                    run.outputs[source],
-                    run.role_completions.get(source, ()),
-                    is_final_unit=is_final_unit,
-                )
+                text, completions = run.outputs[source], run.role_completions.get(source, ())
+                self._publish_attempt(run, spec, text, completions, is_final_unit=is_final_unit)
+            if is_final_unit and not self._has_public_output(text, completions):
+                self._publish_last_answer(run, spec, [*attempts, (text, completions, None)])
             if is_final_unit:
                 run.verification = unverified_report(
                     unavailable.reason, depth + 1, config.threshold
@@ -2440,19 +2461,13 @@ class Conductor:
             return False
         published = verdict
         if not verdict.passed and is_final_unit:
-            # An exhausted final unit never publishes an empty attempt over
-            # one with an answer: that would fail the request (issue #617).
-            visible = [
-                attempt for attempt in attempts if self._has_public_output(attempt[0], attempt[1])
-            ]
-            if visible and visible[-1] is not attempts[-1]:
-                chosen = visible[-1]
-                self._publish_attempt(
-                    run, spec, chosen[0], chosen[1], is_final_unit=is_final_unit
-                )
-                published = chosen[2]
+            published = self._publish_last_answer(run, spec, attempts) or verdict
         if config.curate is not None and spec.name in run.outputs:
-            run.outputs[spec.name] = curate(config.curate, run.outputs[spec.name], published.items)
+            curated = curate(config.curate, run.outputs[spec.name], published.items)
+            if curated != run.outputs[spec.name]:
+                # The stored completion follows the text: a later
+                # unverified_from must not publish the dropped items.
+                self._publish_attempt(run, spec, curated, (), is_final_unit=is_final_unit)
         if is_final_unit:
             run.verification = verdict_report(
                 published,
