@@ -331,7 +331,7 @@ def test_compose_gpus_match_the_allocation() -> None:
     assert [*gpus("openjev-0"), *gpus("openjev-1")] == spec["allocation"]["openjev"]["gpu_ids"]
 
 
-def test_both_models_share_the_verified_dags_and_always_verify() -> None:
+def test_both_models_share_the_verified_dag_and_the_tool_route() -> None:
     routed = yaml.safe_load((EXAMPLE / "verified.yaml").read_text())
     always = yaml.safe_load((EXAMPLE / "verified-always.yaml").read_text())
     assert routed["roles"] == always["roles"]
@@ -415,6 +415,8 @@ async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() 
         sampling_params=SamplingParams(max_tokens=4096),
         tools=(BASH,),
         tool_choice="auto",
+        # The caller's effort does not lower the tool route's max.
+        reasoning_effort="low",
     )
 
     call = await orchestrator.judge_role_profile(call)

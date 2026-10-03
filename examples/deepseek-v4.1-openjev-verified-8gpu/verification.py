@@ -21,6 +21,8 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   think-route   everyday requests stream from deepseek_think at the default effort
   effort        the caller's effort reaches every DeepSeek step on both routes
   implicit      situational requirements are extracted and kept only when expected
+  tool-routing  Jev routes a request that requires a tool call to TOOL, and no other
+  tool-route    a TOOL request gets one DeepSeek call at max effort with tool_calls
   serving-routed  kairyu-verified under load: route mix, latency, tokens per route
 """
 
@@ -93,6 +95,21 @@ def _route(trace: dict | None, model: str) -> tuple[str, float | None]:
     return ("verified" if verdict == "primary" else verdict), p_verified
 
 
+def _judge_seconds(trace: dict | None) -> float | None:
+    """Wall time of the route judge's read, from the trace."""
+
+    for event in (trace or {}).get("events") or []:
+        if event.get("node") == "profile_judge":
+            timing = event.get("timing") or {}
+            try:
+                start = datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00"))
+                end = datetime.fromisoformat(timing["completed_at"].replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError):
+                return None
+            return round((end - start).total_seconds(), 3)
+    return None
+
+
 def _efforts(trace: dict | None) -> list[str | None]:
     """The reasoning effort of every DeepSeek generation in the trace."""
 
@@ -118,6 +135,8 @@ def _post_stream(
     started = time.monotonic()
     first: float | None = None
     content, reasoning = [], []
+    calls: dict[int, dict] = {}
+    finish = None
     body: dict = {"choices": [{"message": {}}]}
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for raw in response:
@@ -131,13 +150,23 @@ def _post_stream(
                     first = time.monotonic() - started
                 content.append(delta.get("content") or "")
                 reasoning.append(delta.get("reasoning_content") or "")
+                for call in delta.get("tool_calls") or []:
+                    if first is None:
+                        first = time.monotonic() - started
+                    slot = calls.setdefault(call.get("index", 0), {"name": "", "arguments": ""})
+                    function = call.get("function") or {}
+                    slot["name"] += function.get("name") or ""
+                    slot["arguments"] += function.get("arguments") or ""
+                finish = choice.get("finish_reason") or finish
             for key in ("usage", "kairyu_verification", "kairyu_trace_v2", "kairyu_route"):
                 if chunk.get(key) is not None:
                     body[key] = chunk[key]
     body["choices"][0]["message"] = {
         "content": "".join(content),
         "reasoning_content": "".join(reasoning),
+        "tool_calls": [{"type": "function", "function": calls[index]} for index in sorted(calls)],
     }
+    body["choices"][0]["finish_reason"] = finish
     return body, first
 
 
@@ -184,7 +213,8 @@ def chat(
     elapsed = time.monotonic() - started
     usage = body.get("usage") or {}
     report = body.get("kairyu_verification") or {}
-    message = (body.get("choices") or [{}])[0].get("message") or {}
+    choice = (body.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
     output_tokens = usage.get("orchestration_output_tokens") or usage.get("completion_tokens") or 0
     trace_body = body.get("kairyu_trace_v2")
     route, p_verified = _route(trace_body, model)
@@ -197,6 +227,7 @@ def chat(
         "route": route,
         "p_verified": p_verified,
         "efforts": _efforts(trace_body),
+        "judge_s": _judge_seconds(trace_body),
         "public_completion_tokens": usage.get("completion_tokens"),
         "orchestration_input_tokens": usage.get("orchestration_input_tokens")
         or usage.get("prompt_tokens"),
@@ -208,6 +239,14 @@ def chat(
         "requirements": report.get("requirements") or [],
         "has_verification": "kairyu_verification" in body,
         "content": message.get("content") or "",
+        "tool_calls": [
+            {
+                "name": (call.get("function") or {}).get("name"),
+                "arguments": (call.get("function") or {}).get("arguments"),
+            }
+            for call in message.get("tool_calls") or []
+        ],
+        "finish_reason": choice.get("finish_reason"),
         "reasoning_chars": len(message.get("reasoning_content") or ""),
         "error": body.get("error"),
         "verification_error": (
@@ -602,6 +641,25 @@ def gate_fallback(env: dict[str, str], *, budget_s: float = 5400) -> None:
             findings.append(
                 f"routed with both down: status={routed['status']} route={routed['route']}"
             )
+        # A request that requires a tool call still gets one through the
+        # think fallback.
+        tool_item = next(
+            item for item in _dataset("tool-routing-set.json") if item["label"] == "TOOL"
+        )
+        tool_down = chat(
+            env,
+            messages=tool_item["messages"],
+            tools=tool_item["tools"],
+            model=control.ROUTED_MODEL,
+            trace=True,
+            max_tokens=65536,
+        )
+        phases["both_down_tool"] = [tool_down]
+        if tool_down["status"] != 200 or not tool_down["tool_calls"]:
+            findings.append(
+                f"tool request with both down: status={tool_down['status']} "
+                f"route={tool_down['route']} tool_calls={len(tool_down['tool_calls'])}"
+            )
         for row in both_down:
             if (
                 row["status"] != 200
@@ -675,7 +733,7 @@ def _dataset(name: str) -> list[dict]:
     return json.loads((DATASETS / name).read_text(encoding="utf-8"))
 
 
-def _routing_probabilities() -> list[dict[str, float] | None]:
+def _routing_probabilities(dataset: str = "routing-set.json") -> list[dict[str, float] | None]:
     """Every route's probability for each routing-set conversation, through
     the served judge.
 
@@ -709,10 +767,12 @@ def _routing_probabilities() -> list[dict[str, float] | None]:
         )
 
         async def one(item: dict) -> dict[str, float] | None:
-            chat = ChatCompletionRequest(model=ROUTED, messages=item["messages"])
+            tools = item.get("tools") or None
+            chat = ChatCompletionRequest(model=ROUTED, messages=item["messages"], tools=tools)
             call = OrchestrationRequest(
                 prompt=validate_orchestration_chat_input(chat).prompt,
                 sampling_params=SamplingParams(max_tokens=1024),
+                tools=tuple(tools or ()),
             )
             judged = await orchestrator.judge_role_profile(call)
             metadata = judged.role_profile_judge_event.metadata
@@ -724,7 +784,7 @@ def _routing_probabilities() -> list[dict[str, float] | None]:
             return probabilities if "VERIFIED" in probabilities else None
 
         try:
-            return await asyncio.gather(*(one(item) for item in _dataset("routing-set.json")))
+            return await asyncio.gather(*(one(item) for item in _dataset(dataset)))
         finally:
             await backend.shutdown()
 
@@ -822,6 +882,150 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         f"(held-out miss rate {summary['holdout_miss_rate']}, to TOOL {summary['to_tool']})"
     )
     if not passed:
+        raise SystemExit(1)
+
+
+def gate_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
+    """Jev routes a request that requires a tool call to TOOL, and no other.
+
+    The tool-routing set offers tools in every conversation: 20 require a
+    call (first turn, mid-loop after a tool result, a choice among tools), 20
+    do not (an unrelated question, a request the latest tool result already
+    answers, chit-chat). Routes are chosen as in serving.
+    """
+
+    deadline = Deadline("tool-routing", budget_s)
+    items = _dataset("tool-routing-set.json")
+    started = time.monotonic()
+    probabilities = _routing_probabilities("tool-routing-set.json")
+    judge_seconds = time.monotonic() - started
+    if any(p is None for p in probabilities):
+        raise SystemExit("tool-routing: the judge did not answer every conversation")
+    import yaml
+
+    tau = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
+        "min_probability"
+    ]
+    rows = [
+        {
+            "id": item["id"],
+            "label": item["label"],
+            "category": item["category"],
+            "route": _served_route(p, tau),
+            "p": p,
+        }
+        for item, p in zip(items, probabilities, strict=True)
+    ]
+    needed = [row for row in rows if row["label"] == "TOOL"]
+    not_needed = [row for row in rows if row["label"] == "NO_TOOL"]
+    by_category = {}
+    for row in rows:
+        entry = by_category.setdefault(row["category"], {})
+        entry[row["route"]] = entry.get(row["route"], 0) + 1
+    summary = {
+        "conversations": len(rows),
+        "judge_wall_s": round(judge_seconds, 2),
+        "needed_to_tool": round(sum(r["route"] == "TOOL" for r in needed) / len(needed), 4),
+        "not_needed_to_tool": round(
+            sum(r["route"] == "TOOL" for r in not_needed) / len(not_needed), 4
+        ),
+        "routes_by_category": by_category,
+    }
+    deadline.check()
+    for row in rows:
+        print(f"  {row['id']} {row['label']:8} {row['category']:20} -> {row['route']} {row['p']}")
+    print(json.dumps(summary, indent=2), flush=True)
+    passed = summary["needed_to_tool"] >= 0.90 and summary["not_needed_to_tool"] < 0.10
+    _write("tool-routing", {"passed": passed, "summary": summary, "rows": rows})
+    print(
+        f"tool-routing: {'PASS' if passed else 'FAIL'} (needed to TOOL "
+        f"{summary['needed_to_tool']} >= 0.90, not needed to TOOL "
+        f"{summary['not_needed_to_tool']} < 0.10)"
+    )
+    if not passed:
+        raise SystemExit(1)
+
+
+def gate_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
+    """A TOOL request gets one DeepSeek call at max effort, returned as tool_calls.
+
+    Every tool-requiring conversation of the tool-routing set is sent unary
+    and streamed, with the caller's effort cycling through none, low, high
+    and max: each must route to TOOL, return 200 with structured tool_calls
+    (finish_reason tool_calls) and no kairyu_verification, and run exactly
+    one DeepSeek generation at max effort.
+    """
+
+    deadline = Deadline("tool-route", budget_s)
+    items = [item for item in _dataset("tool-routing-set.json") if item["label"] == "TOOL"]
+    efforts = [None, "low", "high", "max"]
+    findings = []
+    rows = []
+    for index, item in enumerate(items):
+        for stream in (False, True):
+            effort = efforts[index % len(efforts)]
+            extra = {"reasoning_effort": effort} if effort else {}
+            row = chat(
+                env,
+                messages=item["messages"],
+                tools=item["tools"],
+                model=ROUTED,
+                trace=True,
+                stream=stream,
+                max_tokens=65536,
+                **extra,
+            )
+            row.update(
+                id=item["id"], category=item["category"], stream=stream, caller_effort=effort
+            )
+            rows.append(row)
+            problems = []
+            if row["status"] != 200:
+                problems.append(f"status {row['status']}")
+            if row["route"] != "deepseek_tool":
+                problems.append(f"route {row['route']}")
+            if not row["tool_calls"] or row["finish_reason"] != "tool_calls":
+                problems.append(
+                    f"tool_calls={len(row['tool_calls'])} finish={row['finish_reason']}"
+                )
+            if row["efforts"] != ["max"]:
+                problems.append(f"efforts {row['efforts']}")
+            if row["has_verification"]:
+                problems.append("carries kairyu_verification")
+            if problems:
+                findings.append(f"{item['id']} stream={stream} effort={effort}: {problems}")
+        deadline.check()
+    for row in rows:
+        print(
+            f"  {row['id']} stream={row['stream']} effort={row['caller_effort']} "
+            f"status={row['status']} {row['seconds']:.1f}s ttft={row['ttft_s']} "
+            f"route={row['route']} efforts={row['efforts']} "
+            f"calls={[call['name'] for call in row['tool_calls']]} finish={row['finish_reason']} "
+            f"text={bool(row['content'].strip())} in={row['orchestration_input_tokens']} "
+            f"out={row['orchestration_output_tokens']} "
+            f"({row['orchestration_output_tok_per_s']} tok/s)",
+            flush=True,
+        )
+    ok = [row for row in rows if row["status"] == 200]
+    seconds = sorted(row["seconds"] for row in ok)
+    summary = {
+        **_summary(rows),
+        "latency_p90_s": seconds[max(0, int(len(seconds) * 0.9) - 1)] if seconds else None,
+        "with_text": sum(1 for row in ok if row["content"].strip()),
+        "unary_vs_stream_same_tools": sum(
+            1
+            for a, b in zip(rows[0::2], rows[1::2], strict=True)
+            if sorted(c["name"] for c in a["tool_calls"])
+            == sorted(c["name"] for c in b["tool_calls"])
+        ),
+    }
+    print(json.dumps(summary, indent=2), flush=True)
+    _write(
+        "tool-route",
+        {"passed": not findings, "findings": findings, "summary": summary, "rows": rows},
+    )
+    print(f"tool-route: {'PASS' if not findings else 'FAIL'} {findings}")
+    if findings:
         raise SystemExit(1)
 
 
@@ -986,7 +1190,8 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
     """The routed product model under load: route mix, latency and tokens per route."""
 
     deadline = Deadline("serving-routed", budget_s)
-    items = _dataset("routing-set.json")
+    # Tool-free conversations and conversations that offer tools, mixed.
+    items = _dataset("routing-set.json") + _dataset("tool-routing-set.json")
     random.Random(3).shuffle(items)
     plan = {1: 8, 4: 16, 8: 16, 16: 32}
     report = {}
@@ -997,14 +1202,26 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
         started = time.monotonic()
         rows = _run_concurrently(
             env,
-            [{"messages": item["messages"], "model": ROUTED, "trace": True} for item in batch],
+            [
+                {
+                    "messages": item["messages"],
+                    "model": ROUTED,
+                    "trace": True,
+                    **({"tools": item["tools"], "max_tokens": 65536} if item.get("tools") else {}),
+                }
+                for item in batch
+            ],
             concurrency,
         )
         wall = time.monotonic() - started
         per_route = {}
         for route in sorted({row["route"] for row in rows}):
             subset = [row for row in rows if row["route"] == route]
-            per_route[route] = _summary(subset)
+            judge = sorted(row["judge_s"] for row in subset if row.get("judge_s") is not None)
+            per_route[route] = {
+                **_summary(subset),
+                "judge_p50_s": statistics.median(judge) if judge else None,
+            }
         summary = {
             **_summary(rows),
             "wall_s": round(wall, 1),
@@ -1023,6 +1240,8 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
         name
         for name, entry in report.items()
         if entry["summary"]["ok"] != entry["summary"]["requests"]
+        # The tool route adds only the judge's read (p50 at most 2 s).
+        or (entry["summary"]["per_route"].get("deepseek_tool", {}).get("judge_p50_s") or 0) > 2.0
     ]
     _write("serving-routed", {"passed": not failures, "failed": failures, "report": report})
     print(f"serving-routed: {'PASS' if not failures else 'FAIL'}")
@@ -1042,6 +1261,8 @@ GATES = {
     "think-route": gate_think_route,
     "effort": gate_effort,
     "implicit": gate_implicit,
+    "tool-routing": gate_tool_routing,
+    "tool-route": gate_tool_route,
     "serving-routed": gate_serving_routed,
 }
 

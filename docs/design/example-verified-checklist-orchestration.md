@@ -526,8 +526,14 @@ to call one: an agent loop's turn, or a request to act with the tools). It
 is answered by one DeepSeek call at max effort with the caller's tools and is
 not verified. `kairyu-verified` offers THINK/TOOL/VERIFIED and
 `kairyu-verified-always` TOOL/VERIFIED. VCO-D16's step profile and STEP
-route are removed. The routing gate fails when 10 % or more of its
-tool-free conversations go to TOOL.
+route are removed. GPU gates: `routing` fails when 10 % or more of its
+tool-free conversations go to TOOL; `tool-routing` (40 conversations that
+offer tools, 20 requiring a call) needs at least 90 % of the requiring ones
+on TOOL and under 10 % of the others; `tool-route` needs every requiring
+conversation, unary and streamed at any caller effort, to return structured
+tool_calls from one DeepSeek call at max effort without verification;
+`fallback` adds a tool request with both judges down; `serving-routed` mixes
+both sets and bounds the tool route's judge read at p50 2 s.
 
 Why: verifying a correct intermediate agent step against the request's
 requirements failed it, and its repair jumped to the final move (DeepSWE,
