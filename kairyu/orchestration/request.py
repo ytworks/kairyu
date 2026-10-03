@@ -47,6 +47,24 @@ def _json_chars(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False))
 
 
+def _longest_fit(text: str, limit: int, render) -> object:
+    """``render(keep)`` for the longest prefix length ``keep`` of ``text``
+    whose JSON stays within ``limit`` characters (``keep`` 0 if none does).
+
+    Escaping makes the encoded size grow unevenly with ``keep``, so the
+    prefix is fitted by its own encoded size, not the whole text's.
+    """
+
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _json_chars(render(middle)) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return render(low)
+
+
 def _fit_message(message: object, limit: int) -> object:
     """``message`` within ``limit`` JSON characters.
 
@@ -59,16 +77,14 @@ def _fit_message(message: object, limit: int) -> object:
     full = json.dumps(message, ensure_ascii=False)
     role = message.get("role") if isinstance(message, dict) else None
     shell: dict[str, object] = {"role": role} if isinstance(role, str) else {}
-    keep = limit
-    while True:
-        candidate = {
+    return _longest_fit(
+        full,
+        limit,
+        lambda keep: {
             **shell,
             "content": f"{full[:keep]}\n[... {len(full) - keep} more characters cut ...]",
-        }
-        excess = _json_chars(candidate) - limit
-        if excess <= 0 or keep == 0:
-            return candidate
-        keep = max(0, keep - excess)
+        },
+    )
 
 
 def bounded_conversation(
@@ -106,17 +122,13 @@ def bounded_conversation(
 def bounded_text(text: str, max_chars: int) -> str:
     """``text`` within ``max_chars`` characters of JSON, cut with a marker."""
 
-    keep = len(text)
-    while True:
-        cut = (
-            text
-            if keep == len(text)
-            else (f"{text[:keep]}\n[... {len(text) - keep} more characters cut ...]")
-        )
-        excess = _json_chars(cut) - max_chars
-        if excess <= 0 or keep == 0:
-            return cut
-        keep = max(0, keep - excess)
+    if _json_chars(text) <= max_chars:
+        return text
+    return _longest_fit(
+        text,
+        max_chars,
+        lambda keep: f"{text[:keep]}\n[... {len(text) - keep} more characters cut ...]",
+    )
 
 
 def conversation_text(query: str) -> str:
