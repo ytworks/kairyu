@@ -231,7 +231,9 @@ budget accounting are unchanged. Supporting mechanisms:
 - **Response.** A checklist on the selected final unit publishes
   `kairyu_verification: {guaranteed, reason, threshold, attempts, acceptance,
   requirements: [{id, proposition, group, p, passed, tags}]}` on the chat
-  response (the terminal chunk when streaming), without a trace opt-in.
+  response (the terminal chunk when streaming), without a trace opt-in. A request for
+  `n > 1` is refused: one verdict cannot judge independent choices, and a
+  final verifier is otherwise skipped for them.
 
 Why (framework boundary): (1) System One is a served Kairyu API (m11 D8), but
 the L2 DSL could only branch on generated PASS/FAIL text — `engine_ref`

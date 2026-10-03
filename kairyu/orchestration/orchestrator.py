@@ -1199,6 +1199,18 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
+        if decision is None or decision.target == "multi_agent":
+            roles = self._roles_for(call)
+            final = self._conductor_final_role(roles)
+            params = call.sampling_params
+            if (params.n != 1 or params.best_of not in (None, 1)) and any(
+                role.verifies == final.name and role.checklist is not None for role in roles
+            ):
+                # The Conductor skips a final verifier for n > 1; a checklist
+                # guarantee cannot be dropped silently, so refuse instead.
+                raise ValueError(
+                    "this orchestration publishes one verified answer and does not support n > 1"
+                )
         if call.multimodal_prompt is not None:
             if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
                 raise ValueError("multimodal orchestration does not support MoA sampling")

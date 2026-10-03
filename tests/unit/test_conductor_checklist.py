@@ -705,6 +705,26 @@ async def test_a_failed_state_role_leaves_the_answer_unverified():
     assert result.verification.reason == "checklist_unavailable"
 
 
+async def test_a_checklist_verified_orchestration_refuses_n_greater_than_one():
+    # Codex review (PR #619): with n > 1 the final checklist was skipped and
+    # the answers were returned without verification.
+    from kairyu.orchestration.orchestrator import Orchestrator
+    from kairyu.orchestration.request import OrchestrationRequest
+    from kairyu.orchestration.router import RouteThresholds, RuleRouter
+
+    orchestrator = Orchestrator(
+        {"gen": RoutedBackend({"answer": ["42", "42"]})},
+        router=RuleRouter(RouteThresholds(multi_step_markers=0)),
+        roles=_answer_roles(),
+        decision_workers={"judge": FakeSystemOne()},
+    )
+
+    with pytest.raises(ValueError, match="n > 1"):
+        await orchestrator.run(
+            OrchestrationRequest(prompt="q", sampling_params=SamplingParams(max_tokens=8, n=2))
+        )
+
+
 class _AcceptanceDown(FakeSystemOne):
     async def decide(self, body: dict) -> SystemOneReply:
         self._down = bool(self.bodies)
