@@ -109,6 +109,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [design] Sealed Responses items v2: kst2, key ring, staged secret (M20 WP-20)
+- What: compaction tokens are `kst2.` (per-token HKDF-SHA256 AES-256-GCM key, AAD binds header and tenant, key id, issue time, served-model slot); `kcp1.` is decode-only. Key ring = `server.responses_compaction_secret_env` + accept-only `server.sealing.previous_secrets_env` (two-phase rotation); `sealed_max_age_s`; `sealed_item_max_bytes` (4 MiB, checked before decoding). Refusals are 400 `invalid_encrypted_content` + `param`, telling Codex users to start a new session. A DeploymentSpec without a secret warns in `kairyu validate` and at startup unless `server.sealing.ephemeral: true` (next release: fails). Helm generates and keeps a Secret (`existingSecret` for GitOps); kind f1c shares one.
+- Why: C1/C22: a static key shared one nonce budget and could not rotate, and the optional secret broke compacted Codex sessions on any restart, rollout or gateway hop.
+- Refs: m20 D6 → `docs/design/m20-sealing.md`; `kairyu/entrypoints/server/responses/sealing.py`, `kairyu/deploy/responses_validation.py`, `deploy/helm/kairyu/templates/responses-sealing-secret.yaml`
+
 ### 2026-10-05 — [amendment] Ingress parity: request id, compressed bodies, CORS (M20 WP-41)
 - What: every response (errors too) echoes a server-generated `X-Request-ID` without the access log (a client-sent one is never adopted: it keys the engine request). `Content-Encoding` gzip (core) and zstd (`kairyu[zstd]` extra, in the dev group) are decoded off-loop under `max_decompressed_bytes` (64 MiB → 413, bombs stop after one bounded step); other codings and zstd without the extra → 415 `unsupported_content_encoding`. Optional `cors_allowed_origins` (default empty) answers preflights before auth. Codex `harbor-zstd` fixture passes.
 - Why: SDK `_request_id` was `None` with `access_log: false`; Codex sends zstd bodies with ChatGPT auth (400 before); browser clients need CORS (M-W-9, G-transport-3, M-ST-10).

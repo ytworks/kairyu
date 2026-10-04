@@ -684,24 +684,24 @@ Additional Codex-derived behavior:
 - **WebSocket upgrades get 426.** Codex's built-in `openai` provider
   repointed with `openai_base_url` (Harbor/Terminal-Bench) tries WebSocket
   first and silently falls back to HTTPS; a custom provider never tries.
-- **Compaction.** Codex 0.160 compacts remotely only for its built-in
-  `openai` provider or an Azure-named one (the 0.162 pre-release adds
-  `capabilities.remote_compaction`): a terminal `compaction_trigger` item,
-  answered with one `compaction` item whose `encrypted_content` is an opaque
-  self-issued token; echoed items decode back into the summarized context.
-  Other custom providers compact locally with a `tools: []` summarization
-  request; on its in-band `context_length_exceeded` Codex drops the oldest
-  items and retries. Tokens are AES-256-GCM sealed and bound to the
-  authenticated tenant; forged, modified, or cross-tenant tokens fail closed.
-  Set `server.responses_compaction_secret_env` to the name of an environment
-  variable containing at least 32 random bytes; when unset, each process uses
-  an ephemeral key and tokens do not survive a restart or gateway hop.
+- **Compaction and sealing.** Remote compaction returns a `compaction` item
+  whose `encrypted_content` is a tenant-bound `kst2.` token (AES-256-GCM,
+  per-token key; m20 D6). Forged, modified, cross-tenant, expired or
+  unknown-key tokens get 400 `invalid_encrypted_content` (Codex: start a new
+  session); older `kcp1.` tokens still decode. Give every gateway the same
+  32+ byte secret in `server.responses_compaction_secret_env` (Helm generates
+  one) or restarts, rolling updates and gateway hops break compacted sessions:
+  `kairyu validate` and startup warn unless `server.sealing.ephemeral: true`
+  (the next release fails). `server.sealing` sets `sealed_max_age_s` and
+  `sealed_item_max_bytes` (4 MiB, checked before decoding). Rotate in two
+  phases: add the new secret to `server.sealing.previous_secrets_env`
+  (comma-separated, accept-only) everywhere, then promote it and keep the old
+  one there for the longest session lifetime.
 - **Model ids.** Never serve an id starting with a Codex bundled slug (`gpt-5.5`,
   `gpt-5.6-*`, `gpt-6-*`, `gpt-daybreak-*`, `codex-auto-review`): without a
   catalog Codex applies that slug's wire profile (responses-lite, no `tools`).
 - **`function_call_output.output` arrays** are accepted (text parts
   concatenated); image/audio tool-output parts are rejected explicitly.
-
 
 Operational notes:
 
