@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from fastapi import Request
@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
+    ExecutedChat,
     ValidatedChatRequest,
     execute_chat,
 )
@@ -48,6 +49,9 @@ if TYPE_CHECKING:
     from kairyu.entrypoints.server.tenancy import TenantAdmission
 
 logger = logging.getLogger(__name__)
+
+# One finished turn: output items, usage, terminal status, incomplete details.
+_Produced = tuple[list[dict], dict, str, dict | None]
 
 
 async def buffered_events(
@@ -258,52 +262,15 @@ async def engine_buffered_response(
 ) -> Response:
     """Run one engine generation to completion; serve it unary or as buffered SSE."""
 
-    async def produce() -> tuple[list[dict], dict, str, dict | None]:
-        try:
-            if admission is not None:
-                admission.mark_dispatched()
-            execution = await execute_chat(validated)
-        except ChatRequestError as error:
-            if error.execution is not None:
-                record_execution(http_request, request, error.execution)
-            raise BufferedFailure.from_chat_error(error) from error
-        except Exception as error:
-            logger.exception("Responses API upstream generation failed")
-            raise BufferedFailure(
-                {
-                    "message": f"upstream backend error ({type(error).__name__})",
-                    "type": "upstream_error",
-                    "code": "backend_error",
-                },
-                502,
-            ) from error
-        try:
-            validate_parallel_tool_calls(request, execution)
-        except ChatRequestError as error:
-            record_execution(http_request, request, execution)
-            raise BufferedFailure.from_chat_error(error) from error
-        record_execution(http_request, request, execution)
-        usage = usage_payload(
-            execution.result.prompt,
-            execution.result.completions,
-            execution.result.usage,
+    async def produce() -> _Produced:
+        execution = await _execute_engine_turn(request, validated, http_request, admission)
+        return _engine_turn_result(
+            request,
+            execution,
+            compaction_codec=compaction_codec,
+            owner=owner,
+            compaction_request=compaction_request,
         )
-        status, incomplete_details = terminal_status(execution)
-        if compaction_request:
-            if status != "completed":
-                return [], usage, status, incomplete_details
-            message = (
-                execution.response.choices[0].message.model_dump(mode="json")
-                if execution.response.choices
-                else {}
-            )
-            output = compaction_output_from_message(
-                message, compaction_codec=compaction_codec, owner=owner
-            )
-            return output, usage, status, None
-        output = output_items(request, execution)
-        apply_terminal_item_status(output, status)
-        return output, usage, status, incomplete_details
 
     if request.stream:
         return sse_response(
@@ -318,6 +285,93 @@ async def engine_buffered_response(
                 compaction_request=compaction_request,
             )
         )
+    return await _unary_response(
+        request,
+        produce,
+        response_id=response_id,
+        created_at=created_at,
+        stored_items=stored_items,
+        store=store,
+        owner=owner,
+        compaction_request=compaction_request,
+    )
+
+
+async def _execute_engine_turn(
+    request: ResponsesRequest,
+    validated: ValidatedChatRequest,
+    http_request: Request,
+    admission: TenantAdmission | None,
+) -> ExecutedChat:
+    try:
+        if admission is not None:
+            admission.mark_dispatched()
+        execution = await execute_chat(validated)
+    except ChatRequestError as error:
+        if error.execution is not None:
+            record_execution(http_request, request, error.execution)
+        raise BufferedFailure.from_chat_error(error) from error
+    except Exception as error:
+        logger.exception("Responses API upstream generation failed")
+        raise BufferedFailure(
+            {
+                "message": f"upstream backend error ({type(error).__name__})",
+                "type": "upstream_error",
+                "code": "backend_error",
+            },
+            502,
+        ) from error
+    try:
+        validate_parallel_tool_calls(request, execution)
+    except ChatRequestError as error:
+        record_execution(http_request, request, execution)
+        raise BufferedFailure.from_chat_error(error) from error
+    record_execution(http_request, request, execution)
+    return execution
+
+
+def _engine_turn_result(
+    request: ResponsesRequest,
+    execution: ExecutedChat,
+    *,
+    compaction_codec: CompactionCodec,
+    owner: str,
+    compaction_request: bool,
+) -> _Produced:
+    usage = usage_payload(
+        execution.result.prompt,
+        execution.result.completions,
+        execution.result.usage,
+    )
+    status, incomplete_details = terminal_status(execution)
+    if compaction_request:
+        if status != "completed":
+            return [], usage, status, incomplete_details
+        message = (
+            execution.response.choices[0].message.model_dump(mode="json")
+            if execution.response.choices
+            else {}
+        )
+        output = compaction_output_from_message(
+            message, compaction_codec=compaction_codec, owner=owner
+        )
+        return output, usage, status, None
+    output = output_items(request, execution)
+    apply_terminal_item_status(output, status)
+    return output, usage, status, incomplete_details
+
+
+async def _unary_response(
+    request: ResponsesRequest,
+    produce: Callable[[], Awaitable[_Produced]],
+    *,
+    response_id: str,
+    created_at: int,
+    stored_items: list[dict],
+    store: ResponseStore,
+    owner: str,
+    compaction_request: bool,
+) -> Response:
     try:
         output, usage, status, incomplete_details = await produce()
     except BufferedFailure as failure:

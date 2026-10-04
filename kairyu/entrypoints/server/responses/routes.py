@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     CacheHint,
     EngineBackend,
     UpstreamClientError,
@@ -132,12 +133,8 @@ async def _create_response(
     http_request.state.model = request.model
     metrics = getattr(http_request.app.state, "metrics", None)
     ingress_ns = getattr(http_request.state, "placement_started_ns", None)
-    if metrics is not None and type(ingress_ns) is int:
-        metrics.record_preplacement_phase(
-            "responses",
-            "ingress_to_handler",
-            max(0, time.perf_counter_ns() - ingress_ns),
-        )
+    if type(ingress_ns) is int:
+        _record_phase(metrics, "ingress_to_handler", ingress_ns)
     try:
         validate_request_surface(request)
     except ChatRequestError as error:
@@ -169,29 +166,21 @@ async def _create_response(
     except ChatRequestError as error:
         return request_failure(request, error) or chat_error(error)
     finally:
-        if metrics is not None:
-            metrics.record_preplacement_phase(
-                "responses",
-                "request_validation",
-                max(0, time.perf_counter_ns() - validation_started_ns),
-            )
+        _record_phase(metrics, "request_validation", validation_started_ns)
     if orchestrated:
-        return await orchestrated_response(
-            request,
-            turn.chat_request,
-            http_request,
-            deps.chat_dispatch,
-            response_id=f"resp_{uuid.uuid4().hex}",
-            created_at=int(time.time()),
-            stored_items=turn.stored_items,
-            store=deps.store,
-            owner=owner,
-            compaction_codec=deps.compaction_codec,
-            compaction_request=turn.compaction_request,
-        )
+        return await _orchestrated_turn(deps, request, turn, http_request, owner=owner)
     return await _engine_response(
         deps, request, validated, turn, http_request, owner=owner, metrics=metrics
     )
+
+
+def _record_phase(metrics: ServerMetrics | None, phase: str, started_ns: int) -> None:
+    if metrics is not None:
+        metrics.record_preplacement_phase(
+            "responses",
+            phase,
+            max(0, time.perf_counter_ns() - started_ns),
+        )
 
 
 def _prepare_turn(
@@ -252,6 +241,29 @@ async def _validate_engine_request(
         scheduling_class=scheduling_class,
         placement_started_ns=getattr(http_request.state, "placement_started_ns", None),
         legacy_chat_models=deps.legacy_chat_models,
+    )
+
+
+async def _orchestrated_turn(
+    deps: ResponsesDeps,
+    request: ResponsesRequest,
+    turn: _Turn,
+    http_request: Request,
+    *,
+    owner: str,
+) -> Response:
+    return await orchestrated_response(
+        request,
+        turn.chat_request,
+        http_request,
+        deps.chat_dispatch,
+        response_id=f"resp_{uuid.uuid4().hex}",
+        created_at=int(time.time()),
+        stored_items=turn.stored_items,
+        store=deps.store,
+        owner=owner,
+        compaction_codec=deps.compaction_codec,
+        compaction_request=turn.compaction_request,
     )
 
 
@@ -320,12 +332,7 @@ async def _prepare_backend(
     except RuntimeError as error:
         return upstream_error(error)
     finally:
-        if metrics is not None:
-            metrics.record_preplacement_phase(
-                "responses",
-                "backend_prepare",
-                max(0, time.perf_counter_ns() - prepare_started_ns),
-            )
+        _record_phase(metrics, "backend_prepare", prepare_started_ns)
     return None
 
 
@@ -349,35 +356,10 @@ async def _admit(
         return upstream_error(error)
     admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
     reserve_started_ns = time.perf_counter_ns()
-    if admission is not None:
-        admitted = admission.reserve_tokens(
-            bound.tokens,
-            refundable_on_exact_usage=bound.refundable_on_exact_usage,
-        )
-        if metrics is not None:
-            metrics.record_tenant_admission(
-                owner,
-                source="http",
-                admitted=admitted,
-                reason=admission.reason,
-            )
-        if admitted:
-            http_request.state.tenant_metric_admitted = True
-        if not admitted:
-            return JSONResponse(
-                status_code=429,
-                headers={"Retry-After": "1"},
-                content={
-                    "error": {
-                        "message": (
-                            f"tenant {owner!r} admission limit exceeded "
-                            f"({admission.reason})"
-                        ),
-                        "type": "rate_limit_error",
-                        "code": "tenant_rate_limited",
-                    }
-                },
-            )
+    if admission is not None and not _reserve_tenant_tokens(
+        admission, bound, http_request, metrics, owner=owner
+    ):
+        return _tenant_rate_limited(owner, admission.reason)
     admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
     if metrics is not None:
         metrics.record_preplacement_phase(
@@ -390,3 +372,41 @@ async def _admit(
             source="http",
         )
     return None
+
+
+def _reserve_tenant_tokens(
+    admission: TenantAdmission,
+    bound: AdmissionUpperBound,
+    http_request: Request,
+    metrics: ServerMetrics | None,
+    *,
+    owner: str,
+) -> bool:
+    admitted = admission.reserve_tokens(
+        bound.tokens,
+        refundable_on_exact_usage=bound.refundable_on_exact_usage,
+    )
+    if metrics is not None:
+        metrics.record_tenant_admission(
+            owner,
+            source="http",
+            admitted=admitted,
+            reason=admission.reason,
+        )
+    if admitted:
+        http_request.state.tenant_metric_admitted = True
+    return admitted
+
+
+def _tenant_rate_limited(owner: str, reason: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": "1"},
+        content={
+            "error": {
+                "message": f"tenant {owner!r} admission limit exceeded ({reason})",
+                "type": "rate_limit_error",
+                "code": "tenant_rate_limited",
+            }
+        },
+    )
