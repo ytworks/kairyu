@@ -154,7 +154,12 @@ class Gate:
         if self.args.tool_call_bias:
             token, bias = self.args.tool_call_bias.split(":")
             extra["logit_bias"] = [[int(token), float(bias)]]
-        return SamplingParams(temperature=0.0, max_tokens=24, extra_args=extra, **fields)
+        return SamplingParams(
+            temperature=0.0,
+            max_tokens=self.args.tool_max_tokens,
+            extra_args=extra,
+            **fields,
+        )
 
     async def _raw_chat(self, body: dict[str, object]) -> httpx.Response:
         return await self.raw.post(
@@ -242,7 +247,7 @@ class Gate:
         raw = await self._raw_chat(
             {
                 "temperature": 0.0,
-                "max_tokens": 24,
+                "max_tokens": self.args.tool_max_tokens,
                 "tools": list(_TOOLS),
                 "tool_choice": {"type": "function", "function": {"name": "weather"}},
                 **self._tool_params().extra_args,
@@ -250,7 +255,7 @@ class Gate:
         )
         raw_calls = raw.json()["choices"][0]["message"].get("tool_calls") or []
         return {
-            "passed": result.text.startswith('<tool_call>{"name":"weather"'),
+            "passed": '<tool_call>{"name":"weather"' in result.text,
             "raw_object_called": [call["function"]["name"] for call in raw_calls],
         }
 
@@ -360,7 +365,7 @@ class Gate:
             and usage is not None
             and usage.prompt_tokens > 0
             and response.rstrip().endswith("data: [DONE]")
-            and final.text.startswith('<tool_call>{"name":"weather"'),
+            and '<tool_call>{"name":"weather"' in final.text,
             "finish_reason": None if final is None else final.completions[0].finish_reason,
         }
 
@@ -556,6 +561,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="model")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--tool-call-bias", help="TOKEN_ID:BIAS for a random-weight model")
+    parser.add_argument(
+        "--tool-max-tokens",
+        type=int,
+        default=24,
+        help="output budget of the tool rows (a real model may write text first)",
+    )
     parser.add_argument("--expect-commit", help="build_info commit prefix the server must report")
     parser.add_argument("--expect-slots", type=int)
     parser.add_argument("--expect-ctx", type=int, help="per-slot context the server must report")
