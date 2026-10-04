@@ -114,10 +114,13 @@ Responses suite and real-client gates.
    providers and sidecars, hosted services, MCP allowlists, tool-description
    text, compaction-prompt overrides.
 8. **Repository rules.** New modules 200–400 lines (≤800); no net growth of
-   any touched code file over 800 lines (`wc -l` per WP); cross-boundary
-   records are frozen (documented single-owner state machines allowed); the
-   CLAUDE.md test policy (necessary and sufficient, one schema gate, A→C,
-   counts reported per WP); PROGRESS and D-ID rules.
+   any touched file over 800 lines (`wc -l` per WP). Proposed exception,
+   pending owner acknowledgement (§12 open points): a design record over 800
+   lines may grow by the dated amendments this plan requires, since the
+   never-rewrite rule forbids offsetting them; the WP reports that growth.
+   Cross-boundary records are frozen (documented single-owner state machines
+   allowed); the CLAUDE.md test policy (necessary and sufficient, one schema
+   gate, A→C, counts reported per WP); PROGRESS and D-ID rules.
 
 ## 5. Deliberate deviations
 
@@ -164,10 +167,14 @@ and an unmapped route under those prefixes fails. `tests/contracts/divergences.t
 allowlists current behavior, one entry per gap with its owner WP;
 `CONTRACT_STRICT=1` fails a full run on stale entries or on zero validated
 items. The same recorder captures every route's wire bytes when
-`KAIRYU_WIRE_CAPTURE=<dir>` is set (DoD #9). Later WPs add the Codex extension
-inventory and fixture replay (02), the ScenarioBackend test engines (02b), the
-Codex catalog and nightly matrix with a 7-day fixture refresh procedure (05),
-the strict v3.24 SDK harness (13), Open Responses CI (14) and client smokes (53).
+`KAIRYU_WIRE_CAPTURE=<dir>` is set (DoD #9). Its comparison
+(`python -m tests.contracts.wire_capture diff`) masks only run-to-run volatile
+values (ids keep their prefix and are numbered per test), skips the tests it
+lists as nondeterministic, and pairs tests moved between modules with
+`--key test` (WP-06). Later WPs add the Codex extension inventory and fixture
+replay (02), the ScenarioBackend test engines (02b), the Codex catalog and
+nightly matrix with a 7-day fixture refresh procedure (05), the strict v3.24
+SDK harness (13), Open Responses CI (14) and client smokes (53).
 
 **D2 — Package architecture and single pipeline** (WP-06, 12a, 12b, 17a, 18).
 `responses_service.py` becomes `kairyu/entrypoints/server/responses/` (routes,
@@ -355,7 +362,8 @@ DoD below. Merge order for hot files: `app.py` 12a → 07 → 08c → 16 → 19 
 fixtures in the WP). (2) Base/head collected counts with the same command and a
 rationale per test area. (3) `CONTRACT_STRICT=1` schema gate green with no stale
 entries. (4) New modules ≤800 lines; `wc -l` before/after and zero net growth
-for every touched code file over 800 lines. (5) Cross-boundary records
+for every touched file over 800 lines (the proposed design-record exception of
+Principle 8 aside). (5) Cross-boundary records
 immutable. (6) m20 D-ID status and supersession rows updated; PROGRESS only for
 D-ID, milestone or blocker changes. (7) Enabled capabilities flipped in the Codex
 catalog. (8) `ruff check .`. (9) Refactor-only WPs (06, 06b, 12a, 12b, 37):
@@ -754,6 +762,13 @@ chaining from failed/in-progress responses, the lock code, the cancelled-stream
 end, DELETE while in progress, the `input_items` shape, `encrypted_content` on
 retrieve, resume error codes, and the roles `/compact` retains. Until the owner
 runs the probe, the defaults in D12, D15, D16 and D17 stand.
+
+**Owner acknowledgement needed (WP-01).** `docs/design/m11-product.md` grows
+from 869 to 876 lines (+7) with the m11 D4 pointer amendment and its Status
+note. The plan's size rule has no exception for append-only design records,
+and offsetting the growth would rewrite past text. Principle 8 proposes the
+exception; until the owner acknowledges it, this growth is a recorded
+deviation from DoD (4).
 
 ## 13. Risks
 
