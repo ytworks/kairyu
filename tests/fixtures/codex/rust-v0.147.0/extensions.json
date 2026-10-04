@@ -1,0 +1,2564 @@
+{
+  "codex_tag": "rust-v0.147.0",
+  "generator": "scripts/codex_gate/extension_inventory.py",
+  "note": "Type-level inventory: every field, kind and value the serde request types can serialize at this tag, classified against the pinned OpenAPI closure at the same wire position. Builder gating (which fields a given provider or model actually sends) is recorded by the request fixtures beside this file.",
+  "spec": "responses-schema@13fa6e7ab9.json",
+  "sources": [
+    "codex-rs/codex-api/src/common.rs",
+    "codex-rs/core/src/tools/hosted_spec.rs",
+    "codex-rs/protocol/src/config_types.rs",
+    "codex-rs/protocol/src/models.rs",
+    "codex-rs/protocol/src/openai_models.rs",
+    "codex-rs/tools/src/responses_api.rs",
+    "codex-rs/tools/src/tool_spec.rs"
+  ],
+  "routes": [
+    {
+      "root": "ResponsesApiRequest",
+      "path": "request",
+      "spec_schema": "CreateResponse",
+      "route": "POST /responses"
+    },
+    {
+      "root": "ResponsesWsRequest",
+      "path": "websocket",
+      "spec_schema": "ResponsesClientEvent",
+      "route": "WebSocket /responses"
+    },
+    {
+      "root": "CompactionInput",
+      "path": "compact",
+      "spec_schema": "CompactResponseMethodPublicBody",
+      "route": "POST /responses/compact"
+    }
+  ],
+  "summary": {
+    "entries": 354,
+    "codex_extensions": 125
+  },
+  "codex_extensions": [
+    "compact.parallel_tool_calls",
+    "compact.reasoning",
+    "compact.reasoning.context",
+    "compact.reasoning.context=all_turns",
+    "compact.reasoning.context=auto",
+    "compact.reasoning.context=current_turn",
+    "compact.reasoning.effort",
+    "compact.reasoning.effort=<custom string>",
+    "compact.reasoning.effort=high",
+    "compact.reasoning.effort=low",
+    "compact.reasoning.effort=max",
+    "compact.reasoning.effort=medium",
+    "compact.reasoning.effort=minimal",
+    "compact.reasoning.effort=none",
+    "compact.reasoning.effort=xhigh",
+    "compact.reasoning.summary",
+    "compact.reasoning.summary=auto",
+    "compact.reasoning.summary=concise",
+    "compact.reasoning.summary=detailed",
+    "compact.reasoning.summary=none",
+    "compact.text",
+    "compact.text.format",
+    "compact.text.format.name",
+    "compact.text.format.schema",
+    "compact.text.format.strict",
+    "compact.text.format.type",
+    "compact.text.format.type=json_schema",
+    "compact.text.verbosity",
+    "compact.text.verbosity=high",
+    "compact.text.verbosity=low",
+    "compact.text.verbosity=medium",
+    "compact.tools",
+    "compact.tools[]{type=custom}",
+    "compact.tools[]{type=custom}.defer_loading",
+    "compact.tools[]{type=custom}.description",
+    "compact.tools[]{type=custom}.format",
+    "compact.tools[]{type=custom}.format.definition",
+    "compact.tools[]{type=custom}.format.syntax",
+    "compact.tools[]{type=custom}.format.type",
+    "compact.tools[]{type=custom}.name",
+    "compact.tools[]{type=function}",
+    "compact.tools[]{type=function}.defer_loading",
+    "compact.tools[]{type=function}.description",
+    "compact.tools[]{type=function}.name",
+    "compact.tools[]{type=function}.parameters",
+    "compact.tools[]{type=function}.strict",
+    "compact.tools[]{type=namespace}",
+    "compact.tools[]{type=namespace}.description",
+    "compact.tools[]{type=namespace}.name",
+    "compact.tools[]{type=namespace}.tools",
+    "compact.tools[]{type=namespace}.tools[]{type=custom}",
+    "compact.tools[]{type=namespace}.tools[]{type=function}",
+    "compact.tools[]{type=tool_search}",
+    "compact.tools[]{type=tool_search}.description",
+    "compact.tools[]{type=tool_search}.execution",
+    "compact.tools[]{type=tool_search}.parameters",
+    "compact.tools[]{type=web_search}",
+    "compact.tools[]{type=web_search}.external_web_access",
+    "compact.tools[]{type=web_search}.filters",
+    "compact.tools[]{type=web_search}.filters.allowed_domains",
+    "compact.tools[]{type=web_search}.indexed_web_access",
+    "compact.tools[]{type=web_search}.search_content_types",
+    "compact.tools[]{type=web_search}.search_context_size",
+    "compact.tools[]{type=web_search}.search_context_size=high",
+    "compact.tools[]{type=web_search}.search_context_size=low",
+    "compact.tools[]{type=web_search}.search_context_size=medium",
+    "compact.tools[]{type=web_search}.user_location",
+    "compact.tools[]{type=web_search}.user_location.city",
+    "compact.tools[]{type=web_search}.user_location.country",
+    "compact.tools[]{type=web_search}.user_location.region",
+    "compact.tools[]{type=web_search}.user_location.timezone",
+    "compact.tools[]{type=web_search}.user_location.type",
+    "compact.tools[]{type=web_search}.user_location.type=approximate",
+    "request.client_metadata",
+    "request.input[]{type=agent_message}",
+    "request.input[]{type=agent_message}.author",
+    "request.input[]{type=agent_message}.content",
+    "request.input[]{type=agent_message}.content[]{type=encrypted_content}",
+    "request.input[]{type=agent_message}.content[]{type=encrypted_content}.encrypted_content",
+    "request.input[]{type=agent_message}.content[]{type=input_text}",
+    "request.input[]{type=agent_message}.content[]{type=input_text}.text",
+    "request.input[]{type=agent_message}.id",
+    "request.input[]{type=agent_message}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=agent_message}.recipient",
+    "request.input[]{type=compaction}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=context_compaction}",
+    "request.input[]{type=context_compaction}.encrypted_content",
+    "request.input[]{type=context_compaction}.id",
+    "request.input[]{type=context_compaction}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=custom_tool_call_output}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=custom_tool_call_output}.name",
+    "request.input[]{type=custom_tool_call_output}.output[]{type=encrypted_content}",
+    "request.input[]{type=custom_tool_call_output}.output[]{type=encrypted_content}.encrypted_content",
+    "request.input[]{type=custom_tool_call_output}.output[]{type=input_audio}",
+    "request.input[]{type=custom_tool_call_output}.output[]{type=input_audio}.audio_url",
+    "request.input[]{type=custom_tool_call}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=custom_tool_call}.status",
+    "request.input[]{type=function_call_output}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=function_call_output}.output[]{type=encrypted_content}",
+    "request.input[]{type=function_call_output}.output[]{type=encrypted_content}.encrypted_content",
+    "request.input[]{type=function_call_output}.output[]{type=input_audio}",
+    "request.input[]{type=function_call_output}.output[]{type=input_audio}.audio_url",
+    "request.input[]{type=function_call}.encrypted_function_args",
+    "request.input[]{type=function_call}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=image_generation_call}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=local_shell_call}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=message}.content[]{type=input_audio}",
+    "request.input[]{type=message}.content[]{type=input_audio}.audio_url",
+    "request.input[]{type=message}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=message}.internal_chat_message_metadata_passthrough.executed_tool_calls",
+    "request.input[]{type=message}.internal_chat_message_metadata_passthrough.turn_id",
+    "request.input[]{type=reasoning}.content[]{type=text}",
+    "request.input[]{type=reasoning}.content[]{type=text}.text",
+    "request.input[]{type=reasoning}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=tool_search_call}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=tool_search_output}.internal_chat_message_metadata_passthrough",
+    "request.input[]{type=web_search_call}.internal_chat_message_metadata_passthrough",
+    "request.reasoning.effort=<custom string>",
+    "request.reasoning.summary=none",
+    "request.stream_options.reasoning_summary_delivery",
+    "request.stream_options.reasoning_summary_delivery=sequential_cutoff",
+    "request.tools[]{type=web_search}.indexed_web_access",
+    "request.tools[]{type=web_search}.search_content_types",
+    "websocket{type=response.create}.client_metadata",
+    "websocket{type=response.create}.generate"
+  ],
+  "entries": [
+    {
+      "path": "compact",
+      "kind": "root",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:28"
+    },
+    {
+      "path": "compact.input",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:30",
+      "optional": false
+    },
+    {
+      "path": "compact.input[]",
+      "kind": "same_as",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:813",
+      "same_as": "request.input[]"
+    },
+    {
+      "path": "compact.instructions",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:32",
+      "optional": true
+    },
+    {
+      "path": "compact.model",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:29",
+      "optional": false
+    },
+    {
+      "path": "compact.parallel_tool_calls",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:35",
+      "optional": false
+    },
+    {
+      "path": "compact.prompt_cache_key",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:41",
+      "optional": true
+    },
+    {
+      "path": "compact.reasoning",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:37",
+      "optional": true
+    },
+    {
+      "path": "compact.reasoning.context",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:155",
+      "optional": true
+    },
+    {
+      "path": "compact.reasoning.context=all_turns",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:145"
+    },
+    {
+      "path": "compact.reasoning.context=auto",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:143"
+    },
+    {
+      "path": "compact.reasoning.context=current_turn",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:144"
+    },
+    {
+      "path": "compact.reasoning.effort",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:151",
+      "optional": true
+    },
+    {
+      "path": "compact.reasoning.effort=<custom string>",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:51",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=high",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:62",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=low",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:60",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=max",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:64",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=medium",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:61",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=minimal",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:59",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=none",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:58",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.effort=xhigh",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:63",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "compact.reasoning.summary",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:153",
+      "optional": true
+    },
+    {
+      "path": "compact.reasoning.summary=auto",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:49"
+    },
+    {
+      "path": "compact.reasoning.summary=concise",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:50"
+    },
+    {
+      "path": "compact.reasoning.summary=detailed",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:51"
+    },
+    {
+      "path": "compact.reasoning.summary=none",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:53"
+    },
+    {
+      "path": "compact.service_tier",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:39",
+      "optional": true
+    },
+    {
+      "path": "compact.text",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:43",
+      "optional": true
+    },
+    {
+      "path": "compact.text.format",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:195",
+      "optional": true
+    },
+    {
+      "path": "compact.text.format.name",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:185",
+      "optional": false
+    },
+    {
+      "path": "compact.text.format.schema",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:183",
+      "optional": false
+    },
+    {
+      "path": "compact.text.format.strict",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:181",
+      "optional": false
+    },
+    {
+      "path": "compact.text.format.type",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:179",
+      "optional": false
+    },
+    {
+      "path": "compact.text.format.type=json_schema",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:173"
+    },
+    {
+      "path": "compact.text.verbosity",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:193",
+      "optional": true
+    },
+    {
+      "path": "compact.text.verbosity=high",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:204"
+    },
+    {
+      "path": "compact.text.verbosity=low",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:201"
+    },
+    {
+      "path": "compact.text.verbosity=medium",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:203"
+    },
+    {
+      "path": "compact.tools",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:34",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=custom}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:55"
+    },
+    {
+      "path": "compact.tools[]{type=custom}.defer_loading",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:20",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=custom}.description",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:18",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=custom}.format",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:21",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=custom}.format.definition",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:28",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=custom}.format.syntax",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:27",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=custom}.format.type",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:26",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=custom}.name",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:17",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=function}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:24"
+    },
+    {
+      "path": "compact.tools[]{type=function}.defer_loading",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:40",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=function}.description",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:34",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=function}.name",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:33",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=function}.parameters",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:41",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=function}.strict",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:38",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=namespace}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:26"
+    },
+    {
+      "path": "compact.tools[]{type=namespace}.description",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:60",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=namespace}.name",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:59",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=namespace}.tools",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:61",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=namespace}.tools[]{type=custom}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:79",
+      "same_as": "compact.tools[]{type=custom}"
+    },
+    {
+      "path": "compact.tools[]{type=namespace}.tools[]{type=function}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:77",
+      "same_as": "compact.tools[]{type=function}"
+    },
+    {
+      "path": "compact.tools[]{type=tool_search}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:28"
+    },
+    {
+      "path": "compact.tools[]{type=tool_search}.description",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:30",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=tool_search}.execution",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:29",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=tool_search}.parameters",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:31",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=web_search}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:40",
+      "constructed_at": "codex-rs/core/src/tools/hosted_spec.rs@rust-v0.147.0:32"
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.external_web_access",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:42",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.filters",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:46",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.filters.allowed_domains",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:154",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.indexed_web_access",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:44",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.search_content_types",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:52",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.search_context_size",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:50",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.search_context_size=high",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:384"
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.search_context_size=low",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:382"
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.search_context_size=medium",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:383"
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:48",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.city",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:174",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.country",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:170",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.region",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:172",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.timezone",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:176",
+      "optional": true
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.type",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:168",
+      "optional": false
+    },
+    {
+      "path": "compact.tools[]{type=web_search}.user_location.type=approximate",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:446"
+    },
+    {
+      "path": "request",
+      "kind": "root",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:252"
+    },
+    {
+      "path": "request.client_metadata",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:274",
+      "optional": true
+    },
+    {
+      "path": "request.include",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:266",
+      "optional": false
+    },
+    {
+      "path": "request.input",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:256",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=additional_tools}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:816"
+    },
+    {
+      "path": "request.input[]{type=additional_tools}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:818",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=additional_tools}.role",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:819",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=additional_tools}.tools",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:820",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=additional_tools}.tools[]",
+      "kind": "same_as",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:22",
+      "same_as": "request.tools[]"
+    },
+    {
+      "path": "request.input[]{type=agent_message}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:838"
+    },
+    {
+      "path": "request.input[]{type=agent_message}.author",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:842",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=agent_message}.content",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:844",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=agent_message}.content[]{type=encrypted_content}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:737"
+    },
+    {
+      "path": "request.input[]{type=agent_message}.content[]{type=encrypted_content}.encrypted_content",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:737",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=agent_message}.content[]{type=input_text}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:736"
+    },
+    {
+      "path": "request.input[]{type=agent_message}.content[]{type=input_text}.text",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:736",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=agent_message}.id",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:841",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=agent_message}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:847",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=agent_message}.recipient",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:843",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=compaction_trigger}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1031"
+    },
+    {
+      "path": "request.input[]{type=compaction}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1021"
+    },
+    {
+      "path": "request.input[]{type=compaction}.encrypted_content",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1025",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=compaction}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1024",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=compaction}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1028",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=context_compaction}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1032"
+    },
+    {
+      "path": "request.input[]{type=context_compaction}.encrypted_content",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1038",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=context_compaction}.id",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1035",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=context_compaction}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1041",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:948"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:952",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:951",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:961",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.name",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:955",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:958",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=encrypted_content}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1861"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=encrypted_content}.encrypted_content",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1862",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_audio}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1858"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_audio}.audio_url",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1859",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1851"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.detail",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1855",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.detail=auto",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:757"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.detail=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:759"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.detail=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:758"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.detail=original",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:760"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_image}.image_url",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1852",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1847"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call_output}.output[]{type=input_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1848",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:927"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:935",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:930",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.input",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:940",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:943",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:936",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.namespace",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:939",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=custom_tool_call}.status",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:933",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=function_call_output}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:915"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:919",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:918",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:925",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:922",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=encrypted_content}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1861"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=encrypted_content}.encrypted_content",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1862",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_audio}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1858"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_audio}.audio_url",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1859",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1851"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.detail",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1855",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.detail=auto",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:757"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.detail=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:759"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.detail=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:758"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.detail=original",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:760"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_image}.image_url",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1852",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1847"
+    },
+    {
+      "path": "request.input[]{type=function_call_output}.output[]{type=input_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1848",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:875"
+    },
+    {
+      "path": "request.input[]{type=function_call}.arguments",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:886",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:890",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call}.encrypted_function_args",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:889",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=function_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:878",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=function_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:893",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=function_call}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:879",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=function_call}.namespace",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:882",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1007"
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1010",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1018",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}.result",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1015",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}.revised_prompt",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1014",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=image_generation_call}.status",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1011",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:862"
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:870",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1672"
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}.command",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1677",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}.env",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1680",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}.timeout_ms",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1678",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}.user",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1681",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.action{type=exec}.working_directory",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1679",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:868",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:866",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:873",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.status",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:869",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.status=completed",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1664"
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.status=in_progress",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1665"
+    },
+    {
+      "path": "request.input[]{type=local_shell_call}.status=incomplete",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1666"
+    },
+    {
+      "path": "request.input[]{type=message}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:822"
+    },
+    {
+      "path": "request.input[]{type=message}.content",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:827",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_audio}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:725"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_audio}.audio_url",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:726",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:719"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.detail",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:723",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.detail=auto",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:757"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.detail=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:759"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.detail=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:758"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.detail=original",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:760"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_image}.image_url",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:720",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:716"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=input_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:717",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=output_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:728"
+    },
+    {
+      "path": "request.input[]{type=message}.content[]{type=output_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:729",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=message}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:825",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:836",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.internal_chat_message_metadata_passthrough.executed_tool_calls",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:794",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.internal_chat_message_metadata_passthrough.turn_id",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:789",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.phase",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:833",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=message}.phase=commentary",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:776"
+    },
+    {
+      "path": "request.input[]{type=message}.phase=final_answer",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:778"
+    },
+    {
+      "path": "request.input[]{type=message}.role",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:826",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=reasoning}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:849"
+    },
+    {
+      "path": "request.input[]{type=reasoning}.content",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:856",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=reasoning}.content[]{type=reasoning_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1723"
+    },
+    {
+      "path": "request.input[]{type=reasoning}.content[]{type=reasoning_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1723",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=reasoning}.content[]{type=text}",
+      "kind": "variant",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1724"
+    },
+    {
+      "path": "request.input[]{type=reasoning}.content[]{type=text}.text",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1724",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=reasoning}.encrypted_content",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:857",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=reasoning}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:852",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=reasoning}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:860",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=reasoning}.summary",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:853",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=reasoning}.summary[]{type=summary_text}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1717"
+    },
+    {
+      "path": "request.input[]{type=reasoning}.summary[]{type=summary_text}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1717",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:895"
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.arguments",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:905",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:899",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.execution",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:903",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:898",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:908",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=tool_search_call}.status",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:902",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:963"
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.call_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:967",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.execution",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:969",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:966",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:974",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.status",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:968",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.tools",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:971",
+      "optional": false
+    },
+    {
+      "path": "request.input[]{type=tool_search_output}.tools[]",
+      "kind": "same_as",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:22",
+      "same_as": "request.tools[]"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:984"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:993",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=find_in_page}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1701"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=find_in_page}.pattern",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1707",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=find_in_page}.url",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1704",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=open_page}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1696"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=open_page}.url",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1699",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=search}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1688"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=search}.queries",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1694",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.action{type=search}.query",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:1691",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:987",
+      "optional": true
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.internal_chat_message_metadata_passthrough",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:996",
+      "optional": true,
+      "same_as": "request.input[]{type=message}.internal_chat_message_metadata_passthrough"
+    },
+    {
+      "path": "request.input[]{type=web_search_call}.status",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:990",
+      "optional": true
+    },
+    {
+      "path": "request.instructions",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:255",
+      "optional": true
+    },
+    {
+      "path": "request.model",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:253",
+      "optional": false
+    },
+    {
+      "path": "request.parallel_tool_calls",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:260",
+      "optional": false
+    },
+    {
+      "path": "request.prompt_cache_key",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:270",
+      "optional": true
+    },
+    {
+      "path": "request.reasoning",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:261",
+      "optional": true
+    },
+    {
+      "path": "request.reasoning.context",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:155",
+      "optional": true
+    },
+    {
+      "path": "request.reasoning.context=all_turns",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:145"
+    },
+    {
+      "path": "request.reasoning.context=auto",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:143"
+    },
+    {
+      "path": "request.reasoning.context=current_turn",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:144"
+    },
+    {
+      "path": "request.reasoning.effort",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:151",
+      "optional": true
+    },
+    {
+      "path": "request.reasoning.effort=<custom string>",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:51",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:62",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:60",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=max",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:64",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=medium",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:61",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=minimal",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:59",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=none",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:58",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.effort=xhigh",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/openai_models.rs@rust-v0.147.0:63",
+      "note": "as_str values; ultra resolves to max and persistent to \"disabled\" before the wire; numeric custom efforts serialize as integers"
+    },
+    {
+      "path": "request.reasoning.summary",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:153",
+      "optional": true
+    },
+    {
+      "path": "request.reasoning.summary=auto",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:49"
+    },
+    {
+      "path": "request.reasoning.summary=concise",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:50"
+    },
+    {
+      "path": "request.reasoning.summary=detailed",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:51"
+    },
+    {
+      "path": "request.reasoning.summary=none",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:53"
+    },
+    {
+      "path": "request.service_tier",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:268",
+      "optional": true
+    },
+    {
+      "path": "request.store",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:262",
+      "optional": false
+    },
+    {
+      "path": "request.stream",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:263",
+      "optional": false
+    },
+    {
+      "path": "request.stream_options",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:265",
+      "optional": true
+    },
+    {
+      "path": "request.stream_options.reasoning_summary_delivery",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:166",
+      "optional": false
+    },
+    {
+      "path": "request.stream_options.reasoning_summary_delivery=sequential_cutoff",
+      "kind": "value",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:161"
+    },
+    {
+      "path": "request.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:272",
+      "optional": true
+    },
+    {
+      "path": "request.text.format",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:195",
+      "optional": true
+    },
+    {
+      "path": "request.text.format.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:185",
+      "optional": false
+    },
+    {
+      "path": "request.text.format.schema",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:183",
+      "optional": false
+    },
+    {
+      "path": "request.text.format.strict",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:181",
+      "optional": false
+    },
+    {
+      "path": "request.text.format.type",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:179",
+      "optional": false
+    },
+    {
+      "path": "request.text.format.type=json_schema",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:173"
+    },
+    {
+      "path": "request.text.verbosity",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:193",
+      "optional": true
+    },
+    {
+      "path": "request.text.verbosity=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:204"
+    },
+    {
+      "path": "request.text.verbosity=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:201"
+    },
+    {
+      "path": "request.text.verbosity=medium",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:203"
+    },
+    {
+      "path": "request.tool_choice",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:259",
+      "optional": false
+    },
+    {
+      "path": "request.tools",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:258",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=custom}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:55"
+    },
+    {
+      "path": "request.tools[]{type=custom}.defer_loading",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:20",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=custom}.description",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:18",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=custom}.format",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:21",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=custom}.format.definition",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:28",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=custom}.format.syntax",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:27",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=custom}.format.type",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:26",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=custom}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:17",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=function}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:24"
+    },
+    {
+      "path": "request.tools[]{type=function}.defer_loading",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:40",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=function}.description",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:34",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=function}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:33",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=function}.parameters",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:41",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=function}.strict",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:38",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:26"
+    },
+    {
+      "path": "request.tools[]{type=namespace}.description",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:60",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:59",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:61",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=custom}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:79",
+      "same_as": "request.tools[]{type=custom}"
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:77"
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}.defer_loading",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:40",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}.description",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:34",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}.name",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:33",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}.parameters",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:41",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=namespace}.tools[]{type=function}.strict",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/responses_api.rs@rust-v0.147.0:38",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=tool_search}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:28"
+    },
+    {
+      "path": "request.tools[]{type=tool_search}.description",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:30",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=tool_search}.execution",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:29",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=tool_search}.parameters",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:31",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=web_search}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:40",
+      "constructed_at": "codex-rs/core/src/tools/hosted_spec.rs@rust-v0.147.0:32"
+    },
+    {
+      "path": "request.tools[]{type=web_search}.external_web_access",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:42",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.filters",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:46",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.filters.allowed_domains",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:154",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.indexed_web_access",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:44",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.search_content_types",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:52",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.search_context_size",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:50",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.search_context_size=high",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:384"
+    },
+    {
+      "path": "request.tools[]{type=web_search}.search_context_size=low",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:382"
+    },
+    {
+      "path": "request.tools[]{type=web_search}.search_context_size=medium",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:383"
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:48",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.city",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:174",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.country",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:170",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.region",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:172",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.timezone",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:176",
+      "optional": true
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.type",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:168",
+      "optional": false
+    },
+    {
+      "path": "request.tools[]{type=web_search}.user_location.type=approximate",
+      "kind": "value",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/config_types.rs@rust-v0.147.0:446"
+    },
+    {
+      "path": "websocket",
+      "kind": "root",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:356"
+    },
+    {
+      "path": "websocket{type=response.create}",
+      "kind": "variant",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:358"
+    },
+    {
+      "path": "websocket{type=response.create}.client_metadata",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:328",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.generate",
+      "kind": "field",
+      "classification": "codex-extension",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:326",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.include",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:318",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.input",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:308",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.input[]",
+      "kind": "same_as",
+      "classification": "spec",
+      "source": "codex-rs/protocol/src/models.rs@rust-v0.147.0:813",
+      "same_as": "request.input[]"
+    },
+    {
+      "path": "websocket{type=response.create}.instructions",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:305",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.model",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:303",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.parallel_tool_calls",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:312",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.previous_response_id",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:307",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.prompt_cache_key",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:322",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.reasoning",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:313",
+      "optional": true,
+      "same_as": "request.reasoning"
+    },
+    {
+      "path": "websocket{type=response.create}.service_tier",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:320",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.store",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:314",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.stream",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:315",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.stream_options",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:317",
+      "optional": true,
+      "same_as": "request.stream_options"
+    },
+    {
+      "path": "websocket{type=response.create}.text",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:324",
+      "optional": true,
+      "same_as": "request.text"
+    },
+    {
+      "path": "websocket{type=response.create}.tool_choice",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:311",
+      "optional": false
+    },
+    {
+      "path": "websocket{type=response.create}.tools",
+      "kind": "field",
+      "classification": "spec",
+      "source": "codex-rs/codex-api/src/common.rs@rust-v0.147.0:310",
+      "optional": true
+    },
+    {
+      "path": "websocket{type=response.create}.tools[]",
+      "kind": "same_as",
+      "classification": "spec",
+      "source": "codex-rs/tools/src/tool_spec.rs@rust-v0.147.0:22",
+      "same_as": "request.tools[]"
+    }
+  ]
+}
