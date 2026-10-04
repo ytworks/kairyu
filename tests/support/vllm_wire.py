@@ -20,6 +20,7 @@ from tests.support.scenario_script import (
     Turn,
     channel_text,
     chunk_pieces,
+    inline_part_texts,
     toy_tokens,
 )
 
@@ -42,6 +43,23 @@ def vllm_error_body(
 
     fields = {"message": message, "type": err_type, "param": None, "code": code}
     return {"error": fields} if style == "nested" else {"object": "error", **fields}
+
+
+def vllm_stream_error_frame(
+    message: str,
+    *,
+    err_type: str = "BadRequestError",
+    code: int = 400,
+    style: ErrorStyle = "nested",
+) -> dict[str, object]:
+    """vLLM's in-band SSE error payload, always under a top-level ``error``.
+
+    Older releases wrapped the flat ``ErrorResponse`` in ``{"error": ...}``;
+    the current nested body already has that shape.
+    """
+
+    body = vllm_error_body(message, err_type=err_type, code=code, style=style)
+    return body if style == "nested" else {"error": body}
 
 
 def vllm_context_length_message(
@@ -83,6 +101,35 @@ def vllm_context_length_message(
     )
 
 
+def vllm_context_overflow_message(
+    *,
+    max_model_len: int,
+    prompt_tokens: int,
+    max_tokens: int | None,
+    style: ErrorStyle = "nested",
+) -> str | None:
+    """vLLM's ``_validate_input`` verdict: the overflow text, or None if admitted.
+
+    Current (nested-body) releases reject a prompt that fills the context
+    before checking ``max_tokens``; older (flat-body) releases checked the
+    prompt alone only when ``max_tokens`` was omitted.
+    """
+
+    prompt_only = max_tokens is None or (style == "nested" and prompt_tokens >= max_model_len)
+    if prompt_only:
+        exceeded, budget = prompt_tokens >= max_model_len, None
+    else:
+        exceeded, budget = prompt_tokens + max_tokens > max_model_len, max_tokens
+    if not exceeded:
+        return None
+    return vllm_context_length_message(
+        max_model_len=max_model_len,
+        prompt_tokens=prompt_tokens,
+        max_tokens=budget,
+        style=style,
+    )
+
+
 def _text_of(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -111,9 +158,16 @@ def chat_prompt_text(body: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def last_user_message(body: Mapping[str, object]) -> str:
-    users = tuple(message for message in _messages(body) if message.get("role") == "user")
-    return _text_of(users[-1].get("content")) if users else ""
+def pending_user_message(body: Mapping[str, object]) -> str:
+    """The newest message's text when the user sent it, else empty.
+
+    Chat-body counterpart of ``scenario_script.pending_user_text``.
+    """
+
+    messages = _messages(body)
+    if not messages or messages[-1].get("role") != "user":
+        return ""
+    return _text_of(messages[-1].get("content"))
 
 
 def _chat_part_pieces(index: int, part: Part) -> tuple[Piece, ...]:
@@ -124,22 +178,15 @@ def _chat_part_pieces(index: int, part: Part) -> tuple[Piece, ...]:
         return (Piece(index, "call_name", part.name), *arguments)
     if isinstance(part, Reasoning) and part.typed:
         return tuple(Piece(index, "reasoning", text) for text in toy_tokens(part.text))
-    if isinstance(part, Reasoning):
-        texts = ("<think>", *toy_tokens(part.text), "</think>")
-        return tuple(Piece(index, "content", text) for text in texts)
-    return tuple(Piece(index, "content", text) for text in toy_tokens(part))
+    return tuple(Piece(index, "content", text) for text in inline_part_texts(part))
 
 
 def _completion_part_pieces(index: int, part: Part, end_tag: str) -> tuple[Piece, ...]:
-    if isinstance(part, ToolCall):
-        texts = toy_tokens(part.generic_envelope())
-    elif isinstance(part, Reasoning) and part.typed:
+    if isinstance(part, Reasoning) and part.typed:
         # A template that opens the span: the model emits only its terminator.
         texts = (*toy_tokens(part.text), end_tag)
-    elif isinstance(part, Reasoning):
-        texts = ("<think>", *toy_tokens(part.text), "</think>")
     else:
-        texts = toy_tokens(part)
+        texts = inline_part_texts(part)
     return tuple(Piece(index, "text", text) for text in texts)
 
 

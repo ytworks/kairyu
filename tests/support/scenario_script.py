@@ -27,9 +27,13 @@ _FINISH_REASONS = frozenset({"stop", "length", "content_filter"})
 # Whitespace attaches to the following word, like a BPE "Ġword" piece, so the
 # pieces of a string always concatenate back to exactly that string.
 _TOKEN_PATTERN = re.compile(r"\s*\S+|\s+")
-# ``chat_template.render_chat`` (legacy renderer): "role: text" lines.
+# ``chat_template.render_chat`` (legacy renderer): "role: text" lines, then
+# the bare "assistant:" generation prompt (no space, so never a message line).
 _LEGACY_USER_MARKER = re.compile(r"(?m)^user: ")
 _LEGACY_NEXT_ROLE = re.compile(r"\n(?:assistant|developer|system|tool|user):")
+_LEGACY_LATER_MESSAGE = re.compile(r"\n(?:assistant|developer|system|tool): ")
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
 
 
 def toy_tokens(text: str) -> tuple[str, ...]:
@@ -48,17 +52,20 @@ def numbered_text(count: int, *, word: str = "w") -> str:
     return " ".join(f"{word}{index}" for index in range(count))
 
 
-def last_user_text(rendered: str) -> str:
-    """The final user message of a legacy-rendered prompt, else the prompt.
+def pending_user_text(rendered: str) -> str:
+    """The user message a legacy-rendered prompt awaits a reply to.
 
-    Model chat templates have no portable role markers, so their prompts are
-    matched as a whole.
+    Empty once another message (an assistant tool call, a tool result)
+    follows the last user message. Model chat templates have no portable
+    role markers, so their prompts are returned whole.
     """
 
     starts = tuple(_LEGACY_USER_MARKER.finditer(rendered))
     if not starts:
         return rendered
     tail = rendered[starts[-1].end() :]
+    if _LEGACY_LATER_MESSAGE.search(tail):
+        return ""
     end = _LEGACY_NEXT_ROLE.search(tail)
     return tail if end is None else tail[: end.start()]
 
@@ -108,6 +115,21 @@ class ToolCall:
 
 
 Part: TypeAlias = str | Reasoning | ToolCall
+
+
+def inline_part_texts(part: Part) -> tuple[str, ...]:
+    """The token pieces of ``part`` as raw model output in the visible text.
+
+    A ``ToolCall`` is its generic envelope and ``Reasoning`` sits inside
+    inline think tags. Engines route typed reasoning to their own channel
+    before calling this.
+    """
+
+    if isinstance(part, ToolCall):
+        return toy_tokens(part.generic_envelope())
+    if isinstance(part, Reasoning):
+        return (THINK_OPEN, *toy_tokens(part.text), THINK_CLOSE)
+    return toy_tokens(part)
 
 
 @dataclass(frozen=True)
@@ -169,9 +191,16 @@ class UnscriptedCallError(RuntimeError):
 class Scenario:
     """Selects a turn for each generation call.
 
-    Precedence: the first ``rules`` entry whose key occurs in the call's last
-    user text; else ``turns[call_index]`` (0-based dispatch order on one
-    engine instance); else ``default``. An unscripted call fails loudly.
+    Precedence: the first ``rules`` entry whose key occurs in the call's
+    pending user text; else ``turns[call_index]`` (0-based dispatch order on
+    one engine instance); else ``default``. An unscripted call fails loudly.
+
+    The pending user text is empty once another message (an assistant tool
+    call, a tool result) follows the last user message, so a rule answers a
+    user message once and the follow-up requests of a tool loop fall through:
+    script tool loops with index-based ``turns`` or ``default``. Prompts
+    without legacy role markers are matched whole, so there a rule matches
+    every request carrying its key.
     """
 
     turns: tuple[Turn, ...] = ()
@@ -207,7 +236,7 @@ class Scenario:
             return self.default
         raise UnscriptedCallError(
             f"scenario has no turn for call {call_index} "
-            f"(last user text {user_text[-80:]!r})"
+            f"(pending user text {user_text[-80:]!r})"
         )
 
 

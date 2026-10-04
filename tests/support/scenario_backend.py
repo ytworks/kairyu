@@ -28,21 +28,19 @@ from tests.support.scenario_script import (
     Reasoning,
     Scenario,
     ScriptedFailure,
-    ToolCall,
     Turn,
     channel_text,
     chunk_delay_s,
     chunk_pieces,
     fails_before,
-    last_user_text,
+    inline_part_texts,
     limit_pieces,
+    pending_user_text,
     sleep_s,
     toy_tokens,
     unary_delay_s,
 )
 
-_THINK_OPEN = "<think>"
-_THINK_CLOSE = "</think>"
 _TEXT = "text"
 _REASONING = "reasoning"
 
@@ -72,15 +70,9 @@ class _Plan:
 
 
 def _part_pieces(index: int, part: Part) -> Iterable[Piece]:
-    if isinstance(part, ToolCall):
-        channel, texts = _TEXT, toy_tokens(part.generic_envelope())
-    elif isinstance(part, Reasoning) and part.typed:
-        channel, texts = _REASONING, toy_tokens(part.text)
-    elif isinstance(part, Reasoning):
-        channel, texts = _TEXT, (_THINK_OPEN, *toy_tokens(part.text), _THINK_CLOSE)
-    else:
-        channel, texts = _TEXT, toy_tokens(part)
-    return (Piece(index, channel, text) for text in texts)
+    if isinstance(part, Reasoning) and part.typed:
+        return (Piece(index, _REASONING, text) for text in toy_tokens(part.text))
+    return (Piece(index, _TEXT, text) for text in inline_part_texts(part))
 
 
 def engine_pieces(turn: Turn) -> tuple[Piece, ...]:
@@ -200,7 +192,7 @@ class ScenarioBackend:
         self.validate_request_before_prepare(request)
         text, prompt_tokens, budget = self._admitted_prompt(request)
         index = len(self._calls)
-        turn = self._scenario.select(index, last_user_text(text))
+        turn = self._scenario.select(index, pending_user_text(text))
         self._calls.append(ScenarioCall(index, request, text, prompt_tokens, turn))
         pieces, cut = limit_pieces(engine_pieces(turn), budget)
         usage = turn.usage or GenerationUsage(

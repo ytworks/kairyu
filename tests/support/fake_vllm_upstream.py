@@ -3,8 +3,9 @@
 It serves what ``OpenAICompatBackend`` (``kairyu/engine/openai_backend.py``)
 sends and parses: ``POST /v1/chat/completions`` and ``/v1/completions``
 (unary and SSE, with the ``stream_options.include_usage`` chunk), root
-``POST /tokenize``, vLLM error bodies (including the context-length 400), and
-usage carrying ``prompt_tokens_details`` and ``completion_tokens_details``.
+``POST /tokenize``, vLLM error bodies (including the context-length 400 and
+in-band stream error frames), and usage carrying ``prompt_tokens_details``
+and ``completion_tokens_details``.
 
 Use it as ``transport()`` (an ``httpx.MockTransport``) or as an ASGI app: the
 instance itself, e.g. ``uvicorn.run(fake)`` or ``httpx.ASGITransport(fake)``.
@@ -30,6 +31,7 @@ from tests.support.scenario_script import (
     chunk_delay_s,
     chunk_pieces,
     limit_pieces,
+    pending_user_text,
     toy_tokens,
     unary_delay_s,
 )
@@ -40,12 +42,14 @@ from tests.support.vllm_wire import (
     Generation,
     ReasoningField,
     chat_prompt_text,
-    last_user_message,
+    pending_user_message,
     render_stream,
     render_unary,
     turn_pieces,
     vllm_context_length_message,
+    vllm_context_overflow_message,
     vllm_error_body,
+    vllm_stream_error_frame,
 )
 
 __all__ = [
@@ -53,6 +57,7 @@ __all__ = [
     "UpstreamCall",
     "vllm_context_length_message",
     "vllm_error_body",
+    "vllm_stream_error_frame",
 ]
 
 TOKENIZE_PATH = "/tokenize"
@@ -206,11 +211,9 @@ class FakeVLLMUpstream:
             await send({"type": "http.response.body", "body": frame, "more_body": True})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
-    def _error_body(self, message: str, err_type: str, code: int) -> dict[str, object]:
-        return vllm_error_body(message, err_type=err_type, code=code, style=self._error_style)
-
     def _error(self, status: int, message: str, err_type: str = "BadRequestError") -> _Reply:
-        return _json_reply(status, self._error_body(message, err_type, status))
+        body = vllm_error_body(message, err_type=err_type, code=status, style=self._error_style)
+        return _json_reply(status, body)
 
     def _route(self, method: str, path: str, content: bytes) -> _Reply:
         self._calls.append(UpstreamCall(method, path, content))
@@ -242,20 +245,15 @@ class FakeVLLMUpstream:
     def _overflow(self, prompt_tokens: int, max_tokens: int | None) -> _Reply | None:
         """vLLM's pre-generation context check, with its 400 error body."""
 
-        limit = self._max_model_len
-        if limit is None:
+        if self._max_model_len is None:
             return None
-        if prompt_tokens >= limit:
-            max_tokens = None
-        elif max_tokens is None or prompt_tokens + max_tokens <= limit:
-            return None
-        message = vllm_context_length_message(
-            max_model_len=limit,
+        message = vllm_context_overflow_message(
+            max_model_len=self._max_model_len,
             prompt_tokens=prompt_tokens,
             max_tokens=max_tokens,
             style=self._error_style,
         )
-        return self._error(400, message)
+        return None if message is None else self._error(400, message)
 
     def _generate(self, chat: bool, body: Mapping[str, object]) -> _Reply:
         prompt = chat_prompt_text(body) if chat else str(body.get("prompt", ""))
@@ -267,7 +265,8 @@ class FakeVLLMUpstream:
             return overflow
         index, self._generations = self._generations, self._generations + 1
         try:
-            turn = self._scenario.select(index, last_user_message(body) if chat else prompt)
+            user_text = pending_user_message(body) if chat else pending_user_text(prompt)
+            turn = self._scenario.select(index, user_text)
         except UnscriptedCallError as error:
             return self._error(500, str(error), "InternalServerError")
         if max_tokens is None and self._max_model_len is not None:
@@ -289,7 +288,7 @@ class FakeVLLMUpstream:
             with_usage = isinstance(options, Mapping) and options.get("include_usage") is True
             head, chunks, tail = render_stream(generation, include_usage=with_usage)
             # vLLM reports a failure inside the stream, as BadRequestError.
-            failure = self._error_body("scripted stream failure", "BadRequestError", 400)
+            failure = vllm_stream_error_frame("scripted stream failure", style=self._error_style)
             return _paced_stream(turn, head, chunks, tail, failure)
         if turn.fail_after_chunks is not None:
             return self._error(500, "scripted generation failure", "InternalServerError")
