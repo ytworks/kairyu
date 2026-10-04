@@ -5,7 +5,10 @@ openai-python 3.x talks HTTPX2; an in-process Starlette ``TestClient`` or
 escape hatch. The SDK tests therefore drive the app the way a deployment does:
 a real uvicorn server on an ephemeral loopback port, launched with the CLI's
 uvicorn options (``ws="none"``, loop/http selection, logging), with the app
-lifespan running, and reached by the SDK's own default transport.
+lifespan running, and reached by the SDK's own transport class. The transport
+ignores proxy environment variables (``trust_env=False``, as Kairyu's own
+clients do): HTTPX2 has no loopback bypass, so ``HTTP_PROXY`` without
+``NO_PROXY`` would route every loopback request through the proxy.
 
 The schema gate (``tests/contracts``) records live servers through
 ``uvicorn.Config``. Every helper here stops its server before it returns, so a
@@ -71,9 +74,12 @@ def live_server(app: ASGIApp) -> Iterator[str]:
         yield f"http://{LOOPBACK_HOST}:{port}"
 
 
-def _sdk_options(base_url: str, *, strict: bool = True) -> dict[str, Any]:
+def _sdk_options(base_url: str, transport: Any, *, strict: bool = True) -> dict[str, Any]:
     return {
         "base_url": f"{base_url}/v1",
+        # The SDK's own transport class, without proxy variables; the SDK
+        # closes it when the client closes.
+        "http_client": transport,
         "api_key": _LOCAL_API_KEY,
         # Every response body and stream event must match the SDK's own types.
         "_strict_response_validation": strict,
@@ -85,7 +91,7 @@ def _sdk_options(base_url: str, *, strict: bool = True) -> dict[str, Any]:
 
 @contextmanager
 def openai_client(app: ASGIApp, *, strict: bool = True) -> Iterator[openai.OpenAI]:
-    """The official sync SDK with its default transport, against ``app`` on a live server.
+    """The official sync SDK with its transport class, against ``app`` on a live server.
 
     ``strict=False`` only where the SDK's own design rules strict validation
     out: it validates a default (base64) embedding as ``list[float]`` before
@@ -93,14 +99,16 @@ def openai_client(app: ASGIApp, *, strict: bool = True) -> Iterator[openai.OpenA
     """
 
     with live_server(app) as base_url:
-        with openai.OpenAI(**_sdk_options(base_url, strict=strict)) as client:
+        transport = openai.DefaultHttpxClient(trust_env=False)
+        with openai.OpenAI(**_sdk_options(base_url, transport, strict=strict)) as client:
             yield client
 
 
 @asynccontextmanager
 async def async_openai_client(app: ASGIApp) -> AsyncIterator[openai.AsyncOpenAI]:
-    """The official async SDK with its default transport, against ``app`` on a live server."""
+    """The official async SDK with its transport class, against ``app`` on a live server."""
 
     with live_server(app) as base_url:
-        async with openai.AsyncOpenAI(**_sdk_options(base_url)) as client:
+        transport = openai.DefaultAsyncHttpxClient(trust_env=False)
+        async with openai.AsyncOpenAI(**_sdk_options(base_url, transport)) as client:
             yield client
