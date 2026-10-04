@@ -131,7 +131,9 @@ testpaths = ["tests"]
 # Environment-dependent suites are deselected from the portable CPU suite.
 # Dedicated jobs/scripts select applicable gates only after checking their
 # prerequisites, and reject selected skips. CLI `-m` overrides this expression.
-addopts = "--cov=kairyu --strict-markers -m 'not gpu and not hf_hub and not docker_exec and not helm and not postgres and not vllm'"
+# `-p tests.contracts.contract_plugin` is the OpenAI schema gate (m20 D1): it
+# validates every in-process /v1/responses* and /v1/conversations* exchange.
+addopts = "--cov=kairyu --strict-markers -p tests.contracts.contract_plugin -m 'not gpu and not hf_hub and not docker_exec and not helm and not postgres and not vllm'"
 # Pytest's built-in default ignores every directory named `dist`, including
 # tests/dist. Keep build outputs ignored without hiding distributed tests.
 norecursedirs = [".git", ".tox", ".venv", "build"]

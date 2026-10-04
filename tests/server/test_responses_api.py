@@ -42,12 +42,11 @@ def _sdk(http: TestClient) -> openai.OpenAI:
         base_url=str(http.base_url) + "/v1",
         api_key="sk-local",
         http_client=http,
+        _strict_response_validation=True,
     )
 
 
 def _sse_events(body: str) -> list[dict]:
-    import json
-
     return [
         json.loads(line.removeprefix("data: "))
         for line in body.splitlines()
@@ -413,6 +412,7 @@ async def test_official_async_sdk_stream_is_typed(tmp_path):
             base_url="http://test/v1",
             api_key="sk-local",
             http_client=http,
+            _strict_response_validation=True,
         )
         stream = await client.responses.create(model="m", input="hello", stream=True)
         events = [event async for event in stream]

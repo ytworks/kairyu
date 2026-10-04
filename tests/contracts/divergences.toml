@@ -1,0 +1,120 @@
+# Allowlist of the OpenAI schema gate (docs/design/m20-responses-compat.md, D1).
+#
+# Each [[divergence]] allows the violations that match all of:
+#   schema       fnmatch glob over the validated component (e.g. "Response",
+#                "Response*Event", "ErrorResponse") or "route" for an
+#                operation the pinned spec does not define;
+#   pointer_glob fnmatch glob over the JSON pointer of the violation (for a
+#                missing or undeclared property, the pointer ends with its
+#                name); for "route" it is "METHOD /path";
+#   keyword      the failing JSON Schema keyword, or a gate check:
+#                route | event-type | sse-event-name | content-type | json.
+# gap_id names the research gap (G-*, M-*), review requirement (R-*) or m20
+# decision/deviation (D<n>, D-<x>); owner_wp is the work package that deletes a
+# "temporary" entry. "codex-extension" and "kairyu-extension" entries are
+# deliberate. With CONTRACT_STRICT=1 an entry that matches nothing in a full
+# run fails the session, so remove an entry in the WP that fixes its behavior.
+
+# --- Error envelope -----------------------------------------------------------
+
+[[divergence]]
+id = "error-param-missing"
+schema = "ErrorResponse"
+pointer_glob = "/error/param"
+keyword = "required"
+gap_id = "M-ST-6"
+owner_wp = "WP-07"
+kind = "temporary"
+note = "Responses error bodies (400, 404, 426, 429, 5xx) omit the required nullable param."
+
+# --- Response envelope (unary body and the response object inside events) -----
+
+[[divergence]]
+id = "envelope-access-programs-unary"
+schema = "Response"
+pointer_glob = "/access_programs"
+keyword = "required"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+note = "The pinned Response requires the nullable access_programs field; Kairyu omits it."
+
+[[divergence]]
+id = "envelope-access-programs-stream"
+schema = "Response*Event"
+pointer_glob = "/response/access_programs"
+keyword = "required"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+
+[[divergence]]
+id = "envelope-text-null-unary"
+schema = "Response"
+pointer_glob = "/text"
+keyword = "type"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+note = "Kairyu echoes text:null instead of the effective {format, verbosity} object."
+
+[[divergence]]
+id = "envelope-text-null-stream"
+schema = "Response*Event"
+pointer_glob = "/response/text"
+keyword = "type"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+
+[[divergence]]
+id = "envelope-function-tool-strict-unary"
+schema = "Response"
+pointer_glob = "/tools/*/strict"
+keyword = "required"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+note = "Function tools are echoed as sent; the spec requires the effective nullable strict."
+
+[[divergence]]
+id = "usage-cache-write-tokens-unary"
+schema = "Response"
+pointer_glob = "/usage/input_tokens_details/cache_write_tokens"
+keyword = "required"
+gap_id = "G-usage-2"
+owner_wp = "WP-08b"
+kind = "temporary"
+
+[[divergence]]
+id = "usage-cache-write-tokens-stream"
+schema = "Response*Event"
+pointer_glob = "/response/usage/input_tokens_details/cache_write_tokens"
+keyword = "required"
+gap_id = "G-usage-2"
+owner_wp = "WP-08b"
+kind = "temporary"
+
+# --- Error codes --------------------------------------------------------------
+
+[[divergence]]
+id = "compaction-failed-code"
+schema = "ResponseFailedEvent"
+pointer_glob = "/response/error/code"
+keyword = "enum"
+gap_id = "G-errors-5"
+owner_wp = "WP-18"
+kind = "temporary"
+note = "compaction_failed is outside the ResponseError code enum; C4 maps compaction failures to context_length_exceeded or server_error."
+
+# --- Routes -------------------------------------------------------------------
+
+[[divergence]]
+id = "websocket-probe-426"
+schema = "route"
+pointer_glob = "GET /v1/responses"
+keyword = "route"
+gap_id = "D-e"
+owner_wp = "WP-47"
+kind = "codex-extension"
+note = "Codex probes WebSocket mode with GET /v1/responses; 426 makes it fall back to HTTPS. Not an OpenAPI operation."
