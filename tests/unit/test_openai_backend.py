@@ -33,6 +33,8 @@ from kairyu.engine.vision import ImageInputPolicy
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
+from tests.support.fake_vllm_upstream import FakeVLLMUpstream
+from tests.support.scenario_script import Reasoning, Scenario, Turn
 
 _RED_PNG_DATA_URL = (
     "data:image/png;base64,"
@@ -743,33 +745,15 @@ async def test_chat_reasoning_span_is_read_under_either_upstream_key(key, stream
     pinned Qwen image, ``reasoning``; both must reach the completion, or the
     floor continuation and the reasoning_closed reclaim see nothing."""
 
-    if stream:
-        transport = _sse_chunks_transport(
-            {"choices": [{"index": 0, "delta": {"role": "assistant", key: "plan"}}]},
-            {"choices": [{"index": 0, "delta": {"content": "4"}, "finish_reason": "stop"}]},
-        )
-    else:
-
-        def handler(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "4", key: "plan"},
-                            "finish_reason": "stop",
-                        }
-                    ]
-                },
-            )
-
-        transport = httpx.MockTransport(handler)
+    upstream = FakeVLLMUpstream(
+        Scenario(default=Turn((Reasoning("plan", typed=True), "4"))),
+        reasoning_field=key,
+    )
     backend = OpenAICompatBackend(
         base_url="http://vllm:8000/v1",
         model="m",
         api_key_env=None,
-        transport=transport,
+        transport=upstream.transport(),
         upstream="vllm",
     )
 

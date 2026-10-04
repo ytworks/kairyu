@@ -18,6 +18,8 @@ from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
+from tests.support.scenario_backend import ScenarioBackend
+from tests.support.scenario_script import Scenario, ToolCall, Turn
 
 
 def _app(tmp_path, backend=None, **kwargs):
@@ -802,38 +804,6 @@ class StagedArgumentsBackend(MockBackend):
         )
 
 
-class StagedParallelBackend(MockBackend):
-    """Emits one committed call, sleeps, then a second call."""
-
-    async def stream(self, request):
-        first = '<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>'
-        second = '<tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>'
-        yield GenerationResult(
-            request_id=request.request_id,
-            prompt=request.prompt,
-            completions=(
-                CompletionOutput(
-                    index=0, text=first, token_ids=(1,), finish_reason=None
-                ),
-            ),
-            finished=False,
-        )
-        await asyncio.sleep(0.2)
-        yield GenerationResult(
-            request_id=request.request_id,
-            prompt=request.prompt,
-            completions=(
-                CompletionOutput(
-                    index=0,
-                    text=first + second,
-                    token_ids=(1, 2),
-                    finish_reason="stop",
-                ),
-            ),
-            usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
-        )
-
-
 def test_tool_arguments_stream_before_generation_completes(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
@@ -919,7 +889,10 @@ def test_tool_fragments_are_emitted_before_generation_completes(
     monkeypatch.setattr(
         "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
     )
-    client = TestClient(_app(tmp_path, StagedParallelBackend()))
+    # One committed call, a 0.2 s generation pause, then a second call.
+    calls = (ToolCall.of("add", a=1, b=2), ToolCall.of("add", a=3, b=4))
+    backend = ScenarioBackend(Scenario(default=Turn(calls, inter_chunk_delay_s=0.2)))
+    client = TestClient(_app(tmp_path, backend))
     response = client.post(
         "/v1/messages",
         json=_body(
