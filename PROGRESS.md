@@ -84,6 +84,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DeepSeek V4.1 Flash six-GPU example (FN-D9 six-GPU amendment, 2026-09-30): one DP6/EP6 replica on GPUs 0–5 with the 8-GPU example's L2/L3 structure and its own scripts; official-first L1 (pinned vLLM nightly + SM120 overlay, Engram offload, 4K batch / 0.92 from the recipe's memory-bound arm, DSpark 5 with full verification). Serving 102 / 591 / 718 tok/s at c1/c32/c64; gate evidence in its `MEASUREMENTS.md`.
 - Qwen3.8 + DeepSeek-V4.1 ensemble example (DTO-D16/D17, 2026-10-01): V4.1 DP6/EP6 (GPU 0–5, the six-GPU example's L1) + Qwen TP1 × 2 (GPU 6, 7). A Qwen judge picks one of two routes: thinking DeepSeek, or the dual-track ensemble with two policies and a three-candidate synthesis. Every role takes images natively; DeepSeek uses the official V4.1 encoder with per-request effort, and the example's overlay continues the floor's assistant prefill. ENSEMBLE criteria loosened and judge fallback moved to `deepseek_think` (DTO-D17 amendments). GPU-verified 2026-10-01: all gates pass, including the ensemble TTFT gate at c1–c32 (c32 at 95.8 % of the limit); 4 of 128 coding requests exceed the 900 s turn envelope after two audit refinements.
 - Checklist-verified answers example (m1 D8 / VCO-D1..D6, 2026-10-01): DeepSeek-V4.1 DP6/EP6 (GPU 0-5) writes, OpenJev x 2 (GPU 6, 7) judges through System One, Kairyu L2 checklist verifiers (Jev-shaped questions, tau_hi, an acceptance read; no rule-based checks since PR #619) publish `kairyu_verification` with every answer; tau_hi 0.9966 at alpha 0.10 on InFoBench expert labels (held-out upper bound 8.7 %). Per-claim G1 (OpenJev claim support) failed calibration on RAGTruth/PRM800K/FEVER and is advisory (VCO-D11); the guarantee covers tau_hi requirements plus deterministic grounding checks. Two-stage extraction, a source/action-only state builder and format-scoped units (VCO-D12/D13). All GPU gates pass on `e81db571` (2026-10-02): implicit recall 0.875, InFoBench gold recall 0.972, serving guaranteed 44-53 % (was 25-38 %), routed verified 65 %; owner latency target (p50 <= 180 s) not met (InFoBench p50 154-342 s). Evidence in its `MEASUREMENTS.md`.
+- GGUF via llama.cpp (LCP-D1..D6, 2026-10-04): `upstream: llamacpp` on the `openai` backend; CPU contract gate green on stock b11391; Winnow-12B Q8_0 examples (1 GPU, DP8 ReplicaPool + System One) GPU gates pending
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -110,6 +111,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-04 — [design] GGUF models through llama.cpp as an L1 worker (PR #620)
+- What: `backend: openai` + `upstream: llamacpp` attaches `llama-server` with no L2/L3 change: executed-field profile, `repeat_penalty`, `top_k` 0, named tool_choice → that tool + `required`, `top_logprobs` floor, assistant prefill, `/tokenize`, WebP→PNG; passthrough rejected. CPU contract gate `l1.correctness.llamacpp_upstream_contract` passes on stock b11391.
+- Why: llama-server silently ignores unknown keys and object tool_choice, drops logprobs at `top_logprobs: 0`, and reports undecodable images as HTTP 500 (would eject replicas); `generic` cannot express these.
+- Refs: LCP-D1..D6 in `docs/design/llamacpp-upstream.md`; plan `docs/superpowers/plans/2026-10-04-llamacpp-gguf-l1-upstream.md`
 
 ### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
 - What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.

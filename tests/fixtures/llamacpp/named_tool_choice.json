@@ -1,0 +1,37 @@
+{
+  "build_info": "b6594-46847e615",
+  "path": "/v1/chat/completions",
+  "request": {
+    "model": "tiny",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write one short sentence about rivers."
+      }
+    ],
+    "temperature": 0.0,
+    "max_tokens": 24,
+    "logit_bias": [
+      [
+        48,
+        40.0
+      ]
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "weather",
+          "description": "Get the weather.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      }
+    ],
+    "tool_choice": "required"
+  },
+  "status": 200,
+  "response": "{\"choices\":[{\"finish_reason\":\"length\",\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"{\\\\\\\\<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>\"},\"id\":\"Vqj7bvzsykNyvo14f1CE3pRJ6ATMyrMi\"}]}}],\"created\":1791126415,\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":24,\"prompt_tokens\":45,\"total_tokens\":69,\"prompt_tokens_details\":{\"cached_tokens\":8}},\"id\":\"chatcmpl-I1Bv31rP5tM8lyRaXNYcWVx4CzEARGEt\",\"timings\":{\"cache_n\":8,\"prompt_n\":37,\"prompt_ms\":5.095,\"prompt_per_token_ms\":0.13770270270270268,\"prompt_per_second\":7262.021589793915,\"predicted_n\":24,\"predicted_ms\":627.791,\"predicted_per_token_ms\":27.29526086956522,\"predicted_per_second\":36.63639650775497}}"
+}
