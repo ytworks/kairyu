@@ -1434,7 +1434,7 @@ class TestResponsesApi:
         assert reported.status_code == 200
         assert reported.json()["usage"] == {
             "input_tokens": 17,
-            "input_tokens_details": {"cached_tokens": 11},
+            "input_tokens_details": {"cached_tokens": 11, "cache_write_tokens": 0},
             "output_tokens": 9,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 26,

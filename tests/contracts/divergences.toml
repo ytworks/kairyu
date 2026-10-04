@@ -78,24 +78,6 @@ gap_id = "G-output-object-1"
 owner_wp = "WP-08b"
 kind = "temporary"
 
-[[divergence]]
-id = "usage-cache-write-tokens-unary"
-schema = "Response"
-pointer_glob = "/usage/input_tokens_details/cache_write_tokens"
-keyword = "required"
-gap_id = "G-usage-2"
-owner_wp = "WP-08b"
-kind = "temporary"
-
-[[divergence]]
-id = "usage-cache-write-tokens-stream"
-schema = "Response*Event"
-pointer_glob = "/response/usage/input_tokens_details/cache_write_tokens"
-keyword = "required"
-gap_id = "G-usage-2"
-owner_wp = "WP-08b"
-kind = "temporary"
-
 # --- Error codes --------------------------------------------------------------
 
 [[divergence]]
