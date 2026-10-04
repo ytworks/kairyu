@@ -33,7 +33,8 @@ PROCEDURE = (
     "fixtures through `scripts/codex_gate/record_proxy.py` and `promote` them, "
     "regenerate `extensions.json` with `scripts/codex_gate/extension_inventory.py`, "
     "run `python -m scripts.codex_gate.run_matrix --codex <version>`, then move the pin "
-    "(`CODEX_TAG` in `scripts/codex_model_catalog.py`). An OpenAPI change is re-vendored "
+    "(`CODEX_TAG` in `scripts/codex_model_catalog.py`, which the `codex-gate.yml` PR and "
+    "nightly pinned jobs follow). An OpenAPI change is re-vendored "
     "with `scripts/vendor_openai_schema.py --ref <sha>` and its divergences reviewed."
 )
 

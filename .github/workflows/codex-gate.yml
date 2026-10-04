@@ -6,6 +6,8 @@ name: codex-gate
 #   Codex release (blocking);
 # - nightly: the pinned versions (blocking) and npm latest/alpha (advisory);
 # - weekly: OpenAPI and Codex drift against the pins opens an issue.
+# The pinned release is run_matrix's default (CODEX_TAG in
+# scripts/codex_model_catalog.py), so moving the pin moves these jobs too.
 
 on:
   pull_request:
@@ -30,7 +32,7 @@ permissions:
 
 jobs:
   pr:
-    name: Codex 0.160.0 matrix
+    name: Codex pinned matrix
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -43,13 +45,25 @@ jobs:
           python-version: "3.12"
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      # Codex runs commands under bubblewrap on Linux, which needs unprivileged
+      # user namespaces; Ubuntu 24.04 restricts them through AppArmor (the
+      # workaround of openai/codex-action, issue #75).
+      - name: Enable Linux user namespaces for bubblewrap
+        run: |
+          set -euo pipefail
+          if [[ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 1)" != 1 ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [[ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0 ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run the Codex matrix
         env:
           OUT: ${{ runner.temp }}/codex-gate
           CACHE: ${{ runner.temp }}/codex-cache
         run: >-
           uv run --frozen python -m scripts.codex_gate.run_matrix
-          --codex 0.160.0 --out "$OUT" --cache-dir "$CACHE"
+          --out "$OUT" --cache-dir "$CACHE"
       - name: Retain Codex matrix artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -72,17 +86,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 0.147.0 and 0.153.4 run only the scenarios whose wire differs from
+        # the pin (m20 §3): tool loops (0.147 sends the catalog's
+        # supports_parallel_tool_calls; shell_command fixture) and compaction
+        # (both still carry the V1 remote-compaction client; compact-v1).
         include:
-          - codex: "0.160.0"
+          - codex: pinned
             advisory: false
+            scenarios: ""
           - codex: "0.153.4"
             advisory: false
+            scenarios: namespace-tool-loop local-compaction overflow-compaction
           - codex: "0.147.0"
             advisory: false
+            scenarios: namespace-tool-loop local-compaction overflow-compaction
           - codex: latest
             advisory: true
+            scenarios: ""
           - codex: alpha
             advisory: true
+            scenarios: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -92,14 +115,34 @@ jobs:
           python-version: "3.12"
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      # Codex runs commands under bubblewrap on Linux, which needs unprivileged
+      # user namespaces; Ubuntu 24.04 restricts them through AppArmor (the
+      # workaround of openai/codex-action, issue #75).
+      - name: Enable Linux user namespaces for bubblewrap
+        run: |
+          set -euo pipefail
+          if [[ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 1)" != 1 ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [[ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0 ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run the Codex matrix
         env:
           CODEX: ${{ matrix.codex }}
+          SCENARIOS: ${{ matrix.scenarios }}
           OUT: ${{ runner.temp }}/codex-gate
           CACHE: ${{ runner.temp }}/codex-cache
-        run: >-
-          uv run --frozen python -m scripts.codex_gate.run_matrix
-          --codex "$CODEX" --out "$OUT" --cache-dir "$CACHE"
+        run: |
+          set -euo pipefail
+          args=(--out "$OUT" --cache-dir "$CACHE")
+          if [[ "$CODEX" != pinned ]]; then
+            args+=(--codex "$CODEX")
+          fi
+          for scenario in $SCENARIOS; do
+            args+=(--scenario "$scenario")
+          done
+          uv run --frozen python -m scripts.codex_gate.run_matrix "${args[@]}"
       - name: Retain Codex matrix artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
