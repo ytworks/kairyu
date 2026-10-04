@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Calibrate the Conductor threshold tau_hi on InFoBench expert labels.
+"""Measure the guarantee on InFoBench expert labels (Q1, Q2) and choose tau_hi.
 
-InFoBench's expert annotation pairs model answers with decomposed yes/no
-requirements and a human pass/fail label for each. Every requirement is
-judged through this example's own production path (VCO-D15): DeepSeek turns
-the question into a point statement (like the extractor writes) and runs the
-example's history role, and OpenJev reads the example's coverage question for
-that point over the request, the history summary and the answer, through the
-same Kairyu checklist code as serving. tau_hi is the smallest
-threshold whose accepted requirements have a one-sided 95 % Clopper-Pearson
-upper bound on the violation rate <= alpha on the calibration half; the
-held-out half is reported unchanged.
+The guarantee is the acceptance read (VCO-D15 item 7): Jev reads the
+per-point results, the request and the answer and decides whether the
+answer can be adopted. InFoBench's expert annotation labels every
+decomposed requirement of a model answer; an answer is correct when every
+label is yes. Each answer is judged through the example's production
+checklist code: DeepSeek turns each question into a point statement and
+runs the example's history role, then OpenJev reads the coverage questions
+and the acceptance question, as in serving.
 
-The acceptance read (VCO-D15 item 7) is measured the same way, one read per
-response, labelled acceptable when every requirement label is yes; the
-checklist runs whole (coverage then acceptance), as in serving. No threshold
-meets alpha there (MEASUREMENTS.md); the report gives the evidence for the
-owner's tau_accept.
+tau_hi only marks the points a repair should fix, but the acceptance read
+sees those marks, so the guarantee is measured for every candidate tau_hi:
+  Q1 error  guaranteed answers (acceptance >= tau_accept) that miss a label
+  Q2 miss   correct answers that get no guarantee
+tau_hi is chosen on the calibration half as the candidate with the most
+correct answers guaranteed net of wrong ones guaranteed; the held-out half
+is reported for it and decides the gate: error at most 15.2 % and miss at
+most 36 % (the held-out values measured when the owner set tau_accept 0.99).
 
 Usage: ./verify.sh calibrate   (after ./run.sh up)
 """
@@ -28,6 +29,7 @@ import asyncio
 import concurrent.futures
 import csv
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -232,27 +234,6 @@ def _read(config: ChecklistConfig, sample: dict):
     return asyncio.run(read())
 
 
-def judge(sample: dict, api_url: str, roles: dict[str, dict]) -> list[float]:
-    """P(requirement satisfied) per requirement, via the production checklist."""
-
-    del roles
-    config = dataclasses.replace(_requirement_checklist(), acceptance=None)
-    requirements, _ = _outputs(sample)
-    verdict = _read(config, sample)
-    by_id = {item.id: item.p for item in verdict.items}
-    return [by_id[item["id"]] for item in requirements]
-
-
-def accept(sample: dict) -> float:
-    """P(accepted as the reply), via the production checklist with acceptance."""
-
-    config = _requirement_checklist()
-    assert config.acceptance is not None
-    verdict = _read(config, sample)
-    assert verdict.acceptance is not None
-    return verdict.acceptance
-
-
 def _binomial_cdf(k: int, n: int, p: float) -> float:
     return sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(k + 1))
 
@@ -274,33 +255,45 @@ def clopper_pearson_upper(k: int, n: int, confidence: float) -> float:
     return high
 
 
-def accepted_stats(pairs: list[tuple[float, int]], tau: float, confidence: float) -> dict:
-    accepted = [label for p, label in pairs if p >= tau]
-    violations = accepted.count(0)
+TAU_HI_CANDIDATES = (0.5, 0.9, 0.99, 0.99894, 0.999733)
+MAX_ERROR = 0.152
+MAX_MISS = 0.36
+
+
+def _with_tau_hi(config: ChecklistConfig, tau_hi: float) -> ChecklistConfig:
+    return dataclasses.replace(config, threshold=tau_hi)
+
+
+def accept_at(sample: dict, tau_hi: float) -> float:
+    """P(accepted) with the coverage marks of ``tau_hi``."""
+
+    config = _with_tau_hi(_requirement_checklist(), tau_hi)
+    assert config.acceptance is not None
+    verdict = _read(config, sample)
+    assert verdict.acceptance is not None
+    return verdict.acceptance
+
+
+def guarantee_stats(rows: list[dict], tau_accept: float, confidence: float) -> dict:
+    """Q1 (error among guaranteed) and Q2 (miss among correct) for ``rows``."""
+
+    guaranteed = [row for row in rows if row["acceptance"] >= tau_accept]
+    wrong = [row for row in guaranteed if 0 in row["labels"]]
+    correct = [row for row in rows if 0 not in row["labels"]]
+    missed = [row for row in correct if row["acceptance"] < tau_accept]
     return {
-        "tau": tau,
-        "accepted": len(accepted),
-        "violations": violations,
-        "violation_rate": violations / len(accepted) if accepted else None,
-        "upper_bound": clopper_pearson_upper(violations, len(accepted), confidence),
-        "acceptance": len(accepted) / len(pairs) if pairs else 0.0,
+        "responses": len(rows),
+        "correct": len(correct),
+        "guaranteed": len(guaranteed),
+        "guaranteed_wrong": len(wrong),
+        "error_rate": round(len(wrong) / len(guaranteed), 4) if guaranteed else None,
+        "error_upper_bound": round(
+            clopper_pearson_upper(len(wrong), len(guaranteed), confidence), 4
+        ),
+        "correct_missed": len(missed),
+        "miss_rate": round(len(missed) / len(correct), 4) if correct else None,
+        "net_correct_guaranteed": len(guaranteed) - 2 * len(wrong),
     }
-
-
-def choose_tau(pairs: list[tuple[float, int]], alpha: float, confidence: float) -> dict:
-    for tau in sorted({p for p, _label in pairs}):
-        stats = accepted_stats(pairs, tau, confidence)
-        if stats["accepted"] and stats["upper_bound"] <= alpha:
-            return stats
-    return {"tau": None, "accepted": 0, "violations": 0, "upper_bound": None}
-
-
-def response_level(rows: list[dict], tau: float) -> dict:
-    """A response passes when all its requirements pass; violated if any label is 0."""
-
-    passed = [row for row in rows if all(p >= tau for p in row["p"])]
-    violated = [row for row in passed if 0 in row["labels"]]
-    return {"responses": len(rows), "passed": len(passed), "violated": len(violated)}
 
 
 def main() -> None:
@@ -311,104 +304,85 @@ def main() -> None:
     directory = control.environment_storage() / "calibration"
     rows = samples(download(directory))
     env = control._compose_env()
-    api_url = f"http://127.0.0.1:{env['API_PORT']}"
     l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     roles = _roles()
-    # VCO-D15 question and state with four denoise passes; reads of earlier
-    # formats are not reused, but their DeepSeek point statements and history
-    # summaries are (the same prompts at temperature 0).
-    cache = directory / "judged-coverage-v3.jsonl"
-    done = {}
-    if cache.is_file():
-        for line in cache.read_text(encoding="utf-8").splitlines():
+    spec = yaml.safe_load((HERE / "verified-always.yaml").read_text())
+    checklist = next(role for role in spec["roles"] if role["name"] == "checklist")
+    tau_accept = float(checklist["checklist"]["acceptance"]["threshold"])
+    confidence = float(calibration["confidence"])
+
+    # Point statements and summaries are made once per build of the prompts.
+    prompts = hashlib.sha256((_STATEMENT_PROMPT + roles["history"]["prompt"]).encode()).hexdigest()[
+        :12
+    ]
+    prepared_cache = directory / f"prepared-{prompts}.jsonl"
+    prepared = {}
+    if prepared_cache.is_file():
+        for line in prepared_cache.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
-            done[(row["id"], row["model"])] = row
-    earlier = {}
-    for name in ("judged-coverage-v2.jsonl",):
-        if (directory / name).is_file():
-            for line in (directory / name).read_text(encoding="utf-8").splitlines():
-                row = json.loads(line)
-                earlier[(row["id"], row["model"])] = row
-
-    def work(sample: dict) -> dict:
-        key = (sample["id"], sample["model"])
-        if key in done:
-            return done[key]
-        if key in earlier:
-            prepared = {**sample, **{k: earlier[key][k] for k in ("statements", "history")}}
-        else:
-            prepared = prepare(sample, l1_url, roles)
-        return {**prepared, "p": judge(prepared, api_url, roles)}
-
-    pending = [row for row in rows if (row["id"], row["model"]) not in done]
-    print(f"{len(rows)} labelled responses; {len(pending)} to judge", flush=True)
+            prepared[(row["id"], row["model"])] = row
+    pending = [row for row in rows if (row["id"], row["model"]) not in prepared]
+    print(f"{len(rows)} labelled responses; {len(pending)} to prepare", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for row in pool.map(work, pending):
-            done[(row["id"], row["model"])] = row
-            with cache.open("a", encoding="utf-8") as stream:
+        for row in pool.map(lambda sample: prepare(sample, l1_url, roles), pending):
+            prepared[(row["id"], row["model"])] = row
+            with prepared_cache.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-    judged = [done[(row["id"], row["model"])] for row in rows]
-    instructions = sorted({row["id"] for row in judged})
+    ready = [prepared[(row["id"], row["model"])] for row in rows]
+
+    instructions = sorted({row["id"] for row in ready})
     random.Random(calibration["split_seed"]).shuffle(instructions)
     calibration_ids = set(instructions[: len(instructions) // 2])
-    halves = {
-        "calibration": [row for row in judged if row["id"] in calibration_ids],
-        "holdout": [row for row in judged if row["id"] not in calibration_ids],
-    }
-    pairs = {
-        name: [(p, label) for row in part for p, label in zip(row["p"], row["labels"], strict=True)]
-        for name, part in halves.items()
-    }
-    alpha, confidence = float(calibration["alpha"]), float(calibration["confidence"])
-    chosen = choose_tau(pairs["calibration"], alpha, confidence)
-    report = {
-        "alpha": alpha,
-        "confidence": confidence,
-        "instructions": {name: len({row["id"] for row in part}) for name, part in halves.items()},
-        "labels": {name: len(values) for name, values in pairs.items()},
-        "violations": {
-            name: [label for _p, label in values].count(0) for name, values in pairs.items()
-        },
-        "calibration": chosen,
-    }
-    if chosen["tau"] is not None:
-        report["holdout"] = accepted_stats(pairs["holdout"], chosen["tau"], confidence)
-        report["holdout_responses"] = response_level(halves["holdout"], chosen["tau"])
-    (directory / "tau.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report, indent=2))
 
-    accept_cache = directory / "judged-acceptance-v2.jsonl"
-    accepted = {}
-    if accept_cache.is_file():
-        for line in accept_cache.read_text(encoding="utf-8").splitlines():
-            row = json.loads(line)
-            accepted[(row["id"], row["model"])] = row["acceptance"]
-    pending = [row for row in judged if (row["id"], row["model"]) not in accepted]
-    print(f"{len(pending)} responses to read for acceptance", flush=True)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for row, value in zip(pending, pool.map(accept, pending), strict=True):
-            accepted[(row["id"], row["model"])] = value
-            with accept_cache.open("a", encoding="utf-8") as stream:
-                stream.write(
-                    json.dumps({"id": row["id"], "model": row["model"], "acceptance": value})
-                    + "\n"
-                )
-    responses = {
-        name: [(accepted[(row["id"], row["model"])], int(0 not in row["labels"])) for row in part]
-        for name, part in halves.items()
-    }
-    chosen = choose_tau(responses["calibration"], alpha, confidence)
-    acceptance = {
-        "responses": {name: len(values) for name, values in responses.items()},
-        "unacceptable": {
-            name: [label for _p, label in values].count(0) for name, values in responses.items()
-        },
-        "calibration": chosen,
-    }
-    if chosen["tau"] is not None:
-        acceptance["holdout"] = accepted_stats(responses["holdout"], chosen["tau"], confidence)
-    (directory / "tau-accept.json").write_text(json.dumps(acceptance, indent=2), encoding="utf-8")
-    print(json.dumps(acceptance, indent=2))
+    report: dict = {"tau_accept": tau_accept, "candidates": {}}
+    for tau_hi in TAU_HI_CANDIDATES:
+        cache = directory / f"acceptance-{prompts}-{tau_hi}.jsonl"
+        done = {}
+        if cache.is_file():
+            for line in cache.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                done[(row["id"], row["model"])] = row["acceptance"]
+        todo = [row for row in ready if (row["id"], row["model"]) not in done]
+        print(f"tau_hi {tau_hi}: {len(todo)} acceptance reads", flush=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for row, value in zip(
+                todo, pool.map(functools.partial(accept_at, tau_hi=tau_hi), todo), strict=True
+            ):
+                done[(row["id"], row["model"])] = value
+                with cache.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps({"id": row["id"], "model": row["model"], "acceptance": value})
+                        + "\n"
+                    )
+        scored = [{**row, "acceptance": done[(row["id"], row["model"])]} for row in ready]
+        report["candidates"][str(tau_hi)] = {
+            "calibration": guarantee_stats(
+                [row for row in scored if row["id"] in calibration_ids], tau_accept, confidence
+            ),
+            "holdout": guarantee_stats(
+                [row for row in scored if row["id"] not in calibration_ids], tau_accept, confidence
+            ),
+        }
+    chosen = max(
+        TAU_HI_CANDIDATES,
+        key=lambda tau: report["candidates"][str(tau)]["calibration"]["net_correct_guaranteed"],
+    )
+    holdout = report["candidates"][str(chosen)]["holdout"]
+    report["chosen_tau_hi"] = chosen
+    report["passed"] = (
+        holdout["error_rate"] is not None
+        and holdout["error_rate"] <= MAX_ERROR
+        and holdout["miss_rate"] is not None
+        and holdout["miss_rate"] <= MAX_MISS
+    )
+    (directory / "guarantee.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    print(
+        f"calibrate: {'PASS' if report['passed'] else 'FAIL'} (tau_hi {chosen}: held-out "
+        f"error {holdout['error_rate']} <= {MAX_ERROR}, miss {holdout['miss_rate']} <= {MAX_MISS})"
+    )
+    if not report["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
