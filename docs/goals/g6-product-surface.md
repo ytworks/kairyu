@@ -101,7 +101,7 @@ malformed-tail recovery and shutdown drain.
 | Gate | Target | Where proven |
 |---|---|---|
 | P-C1 (MUST — the headline artifact) | `verification/product/performance/frontier_compare.py`: multi-target (Kairyu, Anthropic, OpenAI, DeepSeek), identical prompt sets, TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly unattended run publishing a dated scoreboard + methodology (prompts, sampling, region, time-of-day, provider cache state) to `bench/results/` | scheduled run |
-| P-C2 (Responses API — COMPLETE; reopened 2026-10-05 for M20, see the P-C2 note) | `/v1/responses` developer surface (`input`, canonical streaming events, flat/namespace tool calls, `previous_response_id` server-side state): OpenAI SDK sync/async clients and a Codex-class agent work unmodified (Fugu parity) | `tests/server/test_responses_api.py`, Qwen3-32B TP8 Codex smoke |
+| P-C2 (Responses API — COMPLETE; reopened 2026-10-05 for M20, see the P-C2 note) | `/v1/responses` developer surface (`input`, canonical streaming events, flat/namespace tool calls, `previous_response_id` server-side state): OpenAI SDK sync/async clients and a Codex-class agent work unmodified (Fugu parity) | `tests/server/responses/`, Qwen3-32B TP8 Codex smoke |
 | P-C3 (embeddings — COMPLETE) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
 | P-C4 (vision) | Content-parts (`[{type:"text"|"image_url"}]`) through template + engine; image chat works in Open WebUI against a VLM replica | manual + tests |
 | P-C5 (pricing signals) | Per-tenant cached-token discount fields in the ledger + price-sheet config; invoice-grade CSV export distinguishes cached vs uncached input | `tests/server/test_pricing_invoice.py` |
