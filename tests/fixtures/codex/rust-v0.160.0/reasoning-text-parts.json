@@ -596,7 +596,8 @@
         "message"
       ],
       "prompt_contains": [
-        "kairyu-fixture"
+        "echo kairyu-fixture",
+        "Process exited with code 0"
       ]
     }
   }

@@ -581,7 +581,8 @@
         {
           "type": "function_call",
           "name": "close_agent",
-          "namespace": "multi_agent_v1"
+          "namespace": "multi_agent_v1",
+          "arguments": "{\"target\": \"fixture-agent-2\"}"
         }
       ],
       "prompt_contains": [

@@ -223,6 +223,9 @@ def test_codex_fixture_replay(fixture, tmp_path):
             {key: item.get(key) for key in wanted}
             for item, wanted in zip(output, expect["output_items"], strict=True)
         ] == expect["output_items"]
+    for item in output:
+        if item["type"] == "function_call":  # Codex pairs the tool output by call_id.
+            assert item["call_id"], item
     if "error_code" in expect:
         assert final["error"]["code"] == expect["error_code"]
     usage = final.get("usage")

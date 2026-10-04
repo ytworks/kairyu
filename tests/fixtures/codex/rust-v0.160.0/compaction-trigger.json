@@ -610,7 +610,8 @@
       ],
       "prompt_contains": [
         "Run the fixture command.",
-        "kairyu-fixture"
+        "echo kairyu-fixture",
+        "Process exited with code 0"
       ],
       "backend_tools_none": true
     }

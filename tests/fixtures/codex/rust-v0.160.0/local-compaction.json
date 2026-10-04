@@ -152,7 +152,8 @@
       "min_output_tokens": 1100,
       "prompt_contains": [
         "CONTEXT CHECKPOINT COMPACTION",
-        "kairyu-fixture"
+        "echo kairyu-fixture",
+        "Process exited with code 0"
       ],
       "backend_tools_none": true
     }

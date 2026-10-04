@@ -580,7 +580,8 @@
         "message"
       ],
       "prompt_contains": [
-        "kairyu-fixture"
+        "echo kairyu-fixture",
+        "Exit code: 0"
       ],
       "backend_tools_include": [
         "shell_command"

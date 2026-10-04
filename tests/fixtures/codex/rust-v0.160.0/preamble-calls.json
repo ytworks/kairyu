@@ -593,7 +593,8 @@
       ],
       "prompt_contains": [
         "I'll run the fixture command.",
-        "kairyu-fixture"
+        "echo kairyu-fixture",
+        "Process exited with code 0"
       ]
     }
   }
