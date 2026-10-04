@@ -306,11 +306,11 @@ D-j rendering, a documented delete-semantics deviation.
 **D18 — Batch `/v1/responses` lines** (WP-40) through the shared executor
 registry; lines reject `stream`, `background` and `conversation`.
 
-**D19 — WebSocket transport** (WP-15, 44–47, 54). `ws="none"` while disabled
-(D-e); then authenticated ingress, per-create admission, connection cache,
-lanes/`stream_id`, 60-minute lifetime, interrupt (D-i) and a steering stub;
-default on after acceptance (WP-47); steering and prewarm only with measured
-benefit (WP-54).
+**D19 — WebSocket transport** (WP-15, 44–47, 54). `ws="none"` while disabled (D-e;
+WP-15: one `cli.uvicorn_options()` for every `kairyu` server and the Codex matrix launcher);
+then authenticated ingress, per-create admission, connection cache, lanes/`stream_id`,
+60-minute lifetime, interrupt (D-i) and a steering stub; default on after acceptance
+(WP-47); steering and prewarm only with measured benefit (WP-54).
 
 **D20 — Hosted mechanism** (WP-48–51, 56). `HostedToolExecutor` protocol and
 registry (DI and config), `RoundDriver` strategy with budgets, `EgressPolicy`
@@ -392,7 +392,7 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Done |
 | 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Done |
 | 1 | 12a | M B refactor | `engine_admission.py` for Messages and the Chat engine path | 01 | Done |
-| 1 | 15 | S D | uvicorn `ws="none"`, reliable 426 | 06 | Planned |
+| 1 | 15 | S D | uvicorn `ws="none"`, reliable 426 | 06 | Done |
 | 1 | 07 | M A | Error contract: `param` everywhere, scoped handlers, middleware via classifier, O-2 table | 06 | Done |
 | 1 | 17a | L A | Shared `segment_stream`; Responses emitter and engine path | 06, 07, 12a | Planned |
 | 1 | 17b | M A | Progressive calls, in-stream gates, terminal rule, call finality, `phase` | 17a, SP-4 | Planned |
@@ -597,7 +597,7 @@ verifier-added gaps is mapped.
 | G-compaction-3 | P3 | 20 | Key ring, kid, max age, per-token subkeys; `created_by` WND (C21) |
 | G-compaction-4 | P3 | 05 | Gating docs; done in WP-05 |
 | G-transport-1 | P2 | 44–47, 54 | WebSocket mode |
-| G-transport-2 | P3 | 15 | `ws="none"` while disabled |
+| G-transport-2 | P3 | 15 | `ws="none"` while disabled; done in WP-15 |
 | G-transport-3 | P3 | 41 | gzip core, zstd extra |
 | G-usage-1 | P2 | 19, 21 | `reasoning_tokens` |
 | G-usage-2 | P3 | 08b | `cache_write_tokens:0`; radix cache-write metric WND |
@@ -709,7 +709,7 @@ to `docs/design/m11-product.md` D4 and its amendments.
 | #201: unsupported fields fail before dispatch — `context_management` | WP-36 | Planned |
 | #201: unknown or unsupported fields rejected (shape of the rejection) | WP-08a (400 `unknown_parameter` with `param`, extension inventory) | Planned |
 | #530: without a configured secret, a process-local key limits tokens to one gateway lifetime | WP-20 (secret required at any replica count, Helm-generated, kst2) | Planned |
-| #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | Planned |
+| #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | In progress (WP-15 2026-10-05) |
 | #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Done (2026-10-05) |
 | D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Done (2026-10-05) |
 | #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | In progress (WP-02 fixtures, WP-05 matrix 2026-10-05) |
