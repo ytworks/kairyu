@@ -6,6 +6,7 @@ name: open-responses
 # - pull requests touching Kairyu or the gate: blocking; every scenario must
 #   pass, or fail as listed with its signature (an expected failure that
 #   passes fails the job, so the list stays truthful);
+# - weekly: upstream main against the same server; drift opens an issue.
 
 on:
   pull_request:
@@ -19,10 +20,12 @@ on:
       - "tests/contracts/divergences.py"
       - "tests/contracts/openresponses/**"
       - "tests/support/scenario_*.py"
+  schedule:
+    - cron: "53 5 * * 1"
   workflow_dispatch:
 
 concurrency:
-  group: open-responses-${{ github.event.pull_request.number || github.run_id }}
+  group: open-responses-${{ github.event.pull_request.number || github.event.schedule || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -31,6 +34,7 @@ permissions:
 jobs:
   compliance:
     name: Open Responses pinned suite
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -69,3 +73,61 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  drift:
+    name: Weekly upstream drift
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Run upstream main against the pinned expected failures
+        env:
+          OUT: ${{ runner.temp }}/open-responses-drift
+          CACHE: ${{ runner.temp }}/open-responses-suite
+          TITLE: ${{ runner.temp }}/drift-title.txt
+          REPORT: ${{ runner.temp }}/drift.md
+        run: >-
+          uv run --frozen python -m scripts.open_responses_gate.drift
+          --out "$OUT" --cache-dir "$CACHE" --title "$TITLE" --report "$REPORT"
+      - name: Open a drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ runner.temp }}/drift-title.txt
+          REPORT: ${{ runner.temp }}/drift.md
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$TITLE" ]]; then
+            echo "no drift"
+            exit 0
+          fi
+          title="$(cat "$TITLE")"
+          # One issue per upstream commit, open or closed: an acknowledged
+          # state is not reported again.
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 200 \
+            --search "M20 Open Responses drift in:title" --json title --jq '.[].title' \
+            | grep -Fxq -- "$title"; then
+            echo "already reported: $title"
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$REPORT"
+      - name: Retain drift artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: open-responses-drift-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/open-responses-drift
+          if-no-files-found: warn
+          retention-days: 14

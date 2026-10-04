@@ -2,7 +2,8 @@
 #
 # [suite] pins the upstream suite; scripts/open_responses_gate/run.py runs its
 # bin/compliance-test.ts --json against Kairyu on ScenarioBackend
-# (kairyu-mock.yaml).
+# (kairyu-mock.yaml), and scripts/open_responses_gate/drift.py runs upstream
+# main against this list weekly.
 #
 # Each [[expected_failure]] names one scenario of the pinned suite that fails
 # today: gap_id (research gap, review requirement or m20 decision) and
