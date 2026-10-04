@@ -200,6 +200,28 @@ regenerated, `calibration/judged-coverage-v2.jsonl`, `calibration/tau.json`):
 Held-out answers passing every point: 45 / 125 (7 violated). The threshold 0.9895 is at
 least both calibrated values (0.98941, 0.98887).
 
+## VERIFIED_TOOL criteria wording E on `805229c4` (2026-10-04, 16:53-17:45 JST)
+
+The criteria now say the next reply must return a tool call, and that a reply
+which only reports tool results already in the conversation, or answers from
+the assistant's own knowledge, returns text. The routing-dependent gates were
+run again on the deployment.
+
+| Gate | Result | Key numbers (before -> after) |
+|---|---|---|
+| routing | PASS | held-out miss 8.3 % -> 4.2 %, tool-free to VERIFIED_TOOL 0 |
+| think-route | PASS | 6/6 THINK |
+| effort | PASS | — |
+| verified-tool-routing | PASS | requiring a call to VERIFIED_TOOL 95 % -> 90 %; not requiring one 0 % -> 5 % |
+| verified-tool-route | FAIL | 34/40: t11 and t16 routed to THINK, t13 and t15 answered without a call (the route's content is out of scope for now, owner decision) |
+| serving-routed | PASS | VERIFIED p50 179 / 158 / 232 / 268 s at c1-c16; guaranteed 1/1, 6/6, 9/10, 13/16; judge p50 <= 0.11 s |
+| replay (83 DeepSWE turns) | **PASS** | VERIFIED_TOOL 72 -> **80 (96 %, >= 90 %)**, THINK 3, VERIFIED 0; all 200 with a bash call, no submission; text with the call 80/83 (the 3 without text are first-step `pwd`/`ls` replies of 73-94 completion tokens); p50 17 s, p90 157 s (recorded 197 s) |
+
+The effort `max` reaches the model: vLLM puts the request's
+`reasoning_effort` into the chat template arguments and the DeepSeek V4.1
+template writes `Reasoning Effort: 100` (`low` 50, `high` 75). The
+`/tokenize` endpoint ignores the field and always shows 75.
+
 ## VERIFIED_TOOL criteria fix on `78d6f411` (2026-10-04, 15:03-15:48 JST)
 
 The criteria now name when a call is needed and exclude a reply that only
