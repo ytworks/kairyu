@@ -10,7 +10,10 @@ Prompt overflow is classified by the public prompt it concerns:
   upstream rejecting the request it was sent) becomes
   ``context_length_exceeded``. Responses delivers it in-band on a stream
   (``placement="in_band_on_stream"``) because Codex compacts only on
-  ``response.failed``; Chat and Messages reject before the stream opens.
+  ``response.failed``; Chat and Messages reject before the stream opens
+  (``pre_stream``) when the overflow is found before dispatch. An upstream
+  reports it only after the SSE headers are committed, so there it is the
+  stream's in-band error (a recorded deviation, m9 D6 amendment 2026-10-05).
 * an internal orchestration stage prompt (built from candidates, judged
   outputs, …) is a server failure. An L2 error declares that boundary with a
   ``context_overflow_reason`` attribute; the overflow is logged with it and
