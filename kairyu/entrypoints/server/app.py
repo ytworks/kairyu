@@ -59,6 +59,10 @@ from kairyu.entrypoints.server.chat_errors import (
     chat_error_from_value_error,
     chat_stream_error_payload,
 )
+from kairyu.entrypoints.server.chat_render import (
+    render_prompt as render_prompt,
+)
+from kairyu.entrypoints.server.chat_render import validate_chat_policy
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ReasoningDeltaParser,
@@ -71,12 +75,8 @@ from kairyu.entrypoints.server.chat_service import (
     sampling_params_from,
     tool_choice_is_satisfied,
     validate_chat_input_async,
-    validate_chat_policy,
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
-)
-from kairyu.entrypoints.server.chat_service import (
-    render_prompt as render_prompt,
 )
 from kairyu.entrypoints.server.errors import (
     chat_error_response,

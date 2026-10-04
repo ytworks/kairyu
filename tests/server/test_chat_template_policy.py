@@ -10,9 +10,9 @@ from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import MultimodalPrompt, TemplatedPrompt
 from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
 from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.chat_render import render_prompt
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
-    render_prompt,
     validate_chat_input,
     validate_chat_request,
     validate_orchestration_chat_input,

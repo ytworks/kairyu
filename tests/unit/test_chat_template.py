@@ -407,7 +407,7 @@ def test_template_reports_unresolved_tokenizer_owned_variables():
 
 def test_http_message_dump_preserves_omitted_keys_with_transformers_parity():
     from kairyu.engine.prompt import TemplatedPrompt
-    from kairyu.entrypoints.server.chat_service import render_prompt
+    from kairyu.entrypoints.server.chat_render import render_prompt
     from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 
     source = (

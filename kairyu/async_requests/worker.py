@@ -29,12 +29,12 @@ from kairyu.engine.backend import (
     prepare_backend_request,
 )
 from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.chat_render import validate_chat_policy
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
     chat_error_from_upstream_client_error,
     execute_chat,
-    validate_chat_policy,
     validate_chat_request_async,
 )
 from kairyu.entrypoints.server.metering import (
