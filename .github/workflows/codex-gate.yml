@@ -13,7 +13,6 @@ on:
   pull_request:
     paths:
       - ".github/workflows/codex-gate.yml"
-      - "kairyu/entrypoints/server/responses_service.py"
       - "kairyu/entrypoints/server/responses/**"
       - "scripts/codex_model_catalog.py"
       - "scripts/codex_gate/**"

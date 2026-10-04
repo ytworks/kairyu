@@ -154,9 +154,9 @@ def test_every_sse_path_emits_data_heartbeat(tmp_path, monkeypatch, model, paylo
     # comment keep-alives never reach its parser. Every Responses stream path
     # must emit a real data event (a repeated response.in_progress) while
     # generation is silent, without breaking the gapless sequence numbers.
-    from kairyu.entrypoints.server import responses_service
+    from kairyu.entrypoints.server.responses import events
 
-    monkeypatch.setattr(responses_service, "_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(events, "HEARTBEAT_SECONDS", 0.05)
     backend = MockBackend({"hello": "done"}, latency_s=0.3)
     app = create_legacy_app(
         {"m": backend},

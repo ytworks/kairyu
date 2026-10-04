@@ -1362,7 +1362,7 @@ class TestResponseStore:
     def test_lru_cap_and_tenant_scope(self):
         # M2: the in-memory store is LRU-capped and tenant-scoped — a leaked id
         # from another tenant reads as not-found.
-        from kairyu.entrypoints.server.extra_routes import ResponseStore
+        from kairyu.entrypoints.server.responses.store import ResponseStore
 
         store = ResponseStore(max_items=2)
         store.save("r1", [{"a": 1}], owner="tenant-a")

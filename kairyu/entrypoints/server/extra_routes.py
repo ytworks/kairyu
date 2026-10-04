@@ -2,7 +2,7 @@
 
 Embeddings: ``EmbeddingBackend`` protocol; base64 is the OpenAI SDK's
 DEFAULT encoding_format — both float and base64 are served. Responses lives in
-``responses_service`` so its typed SSE and tool-call state machine remain
+the ``responses`` package so its typed SSE and tool-call state machine remain
 separate from embeddings.
 """
 
@@ -30,18 +30,12 @@ from kairyu.entrypoints.server.messages_service import (
     add_messages_route,
 )
 from kairyu.entrypoints.server.metering import record_state_usage
-from kairyu.entrypoints.server.responses_service import (
-    ResponsesRequest,
-    ResponseStore,
-    add_responses_route,
-)
+from kairyu.entrypoints.server.responses.routes import add_responses_route
 
 __all__ = [
     "EmbeddingBackend",
     "EmbeddingsRequest",
     "MockEmbeddingBackend",
-    "ResponseStore",
-    "ResponsesRequest",
     "add_extra_routes",
 ]
 
