@@ -385,12 +385,14 @@ profile_judge:
     - profile: verified_tool
       label: VERIFIED_TOOL
       criteria: >-
-        the caller offers tools (tool_calling is true) and the next reply
-        must call one of them because the work the user asked for is not done:
-        a first tool action, a retry after a tool error, reading or checking
-        more, or the conversation requires every reply to call a tool. Not
-        when the tool results already in the conversation give everything the
-        user asked and the reply only has to report them
+        the caller offers tools (tool_calling is true) and the next reply must
+        return a tool call to make progress: no tool has run yet for an action
+        the user asked for, the latest tool result shows an error or is
+        incomplete, or the conversation requires a tool call in every reply.
+        Not when the tool results already in the conversation give everything
+        the user asked and the reply only has to report them, nor when the
+        assistant can answer from its own knowledge: then the next reply
+        returns text
     - profile: primary
       label: VERIFIED
       criteria: >-

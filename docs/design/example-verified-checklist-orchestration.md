@@ -559,6 +559,12 @@ tool-free conversations to VERIFIED_TOOL fell from 35 % to 5 %, requiring
 ones stayed at 95 %, the routing set's held-out miss stayed 8.3 % and 73 of
 the 83 recorded DeepSWE turns (was 65) route to VERIFIED_TOOL.
 
+A second wording (owner-approved, 2026-10-04) frames VERIFIED_TOOL as "the
+next reply must return a tool call to make progress" and also excludes a
+question the assistant can answer from its own knowledge. Offline, of five
+wordings it alone met every bound: tool-free to VERIFIED_TOOL 5 %, requiring
+90 %, routing held-out miss 4.2 %, recorded DeepSWE turns 78 of 83.
+
 The route judge picks the most probable label; the VERIFIED floor
 (`prefer`) is removed (owner decision, 2026-10-04).
 
