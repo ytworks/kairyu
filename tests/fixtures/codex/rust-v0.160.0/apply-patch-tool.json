@@ -33,6 +33,26 @@
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:1134",
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:1155",
       "codex-rs/tools/src/tool_spec.rs@rust-v0.160.0:55"
+    ],
+    "derivation": [
+      {
+        "op": "append",
+        "items": [
+          {
+            "type": "custom_tool_call",
+            "id": "ctc_{{ID_20}}",
+            "status": "completed",
+            "call_id": "call_{{ID_21}}",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+          },
+          {
+            "type": "custom_tool_call_output",
+            "call_id": "call_{{ID_21}}",
+            "output": "Success. Updated the following files:\nA hello.txt\n"
+          }
+        ]
+      }
     ]
   },
   "request": {

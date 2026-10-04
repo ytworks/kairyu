@@ -30,6 +30,40 @@
     "codex_rs": [
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:1048",
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:1056"
+    ],
+    "derivation": [
+      {
+        "op": "insert",
+        "before": {
+          "type": "function_call"
+        },
+        "items": [
+          {
+            "type": "reasoning",
+            "id": "rs_{{ID_20}}",
+            "summary": [],
+            "content": [
+              {
+                "type": "reasoning_text",
+                "text": "Run the command first."
+              }
+            ],
+            "encrypted_content": null
+          },
+          {
+            "type": "reasoning",
+            "id": "rs_{{ID_21}}",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "Planning the command."
+              }
+            ],
+            "content": null,
+            "encrypted_content": "gAAAAABfixture-foreign-opaque-reasoning-blob"
+          }
+        ]
+      }
     ]
   },
   "request": {

@@ -29,7 +29,8 @@
     "edit": "sent with Content-Encoding: zstd (ChatGPT auth + openai_base_url)",
     "codex_rs": [
       "codex-rs/core/src/client.rs@rust-v0.160.0:1617-1626"
-    ]
+    ],
+    "derivation": []
   },
   "request": {
     "method": "POST",

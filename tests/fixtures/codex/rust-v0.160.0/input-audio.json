@@ -29,6 +29,22 @@
     "edit": "added an input_audio part to the user's message",
     "codex_rs": [
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:890"
+    ],
+    "derivation": [
+      {
+        "op": "extend_content",
+        "of": {
+          "type": "message",
+          "role": "user",
+          "last": true
+        },
+        "parts": [
+          {
+            "type": "input_audio",
+            "audio_url": "data:audio/wav;base64,UklGRiQAAABXQVZF"
+          }
+        ]
+      }
     ]
   },
   "request": {

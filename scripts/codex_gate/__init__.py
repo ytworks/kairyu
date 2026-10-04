@@ -2,7 +2,8 @@
 
 - ``record_proxy``: a recording reverse proxy between a real Codex binary and a
   Kairyu server; writes normalized request captures and promotes them into
-  ``tests/fixtures/codex/rust-v<ver>/`` fixtures.
+  ``tests/fixtures/codex/rust-v<ver>/`` fixtures, re-applying a derived
+  fixture's edits (``derivation``).
 - ``extension_inventory``: walks the codex-rs serde request types at a pinned
   tag and writes ``extensions.json`` (spec field vs Codex extension).
 

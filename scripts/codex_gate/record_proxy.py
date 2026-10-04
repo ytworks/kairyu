@@ -27,9 +27,11 @@ Normalization makes a capture reproducible and safe to commit:
 
 Recording procedure (D1; repeat within 7 days of a new Codex stable):
 
-1. start a Kairyu server; any server answers single-turn shapes, a server
-   scripted over ``tests/support/scenario_backend.py`` answers tool loops and
-   compaction;
+1. start a Kairyu server; any server answers the single-turn shapes. The
+   multi-turn shapes (tool loop, namespace loop, view_image, compaction) need a
+   server scripted over ``tests/support/scenario_backend.py``: WP-05's
+   ``scripts/codex_gate`` scenarios launcher provides it; until it lands those
+   fixtures keep their recording at the tag they name;
 2. ``python -m scripts.codex_gate.record_proxy serve --upstream URL --port 8010
    --out DIR --codex-version 0.160.0 --provider-shape custom-responses
    --scenario default-turn --redact /work/dir={{CWD}}``;
@@ -37,7 +39,9 @@ Recording procedure (D1; repeat within 7 days of a new Codex stable):
    a provider whose base URL is ``http://127.0.0.1:8010/v1``;
 4. ``python -m scripts.codex_gate.record_proxy promote DIR/default-turn-01.json
    tests/fixtures/codex/rust-v0.160.0/default-turn.json`` replaces the
-   fixture's ``provenance`` and ``request`` and keeps its authored keys.
+   fixture's ``provenance`` and ``request`` and keeps its authored keys; onto a
+   derived fixture it re-applies ``provenance.derivation`` (``derivation.py``)
+   to the new capture, whose scenario is the one ``derived_from`` names.
 """
 
 from __future__ import annotations
@@ -56,12 +60,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
 
+from scripts.codex_gate.derivation import DerivationError, apply_derivation
+
 RECORDER = "scripts/codex_gate/record_proxy.py"
 PROVIDER_SHAPES = ("custom-responses", "openai-base-url", "oss-lmstudio", "oss-ollama")
 RECORDED_SUFFIXES = ("/responses", "/responses/compact", "/models")
 # Authored fixture keys that ``promote`` keeps; it replaces everything else.
 AUTHORED_KEYS = ("id", "gap_ids", "contract", "replay")
 FIXTURE_KEY_ORDER = ("id", "gap_ids", "contract", "provenance", "request", "replay")
+# Authored provenance of a derived fixture, kept and re-applied by ``promote``.
+DERIVED_KEYS = ("edit", "codex_rs", "derivation")
 RECORDED_HEADERS = frozenset(
     {
         "accept",
@@ -294,17 +302,43 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def promote(capture_path: Path, fixture_path: Path) -> dict[str, Any]:
-    """Merge a capture into a fixture, keeping the fixture's authored keys."""
+    """Merge a capture into a fixture, keeping the fixture's authored keys.
+
+    A derived fixture keeps its ``provenance.derivation`` (see
+    ``derivation.py``), which is re-applied to the new capture.
+    """
 
     capture = json.loads(capture_path.read_text(encoding="utf-8"))
     existing = json.loads(fixture_path.read_text(encoding="utf-8")) if fixture_path.exists() else {}
     merged = {key: existing[key] for key in AUTHORED_KEYS if key in existing}
     merged.setdefault("id", fixture_path.stem)
-    merged["provenance"] = capture["provenance"]
-    merged["request"] = capture["request"]
+    merged.update(_promoted(capture, existing.get("provenance", {}), fixture_path))
     ordered = {key: merged[key] for key in FIXTURE_KEY_ORDER if key in merged}
     write_json(fixture_path, ordered)
     return ordered
+
+
+def _promoted(
+    capture: Mapping[str, Any], previous: Mapping[str, Any], fixture_path: Path
+) -> dict[str, Any]:
+    """The fixture's ``provenance`` and ``request`` from a capture."""
+
+    provenance, request = capture["provenance"], capture["request"]
+    if previous.get("source") != "derived":
+        return {"provenance": provenance, "request": request}
+    missing = [key for key in DERIVED_KEYS if key not in previous]
+    if missing:
+        raise DerivationError(f"{fixture_path}: derived fixture lacks provenance {missing}")
+    origin = f"recorded capture {provenance['scenario']} (sequence {provenance['sequence']})"
+    return {
+        "provenance": {
+            **provenance,
+            "source": "derived",
+            "derived_from": origin,
+            **{key: previous[key] for key in DERIVED_KEYS},
+        },
+        "request": {**request, "body": apply_derivation(request["body"], previous["derivation"])},
+    }
 
 
 def create_proxy_app(upstream: str, out_dir: Path, context: CaptureContext):
