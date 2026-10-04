@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -23,7 +25,6 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
 from tests.server._legacy_chat import create_legacy_app
-from tests.server.live_server import LOOPBACK_HOST, SERVER_TIMEOUT_S, serve
 from tests.server.responses._helpers import _app, _sse_events, _tool
 
 
@@ -131,6 +132,7 @@ def test_responses_stream_escapes_unicode_line_separators_on_the_wire(tmp_path):
     assert "".join(deltas) == separators
 
 
+_SERVER_TIMEOUT_S = 10.0
 _WEBSOCKET_UPGRADE = {
     "Connection": "Upgrade",
     "Upgrade": "websocket",
@@ -165,8 +167,18 @@ def _kairyu_serve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[i
     # Keep pytest's logging: serve would replace the root handlers.
     monkeypatch.setattr("kairyu.entrypoints.server.middleware.configure_json_logging", lambda: None)
     cli.main(["serve", str(config)])
-    with serve(uvicorn.Config(**{**launch, "host": LOOPBACK_HOST, "port": 0})) as port:
-        yield port
+    server = uvicorn.Server(uvicorn.Config(**{**launch, "host": "127.0.0.1", "port": 0}))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + _SERVER_TIMEOUT_S
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "kairyu serve did not start"
+        time.sleep(0.02)
+    try:
+        yield server.servers[0].sockets[0].getsockname()[1]
+    finally:
+        server.should_exit = True
+        thread.join(_SERVER_TIMEOUT_S)
 
 
 @pytest.mark.parametrize(
@@ -180,7 +192,7 @@ def test_websocket_upgrade_get_returns_426(tmp_path, monkeypatch, headers):
     # library: a websocket scope would skip AuthMiddleware and tenancy.
     monkeypatch.setattr(uvicorn_ws_auto, "AutoWebSocketsProtocol", _TransitiveWebSocketLibrary)
     with _kairyu_serve(tmp_path, monkeypatch) as port:
-        connection = HTTPConnection(LOOPBACK_HOST, port, timeout=SERVER_TIMEOUT_S)
+        connection = HTTPConnection("127.0.0.1", port, timeout=_SERVER_TIMEOUT_S)
         try:
             connection.request("GET", "/v1/responses", headers=headers)
             response = connection.getresponse()

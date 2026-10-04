@@ -60,26 +60,30 @@ def usage_payload(
     input_tokens, output_tokens = resolve_usage_counts(
         usage, prompt=prompt, completions=completions
     )
-    return _usage(input_tokens, resolve_cached_tokens(usage), output_tokens)
+    cached_tokens = resolve_cached_tokens(usage)
+    return {
+        "input_tokens": input_tokens,
+        # Kairyu never bills a prompt-cache write (m20 D11); openai-python 3.x
+        # requires the field.
+        "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 def usage_payload_from_wire(usage: dict | None) -> dict:
     """Map public Chat Completions usage onto the Responses usage shape."""
     usage = usage or {}
     details = usage.get("prompt_tokens_details") or {}
-    return _usage(
-        int(usage.get("prompt_tokens") or 0),
-        int(details.get("cached_tokens") or 0),
-        int(usage.get("completion_tokens") or 0),
-    )
-
-
-def _usage(input_tokens: int, cached_tokens: int, output_tokens: int) -> dict:
+    input_tokens = int(usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or 0)
     return {
         "input_tokens": input_tokens,
-        # Kairyu never bills a prompt-cache write (m20 D11); openai-python 3.x
-        # requires the field.
-        "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
+        "input_tokens_details": {
+            "cached_tokens": int(details.get("cached_tokens") or 0),
+            "cache_write_tokens": 0,
+        },
         "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": 0},
         "total_tokens": input_tokens + output_tokens,
