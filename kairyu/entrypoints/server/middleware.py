@@ -1,4 +1,4 @@
-"""Pure-ASGI middleware: auth, concurrency guard, metrics, JSON access log.
+"""Pure-ASGI middleware: auth, concurrency guard, metrics, request id, access log.
 
 Pure ASGI (not ``BaseHTTPMiddleware``) so the concurrency guard holds its slot
 until the last body byte of an SSE stream is sent, and metrics measure the
@@ -448,26 +448,18 @@ class MetricsMiddleware:
                 ).inc()
 
 
+def _new_request_id() -> str:
+    return uuid.uuid4().hex[:16]
+
+
 class RequestIngressMiddleware:
-    """Own request-boundary timing and direct-chat SLO lease cleanup."""
+    """Own the request boundary: timing, the request id, SLO lease cleanup.
 
-    def __init__(self, app: _ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
-        if scope["type"] == "http":
-            _state(scope)["placement_started_ns"] = time.perf_counter_ns()
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            if scope["type"] == "http":
-                lease = _state(scope).pop(_SLO_ADMISSION_LEASE_STATE_KEY, None)
-                if lease is not None and lease.active:
-                    lease.completed()
-
-
-class AccessLogMiddleware:
-    """One JSON line per request; assigns and echoes X-Request-ID."""
+    Every HTTP response, errors included, echoes ``X-Request-ID`` whether or
+    not access logging is on (M20 WP-41; the OpenAI SDKs' ``_request_id``).
+    The id is always generated here: it keys the engine request, which must be
+    unique in flight, so a client-sent ``X-Request-ID`` is never adopted.
+    """
 
     def __init__(self, app: _ASGIApp) -> None:
         self.app = app
@@ -476,17 +468,46 @@ class AccessLogMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        request_id = uuid.uuid4().hex[:16]
-        _state(scope)["request_id"] = request_id
+        state = _state(scope)
+        state["placement_started_ns"] = time.perf_counter_ns()
+        request_id = _new_request_id()
+        state["request_id"] = request_id
+        request_id_header = (b"x-request-id", request_id.encode())
+
+        async def send_with_request_id(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = [*(message.get("headers") or ()), request_id_header]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            lease = state.pop(_SLO_ADMISSION_LEASE_STATE_KEY, None)
+            if lease is not None and lease.active:
+                lease.completed()
+
+
+class AccessLogMiddleware:
+    """One JSON line per request, keyed by the ingress request id."""
+
+    def __init__(self, app: _ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        state = _state(scope)
+        request_id = state.get("request_id")
+        if request_id is None:  # mounted without RequestIngressMiddleware
+            request_id = state["request_id"] = _new_request_id()
         started = time.perf_counter()
         status = {"code": 500}
 
         async def wrapped_send(message: dict) -> None:
             if message["type"] == "http.response.start":
                 status["code"] = message["status"]
-                headers = list(message.get("headers") or [])
-                headers.append((b"x-request-id", request_id.encode()))
-                message = {**message, "headers": headers}
             await send(message)
 
         try:
@@ -626,3 +647,4 @@ class TracingMiddleware:
                         )
                     elif status["code"] >= 500:
                         mark_span_error(span, error_type=str(status["code"]))
+
