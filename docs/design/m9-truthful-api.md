@@ -1,7 +1,7 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
 Status: **Implemented** (2026-07-03; D2 amended 2026-08-04; D3 amended
-2026-08-05; D6 amended 2026-10-05 by M20 WP-04 and WP-07). Reviewed —
+2026-08-05; D6 amended 2026-10-05 by M20 WP-04, WP-07 and WP-30). Reviewed —
 APPROVE-WITH-AMENDMENTS (2-reviewer agent panel, 2026-07-03; amendments
 applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
@@ -330,6 +330,38 @@ Messages keeps the Anthropic envelope and Jev its own. Hand-built Chat-family
 bodies (embeddings, async requests, batches, admin routes, Chat stream error
 frames) still omit it; they are outside M20's Responses scope (m7 D5
 amendment, known limit b).
+
+**Amendment 2026-10-05 (M20 WP-30) — the in-process vLLM adapter fails closed
+and reports exact usage.** `VLLMBackend` mapped only vLLM's sampling fields and
+validated only `forced_token_ids`, `chat_template_kwargs`, `assistant_prefill`
+and the prompt kind. Chat `logprobs`, `prompt_logprobs`, `best_of`, every
+`extra_args` key (so `response_format` and Responses `text.format`) and strict
+tools were dropped and the request ran unconstrained; every result had
+`usage=None`, so the D1 word-split fallback (its recorded limitation) billed
+and settled tenant budgets from an approximation.
+
+- `validate_request`, and `stream` for direct `EngineBackend` callers, raise
+  one `ValueError` naming each unhonored field (`best_of`, `logprobs`,
+  `prompt_logprobs`, `forced_token_ids`, `extra_args.<key>`,
+  `chat_template_kwargs`, `assistant_prefill`, `tools[i].function.strict`)
+  before dispatch, so the server answers 400 `invalid_request` as for the
+  native engine's surface check. `to_vllm_sampling_kwargs` rejects its own
+  unmapped sampling fields.
+- Usage follows D1 from each cumulative `RequestOutput`: `prompt_tokens` is
+  `len(prompt_token_ids)` once (also for `n > 1`), `completion_tokens` sums the
+  completions' token IDs, and `cached_tokens` is `num_cached_tokens` (0 when
+  vLLM reports none).
+- Not covered: D3 logprobs and D4 structured outputs stay unsupported inside
+  this adapter; a deployment that needs them serves vLLM through the `openai`
+  backend (`upstream: vllm`), which forwards both. `reasoning_effort`,
+  `tool_choice` and `parallel_tool_calls` keep the native engine's semantics
+  (Kairyu chat template, public-boundary tool gate); M20 WP-10 owns effort.
+- Admission (framework boundary): the shared contract is this section's
+  request-surface truthfulness for an `EngineBackend`. Only the adapter sees
+  the dropped intents, so no other extension point can reject them. The
+  regression (Chat `logprobs`/`response_format` silently ignored, approximate
+  usage) is independent of any example. The mechanism is `validate_request`
+  plus `_to_result`, and nothing in it is example-owned (m20 admission row 30).
 
 ## 3. Non-goals
 
