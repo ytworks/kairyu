@@ -158,8 +158,9 @@ Responses suite and real-client gates.
 Each D-ID is Proposed until its last WP lands; partial implementation is noted.
 
 **D1 — Reference contract and conformance infrastructure** (WP-01, 02, 02b,
-05, 08a, 13, 14, 53; *WP-01 in progress*). The §3 pins are the contract. WP-01
-vendors the OpenAPI closure and gates every test: an ASGI recorder wraps the
+05, 08a, 13, 14, 53; *WP-01 in progress; WP-02 implemented*). The §3 pins
+are the contract. WP-01 vendors the OpenAPI closure and gates every test: an
+ASGI recorder wraps the
 app of every in-process test transport, `ContractValidator` (Draft 2020-12)
 validates each `/v1/responses*` and `/v1/conversations*` body, each SSE event by
 its `type` (unknown types fail) and each error body against `ErrorResponse`,
@@ -175,6 +176,15 @@ lists as nondeterministic, and pairs tests moved between modules with
 replay (02), the ScenarioBackend test engines (02b), the Codex catalog and
 nightly matrix with a 7-day fixture refresh procedure (05), the strict v3.24
 SDK harness (13), Open Responses CI (14) and client smokes (53).
+*2026-10-05, WP-02:* `tests/fixtures/codex/rust-v<ver>/` holds one fixture per
+Codex wire contract (request, scripted turns, expected outcome, gap IDs,
+provenance), recorded via `scripts/codex_gate/record_proxy.py` (no credentials;
+volatile values normalized) or derived from codex-rs at the tag, and replayed by
+`test_codex_fixture_replay` on engine or AUTO apps; a later WP's behavior is
+`xfail(strict=True)` naming its gap and WP. `extension_inventory.py` writes each
+tag's `extensions.json` (serde types vs the closure), the list WP-08a accepts;
+0.147/0.153.4 cover only §7 wire differences. **Refresh:** within 7 days of a
+new Codex stable, re-record (`promote` keeps the replay) and regenerate it.
 
 **D2 — Package architecture and single pipeline** (WP-06, 12a, 12b, 17a, 18).
 `responses_service.py` becomes `kairyu/entrypoints/server/responses/` (routes,
@@ -375,7 +385,7 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 0 | 03 | S A | Codex P0 hotfix: no 1024/4096 caps, `stream_util`, data heartbeats on every path, `web_search` accept-and-drop, tenant-budget warning | 00 | Done |
 | 0 | 01 | S/M D | Schema gate (vendored closure, `ContractValidator`, ASGI recorder + wire capture, `divergences.toml`, strict SDK on 2.44); this record | – | In progress |
 | 0 | 02b | M D | `tests/support/scenario_backend.py`, `fake_vllm_upstream.py` | – | Planned |
-| 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Planned |
+| 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Done |
 | 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Planned |
 | 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Planned |
 | 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Planned |
@@ -578,7 +588,7 @@ verifier-added gaps is mapped.
 | G-other-7 | P3 | 05, 34b, 53 | Docs |
 | G-other-8 | P3 hosted | 55 | Optional HMAC webhook sink, default off (O-5 approved) |
 | G-conformance-1 | P1 | 01 | Schema gate |
-| G-conformance-2 | P1 | 02, 05, 53 | Fixtures + matrix |
+| G-conformance-2 | P1 | 02, 05, 53 | Fixtures + matrix; fixtures done in WP-02 |
 | G-conformance-3 | P2 | 14 | Open Responses |
 | G-conformance-4 | P2 | 13, 53 | v3.24 + node/Agents |
 | G-compaction-1 | P2 | 36 | `context_management` |
@@ -616,7 +626,7 @@ verifier-added gaps is mapped.
 | M-ST-4 body guard | P2 | 08c (+33, 35, 36, 39 predicates) | Default 64 MiB |
 | M-ST-5 framework envelopes | P2 | 07 | – |
 | M-ST-6 `param` missing | P2 | 01 (detection), 07 | Middleware included |
-| M-ST-7 hand-written Codex test | P2 | 02 | – |
+| M-ST-7 hand-written Codex test | P2 | 02 | Done in WP-02 (AUTO `namespace-tool-loop` fixture) |
 | M-ST-8 lenient SDK | P2 | 01 (2.44 strict), 13 | – |
 | M-ST-9 beta surface | P3 | 08a | – |
 | M-ST-10 CORS | P3 | 41 | – |
@@ -701,7 +711,7 @@ to `docs/design/m11-product.md` D4 and its amendments.
 | #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | Planned |
 | #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Planned |
 | D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Planned |
-| #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | Planned |
+| #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | In progress (WP-02 fixtures 2026-10-05) |
 | D4/#201/A16: official SDK round-trips (lenient openai 2.44 tests) as binding coverage | WP-01 (strict 2.44 harness + schema gate) → WP-13 (v3.24 live server) → WP-53 (Agents, node) | In progress (WP-01) |
 
 m11 D3 (tenant tiers) and D6 (`flex` → batch class) receive their own dated
