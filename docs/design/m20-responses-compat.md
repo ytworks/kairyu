@@ -1,8 +1,7 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
 Status: **Proposed** (2026-10-05). WP-00, 02, 02b, 03 and 05 implemented (parts
-of D1, D3/D7/D9, D22); WP-01 (this record and the schema gate, D1) in progress.
-Each D-ID moves to Implemented when its last WP lands; WP-53 closes the milestone.
+of D1, D3/D7/D9, D22); WP-01 (record, schema gate) in progress; WP-53 closes M20.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -290,7 +289,9 @@ failure codes per C4 (input overflow or starved budget →
 `context_length_exceeded`; empty or malformed summary → `server_error`; an
 emitted compaction item is never followed by `incomplete`, amending #531).
 Expected Codex behavior (remote v2 retries at most twice) is recorded with the
-live run.
+live run. *2026-10-05, WP-05 (live run):* remote v2 trims history to the catalog
+window before sending and never retries an in-band `context_length_exceeded`
+(`compact_remote_v2*.rs@rust-v0.160.0`): an overstated window fails it (WP-36).
 
 **D16 — Background mode** (WP-37, 38a–c). One `EndpointExecutor` registry for
 async and batch; per-job scheduling class; queued start order; the event log as
@@ -330,8 +331,7 @@ disconnect cancellation for Chat unary/Messages/Responses, affinity precedence
 auto-compact limit ≈0.9·ctx, modalities, `apply_patch_tool_type`, honest
 reasoning levels); provider TOML, `stream_idle_timeout_ms`, `web_search` modes,
 compaction gating, auxiliary slugs, sealing secret and tenant sizing are
-documented. *2026-10-05, WP-05:* Codex 0.147.0, 0.153.4 and 0.160.0 decode the
-catalog and pass `scripts/codex_gate/run_matrix.py` (CI: `codex-gate.yml`).
+documented. *2026-10-05, WP-05:* matrix passes on macOS; first Linux CI run pending.
 
 ### Design conflict resolutions referenced above
 

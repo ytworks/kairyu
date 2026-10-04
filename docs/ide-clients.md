@@ -217,12 +217,19 @@ compaction (`compaction_trigger`, a sealed `compaction` item) is used only by
 the built-in `openai` provider and Azure-named providers; the 0.162
 pre-release adds `capabilities = { remote_compaction = "v2" }` (and
 `external_web_access = false`) for custom providers. Gateways serving remote
-compaction need `server.responses_compaction_secret_env`.
+compaction need `server.responses_compaction_secret_env`. Remote compaction
+trims the history to the catalog's `context_window` before sending and does not
+retry an in-band `context_length_exceeded`, so it needs an accurate catalog:
+without one (the 272,000-token fallback) or with a stale one, compaction fails
+once the history outgrows the served `max_model_len`.
 
 **Harbor/Terminal-Bench shape.** Repointing the built-in provider also works:
-`openai_base_url = "http://<kairyu-host>:<port>/v1"` with the key in
-`OPENAI_API_KEY` (plus `model` and `model_catalog_json`). Codex first tries a
-WebSocket upgrade, gets 426 and continues over HTTPS.
+`openai_base_url = "http://<kairyu-host>:<port>/v1"` plus `model` and
+`model_catalog_json` (required: this shape compacts remotely). The built-in
+provider does not read `OPENAI_API_KEY`: store the key with `codex login
+--with-api-key` (it reads the key from stdin) or, for `codex exec`, set
+`CODEX_API_KEY`. Codex first tries a WebSocket upgrade, gets 426 and continues
+over HTTPS.
 
 **Local-provider shape.** `CODEX_OSS_BASE_URL=http://<kairyu-host>:<port>/v1
 codex --oss --local-provider lmstudio -m <model-id>` also works: Codex lists

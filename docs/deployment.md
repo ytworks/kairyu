@@ -645,7 +645,7 @@ slugs, local providers) is in `docs/ide-clients.md`. The live Codex gate runs
 real Codex binaries against a deployment through a recording proxy:
 
 ```bash
-KAIRYU_API_KEY=local python -m scripts.codex_gate.run_matrix --codex 0.160.0 \
+KAIRYU_API_KEY=local python -m scripts.codex_gate.run_matrix \
   --live --base-url http://127.0.0.1:8000/v1 --model qwen3-32b
 ```
 
