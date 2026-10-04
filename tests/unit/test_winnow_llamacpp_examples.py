@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -54,3 +55,52 @@ def test_l1_geometry_matches_what_kairyu_admits(environment):
         ):
             assert float(_flag(command, flag)) == sampling[name]
     assert deployment.server.max_concurrency == runtime["chat_slots"] * len(spec["replicas"])
+
+
+def _verification(environment: str):
+    path = EXAMPLES / environment / "verification.py"
+    spec = importlib.util.spec_from_file_location(f"verification_{environment}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("environment", ["winnow-12b-q8-1gpu", "winnow-12b-q8-dp8-8gpu"])
+def test_attest_fails_when_server_sampling_defaults_are_missing(
+    environment, tmp_path, monkeypatch
+):
+    """An absent default compared as NaN once passed the tolerance check, so
+    attest verified LCP-D5 without seeing a single sampling default."""
+
+    verification = _verification(environment)
+    runtime = verification.RUNTIME
+
+    def props(params: dict) -> dict:
+        return {
+            "build_info": f"b11036-{runtime['llama_cpp_commit'][:7]}",
+            "total_slots": runtime["chat_slots"],
+            "default_generation_settings": {
+                "n_ctx": runtime["slot_context_tokens"],
+                "params": params,
+            },
+            "chat_template_caps": {"supports_tool_calls": True},
+            "modalities": {"vision": True},
+        }
+
+    def serve(params: dict) -> None:
+        def fake_json(method, url, payload=None):
+            if url.endswith("/props"):
+                return 200, props(params)
+            return 200, {"data": [{"id": verification.MODEL}]}
+
+        monkeypatch.setattr(verification, "_http", lambda *args, **kwargs: (200, ""))
+        monkeypatch.setattr(verification, "_json", fake_json)
+
+    serve(dict(runtime["sampling_defaults"]))
+    assert verification.attest(tmp_path) == 0
+    serve({})
+    assert verification.attest(tmp_path) == 1
+    report = json.loads((tmp_path / "attest.json").read_text())
+    for replica in verification.REPLICAS:
+        assert "default temperature" in report["cases"][replica["service"]]

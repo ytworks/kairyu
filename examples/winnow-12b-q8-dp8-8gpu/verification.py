@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -125,8 +126,16 @@ def attest(run_dir: Path) -> int:
         if settings.get("n_ctx") != RUNTIME["slot_context_tokens"]:
             problems.append(f"slot n_ctx {settings.get('n_ctx')}")
         for name, value in expected.items():
-            if abs(float(params.get(name, float("nan"))) - value) > 1e-6:
-                problems.append(f"default {name} {params.get(name)}")
+            # A missing or non-numeric default is a failure, not a NaN that
+            # compares false against the tolerance.
+            actual = params.get(name)
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, (int, float))
+                or not math.isfinite(actual)
+                or abs(actual - value) > 1e-6
+            ):
+                problems.append(f"default {name} {actual!r}")
         if props.get("chat_template_caps", {}).get("supports_tool_calls") is not True:
             problems.append("chat template without tool calls")
         if props.get("modalities", {}).get("vision") is not True:

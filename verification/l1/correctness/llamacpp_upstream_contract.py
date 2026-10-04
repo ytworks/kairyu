@@ -136,18 +136,21 @@ class Gate:
         self.root = args.base_url.rstrip("/")
         self.raw = httpx.AsyncClient(timeout=args.timeout_s, trust_env=False)
         self.recorder = _RecordingTransport()
-        extra = {"logit_bias"} if args.tool_call_bias else set()
         self.props: dict[str, object] = {}
-        self.backend = OpenAICompatBackend(
-            base_url=f"{self.root}/v1",
-            model=args.model,
-            api_key_env=None,
-            timeout_s=args.timeout_s,
-            transport=self.recorder,
-            upstream="llamacpp",
-            capabilities={"allow_extra_args": sorted(extra)},
-        )
+        # Built from /props: llamacpp requires the per-slot context.
+        self.backend: OpenAICompatBackend | None = None
         self.rows: list[dict[str, object]] = []
+
+    def _backend(self, **options: object) -> OpenAICompatBackend:
+        return OpenAICompatBackend(
+            base_url=f"{self.root}/v1",
+            model=self.args.model,
+            api_key_env=None,
+            timeout_s=self.args.timeout_s,
+            upstream="llamacpp",
+            max_model_len=int(self.props["default_generation_settings"]["n_ctx"]),
+            **options,
+        )
 
     def _tool_params(self, **fields: object) -> SamplingParams:
         extra: dict[str, object] = {}
@@ -210,15 +213,23 @@ class Gate:
         explicit = frozenset({"temperature", "repetition_penalty"})
         base = SamplingParams(temperature=0.0, max_tokens=32, seed=1)
         baseline = await self.backend.generate(_request(base, explicit=explicit))
-        penalized = await self.backend.generate(
-            _request(base.clone(repetition_penalty=3.0), explicit=explicit)
-        )
+        self.recorder.label = "repeat_penalty"
+        try:
+            penalized = await self.backend.generate(
+                _request(base.clone(repetition_penalty=3.0), explicit=explicit)
+            )
+        finally:
+            self.recorder.label = None
+        window = self.recorder.records["repeat_penalty"]["request"].get("repeat_last_n")
         raw = await self._raw_chat(
             {"temperature": 0.0, "max_tokens": 32, "seed": 1, "repetition_penalty": 3.0}
         )
         vllm_spelling = raw.json()["choices"][0]["message"]["content"]
+        n_ctx = self.props["default_generation_settings"]["n_ctx"]
         return {
-            "passed": penalized.text != baseline.text,
+            # Executed, and over the whole sequence like Kairyu's sampler.
+            "passed": penalized.text != baseline.text and window == n_ctx,
+            "repeat_last_n": window,
             "vllm_spelling_ignored": vllm_spelling == baseline.text,
         }
 
@@ -300,15 +311,6 @@ class Gate:
             "passed": prompt.endswith(prefill) and result.completions[0].finish_reason is not None,
             "rendered_tail": prompt[-40:],
         }
-
-    async def count_tokens(self) -> dict:
-        counted = await self.backend.count_prompt_tokens_async(_PROMPT)
-        direct = (
-            await self.raw.post(
-                f"{self.root}/tokenize", json={"content": _PROMPT, "add_special": True}
-            )
-        ).json()["tokens"]
-        return {"passed": counted == len(direct) and counted > 0, "count": counted}
 
     async def n_above_slots_is_400(self) -> dict:
         slots = int(self.props["total_slots"])
@@ -405,12 +407,7 @@ class Gate:
                 ),
             ),
         )
-        backend = OpenAICompatBackend(
-            base_url=f"{self.root}/v1",
-            model=self.args.model,
-            api_key_env=None,
-            timeout_s=self.args.timeout_s,
-            upstream="llamacpp",
+        backend = self._backend(
             capabilities={"allow_prompt_kinds": ["multimodal"]},
             image_input_policy={"max_processed_prompt_tokens": 8192},
         )
@@ -444,13 +441,17 @@ class Gate:
             await self.row("server_identity", self.server_identity)
             if not self.props:
                 raise RuntimeError("server /props is unavailable")
+            extra = ["logit_bias"] if self.args.tool_call_bias else []
+            self.backend = self._backend(
+                transport=self.recorder,
+                capabilities={"allow_extra_args": extra},
+            )
             for row_id, check in (
                 ("repeat_penalty_executed", self.repeat_penalty_executed),
                 ("top_k_disabled_accepted", self.top_k_disabled_accepted),
                 ("named_tool_choice", self.named_tool_choice),
                 ("logprobs_zero", self.logprobs_zero),
                 ("assistant_prefill", self.assistant_prefill),
-                ("count_tokens", self.count_tokens),
                 ("n_above_slots_is_400", self.n_above_slots_is_400),
                 ("context_overflow_is_400", self.context_overflow_is_400),
                 ("cached_tokens_reported", self.cached_tokens_reported),
@@ -460,7 +461,8 @@ class Gate:
             ):
                 await self.row(row_id, check)
         finally:
-            await self.backend.shutdown()
+            if self.backend is not None:
+                await self.backend.shutdown()
             await self.recorder.aclose()
             await self.raw.aclose()
         if self.args.record_fixtures:

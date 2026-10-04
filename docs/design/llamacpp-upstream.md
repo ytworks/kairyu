@@ -38,7 +38,7 @@ Rejected alternatives:
 | In-process `llama-cpp-python` | Its `Llama` generates one sequence at a time. Its bundled server serializes requests and lets a new request interrupt the one streaming. Releases lag llama.cpp by weeks. |
 | Native GGUF loading in Kairyu's engine | Needs GGML k-quant/IQ kernels and per-architecture parity. Transformers' GGUF path dequantizes. A separate roadmap item. |
 | Kairyu-managed `llama-server` subprocess | A second lifecycle stack, which fails framework admission (compose/Helm already own L1 lifecycle). |
-| `upstream: generic` + overrides | Cannot rename `repetition_penalty`, rewrite a named `tool_choice`, lift `top_logprobs: 0`, enable assistant prefill, count tokens, or keep client images from becoming HTTP 500. |
+| `upstream: generic` + overrides | Cannot rename `repetition_penalty` or widen its window, reject penalties whose meaning differs, rewrite a named `tool_choice`, lift `top_logprobs: 0`, enable assistant prefill, or keep client images from becoming HTTP 500. |
 
 ### LCP-D2. Profile contents
 
@@ -48,8 +48,8 @@ The profile therefore forwards only fields llama-server executes; everything
 else fails closed before dispatch.
 
 **Accepted (`sampling_fields`)**
-- The OpenAI core: `frequency_penalty`, `logprobs`, `max_tokens`, `n`,
-  `presence_penalty`, `response_format`, `seed`, `stop`, `temperature`, `top_p`.
+- From the OpenAI core: `logprobs`, `max_tokens`, `n`, `response_format`,
+  `seed`, `stop`, `temperature`, `top_p`.
 - `top_k`, `min_p`, `repetition_penalty`, `ignore_eos`.
 
 All five generation-config fields are included because the L2 profile judge
@@ -58,6 +58,12 @@ sends `temperature=0.0` with nothing omitted.
 **Rejected before dispatch**
 - `min_tokens`, `stop_token_ids`, `skip_special_tokens=false`,
   `forced_token_ids`, `best_of`, `prompt_logprobs`, `priority`.
+- `frequency_penalty`, `presence_penalty` (amended 2026-10-04, PR #620
+  review). Kairyu's sampler applies them to generated tokens only. llama.cpp
+  also feeds the prompt into its penalty sampler (`server-context.cpp`, prompt
+  tokens accepted into the sampler), so `presence_penalty=1` would penalize
+  prompt words from the first token. No request field restricts the window
+  to output tokens.
 - `strict: true` tools: llama.cpp never reads `strict`.
 
 **Other settings**
@@ -77,12 +83,12 @@ sends `temperature=0.0` with nothing omitted.
 
 | Kairyu intent | llama-server wire | Why |
 |---|---|---|
-| `repetition_penalty` | `repeat_penalty` (capability `repetition_penalty_wire_name`) | Only `repeat_penalty` is parsed. |
+| `repetition_penalty` | `repeat_penalty` (capability `repetition_penalty_wire_name`) plus `repeat_last_n: max_model_len` | Only `repeat_penalty` is parsed. Its window defaults to the last 64 tokens; Kairyu's covers the whole prompt and output. The window is allocated up front, so it is bounded by the per-slot context, which `upstream: llamacpp` therefore requires. |
 | `top_k = -1` | `top_k: 0` | llama.cpp disables top-k with 0. |
 | `tool_choice` naming function X | `tools: [X]`, `tool_choice: "required"` | Only string `tool_choice` values parse; an object silently becomes `"auto"`. |
 | `logprobs = 0` | `top_logprobs: 1`; returned alternatives trimmed to 0 | `top_logprobs: 0` sets `n_probs = 0`, which disables probabilities. |
 | `assistant_prefill` | trailing assistant message, `continue_final_message: true`, `add_generation_prompt: false` (capability `assistant_prefill`, shared with `vllm`) | Native llama.cpp continuation. |
-| `/v1/messages/count_tokens` | `POST /tokenize {"content", "add_special": true}` → `len(tokens)` | Matches vLLM `/tokenize` defaults. |
+| `/v1/messages/count_tokens` | declined (HTTP 404, unsupported) | The route passes a rendered string. llama.cpp `/tokenize` counts it without the chat template generation applies, and tools change the generated prompt. The count would understate `usage.prompt_tokens` (amended 2026-10-04, PR #620 review). |
 | WebP image | re-encoded as lossless PNG from the validated raster | stb_image has no WebP. Without ffmpeg the decode fails as HTTP 500. |
 | `TemplatedPrompt` passthrough | rejected at configuration | llama-server would template the rendered text again. |
 
@@ -138,8 +144,12 @@ before dispatch:
 - KV is never oversubscribed. With an explicit `-np`, the KV cache is split per
   slot (`n_ctx / N`). The alternative is `--kv-unified-per-slot L` with `-c`
   unset.
-- Kairyu `max_model_len` = per-slot context, attested from
+- Kairyu `max_model_len` = per-slot context. It is required for
+  `upstream: llamacpp` and attested from
   `/props.default_generation_settings.n_ctx` and `total_slots`.
+- A non-1.0 server default `--repeat-penalty` also needs `--repeat-last-n`
+  set to the per-slot context. Requests set the window themselves; on the
+  CLI, `-1` disables the penalty rather than meaning "all".
 - `-fit off` with explicit `-c`/`-ngl`.
 - Context shift stays off (the default).
 
@@ -191,9 +201,10 @@ The recorded request/reply pairs are the unit-test fixtures in
 ReplicaPool behind `kairyu serve`, with no L2/L3 code change:
 
 - The prober marked both ready through their `/health` URLs.
-- Chat, the Responses API, `/v1/messages/count_tokens` (llama.cpp `/tokenize`)
-  and `logprobs` with `top_logprobs: 0` (sampled-token logprobs, no
-  alternatives) answered 200.
+- Chat, the Responses API and `logprobs` with `top_logprobs: 0`
+  (sampled-token logprobs, no alternatives) answered 200. This run predates
+  the review amendment that declines `/v1/messages/count_tokens`; it then
+  counted through llama.cpp `/tokenize`.
 - `min_tokens` failed with 400 before dispatch.
 - A concurrent burst spread over both replicas.
 - Killing replica 0 failed one request (502), ejected the replica and moved

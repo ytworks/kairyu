@@ -603,12 +603,13 @@ def _validated_request_payload(
                 + ", ".join(sorted(unsupported)),
             )
         payload["chat_template_kwargs"] = dict(request.chat_template_kwargs)
-    if capabilities.upstream == "llamacpp":
-        _adapt_llamacpp_sampling(payload)
     return payload
 
 
-def _adapt_llamacpp_sampling(payload: dict[str, object]) -> None:
+def _adapt_llamacpp_sampling(
+    payload: dict[str, object],
+    max_model_len: int | None,
+) -> None:
     """Express Kairyu sampling intent in llama.cpp's executed values."""
 
     # llama.cpp disables top-k with 0; Kairyu and vLLM use -1.
@@ -619,6 +620,13 @@ def _adapt_llamacpp_sampling(payload: dict[str, object]) -> None:
     # requested count (the sampled token's logprob does not depend on it).
     if payload.get("logprobs") is True and payload.get("top_logprobs") == 0:
         payload["top_logprobs"] = 1
+    # Kairyu's repetition_penalty covers the whole sequence (prompt and
+    # output); llama.cpp penalizes only the last ``repeat_last_n`` tokens
+    # (default 64). Its window is allocated up front, so it is bounded by the
+    # per-slot context rather than an unbounded maximum.
+    if payload.get("repeat_penalty", 1.0) != 1.0:
+        assert max_model_len is not None  # required at construction
+        payload["repeat_last_n"] = max_model_len
 
 
 def _llamacpp_named_tool(
@@ -760,6 +768,10 @@ class OpenAICompatBackend:
                 "completion_reasoning_end_tag requires upstream='vllm' and "
                 "allow_templated_chat_passthrough=true"
             )
+        if self._capabilities.upstream == "llamacpp" and max_model_len is None:
+            # The per-slot context bounds admission and llama.cpp's
+            # repetition-penalty window (LCP-D5).
+            raise ValueError("upstream='llamacpp' requires max_model_len")
         if allow_templated_chat_passthrough and self._capabilities.upstream == "llamacpp":
             # llama-server would apply its own chat template to the rendered text.
             raise ValueError(
@@ -960,7 +972,22 @@ class OpenAICompatBackend:
         """Fail unsupported intent before dispatch, metering, or client creation."""
 
         self._validate_request_structure(request)
-        _validated_request_payload(request, self._capabilities)
+        self._request_payload(request, validate_json=True)
+
+    def _request_payload(
+        self,
+        request: GenerationRequest,
+        *,
+        validate_json: bool,
+    ) -> dict[str, object]:
+        payload = _validated_request_payload(
+            request,
+            self._capabilities,
+            validate_json=validate_json,
+        )
+        if self._capabilities.upstream == "llamacpp":
+            _adapt_llamacpp_sampling(payload, self.max_model_len)
+        return payload
 
     def validate_request_before_prepare(self, request: GenerationRequest) -> None:
         """Keep only bounded structural checks on the serving event loop."""
@@ -973,11 +1000,7 @@ class OpenAICompatBackend:
     ) -> dict[str, object]:
         try:
             self._validate_request_structure(request)
-            return _validated_request_payload(
-                request,
-                self._capabilities,
-                validate_json=False,
-            )
+            return self._request_payload(request, validate_json=False)
         except InvalidImageInput as error:
             raise UpstreamClientError(
                 str(error),
@@ -1057,31 +1080,24 @@ class OpenAICompatBackend:
     async def count_prompt_tokens_async(
         self, prompt: str, *, timeout_s: float = 2.0
     ) -> int | None:
-        """Best-effort exact count via the upstream's ``POST /tokenize``.
+        """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
 
         Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
-        fail-soft ``None`` on any transport or shape problem. Only vLLM and
-        llama.cpp upstreams are known to expose the endpoint; llama.cpp gets
-        ``add_special`` to match vLLM's default special-token handling.
+        fail-soft ``None`` on any transport or shape problem. Only a vLLM
+        upstream is known to expose the endpoint.
         """
 
-        upstream = self._capabilities.upstream
-        if upstream not in {"vllm", "llamacpp"}:
+        if self._capabilities.upstream != "vllm":
             return None
         root = (
             self._base_url[: -len("/v1")]
             if self._base_url.endswith("/v1")
             else self._base_url
         )
-        body: dict[str, object] = (
-            {"model": self._model, "prompt": prompt}
-            if upstream == "vllm"
-            else {"content": prompt, "add_special": True}
-        )
         try:
             response = await self._get_client().post(
                 f"{root}/tokenize",
-                json=body,
+                json={"model": self._model, "prompt": prompt},
                 headers=self._headers(),
                 timeout=timeout_s,
             )
@@ -1093,12 +1109,7 @@ class OpenAICompatBackend:
             payload = response.json()
         except ValueError:
             return None
-        if not isinstance(payload, dict):
-            return None
-        if upstream == "llamacpp":
-            tokens = payload.get("tokens")
-            return len(tokens) if isinstance(tokens, list) else None
-        count = payload.get("count")
+        count = payload.get("count") if isinstance(payload, dict) else None
         return count if type(count) is int and count >= 0 else None
 
     def _api_key(self) -> str:
@@ -1178,6 +1189,7 @@ class OpenAICompatBackend:
             self._image_input_policy,
             self._model,
             self._request_stream_usage,
+            self.max_model_len,
         )
 
     def _peek_shared_prepared_payload(

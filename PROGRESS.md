@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-04 — [amendment] llama.cpp penalties, token counts and attest (PR #620 review)
+- What: `upstream: llamacpp` rejects frequency/presence penalties, sends `repeat_last_n` = `max_model_len` with `repetition_penalty`, requires `max_model_len`, and declines `/v1/messages/count_tokens`; the Winnow examples' `attest` fails on missing or non-numeric sampling defaults.
+- Why: owner review. llama.cpp penalizes prompt tokens with frequency/presence and only the last 64 tokens with repeat. `/tokenize` counts the string without the chat template generation applies. A missing default compared as NaN and passed.
+- Refs: LCP-D2/D3/D5 in `docs/design/llamacpp-upstream.md`; PR #620 review 5406980804
+
 ### 2026-10-04 — [design] GGUF models through llama.cpp as an L1 worker (PR #620)
 - What: `backend: openai` + `upstream: llamacpp` attaches `llama-server` with no L2/L3 change: executed-field profile, `repeat_penalty`, `top_k` 0, named tool_choice → that tool + `required`, `top_logprobs` floor, assistant prefill, `/tokenize`, WebP→PNG; passthrough rejected. CPU contract gate `l1.correctness.llamacpp_upstream_contract` passes on stock b11391.
 - Why: llama-server silently ignores unknown keys and object tool_choice, drops logprobs at `top_logprobs: 0`, and reports undecodable images as HTTP 500 (would eject replicas); `generic` cannot express these.

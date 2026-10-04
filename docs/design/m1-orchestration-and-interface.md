@@ -50,7 +50,8 @@ lifecycle. See `example-layered-orchestration.md`.
 gains the `upstream: llamacpp` profile for `llama-server` (GGUF models). It adds
 two capability fields: `repetition_penalty_wire_name`, and `assistant_prefill`
 (now also the vLLM gate). It also adds llama.cpp-specific wire adaptations for
-named `tool_choice`, `top_logprobs`, `top_k`, `/tokenize` and WebP images.
+named `tool_choice`, `top_logprobs`, `top_k`, the repetition-penalty window
+and WebP images.
 L2/L3 are unchanged. See `llamacpp-upstream.md` (LCP-D1..D6).
 
 **Typed-prompt amendment (2026-07-30, issue #227):** the public backend seam now

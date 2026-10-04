@@ -945,6 +945,7 @@ async def test_generate_continues_assistant_prefill_on_chat(upstream):
         api_key_env=None,
         transport=_ok_transport(captured),
         upstream=upstream,
+        max_model_len=4096,
     )
     prefill = "<think>\nplan\n</think>\n\n"
 
@@ -1400,6 +1401,9 @@ async def test_upstream_profiles_forward_exact_supported_body(upstream, params, 
         ("llamacpp", "min_tokens", SamplingParams(min_tokens=2)),
         ("llamacpp", "stop_token_ids", SamplingParams(stop_token_ids=(7,))),
         ("llamacpp", "skip_special_tokens", SamplingParams(skip_special_tokens=False)),
+        # llama.cpp also penalizes prompt tokens; Kairyu's are output-only.
+        ("llamacpp", "presence_penalty", SamplingParams(presence_penalty=0.5)),
+        ("llamacpp", "frequency_penalty", SamplingParams(frequency_penalty=0.5)),
         (
             "openai",
             "forced_token_ids",
@@ -1440,6 +1444,7 @@ async def test_upstream_profile_mismatch_is_400_before_transport(upstream, field
         api_key_env=None,
         transport=httpx.MockTransport(handler),
         upstream=upstream,
+        max_model_len=4096,
     )
 
     with pytest.raises(UpstreamClientError, match=field) as exc_info:
@@ -3198,16 +3203,14 @@ def test_template_kwargs_rejected_on_pre_rendered_prompt():
         pytest.param("vllm", 404, {"count": 42}, None, id="non-200"),
         pytest.param("vllm", 200, {"count": "42"}, None, id="non-int"),
         pytest.param("openai", 200, {"count": 42}, None, id="non-vllm-declines"),
-        pytest.param("llamacpp", 200, {"tokens": [9, 8, 7]}, 3, id="llamacpp-tokens"),
-        pytest.param("llamacpp", 200, {"count": 3}, None, id="llamacpp-shape"),
     ],
 )
-async def test_count_prompt_tokens_via_upstream_tokenize(
+async def test_count_prompt_tokens_via_vllm_tokenize(
     upstream, status, payload, expected
 ):
     # /v1/messages/count_tokens network boundary: exact counts come from a
-    # vLLM or llama.cpp upstream's POST /tokenize and every failure mode fails
-    # soft to None (the route then uses the same approximation billing would).
+    # vLLM upstream's POST /tokenize and every failure mode fails soft to
+    # None (the route then uses the same approximation billing would).
     captured: dict = {}
 
     def handler(http_request: httpx.Request) -> httpx.Response:
@@ -3225,11 +3228,7 @@ async def test_count_prompt_tokens_via_upstream_tokenize(
     assert await backend.count_prompt_tokens_async("some prompt") == expected
     if expected is not None:
         assert captured["url"] == "https://api.example.com/tokenize"
-        assert captured["body"] == (
-            {"content": "some prompt", "add_special": True}
-            if upstream == "llamacpp"
-            else {"model": "m", "prompt": "some prompt"}
-        )
+        assert captured["body"] == {"model": "m", "prompt": "some prompt"}
 
 
 async def test_count_prompt_tokens_transport_error_is_none():
@@ -3304,6 +3303,7 @@ async def test_llamacpp_wire_matches_recorded_server_exchange(
         transport=httpx.MockTransport(handler),
         upstream="llamacpp",
         capabilities={"allow_extra_args": ["logit_bias"]},
+        max_model_len=4096,
     )
     request = GenerationRequest(
         request_id="r1",
@@ -3330,8 +3330,9 @@ async def test_llamacpp_wire_matches_recorded_server_exchange(
 
 
 async def test_llamacpp_sampling_uses_executed_wire_values():
-    """llama-server reads only ``repeat_penalty``, disables top-k with 0, and
-    returns no logprobs at all for ``top_logprobs: 0``."""
+    """llama-server reads only ``repeat_penalty`` and applies it to the last
+    ``repeat_last_n`` tokens (default 64), disables top-k with 0, and returns
+    no logprobs at all for ``top_logprobs: 0``."""
 
     captured: dict = {}
 
@@ -3359,6 +3360,7 @@ async def test_llamacpp_sampling_uses_executed_wire_values():
         api_key_env=None,
         transport=httpx.MockTransport(handler),
         upstream="llamacpp",
+        max_model_len=4096,
     )
     result = await backend.generate(
         _request(
@@ -3371,6 +3373,8 @@ async def test_llamacpp_sampling_uses_executed_wire_values():
 
     body = captured["body"]
     assert body["repeat_penalty"] == 1.1 and "repetition_penalty" not in body
+    # The whole sequence, as Kairyu's native sampler penalizes it.
+    assert body["repeat_last_n"] == 4096
     assert body["top_k"] == 0
     assert (body["logprobs"], body["top_logprobs"]) == (True, 1)
     content = result.completions[0].logprob_content
@@ -3416,6 +3420,7 @@ async def test_llamacpp_webp_image_is_sent_as_png():
         upstream="llamacpp",
         capabilities={"allow_prompt_kinds": ["multimodal"]},
         image_input_policy={"max_processed_prompt_tokens": 1024},
+        max_model_len=4096,
     )
     await backend.generate(_request(prompt=_multimodal_prompt(webp_url)))
 

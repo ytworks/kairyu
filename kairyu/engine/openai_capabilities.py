@@ -207,11 +207,13 @@ _PROFILES = {
     # llama.cpp ``llama-server``: the controls its request schema executes.
     # Unknown JSON keys are silently ignored upstream, so ``min_tokens``,
     # ``stop_token_ids``, ``skip_special_tokens``, ``priority``, prompt
-    # logprobs and strict tool schemas stay unsupported. ``n`` is bounded by
+    # logprobs and strict tool schemas stay unsupported. llama.cpp applies
+    # frequency/presence penalties to prompt tokens too, unlike Kairyu's
+    # generated-tokens-only contract, so both fail closed. ``n`` is bounded by
     # the server's slot count, which rejects larger values with HTTP 400.
     "llamacpp": OpenAIRequestCapabilities(
         upstream="llamacpp",
-        sampling_fields=_OPENAI_CORE
+        sampling_fields=(_OPENAI_CORE - {"frequency_penalty", "presence_penalty"})
         | {"ignore_eos", "min_p", "repetition_penalty", "top_k"},
         parallel_tool_calls=True,
         repetition_penalty_wire_name="repeat_penalty",

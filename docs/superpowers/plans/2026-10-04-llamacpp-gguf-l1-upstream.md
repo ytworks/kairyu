@@ -1,6 +1,10 @@
 # llama.cpp as a Kairyu L1 worker: serve GGUF models with zero L2 change
 
-Status: owner-approved 2026-10-04 (decisions under "Owner decisions"). Base:
+Status: owner-approved 2026-10-04 (decisions under "Owner decisions");
+amended by the PR #620 review: frequency/presence penalties are rejected,
+`repetition_penalty` gets `repeat_last_n` = `max_model_len` (now required),
+and `/v1/messages/count_tokens` is declined. `docs/design/llamacpp-upstream.md`
+is authoritative where this plan differs. Base:
 `main` at `a8d242b`. llama.cpp reference: `ggml-org/llama.cpp` master
 `46847e6` (tag `b11391`, 2026-10-04); every llama.cpp claim below was read in
 that source (paths are relative to its repo root). The example runtime's base

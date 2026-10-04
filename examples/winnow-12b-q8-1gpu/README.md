@@ -78,6 +78,8 @@ DP8 example. Open WebUI state is per environment. Lifecycle commands are
   ffmpeg.
 - **Request fields.** Fields llama.cpp would silently ignore (`min_tokens`,
   `stop_token_ids`, `skip_special_tokens`, priority) are rejected with HTTP 400.
+  So are frequency/presence penalties, which llama.cpp would also apply to
+  prompt tokens. `repetition_penalty` covers the whole 65,536-token slot.
 - **Admission.** Kairyu admits 8 chat requests at a time, the slot count.
 - **System One.** `/v1/systemone` forwards Jev-shaped decision requests to
   Winnow. Kairyu queues bursts and answers 429 before Winnow's own 128-request

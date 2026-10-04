@@ -570,7 +570,7 @@ built-in contract.
 | `anthropic` | temperature (0–1), top-p, one completion, max tokens, stop, non-strict tools | Rejects penalties, seed, logprobs, `response_format`, and strict tool schemas because the [Anthropic compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) documents them as ignored. Anthropic recommends its native API for production features. |
 | `gemini` | max tokens, structured output, and non-strict tools | Allows `reasoning_effort` and the documented `extra_body.google` extension object. Sampling controls vary across Gemini model families, so fields not guaranteed by the [Gemini OpenAI compatibility contract](https://ai.google.dev/gemini-api/docs/openai) fail closed unless a pinned deployment declares a verified custom contract. |
 | `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, `ignore_eos`, `skip_special_tokens`, and signed-int64 `priority` | Use for gateway-to-Kairyu replica traffic. These extensions and the bounded interactive/batch class hint are typed and preserved through the receiving HTTP boundary into native scheduler admission. `skip_special_tokens` defaults to `true` and is isolated per request; `false` exposes otherwise-visible registered specials, but an ID that actually terminates on EOS or a stop token remains hidden under both values. |
-| `llamacpp` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty` and `ignore_eos`; `n` up to the server's slot count | For `llama-server` (GGUF). Sent as llama.cpp executes them: `repeat_penalty`, `top_k: 0` for disabled, a named `tool_choice` as that single tool plus `required`, at least one top logprob (trimmed back), WebP images as PNG. `min_tokens`, `stop_token_ids`, `skip_special_tokens`, `priority`, prompt logprobs and strict tool schemas fail closed because llama-server ignores them. `response_format` is forwarded; llama.cpp relaxes a regex `pattern` it cannot express to any string. See [GGUF models through llama.cpp](#gguf-models-through-llamacpp). |
+| `llamacpp` | OpenAI controls without frequency/presence penalties, plus `top_k`, `min_p`, `repetition_penalty` and `ignore_eos`; `n` up to the server's slot count | For `llama-server` (GGUF); requires `max_model_len`. Sent as llama.cpp executes them: `repeat_penalty` over the whole sequence (`repeat_last_n` = `max_model_len`), `top_k: 0` for disabled, a named `tool_choice` as that single tool plus `required`, at least one top logprob (trimmed back), WebP images as PNG. Frequency/presence penalties fail closed because llama.cpp also applies them to prompt tokens. `min_tokens`, `stop_token_ids`, `skip_special_tokens`, `priority`, prompt logprobs and strict tool schemas fail closed because llama-server ignores them. `/v1/messages/count_tokens` is declined: llama.cpp cannot count the chat-templated prompt from the string it receives. `response_format` is forwarded; llama.cpp relaxes a regex `pattern` it cannot express to any string. See [GGUF models through llama.cpp](#gguf-models-through-llamacpp). |
 | `vllm` | OpenAI controls plus result-preserving [vLLM Chat extensions](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/) and `priority` | Shares the Kairyu profile's `skip_special_tokens` control. Smaller priority values run first. Kairyu's local vLLM adapter requires `scheduling_policy=priority` so the field cannot be silently ignored; a separately operated remote vLLM server must enable the same policy. `prompt_logprobs` fails closed until Kairyu's result/API types can return the upstream prompt distribution. |
 
 Example provider configurations:
@@ -646,7 +646,7 @@ engines:
       model: local-gguf                    # equals llama-server --alias
       api_key_env: null
       upstream: llamacpp
-      max_model_len: 32768                 # per-slot context (see below)
+      max_model_len: 32768                 # required: per-slot context (see below)
       quantization_format: gguf:Q4_K_M
 legacy_chat_models: [local-gguf]
 ```
@@ -666,8 +666,9 @@ These server settings are the contract Kairyu relies on. Attest them from
   `build_info`. The build number changes with clone depth.
 - **Slots and context.** Use an explicit `-np N`; auto means four slots
   sharing one KV pool. With an explicit `-np`, each slot gets `-c / N` tokens.
-  - Set `max_model_len` to that per-slot value
-    (`default_generation_settings.n_ctx`).
+  - Set `max_model_len` (required) to that per-slot value
+    (`default_generation_settings.n_ctx`). It also bounds the
+    repetition-penalty window Kairyu requests (`repeat_last_n`).
   - Never oversubscribe KV: a full shared pool fails every running request
     with HTTP 500.
   - `-fit off` stops llama.cpp from silently lowering context or offload.

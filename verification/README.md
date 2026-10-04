@@ -894,12 +894,12 @@ or deployment relies on a pinned build (llama.cpp's server HTTP API has no
 stability guarantee). Through `OpenAICompatBackend` it proves that each wire
 adaptation is executed upstream:
 
-- `repeat_penalty` changes greedy output;
+- `repeat_penalty` changes greedy output over the whole sequence
+  (`repeat_last_n` = the per-slot context);
 - explicit `top_k: -1` is accepted;
 - a named `tool_choice` calls that function;
 - `logprobs: 0` returns sampled-token logprobs;
 - an assistant prefill is continued;
-- `/tokenize` counts prompts;
 - `n` above the slot count and prompt overflow are HTTP 400;
 - repeated prefixes report `cached_tokens`;
 - a stream ends with usage and `[DONE]`;
