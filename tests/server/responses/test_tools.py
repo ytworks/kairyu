@@ -12,13 +12,13 @@ from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.outputs import CompletionOutput
-from tests.server.responses._helpers import ToolLoopBackend, _app, _sdk, _sse_events, _tool
+from tests.server.live_server import openai_client
+from tests.server.responses._helpers import ToolLoopBackend, _app, _sse_events, _tool
 
 
 def test_function_tool_unary_loop_with_previous_response_id(tmp_path):
     backend = ToolLoopBackend()
-    with TestClient(_app(tmp_path, backend)) as http:
-        client = _sdk(http)
+    with openai_client(_app(tmp_path, backend)) as client:
         first = client.responses.create(
             model="m",
             input="Add 2 and 3.",

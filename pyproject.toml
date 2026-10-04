@@ -104,7 +104,10 @@ dev = [
     "psycopg[binary]>=3.2",
     "opentelemetry-sdk>=1.27",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
-    "openai>=1.66",
+    # Pinned reference SDKs (m20): openai-python 3.x talks HTTPX2, so the SDK
+    # tests drive a live uvicorn server (tests/server/live_server.py).
+    "openai[realtime]>=3.24,<4",
+    "openai-agents==0.23.*",
     "datasets>=3.2",  # hf_hub-marked eval download tests
     "immutabledict>=4.2",
     "langdetect==1.0.9",

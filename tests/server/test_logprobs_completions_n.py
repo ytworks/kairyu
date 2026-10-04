@@ -10,6 +10,7 @@ from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.entrypoints.server.app import _completion_logprobs
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from tests.server._legacy_chat import create_legacy_app
+from tests.server.live_server import async_openai_client
 
 
 class _SmallVocabTokenizer(ToyTokenizer):
@@ -55,21 +56,15 @@ def test_legacy_offsets_use_decoded_contributions_for_raw_vocab_pieces():
 
 
 async def test_chat_logprobs_via_openai_sdk(app):
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key="x",
-        base_url="http://t/v1",
-        http_client=_client(app),
-    )
-    response = await client.chat.completions.create(
-        model="m",
-        messages=[{"role": "user", "content": "hello logprobs"}],
-        max_tokens=4,
-        logprobs=True,
-        top_logprobs=3,
-        temperature=0.0,
-    )
+    async with async_openai_client(app) as client:
+        response = await client.chat.completions.create(
+            model="m",
+            messages=[{"role": "user", "content": "hello logprobs"}],
+            max_tokens=4,
+            logprobs=True,
+            top_logprobs=3,
+            temperature=0.0,
+        )
     content = response.choices[0].logprobs.content
     assert len(content) == 4
     for entry in content:
@@ -120,12 +115,10 @@ async def test_streaming_logprobs_on_chunk_choice(app):
 
 
 async def test_legacy_completions_via_openai_sdk(app):
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key="x", base_url="http://t/v1", http_client=_client(app))
-    response = await client.completions.create(
-        model="m", prompt="legacy endpoint", max_tokens=4, logprobs=2, temperature=0.0
-    )
+    async with async_openai_client(app) as client:
+        response = await client.completions.create(
+            model="m", prompt="legacy endpoint", max_tokens=4, logprobs=2, temperature=0.0
+        )
     assert response.id.startswith("cmpl-")
     assert response.object == "text_completion"
     choice = response.choices[0]

@@ -5,9 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
-import openai
-from fastapi.testclient import TestClient
-
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
@@ -20,15 +17,6 @@ def _app(tmp_path, backend=None, **kwargs):
         {"m": backend or MockBackend({"hello": "streamed hello"})},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
         **kwargs,
-    )
-
-
-def _sdk(http: TestClient) -> openai.OpenAI:
-    return openai.OpenAI(
-        base_url=str(http.base_url) + "/v1",
-        api_key="sk-local",
-        http_client=http,
-        _strict_response_validation=True,
     )
 
 

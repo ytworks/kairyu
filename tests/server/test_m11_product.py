@@ -29,6 +29,7 @@ from kairyu.entrypoints.server.tenancy import (
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
+from tests.server.live_server import openai_client
 
 
 def _auto_app(tmp_path, **kwargs):
@@ -1513,15 +1514,7 @@ class TestResponsesApi:
         assert totals["completion_tokens"] == 0
 
     def test_sdk_round_trip_with_previous_response_id(self, tmp_path):
-        import openai
-
-        app = _auto_app(tmp_path)
-        with TestClient(app) as http:
-            client = openai.OpenAI(
-                base_url=str(http.base_url) + "/v1",
-                api_key="sk-local",
-                http_client=http,
-            )
+        with openai_client(_auto_app(tmp_path)) as client:
             first = client.responses.create(model="m", input="hello")
             assert first.status == "completed"
             assert first.output_text  # computed from the exact item shapes (A8)
@@ -1669,14 +1662,8 @@ class TestEmbeddings:
         assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
 
     def test_sdk_round_trip_base64_default(self, tmp_path):
-        import openai
-
-        with TestClient(_auto_app(tmp_path)) as http:
-            client = openai.OpenAI(
-                base_url=str(http.base_url) + "/v1",
-                api_key="sk-local",
-                http_client=http,
-            )
+        # Lenient: the SDK validates base64 as list[float] before decoding it.
+        with openai_client(_auto_app(tmp_path), strict=False) as client:
             result = client.embeddings.create(model="embedding-model", input=["hello", "world"])
             assert len(result.data) == 2
             assert len(result.data[0].embedding) == 8  # SDK decodes base64 (A9)

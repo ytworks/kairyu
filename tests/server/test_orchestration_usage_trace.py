@@ -9,6 +9,7 @@ from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
+from tests.server.live_server import openai_client
 
 COMPLEX = (
     "First research the options and summarize trade-offs. Then design a plan. "
@@ -325,17 +326,7 @@ def test_stream_without_trace_opt_in_omits_trace_extensions(tmp_path):
 
 
 def test_openai_sdk_accepts_usage_and_trace_terminal_metadata(tmp_path):
-    import openai
-    from fastapi.testclient import TestClient
-
-    backend = AccountingBackend()
-    app = _app(tmp_path, backend)
-    with TestClient(app) as http:
-        client = openai.OpenAI(
-            base_url=str(http.base_url) + "/v1",
-            api_key="sk-local",
-            http_client=http,
-        )
+    with openai_client(_app(tmp_path, AccountingBackend())) as client:
         chunks = list(
             client.chat.completions.create(
                 model="auto",

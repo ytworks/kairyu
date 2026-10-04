@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import httpx
-import openai
 import pytest
-from fastapi.testclient import TestClient
 
-from tests.server.responses._helpers import LengthBackend, _app, _sdk
+from tests.server.live_server import async_openai_client, openai_client
+from tests.server.responses._helpers import LengthBackend, _app
 
 
 def test_official_sdk_typed_text_stream_and_final_response(tmp_path):
-    with TestClient(_app(tmp_path)) as http:
-        client = _sdk(http)
+    with openai_client(_app(tmp_path)) as client:
         with client.responses.stream(model="m", input="hello") as stream:
             events = list(stream)
             final = stream.get_final_response()
@@ -38,8 +35,8 @@ def test_official_sdk_typed_text_stream_and_final_response(tmp_path):
 
 
 def test_create_stream_true_returns_sdk_typed_events(tmp_path):
-    with TestClient(_app(tmp_path)) as http:
-        events = list(_sdk(http).responses.create(model="m", input="hello", stream=True))
+    with openai_client(_app(tmp_path)) as client:
+        events = list(client.responses.create(model="m", input="hello", stream=True))
     assert events[0].type == "response.created"
     assert events[-1].type == "response.completed"
     deltas = [
@@ -50,17 +47,7 @@ def test_create_stream_true_returns_sdk_typed_events(tmp_path):
 
 @pytest.mark.asyncio
 async def test_official_async_sdk_stream_is_typed(tmp_path):
-    transport = httpx.ASGITransport(app=_app(tmp_path))
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as http:
-        client = openai.AsyncOpenAI(
-            base_url="http://test/v1",
-            api_key="sk-local",
-            http_client=http,
-            _strict_response_validation=True,
-        )
+    async with async_openai_client(_app(tmp_path)) as client:
         stream = await client.responses.create(model="m", input="hello", stream=True)
         events = [event async for event in stream]
     assert events[0].type == "response.created"
@@ -70,8 +57,8 @@ async def test_official_async_sdk_stream_is_typed(tmp_path):
 
 def test_incomplete_stream_has_consistent_item_and_terminal_status(tmp_path):
     backend = LengthBackend({"hello": "truncated"})
-    with TestClient(_app(tmp_path, backend)) as http:
-        events = list(_sdk(http).responses.create(model="m", input="hello", stream=True))
+    with openai_client(_app(tmp_path, backend)) as client:
+        events = list(client.responses.create(model="m", input="hello", stream=True))
 
     item_done = next(event for event in events if event.type == "response.output_item.done")
     terminal = events[-1]
@@ -84,8 +71,8 @@ def test_incomplete_stream_has_consistent_item_and_terminal_status(tmp_path):
 
 def test_incomplete_unary_has_consistent_item_and_response_status(tmp_path):
     backend = LengthBackend({"hello": "truncated"})
-    with TestClient(_app(tmp_path, backend)) as http:
-        response = _sdk(http).responses.create(model="m", input="hello")
+    with openai_client(_app(tmp_path, backend)) as client:
+        response = client.responses.create(model="m", input="hello")
 
     assert response.status == "incomplete"
     assert response.output[0].status == "incomplete"
