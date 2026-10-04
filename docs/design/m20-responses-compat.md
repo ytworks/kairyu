@@ -1,7 +1,7 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
 Status: **Proposed** (2026-10-05). Phase 0 (WP-00–05) implemented (parts of D1,
-D3/D7/D9, D10, D22); Phase 1 starts with WP-06; WP-53 closes M20.
+D3/D7/D9, D10, D22) and Phase 1 refactors 06/06b/12a; WP-53 closes M20.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -389,9 +389,9 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Done |
 | 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Done |
 | 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Done |
-| 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Planned |
-| 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Planned |
-| 1 | 12a | M B refactor | `engine_admission.py` for Messages and the Chat engine path | 01 | Planned |
+| 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Done |
+| 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Done |
+| 1 | 12a | M B refactor | `engine_admission.py` for Messages and the Chat engine path | 01 | Done |
 | 1 | 15 | S D | uvicorn `ws="none"`, reliable 426 | 06 | Planned |
 | 1 | 07 | M A | Error contract: `param` everywhere, scoped handlers, middleware via classifier, O-2 table | 06 | Planned |
 | 1 | 17a | L A | Shared `segment_stream`; Responses emitter and engine path | 06, 07, 12a | Planned |
