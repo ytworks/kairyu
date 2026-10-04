@@ -1,7 +1,7 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
-Status: **Proposed** (2026-10-05). WP-00, 02, 02b, 03 and 05 implemented (parts
-of D1, D3/D7/D9, D22); WP-01 (record, schema gate) in progress; WP-53 closes M20.
+Status: **Proposed** (2026-10-05). Phase 0 (WP-00–05) implemented (parts of D1,
+D3/D7/D9, D10, D22); Phase 1 starts with WP-06; WP-53 closes M20.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -384,10 +384,10 @@ Chat, Messages and Responses wire captures identical at base and head.
 |---|---|---|---|---|---|
 | 0 | 00 | S docs | PROGRESS archiving (Current Status ≤80 lines) | – | Done |
 | 0 | 03 | S A | Codex P0 hotfix: no 1024/4096 caps, `stream_util`, data heartbeats on every path, `web_search` accept-and-drop, tenant-budget warning | 00 | Done |
-| 0 | 01 | S/M D | Schema gate (vendored closure, `ContractValidator`, ASGI recorder + wire capture, `divergences.toml`, strict SDK on 2.44); this record | – | In progress |
+| 0 | 01 | S/M D | Schema gate (vendored closure, `ContractValidator`, ASGI recorder + wire capture, `divergences.toml`, strict SDK on 2.44); this record | – | Done |
 | 0 | 02b | M D | `tests/support/scenario_backend.py`, `fake_vllm_upstream.py` | – | Done |
 | 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Done |
-| 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Planned |
+| 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Done |
 | 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Done |
 | 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Planned |
 | 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Planned |
