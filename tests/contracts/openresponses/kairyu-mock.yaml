@@ -1,0 +1,19 @@
+# Kairyu deployment the Open Responses compliance gate runs against (M20 WP-14,
+# docs/design/m20-open-responses-ci.md). scripts/open_responses_gate/launcher.py
+# registers the gate's ScenarioBackend script as backend
+# "open-responses-scenario" and overrides host and port from its command line;
+# everything else is this ordinary DeploymentSpec, served with `kairyu serve`'s
+# uvicorn options (ws="none": WebSocket upgrades are plain 426 GETs, D-e).
+server:
+  host: 127.0.0.1
+  port: 8000
+  access_log: false
+engines:
+  kairyu-mock:
+    backend: open-responses-scenario
+    options:
+      max_model_len: 32768
+# ScenarioBackend rules match the pending user text of the legacy
+# "role: text" rendering.
+legacy_chat_models:
+  - kairyu-mock

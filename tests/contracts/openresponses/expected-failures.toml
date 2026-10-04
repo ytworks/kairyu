@@ -1,0 +1,137 @@
+# Open Responses compliance gate (M20 WP-14, docs/design/m20-open-responses-ci.md).
+#
+# [suite] pins the upstream suite; scripts/open_responses_gate/run.py runs its
+# bin/compliance-test.ts --json against Kairyu on ScenarioBackend
+# (kairyu-mock.yaml).
+#
+# Each [[expected_failure]] names one scenario of the pinned suite that fails
+# today: gap_id (research gap, review requirement or m20 decision) and
+# owner_wp (the WP that makes it pass), the reason, and a signature the
+# scenario's errors or error body contain while it fails for that reason. A
+# listed scenario failing without its signature, an unlisted failure, a
+# listed scenario that passes (XPASS) and a listed id the suite no longer has
+# all fail the gate: the WP that fixes a scenario deletes its entry, and one
+# that changes how a listed scenario fails updates its signature.
+
+[suite]
+repository = "openresponses/openresponses"
+commit = "92c12d96d7b61d6d15e2214daa5e9c6000ab6e1c"
+spec = "2026-04-24"
+
+# --- HTTP: the response envelope ---------------------------------------------
+
+[[expected_failure]]
+id = "basic-response"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "The envelope lacks fields the suite's ResponseResource requires (completed_at, truncation, store, background, the sampling numbers, text.format, service_tier string, ...)."
+
+[[expected_failure]]
+id = "assistant-phase"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "Assistant history with phase is accepted; the envelope fails as in basic-response."
+
+[[expected_failure]]
+id = "system-prompt"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "The system message is accepted; the envelope fails as in basic-response."
+
+[[expected_failure]]
+id = "multi-turn"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "Manual history is accepted; the envelope fails as in basic-response."
+
+[[expected_failure]]
+id = "tool-calling"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "The function_call item is emitted; the envelope fails as in basic-response, and the echoed function tool lacks strict."
+
+[[expected_failure]]
+id = "streaming-response"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+signature = "completed_at: Invalid input"
+reason = "Every event validates; the terminal response's envelope fails as in basic-response. The scenario runs with reasoning off: Kairyu's response.reasoning_text.* events are OpenAI's names, the suite's union says response.reasoning.* (openresponses PR #42)."
+
+# --- HTTP: inputs and endpoints not built yet ---------------------------------
+
+[[expected_failure]]
+id = "image-input"
+gap_id = "G-input-items-1"
+owner_wp = "WP-25"
+signature = "'input_image' is not supported"
+reason = "Responses rejects message images with 400 until WP-25. ScenarioBackend rejects multimodal prompts, so WP-25 also gives this gate a backend that answers them."
+
+[[expected_failure]]
+id = "compact-response"
+gap_id = "G-compaction-2"
+owner_wp = "WP-36"
+signature = "Invalid URL (POST /v1/responses/compact)"
+reason = "POST /v1/responses/compact does not exist yet (404)."
+
+[[expected_failure]]
+id = "compact-missing-model"
+gap_id = "G-compaction-2"
+owner_wp = "WP-36"
+signature = "Invalid URL (POST /v1/responses/compact)"
+reason = "The suite expects 400 or 422 for a compact request without model; the route does not exist yet (404)."
+
+# --- WebSocket mode (D-e: disabled, uvicorn ws="none", upgrades get 426) ------
+
+[[expected_failure]]
+id = "websocket-response"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-sequential-responses"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-continuation"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-reconnect-store-false-recovery"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-previous-response-not-found"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-failed-continuation-evicts-cache"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "WebSocket connection failed"
+reason = "WebSocket mode ships disabled until WP-47; the upgrade is a plain 426 GET."
+
+[[expected_failure]]
+id = "websocket-compact-new-chain"
+gap_id = "G-transport-1"
+owner_wp = "WP-47"
+signature = "HTTP 404 from /responses/compact"
+reason = "It compacts over HTTP before opening the socket, so it fails on the missing /compact route today; WP-36 changes the signature to the WebSocket failure, WP-47 deletes the entry."

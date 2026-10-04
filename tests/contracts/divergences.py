@@ -25,9 +25,9 @@ KINDS = frozenset({"temporary", "codex-extension", "kairyu-extension"})
 REQUIRED_FIELDS = ("id", "schema", "pointer_glob", "keyword", "gap_id", "owner_wp", "kind")
 OPTIONAL_FIELDS = ("value", "route", "note")
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-_OWNER_WP = re.compile(r"^WP-\d{2}[a-c]?$")
+OWNER_WP_PATTERN = re.compile(r"^WP-\d{2}[a-c]?$")
 # Research gap IDs, verifier-added gaps, review requirements, and m20 decisions.
-_GAP_ID = re.compile(r"^(G-[a-z-]+-\d+|M-(W|SR|ST)-\d+|R-\d+|D\d+|D-[a-j])$")
+GAP_ID_PATTERN = re.compile(r"^(G-[a-z-]+-\d+|M-(W|SR|ST)-\d+|R-\d+|D\d+|D-[a-j])$")
 
 
 class DivergenceFileError(ValueError):
@@ -69,8 +69,8 @@ def _entry(raw: Mapping[str, Any], index: int) -> Divergence:
         "schema": text["schema"],
         "pointer_glob": text["pointer_glob"],
         "keyword": text["keyword"],
-        "gap_id": _GAP_ID.match(text["gap_id"]),
-        "owner_wp": _OWNER_WP.match(text["owner_wp"]),
+        "gap_id": GAP_ID_PATTERN.match(text["gap_id"]),
+        "owner_wp": OWNER_WP_PATTERN.match(text["owner_wp"]),
         "kind": text["kind"] in KINDS,
         "value": isinstance(raw.get("value", ""), str),
         "route": isinstance(raw.get("route", ""), str),
