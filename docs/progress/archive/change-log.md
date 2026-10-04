@@ -11,6 +11,32 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-02 — [design] Verified-answers example: two-stage extraction, slimmer state builder (VCO-D8 am. 2, VCO-D12)
+- What: stated and implicit conditions come from two parallel extractors (implicit: at most four, Jev-kept); the state builder lists only source/action claims (G1-computation/general removed); step budget 16 -> 24 (worst case 18 published `reason: budget`). InFoBench c8 p50 492 -> 297 s. The requirements gate no longer reuses answers from another build; the implicit gate's judge thinks.
+- Why: one combined extractor lost stated conditions (gold recall 0.867) and re-extraction dropped implicit ones (gate recall 0.525-0.675); owner latency target p50 <= 3 min (not yet met).
+- Refs: `docs/design/example-verified-checklist-orchestration.md` VCO-D8, VCO-D12; example `MEASUREMENTS.md`; PR #616
+
+### 2026-10-02 — [design] Verified-answers example: per-claim G1 is advisory (VCO-D11)
+- What: G1 split per claim kind and calibrated on 600 human-labelled answers each (RAGTruth, PRM800K, FEVER) through the production state builder and questions; no kind meets alpha 0.10 held-out (accepted violation 15-40 %, AUROC 0.69-0.89). The G1 questions now report p with threshold 0 (`guarantee: advisory`).
+- Why: owner choice (option A) — the flag must claim only what is calibrated; RAGTruth counts unsourced true additions, OpenJev misses math errors and false facts.
+- Refs: `docs/design/example-verified-checklist-orchestration.md` VCO-D11, example `calibrate_g1.py`, `MEASUREMENTS.md`, PR #616
+
+### 2026-10-01 — [progress] Runner and model-cache authority rebased on current main
+- What: rebased WP3.3–WP3.7 and WP4.1–WP4.7/D3.1–D3.20 onto current main,
+  retaining the fail-closed authority, cache, admission, lifecycle, and tests.
+- Refs: `docs/design/runner-state-v1.md`;
+  `docs/design/node-model-cache-prestage-v1.md`; `kairyu/runners/`
+
+### 2026-10-01 — [design] Checklist verifiers in L2; checklist-verified answers example
+- What: m1 D8: a verifier may judge with deterministic checks plus System One `noul` reads (Kairyu converts requirements into Jev questions with yes/no criteria and a JSON state), threshold verdicts, seeded targets with `refine_prompt`, inline claim roles, `on_unavailable: publish_unverified`, curation, internal `response_format`, `{conversation}`, and `kairyu_verification` on responses. m11 D8: System One `base_urls` replicas. New example `deepseek-v4.1-openjev-verified-8gpu`.
+- Why: owner request (requirement-checklist guarantee); L2 could only branch on generated PASS/FAIL text and could not call System One. Jev-shaped requests beat free text (AUROC 0.830 vs 0.814); alpha amended 0.05 -> 0.10 because InFoBench expert labels disagree at 9-10 %.
+- Refs: m1 D8, m11 D8 replica amendment, `docs/design/example-verified-checklist-orchestration.md` (VCO-D4 amendment), example `MEASUREMENTS.md`
+
+### 2026-10-01 — [amendment] System One second review round (PR #614)
+- What: `/v1/systemone` normalizes `samples`/`think`/`steps` ("32", 32.0) before reserving and forwarding (422 otherwise) and reserves `sequential` reads' repeated schema. The OpenJev overlay ends a thought cut at 512 with a budget sentence (budget forcing): empty answers after a cut thought 13/40 → 0/40; `l1` 8/8. Overlay re-pinned `5e8e2e08`; every gate passes.
+- Why: owner re-review: type changes and `sequential` still slipped past the reservation, and an answer pass could reopen a thought and return empty. vLLM refuses token bans for diffusion models, so the thought is closed in text.
+- Refs: m11 D8 metering; example `MEASUREMENTS.md` "Second review-fix rerun"
+
 ### 2026-10-01 — [amendment] System One review fixes (PR #614)
 - What: `/v1/systemone` reserves the billed upper bound (questions as separate reads, think × samples), enforces each model's body limit, 502s unless both usage counts are valid, and tenant 429s use Jev's shape. The OpenJev overlay refuses empty `stop`/out-of-range `top_logprobs` before the thought; preflight exempts only the GPU the L1 holds; playground fixes. Gates pass on overlay `46530fa7`; `l1` thought-cut-then-answer fails intermittently (2/4, answer pass reopens a thought) — open finding.
 - Why: owner review: the old bound let one request bill 13× a tenant's bucket, and answer-only refusals after the thought ejected the only replica.
