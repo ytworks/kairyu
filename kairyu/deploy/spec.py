@@ -25,7 +25,11 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.resolver import BaseResolver
 
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
-from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.settings import (
+    DEFAULT_MAX_DECOMPRESSED_BYTES,
+    CorsOrigins,
+    ServerSettings,
+)
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.pricing import PriceSheet
 
@@ -220,6 +224,15 @@ class ServerSection(BaseModel):
             "the process-level guard."
         ),
     )
+    max_decompressed_bytes: int = Field(
+        default=DEFAULT_MAX_DECOMPRESSED_BYTES,
+        ge=1,
+        description="Decoded-size cap of a gzip/zstd request body (413 above it).",
+    )
+    cors_allowed_origins: CorsOrigins = Field(
+        default=(),
+        description="Browser origins allowed by CORS ('*' for any); empty disables CORS.",
+    )
     metrics: bool = Field(default=True, description="Expose /metrics (Prometheus).")
     protect_metrics: bool = Field(
         default=False,
@@ -264,6 +277,8 @@ class ServerSection(BaseModel):
             admission_wait_timeout_s=self.admission_wait_timeout_s,
             ttft_slo_s=self.ttft_slo_s,
             max_chat_body_bytes=self.max_chat_body_bytes,
+            max_decompressed_bytes=self.max_decompressed_bytes,
+            cors_allowed_origins=self.cors_allowed_origins,
             metrics=self.metrics,
             protect_metrics=self.protect_metrics,
             access_log=self.access_log,

@@ -273,6 +273,7 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
         for name, property_schema in schema["properties"].items()
     }
 
+    nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
     assert not issubclass(ServerSection, ServerSettings)
     assert schema["additionalProperties"] is False
     assert schema.get("required", []) == []
@@ -284,14 +285,8 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             "minimum": 1,
             "type": "integer",
         },
-        "api_keys_env": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "default": None,
-        },
-        "responses_compaction_secret_env": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "default": None,
-        },
+        "api_keys_env": nullable_string,
+        "responses_compaction_secret_env": nullable_string,
         "max_concurrency": {
             "anyOf": [
                 {"minimum": 1, "type": "integer"},
@@ -320,18 +315,14 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             ],
             "default": None,
         },
+        "max_decompressed_bytes": {"default": 64 << 20, "minimum": 1, "type": "integer"},
+        "cors_allowed_origins": {"default": [], "items": {"type": "string"}, "type": "array"},
         "metrics": {"default": True, "type": "boolean"},
         "protect_metrics": {"default": False, "type": "boolean"},
         "access_log": {"default": True, "type": "boolean"},
         "tracing": {"default": False, "type": "boolean"},
-        "usage_ledger_path": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "default": None,
-        },
-        "admin_keys_env": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "default": None,
-        },
+        "usage_ledger_path": nullable_string,
+        "admin_keys_env": nullable_string,
     }
 
 
@@ -347,6 +338,8 @@ server:
   admission_wait_timeout_s: 3.5
   ttft_slo_s: 2.0
   max_chat_body_bytes: 16777216
+  max_decompressed_bytes: 1048576
+  cors_allowed_origins: [https://chat.example]
   metrics: false
   protect_metrics: true
   access_log: false
@@ -367,6 +360,8 @@ engines:
         admission_wait_timeout_s=3.5,
         ttft_slo_s=2.0,
         max_chat_body_bytes=16_777_216,
+        max_decompressed_bytes=1_048_576,
+        cors_allowed_origins=("https://chat.example",),
         metrics=False,
         protect_metrics=True,
         access_log=False,
