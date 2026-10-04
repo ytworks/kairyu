@@ -52,6 +52,9 @@ vision = [
 ]
 # OpenTelemetry span export (L2-safe no-op without it).
 otel = ["opentelemetry-sdk>=1.27"]
+# zstd request bodies (Codex compresses with ChatGPT auth); without it the
+# server answers 415 unsupported_content_encoding. gzip is stdlib (m20 D21).
+zstd = ["zstandard>=0.23"]
 # GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.
 gpu = [
     "flashinfer-python>=0.6.14; sys_platform == 'linux'",
@@ -115,6 +118,7 @@ dev = [
     "pillow>=10",
     "tiktoken>=0.7",  # retained RULER long-context coverage
     "jsonschema==4.26.0",
+    "zstandard>=0.23",  # the zstd extra, so CI decodes Codex zstd bodies
 ]
 
 [project.scripts]
