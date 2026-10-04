@@ -56,6 +56,7 @@ from kairyu.engine.engine_loop import (
     StreamUpdate,
     _validate_max_model_len,
 )
+from kairyu.engine.model_limits import resolve_model_max_model_len
 from kairyu.engine.prompt import (
     TemplatedPrompt,
     prompt_kind,
@@ -184,36 +185,6 @@ def _default_cuda_graph_max_pages(
         context_tokens = graph_page_capacity * page_size
     required = (context_tokens + page_size - 1) // page_size
     return min(required, graph_page_capacity)
-
-
-def _resolve_model_max_model_len(
-    model_path: str,
-    max_model_len: int | None,
-    *,
-    raw_model_config: dict | None = None,
-) -> int | None:
-    """Bind native admission to the resident precomputed RoPE table."""
-
-    raw = raw_model_config
-    if raw is None:
-        config_path = Path(model_path) / "config.json"
-        if not config_path.is_file():
-            return max_model_len
-        raw = json.loads(config_path.read_text())
-    text_config = raw.get("text_config")
-    position_source = text_config if isinstance(text_config, dict) else raw
-    position_limit = position_source.get("max_position_embeddings", 4096)
-    if type(position_limit) is not int or position_limit < 1:
-        raise ValueError("max_position_embeddings must be an integer >= 1")
-    if max_model_len is None:
-        return position_limit
-    if max_model_len > position_limit:
-        raise ValueError(
-            f"max_model_len={max_model_len} exceeds the model's "
-            f"max_position_embeddings={position_limit}; the precomputed RoPE "
-            "table cannot serve positions beyond the model limit"
-        )
-    return max_model_len
 
 
 @dataclass
@@ -600,7 +571,7 @@ def build_engine_loop(
 
             raw_model_config = json.loads(config_path.read_text())
             reference_config = parse_model_config(raw_model_config)
-        max_model_len = _resolve_model_max_model_len(
+        max_model_len = resolve_model_max_model_len(
             model_path,
             max_model_len,
             raw_model_config=raw_model_config,

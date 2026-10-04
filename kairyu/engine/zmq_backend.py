@@ -60,6 +60,7 @@ from kairyu.engine.engine_loop import (
     engine_sampling_from,
     validate_structured_sampling,
 )
+from kairyu.engine.model_limits import resolve_model_max_model_len
 from kairyu.engine.prompt import (
     PromptInput,
     TemplatedPrompt,
@@ -1154,7 +1155,8 @@ class ZmqEngineBackend:
         self._shutdown_task: asyncio.Task[None] | None = None
         self._closed = False
         self._atexit_registered = False
-        self._max_model_len = max_model_len
+        # Preflight enforces the limit the child builds with (WP-04).
+        self._max_model_len = resolve_model_max_model_len(model_path, max_model_len)
         # A configured context limit must be enforceable by the HTTP-facing
         # parent before a StreamingResponse commits SSE headers. All text is
         # also resolved here before crossing the process boundary, even when

@@ -7,6 +7,8 @@ exactly what the child engine would, before any child process starts.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -59,11 +61,18 @@ async def test_parent_preflight_enforces_context_limit_without_starting_child():
         await backend.shutdown()
 
 
-async def test_parent_preflight_resolves_the_child_output_budget():
+@pytest.mark.parametrize("limit_source", ["configured", "model-config"])
+async def test_parent_preflight_resolves_the_child_output_budget(tmp_path, limit_source):
     # With max_tokens omitted the child generates up to the remaining context
     # (#496). The parent preflight once assumed 16 output tokens, rejecting
     # prompts the child accepts and reporting overflow as an untyped error.
-    backend = ZmqEngineBackend(num_pages=64, max_model_len=8)
+    # Without a configured limit the child derives it from the model's
+    # max_position_embeddings; the parent must enforce that same limit.
+    if limit_source == "configured":
+        backend = ZmqEngineBackend(num_pages=64, max_model_len=8)
+    else:
+        (tmp_path / "config.json").write_text(json.dumps({"max_position_embeddings": 8}))
+        backend = ZmqEngineBackend(num_pages=64, model_path=str(tmp_path))
     try:
         backend.validate_request(
             _request("fits", TokensPrompt(tuple(range(1, 8))), max_tokens=None)
