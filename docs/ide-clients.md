@@ -229,7 +229,9 @@ once the history outgrows the served `max_model_len`.
 provider does not read `OPENAI_API_KEY`: store the key with `codex login
 --with-api-key` (it reads the key from stdin) or, for `codex exec`, set
 `CODEX_API_KEY`. Codex first tries a WebSocket upgrade, gets 426 and continues
-over HTTPS.
+over HTTPS. Signed in with ChatGPT instead (a keyless gateway), Codex sends
+zstd-compressed request bodies: install the gateway with the `kairyu[zstd]`
+extra, or those requests get 415 `unsupported_content_encoding`.
 
 **Local-provider shape.** `CODEX_OSS_BASE_URL=http://<kairyu-host>:<port>/v1
 codex --oss --local-provider lmstudio -m <model-id>` also works: Codex lists

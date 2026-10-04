@@ -36,12 +36,12 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 |---|---|---|
 | DDoS, bot filtering, per-client rate limits | Cloud WAF | — |
 | TLS termination, certificates | Cloud LB (or DC reverse proxy) | serves plain HTTP behind it |
-| Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare) |
-| Process overload | Gateway/replica | `server.max_concurrency`; optional single-local-backend admission queue → 429 + Retry-After (503 `slow_down` on `/v1/responses*`) |
+| Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare); optional `server.cors_allowed_origins` answers browser preflights before auth |
+| Process overload | Gateway/replica | `server.max_concurrency`; optional single-local-backend admission queue → 429 + Retry-After (503 `slow_down` on `/v1/responses*`); gzip/zstd (`kairyu[zstd]`) bodies decoded under `server.max_decompressed_bytes` (64 MiB → 413) |
 | TTFT SLO overload | Gateway | optional `server.ttft_slo_s` → admit, batch-defer, or 429 + Retry-After |
 | Routing inspection | Gateway | `/v1/route` uses data-plane auth; `/routing` remains inside the configured API-key boundary |
 | Node-to-node auth inside the DC | Deployment choice | keyless (`api_key_env: null`) or a shared key env var |
-| Audit trail | Gateway | JSON access log with `X-Request-ID`, JSONL router decision log |
+| Audit trail | Gateway | server-generated `X-Request-ID` on every response (errors too), JSON access log, JSONL router decision log |
 
 ## 3. Node setup (systemd + docker compose — design m7 D2)
 

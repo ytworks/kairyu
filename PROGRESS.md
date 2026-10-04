@@ -109,6 +109,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [amendment] Ingress parity: request id, compressed bodies, CORS (M20 WP-41)
+- What: every response (errors too) echoes a server-generated `X-Request-ID` without the access log (a client-sent one is never adopted: it keys the engine request). `Content-Encoding` gzip (core) and zstd (`kairyu[zstd]` extra, in the dev group) are decoded off-loop under `max_decompressed_bytes` (64 MiB → 413, bombs stop after one bounded step); other codings and zstd without the extra → 415 `unsupported_content_encoding`. Optional `cors_allowed_origins` (default empty) answers preflights before auth. Codex `harbor-zstd` fixture passes.
+- Why: SDK `_request_id` was `None` with `access_log: false`; Codex sends zstd bodies with ChatGPT auth (400 before); browser clients need CORS (M-W-9, G-transport-3, M-ST-10).
+- Refs: m7 D5/D8 amendments 2026-10-05; m20 D21, C20; `docs/design/m20-ingress.md`; `kairyu/entrypoints/server/{decompression,middleware,settings}.py`
+
 ### 2026-10-05 — [amendment] In-process vLLM fails closed, reports exact usage (M20 WP-30)
 - What: `VLLMBackend.validate_request` (and `stream`) reject `best_of`, `logprobs`, `prompt_logprobs`, `forced_token_ids`, any `extra_args` key (incl. a non-`text` `response_format`), `chat_template_kwargs`, `assistant_prefill` and grammar-selected strict tools before dispatch (400; WP-28 relaxes strict on both vLLM paths); results carry exact `usage` from `RequestOutput` (`prompt_token_ids`, completion token IDs, `num_cached_tokens`). Logprobs/structured output in-process stay unsupported (use the `openai` backend, `upstream: vllm`).
 - Why: those intents were silently dropped and usage fell back to the word-split approximation (m9 D1 recorded limitation; G-usage-4).

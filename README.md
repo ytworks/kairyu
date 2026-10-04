@@ -702,7 +702,7 @@ server:                        # versioned deployment schema; explicitly maps to
   ttft_slo_s: null             # direct-chat admit/defer/shed TTFT target; null disables
   metrics: true                # expose /metrics (Prometheus)
   protect_metrics: false       # require an API key for /metrics too
-  access_log: true             # one JSON line per request (X-Request-ID echoed)
+  access_log: true             # one JSON line per request (X-Request-ID is always echoed)
   tracing: false               # OTel spans (needs the otel extra; no-op without)
   usage_ledger_path: null      # JSONL usage ledger; enables GET /admin/usage
   admin_keys_env: null         # env var for /admin/* mutation keys

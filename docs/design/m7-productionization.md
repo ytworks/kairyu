@@ -27,6 +27,10 @@ retain the configured cap and historical immediate saturation 429.
 **Amended 2026-10-05** (D5, M20 WP-07, owner decision O-2): on the Responses
 dialect paths the transient 429s become 503 `slow_down` with `Retry-After`; see
 the D5 amendment below.
+**Amended 2026-10-05** (D5/D8, M20 WP-41): every response carries a
+server-generated `X-Request-ID` without the access log; ingress decodes gzip and
+(extra) zstd bodies under a 64 MiB cap; optional CORS answers preflights before
+auth. See the D5 and D8 amendments below and `docs/design/m20-ingress.md`.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -206,6 +210,16 @@ tools or compaction takes the buffered path, which reserves after
 before the stream opens. (b) Hand-built Chat-family bodies (embeddings, async
 requests, batches and the batch worker, admin routes, Chat stream error
 frames) still omit `param`; they are outside M20's Responses scope.
+
+**Ingress-parity amendment (2026-10-05, M20 WP-41).** Two more ingress
+guards, both deployment-configured: request bodies with `Content-Encoding`
+gzip (core) or zstd (`kairyu[zstd]` extra) are decoded inside auth under
+`server.max_decompressed_bytes` (64 MiB → 413; unsupported coding → 415), and
+`server.cors_allowed_origins` (default empty) installs CORS outside auth, so
+the only new unauthenticated answer is a CORS preflight. Why: OpenAI clients
+compress bodies (Codex zstd) and browser clients need CORS, while an
+unbounded decoder would turn a small body into unbounded memory. Detail:
+`docs/design/m20-ingress.md`.
 
 ### D6 — The cache layer is per-replica radix KV + pool session affinity; no Redis
 
@@ -494,6 +508,12 @@ Metrics: `kairyu_requests_total{model,code}`,
 formatter and request-ID field — consistent with the existing JSONL
 router-log style; no structlog/OTel dependency until a tracing consumer
 exists.
+
+**Amendment (2026-10-05, M20 WP-41).** The request id no longer depends on the
+access log: the outermost ingress middleware assigns it and echoes
+`X-Request-ID` on every response, errors included (the OpenAI SDKs read it as
+`_request_id`). It is always server-generated, because it also keys the engine
+request; a client-sent `X-Request-ID` is not adopted.
 
 ## 3. What M7 does not include
 
