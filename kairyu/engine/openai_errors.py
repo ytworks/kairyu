@@ -26,9 +26,15 @@ _CONTEXT_OVERFLOW_MESSAGE = re.compile(
 )
 # Error bodies are small; never parse an unexpectedly large payload.
 _MAX_CLASSIFIED_BODY_CHARS = 64 * 1024
+# Body excerpt kept in the private (server-log) message of an HTTP failure.
+_BODY_EXCERPT_CHARS = 500
 UPSTREAM_CONTEXT_OVERFLOW_MESSAGE = (
     "the request exceeds the model's maximum context length"
 )
+
+
+def _private_message(base_url: str, status_code: int, body: str) -> str:
+    return f"backend {base_url} returned HTTP {status_code}: {body[:_BODY_EXCERPT_CHARS]}"
 
 
 def _error_object(body: str) -> dict | None:
@@ -69,7 +75,7 @@ def classify_upstream_client_error(
     only the fixed overflow message may cross the tenant boundary.
     """
 
-    message = f"backend {base_url} returned HTTP {status_code}: {body[:500]}"
+    message = _private_message(base_url, status_code, body)
     if status_code == 400 and is_context_overflow_body(body):
         return UpstreamClientError(
             message,
@@ -86,4 +92,4 @@ def raise_for_status(base_url: str, status_code: int, body: str) -> None:
 
     if 400 <= status_code < 500:
         raise classify_upstream_client_error(base_url, status_code, body)
-    raise RuntimeError(f"backend {base_url} returned HTTP {status_code}: {body[:500]}")
+    raise RuntimeError(_private_message(base_url, status_code, body))

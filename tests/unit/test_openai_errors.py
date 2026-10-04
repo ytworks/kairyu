@@ -1,4 +1,8 @@
-"""Upstream 4xx classification at the OpenAI-compatible boundary (M20 WP-04)."""
+"""Upstream 4xx classification at the OpenAI-compatible boundary (M20 WP-04).
+
+vLLM's nested "maximum context length" body is driven end to end by
+``tests/server/test_context_overflow.py``; these cases cover the other branches.
+"""
 
 from __future__ import annotations
 
@@ -26,23 +30,6 @@ _SECRET = "SECRET-UPSTREAM-DETAIL"
                     "type": "invalid_request_error",
                     "param": "input",
                     "code": "context_length_exceeded",
-                }
-            },
-            True,
-        ),
-        (
-            # vLLM >= 0.11 nests the OpenAI-style error object.
-            {
-                "error": {
-                    "message": (
-                        "'max_tokens' or 'max_completion_tokens' is too large: "
-                        "4000. This model's maximum context length is 4096 "
-                        "tokens and your request has 200 input tokens "
-                        f"(4000 > 4096 - 200). {_SECRET}"
-                    ),
-                    "type": "BadRequestError",
-                    "param": None,
-                    "code": 400,
                 }
             },
             True,
@@ -103,7 +90,6 @@ _SECRET = "SECRET-UPSTREAM-DETAIL"
     ],
     ids=[
         "openai-code",
-        "vllm-nested",
         "vllm-flat",
         "kairyu-legacy-text",
         "string-above-max-length",
