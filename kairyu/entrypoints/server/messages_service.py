@@ -177,12 +177,7 @@ class _MessagesAdmissionErrors:
     request_id: str | None
 
     def slo_shed(self) -> JSONResponse:
-        return anthropic_error_response(
-            "predicted TTFT exceeds the configured SLO",
-            status_code=429,
-            request_id=self.request_id,
-            headers={"Retry-After": "1"},
-        )
+        return self._rate_limited("predicted TTFT exceeds the configured SLO")
 
     def invalid(self, message: str) -> JSONResponse:
         return anthropic_error_response(message, request_id=self.request_id)
@@ -201,9 +196,13 @@ class _MessagesAdmissionErrors:
         )
 
     def tenant_limited(self, refusal: TenantRefusal) -> JSONResponse:
+        return self._rate_limited(
+            f"tenant {refusal.tenant!r} admission limit exceeded ({refusal.reason})"
+        )
+
+    def _rate_limited(self, message: str) -> JSONResponse:
         return anthropic_error_response(
-            f"tenant {refusal.tenant!r} admission limit exceeded "
-            f"({refusal.reason})",
+            message,
             status_code=429,
             request_id=self.request_id,
             headers={"Retry-After": "1"},
