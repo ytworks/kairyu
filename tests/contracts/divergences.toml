@@ -80,6 +80,15 @@ kind = "temporary"
 note = "Function tools are echoed as sent; the spec requires the effective nullable strict."
 
 [[divergence]]
+id = "envelope-function-tool-strict-stream"
+schema = "Response*Event"
+pointer_glob = "/response/tools/*/strict"
+keyword = "required"
+gap_id = "G-output-object-1"
+owner_wp = "WP-08b"
+kind = "temporary"
+
+[[divergence]]
 id = "usage-cache-write-tokens-unary"
 schema = "Response"
 pointer_glob = "/usage/input_tokens_details/cache_write_tokens"
@@ -109,6 +118,17 @@ gap_id = "G-errors-5"
 owner_wp = "WP-18"
 kind = "temporary"
 note = "compaction_failed is outside the ResponseError code enum; C4 maps compaction failures to context_length_exceeded or server_error."
+
+[[divergence]]
+id = "context-length-exceeded-in-band"
+schema = "ResponseFailedEvent"
+pointer_glob = "/response/error/code"
+keyword = "enum"
+value = "context_length_exceeded"
+gap_id = "G-errors-1"
+owner_wp = "WP-04"
+kind = "codex-extension"
+note = "Codex compacts only on an in-band response.failed with code context_length_exceeded (codex-rs sse/responses_error.rs); the pinned ResponseError enum omits the code OpenAI returns on HTTP (D10)."
 
 # --- Routes -------------------------------------------------------------------
 
