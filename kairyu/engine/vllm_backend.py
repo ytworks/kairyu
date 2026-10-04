@@ -4,6 +4,10 @@ The module always imports; vLLM itself is imported lazily at instantiation so
 Kairyu works on machines where vLLM cannot even be installed. Prefix caching is
 enabled by default so orchestration steps sharing a prompt prefix already get
 KV hits on the vLLM backend (design doc D5).
+
+The adapter fails closed (m9 D6, M20 WP-30): a request intent it has no vLLM
+mapping for is a ``ValueError`` before dispatch, never a silent drop, and every
+result carries the engine-reported token usage.
 """
 
 from __future__ import annotations
@@ -11,10 +15,12 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import AsyncIterator, Mapping
+from typing import Any
 
 from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
+    GenerationUsage,
     prompt_with_tool_intent,
 )
 from kairyu.engine.prompt import (
@@ -32,12 +38,69 @@ from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 
-def to_vllm_sampling_kwargs(params: SamplingParams) -> dict:
-    """Map kairyu SamplingParams to vllm.SamplingParams constructor kwargs."""
-    if params.forced_token_ids is not None:
-        raise ValueError(
-            "vLLM backend does not support request field forced_token_ids"
+def _unhonored_sampling_fields(params: SamplingParams) -> tuple[str, ...]:
+    """Sampling intents without a vLLM mapping in ``to_vllm_sampling_kwargs``.
+
+    Logprobs would need a ``TokenLogprob`` conversion and ``extra_args`` (the
+    ``response_format`` carrier included) a structured-output translation;
+    neither exists here, so both are rejected rather than dropped.
+    """
+
+    unmapped = tuple(
+        name
+        for name, value in (
+            ("best_of", params.best_of),
+            ("logprobs", params.logprobs),
+            ("prompt_logprobs", params.prompt_logprobs),
+            ("forced_token_ids", params.forced_token_ids),
         )
+        if value is not None
+    )
+    extra_args = params.extra_args
+    if not isinstance(extra_args, Mapping):
+        return (*unmapped, "extra_args")
+    return (*unmapped, *(f"extra_args.{key}" for key in extra_args))
+
+
+def _unhonored_request_fields(request: GenerationRequest) -> tuple[str, ...]:
+    """Every request intent this adapter would otherwise silently drop."""
+
+    unsupported = tuple(
+        name
+        for name, value in (
+            ("chat_template_kwargs", request.chat_template_kwargs),
+            ("assistant_prefill", request.assistant_prefill),
+        )
+        if value is not None
+    )
+    # Strict tools are a grammar intent; the native engine compiles one and
+    # OpenAI-compatible upstreams without strict support reject it.
+    strict_tools = tuple(
+        f"tools[{index}].function.strict"
+        for index, tool in enumerate(request.tools)
+        if isinstance(function := tool.get("function"), Mapping)
+        and function.get("strict") is True
+    )
+    return (
+        *_unhonored_sampling_fields(request.sampling_params),
+        *unsupported,
+        *strict_tools,
+    )
+
+
+def _reject_unhonored(fields: tuple[str, ...]) -> None:
+    if fields:
+        raise ValueError(
+            "vLLM backend does not support request fields: " + ", ".join(fields)
+        )
+
+
+def to_vllm_sampling_kwargs(params: SamplingParams) -> dict:
+    """Map kairyu SamplingParams to vllm.SamplingParams constructor kwargs.
+
+    Raises ``ValueError`` for a set field this mapping cannot carry.
+    """
+    _reject_unhonored(_unhonored_sampling_fields(params))
     return {
         "n": params.n,
         "temperature": params.temperature,
@@ -55,6 +118,27 @@ def to_vllm_sampling_kwargs(params: SamplingParams) -> dict:
         "ignore_eos": params.ignore_eos,
         "skip_special_tokens": params.skip_special_tokens,
     }
+
+
+def _engine_usage(
+    output: Any,
+    completions: tuple[CompletionOutput, ...],
+) -> GenerationUsage | None:
+    """Exact usage from one cumulative ``vllm.RequestOutput`` (m9 D1).
+
+    The prompt is counted once and completion tokens are summed across the
+    ``n`` completions, as vLLM's own OpenAI server does.
+    """
+
+    prompt_token_ids = output.prompt_token_ids
+    if prompt_token_ids is None:
+        # vLLM omits IDs only for prompt-embedding inputs, never sent here.
+        return None
+    return GenerationUsage(
+        prompt_tokens=len(prompt_token_ids),
+        completion_tokens=sum(len(completion.token_ids) for completion in completions),
+        cached_tokens=output.num_cached_tokens or 0,
+    )
 
 
 def _import_vllm():
@@ -166,15 +250,8 @@ class VLLMBackend:
 
     @staticmethod
     def _validated_prompt(request: GenerationRequest) -> PromptInput:
+        _reject_unhonored(_unhonored_request_fields(request))
         prompt = request.prompt
-        if request.chat_template_kwargs is not None:
-            raise ValueError(
-                "vLLM backend does not support request field chat_template_kwargs"
-            )
-        if request.assistant_prefill is not None:
-            raise ValueError(
-                "vLLM backend does not support request field assistant_prefill"
-            )
         if isinstance(prompt, MultimodalPrompt):
             raise ValueError(
                 "vLLM backend does not support multimodal prompts through "
@@ -190,12 +267,13 @@ class VLLMBackend:
         return prompt_with_tool_intent(request)
 
     def validate_request(self, request: GenerationRequest) -> None:
-        """Reject prompt variants that this adapter cannot preserve exactly."""
+        """Reject every intent and prompt variant this adapter cannot honor.
 
-        if request.sampling_params.forced_token_ids is not None:
-            raise ValueError(
-                "vLLM backend does not support request field forced_token_ids"
-            )
+        As on the native engine, ``tool_choice`` and ``parallel_tool_calls``
+        are enforced by the public-boundary tool gate, and ``reasoning_effort``
+        reaches the model only through a Kairyu chat template.
+        """
+
         self._validated_prompt(request)
 
     def _to_result(self, request: GenerationRequest, output) -> GenerationResult:
@@ -215,6 +293,7 @@ class VLLMBackend:
             prompt=request.prompt,
             completions=completions,
             finished=output.finished,
+            usage=_engine_usage(output, completions),
             prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 

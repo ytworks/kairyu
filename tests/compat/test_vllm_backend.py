@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import sys
 import types
 
@@ -6,7 +7,7 @@ import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine import vllm_backend
-from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.backend import GenerationRequest, GenerationUsage
 from kairyu.engine.prompt import (
     MultimodalItem,
     MultimodalPrompt,
@@ -94,7 +95,13 @@ class _CapturingEngine:
                 **kwargs,
             }
         )
+        # Mirrors vllm.RequestOutput: the engine reports the processed prompt
+        # and its prefix-cache hits alongside the cumulative completions.
         yield types.SimpleNamespace(
+            prompt_token_ids=(
+                list(prompt["prompt_token_ids"]) if isinstance(prompt, dict) else [5, 6]
+            ),
+            num_cached_tokens=2,
             outputs=[
                 types.SimpleNamespace(
                     index=0,
@@ -191,7 +198,7 @@ def test_instantiation_without_vllm_raises_clear_error(monkeypatch):
 )
 async def test_vllm_backend_forwards_text_variants_as_strings(monkeypatch, prompt):
     backend, engine = _capturing_backend(monkeypatch)
-    await backend.generate(
+    result = await backend.generate(
         GenerationRequest(
             request_id="text",
             prompt=prompt,
@@ -201,20 +208,12 @@ async def test_vllm_backend_forwards_text_variants_as_strings(monkeypatch, promp
     assert engine.calls[0]["prompt"] == "legacy text"
     assert isinstance(engine.calls[0]["prompt"], str)
     assert "tokenization_kwargs" not in engine.calls[0]
-
-
-async def test_vllm_backend_rejects_chat_template_kwargs_before_dispatch(monkeypatch):
-    backend, engine = _capturing_backend(monkeypatch)
-    request = GenerationRequest(
-        request_id="template-kwargs",
-        prompt="hello",
-        sampling_params=SamplingParams(max_tokens=1),
-        chat_template_kwargs={"enable_thinking": False},
+    # Exact counts come from the engine's tokenization, not the display text.
+    assert result.usage == GenerationUsage(
+        prompt_tokens=2,
+        completion_tokens=1,
+        cached_tokens=2,
     )
-
-    with pytest.raises(ValueError, match="chat_template_kwargs"):
-        await backend.generate(request)
-    assert engine.calls == []
 
 
 async def test_vllm_backend_disables_special_tokens_only_for_templated_text(
@@ -333,23 +332,79 @@ async def test_vllm_backend_resolves_omissions_but_preserves_explicit_neutrals(
     }
 
 
-async def test_vllm_backend_rejects_multimodal_before_engine_dispatch(monkeypatch):
+_STRICT_TOOL = {
+    "type": "function",
+    "function": {"name": "lookup", "parameters": {"type": "object"}, "strict": True},
+}
+_IMAGE_PROMPT = MultimodalPrompt(
+    base=TextPrompt(prompt="describe this image"),
+    items=(
+        MultimodalItem(
+            modality="image",
+            encoding="uri",
+            data="https://example.test/image.png",
+        ),
+    ),
+)
+
+
+_UNHONORED_INTENTS = [
+    ({"sampling_params": SamplingParams(max_tokens=1, logprobs=0)}, "logprobs"),
+    (
+        {"sampling_params": SamplingParams(max_tokens=1, prompt_logprobs=0)},
+        "prompt_logprobs",
+    ),
+    ({"sampling_params": SamplingParams(max_tokens=1, best_of=2)}, "best_of"),
+    (
+        {
+            "sampling_params": SamplingParams(
+                max_tokens=1,
+                extra_args={"response_format": {"type": "json_object"}},
+            )
+        },
+        "extra_args.response_format",
+    ),
+    (
+        {
+            "sampling_params": SamplingParams(
+                max_tokens=1,
+                forced_token_ids=(7,),
+                ignore_eos=True,
+            )
+        },
+        "forced_token_ids",
+    ),
+    ({"chat_template_kwargs": {"enable_thinking": False}}, "chat_template_kwargs"),
+    ({"assistant_prefill": "Sure"}, "assistant_prefill"),
+    ({"tools": (_STRICT_TOOL,)}, "tools[0].function.strict"),
+    ({"prompt": _IMAGE_PROMPT}, "multimodal"),
+]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    _UNHONORED_INTENTS,
+    ids=[field for _overrides, field in _UNHONORED_INTENTS],
+)
+async def test_vllm_backend_rejects_unhonored_intents_before_dispatch(
+    monkeypatch,
+    overrides,
+    field,
+):
     backend, engine = _capturing_backend(monkeypatch)
     request = GenerationRequest(
-        request_id="mm",
-        prompt=MultimodalPrompt(
-            base=TextPrompt(prompt="describe this image"),
-            items=(
-                MultimodalItem(
-                    modality="image",
-                    encoding="uri",
-                    data="https://example.test/image.png",
-                ),
-            ),
-        ),
-        sampling_params=SamplingParams(max_tokens=1),
+        **{
+            "request_id": "unhonored",
+            "prompt": "hello",
+            "sampling_params": SamplingParams(max_tokens=1),
+            **overrides,
+        }
     )
-    with pytest.raises(ValueError, match="does not support multimodal"):
+
+    # validate_request is the pre-dispatch 400 seam; generate covers direct use.
+    with pytest.raises(ValueError, match=re.escape(field)):
+        backend.validate_request(request)
+    with pytest.raises(ValueError, match=re.escape(field)):
         await backend.generate(request)
     assert engine.calls == []
 
@@ -369,24 +424,6 @@ def test_vllm_backend_rejects_unrendered_tool_intent_for_token_prompt(monkeypatc
     )
     with pytest.raises(ValueError, match="tool"):
         backend.validate_request(request)
-
-
-async def test_vllm_backend_rejects_forced_tokens_before_engine_dispatch(monkeypatch):
-    backend, engine = _capturing_backend(monkeypatch)
-    request = GenerationRequest(
-        request_id="forced",
-        prompt="hello",
-        sampling_params=SamplingParams(
-            max_tokens=1,
-            forced_token_ids=(7,),
-            ignore_eos=True,
-        ),
-    )
-
-    with pytest.raises(ValueError, match="forced_token_ids"):
-        await backend.generate(request)
-
-    assert engine.calls == []
 
 
 @pytest.mark.vllm
