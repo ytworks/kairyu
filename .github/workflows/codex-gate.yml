@@ -1,0 +1,156 @@
+name: codex-gate
+
+# M20 WP-05 (docs/design/m20-responses-compat.md, D1/D22): real Codex CLI
+# binaries against Kairyu on ScenarioBackend (scripts/codex_gate/run_matrix.py).
+# - pull requests touching the Responses surface or the gate: the pinned
+#   Codex release (blocking);
+# - nightly: the pinned versions (blocking) and npm latest/alpha (advisory);
+# - weekly: OpenAPI and Codex drift against the pins opens an issue.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/codex-gate.yml"
+      - "kairyu/entrypoints/server/responses_service.py"
+      - "kairyu/entrypoints/server/responses/**"
+      - "scripts/codex_model_catalog.py"
+      - "scripts/codex_gate/**"
+      - "tests/support/scenario_*.py"
+  schedule:
+    - cron: "17 4 * * *"
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codex-gate-${{ github.event.pull_request.number || github.event.schedule || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: Codex 0.160.0 matrix
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Run the Codex matrix
+        env:
+          OUT: ${{ runner.temp }}/codex-gate
+          CACHE: ${{ runner.temp }}/codex-cache
+        run: >-
+          uv run --frozen python -m scripts.codex_gate.run_matrix
+          --codex 0.160.0 --out "$OUT" --cache-dir "$CACHE"
+      - name: Retain Codex matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-gate-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-gate
+          if-no-files-found: warn
+          retention-days: 7
+
+  nightly:
+    name: Codex ${{ matrix.codex }} matrix
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '17 4 * * *')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # latest and alpha are advisory: they report Codex drift, not a Kairyu
+    # regression, until the weekly procedure moves the pin.
+    continue-on-error: ${{ matrix.advisory }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codex: "0.160.0"
+            advisory: false
+          - codex: "0.153.4"
+            advisory: false
+          - codex: "0.147.0"
+            advisory: false
+          - codex: latest
+            advisory: true
+          - codex: alpha
+            advisory: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Run the Codex matrix
+        env:
+          CODEX: ${{ matrix.codex }}
+          OUT: ${{ runner.temp }}/codex-gate
+          CACHE: ${{ runner.temp }}/codex-cache
+        run: >-
+          uv run --frozen python -m scripts.codex_gate.run_matrix
+          --codex "$CODEX" --out "$OUT" --cache-dir "$CACHE"
+      - name: Retain Codex matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-gate-${{ matrix.codex }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-gate
+          if-no-files-found: warn
+          retention-days: 14
+
+  drift:
+    name: Weekly reference drift
+    if: github.event_name == 'schedule' && github.event.schedule == '41 5 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Compare the OpenAPI and Codex pins with upstream
+        env:
+          TITLE: ${{ runner.temp }}/drift-title.txt
+          REPORT: ${{ runner.temp }}/drift.md
+        run: >-
+          uv run --frozen python -m scripts.codex_gate.drift
+          --title "$TITLE" --report "$REPORT"
+      - name: Open a drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ runner.temp }}/drift-title.txt
+          REPORT: ${{ runner.temp }}/drift.md
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$TITLE" ]]; then
+            echo "no drift"
+            exit 0
+          fi
+          title="$(cat "$TITLE")"
+          # One issue per drifted state, open or closed: an acknowledged
+          # state is not reported again.
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 200 \
+            --search "M20 reference drift in:title" --json title --jq '.[].title' \
+            | grep -Fxq -- "$title"; then
+            echo "already reported: $title"
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$REPORT"
