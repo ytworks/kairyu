@@ -22,3 +22,7 @@ app: {{ include "kairyu.fullname" . }}
 {{ printf "%s:%s" .Values.image.repository .Values.image.tag }}
 {{- end -}}
 {{- end -}}
+
+{{- define "kairyu.sealingSecretName" -}}
+{{- default (printf "%s-responses-sealing" (include "kairyu.fullname" .)) .Values.responsesSealing.existingSecret -}}
+{{- end -}}

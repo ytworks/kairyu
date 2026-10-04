@@ -4,6 +4,7 @@ resources:
   - namespace-rbac.yaml
   - replicas.yaml
   - postgres.yaml
+  - responses-sealing.yaml
   - gateways.yaml
   - lb.yaml
 configMapGenerator:

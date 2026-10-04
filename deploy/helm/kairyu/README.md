@@ -57,6 +57,25 @@ The chart also injects each Pod's immutable UID as
 `KAIRYU_BATCH_WORKER_ID`, which binds PostgreSQL claims and fencing audit rows
 to the actual gateway instance. The chart does not create or own PostgreSQL.
 
+## Responses sealing secret
+
+Compacted Codex sessions carry `kst2.` tokens sealed with one secret (m20 D6);
+every Pod must share it or restarts, rolling updates and gateway hops break
+those sessions. With `responsesSealing.enabled` (the default) the chart injects
+`KAIRYU_RESPONSES_COMPACTION_SECRET` and, when present, the optional
+comma-separated accept-only `KAIRYU_RESPONSES_PREVIOUS_SECRETS`; the default
+`config` references both (`server.responses_compaction_secret_env`,
+`server.sealing.previous_secrets_env`), and a custom `config` must too.
+
+Without `existingSecret` the chart generates a 64-character secret in
+`<release>-responses-sealing` on install, reuses it on every upgrade (`lookup`)
+and keeps it on uninstall (`helm.sh/resource-policy: keep`). Renders without
+cluster access (`helm template`, most GitOps controllers) would generate a new
+secret each time, so GitOps releases set `existingSecret` to a Secret they
+manage. Rotate in two phases (`docs/deployment.md`): add the new secret under
+`previous` and roll out; then swap it into `secret`, keep the old one under
+`previous`, and roll out again.
+
 ### Attention backend
 
 The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and uses

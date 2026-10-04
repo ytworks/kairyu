@@ -24,6 +24,10 @@ modelStorage:
 # Otherwise extend config with a per-model chat_templates entry or explicit
 # legacy_chat_models membership before installing this GPU overlay.
 config: |
+  server:
+    responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
+    sealing:
+      previous_secrets_env: KAIRYU_RESPONSES_PREVIOUS_SECRETS
   engines:
     default:
       backend: kairyu

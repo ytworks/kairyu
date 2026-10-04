@@ -59,6 +59,20 @@ batchPostgres:
   secretName: ""
   secretKey: dsn
   dsnEnvName: KAIRYU_BATCH_POSTGRES_DSN
+# Responses sealing secret (m20 D6): every Pod gets the same secret, so
+# compacted Codex sessions survive restarts, rolling updates and gateway hops.
+# Without existingSecret the chart generates one on install and keeps it
+# (helm lookup; never deleted by the chart). GitOps tools that render without
+# cluster access must name a Secret they manage in existingSecret. The
+# optional previousSecretsKey holds comma-separated accept-only secrets for
+# two-phase rotation. config must reference both env names (as below).
+responsesSealing:
+  enabled: true
+  existingSecret: ""
+  secretKey: secret
+  envName: KAIRYU_RESPONSES_COMPACTION_SECRET
+  previousSecretsKey: previous
+  previousSecretsEnvName: KAIRYU_RESPONSES_PREVIOUS_SECRETS
 tolerations: []
 affinity: {}
 modelStorage:
@@ -69,6 +83,10 @@ modelStorage:
 # DeploymentSpec YAML mounted at exactly /etc/kairyu/config.yaml (the
 # Dockerfile CMD — m10a A11)
 config: |
+  server:
+    responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
+    sealing:
+      previous_secrets_env: KAIRYU_RESPONSES_PREVIOUS_SECRETS
   engines:
     default:
       backend: mock

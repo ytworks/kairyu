@@ -23,6 +23,7 @@
     "runtimeClassName",
     "attentionBackend",
     "batchPostgres",
+    "responsesSealing",
     "tolerations",
     "affinity",
     "modelStorage",
@@ -286,6 +287,44 @@
           }
         }
       ]
+    },
+    "responsesSealing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "existingSecret",
+        "secretKey",
+        "envName",
+        "previousSecretsKey",
+        "previousSecretsEnvName"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "existingSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "secretKey": {
+          "type": "string",
+          "pattern": "^[-._a-zA-Z0-9]+$"
+        },
+        "envName": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "previousSecretsKey": {
+          "type": "string",
+          "pattern": "^[-._a-zA-Z0-9]+$"
+        },
+        "previousSecretsEnvName": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        }
+      }
     },
     "tolerations": {
       "type": "array",

@@ -60,7 +60,7 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or .Values.attentionBackend .Values.batchPostgres.enabled (and .Values.gracefulDrain.enabled .Values.gracefulDrain.auth.secretName) }}
+          {{- if or .Values.attentionBackend .Values.batchPostgres.enabled .Values.responsesSealing.enabled (and .Values.gracefulDrain.enabled .Values.gracefulDrain.auth.secretName) }}
           env:
           {{- with .Values.attentionBackend }}
             - name: KAIRYU_ATTENTION_BACKEND
@@ -76,6 +76,19 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+          {{- end }}
+          {{- if .Values.responsesSealing.enabled }}
+            - name: {{ .Values.responsesSealing.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kairyu.sealingSecretName" . | quote }}
+                  key: {{ .Values.responsesSealing.secretKey | quote }}
+            - name: {{ .Values.responsesSealing.previousSecretsEnvName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kairyu.sealingSecretName" . | quote }}
+                  key: {{ .Values.responsesSealing.previousSecretsKey | quote }}
+                  optional: true
           {{- end }}
           {{- if and .Values.gracefulDrain.enabled .Values.gracefulDrain.auth.secretName }}
             - name: KAIRYU_HELM_DRAIN_TOKEN

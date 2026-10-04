@@ -1353,11 +1353,8 @@ def test_helm_chart_renders():
     assert "kind: Deployment" in rendered
     assert "path: /readyz" in rendered
     assert "mountPath: /etc/kairyu" in rendered  # the Dockerfile CMD path (A11)
-    deployment = next(
-        document
-        for document in yaml.safe_load_all(rendered)
-        if document and document.get("kind") == "Deployment"
-    )
+    documents = {doc["kind"]: doc for doc in yaml.safe_load_all(rendered) if doc}
+    deployment, secret = documents["Deployment"], documents["Secret"]
     pod_spec = deployment["spec"]["template"]["spec"]
     assert deployment["spec"]["selector"]["matchLabels"] == {"app": "kairyu"}
     assert deployment["spec"]["template"]["metadata"]["labels"]["app"] == "kairyu"
@@ -1377,6 +1374,13 @@ def test_helm_chart_renders():
     )
     assert all(mount["name"] != "model-storage" for mount in container["volumeMounts"])
     assert all(volume["name"] != "model-storage" for volume in pod_spec["volumes"])
+    # m20 D6: every Pod reads one chart-generated sealing secret the chart keeps.
+    assert secret["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    assert len(secret["data"]["secret"]) == 88  # base64 of 64 random characters
+    sealing_ref = {"secretKeyRef": {"name": secret["metadata"]["name"], "key": "secret"}}
+    assert {"name": "KAIRYU_RESPONSES_COMPACTION_SECRET", "valueFrom": sealing_ref} in (
+        container["env"]
+    )
 
 
 @pytest.mark.helm
@@ -1480,12 +1484,8 @@ async def test_helm_chart_renders_supported_attention_backend(
     )
     container = deployment["spec"]["template"]["spec"]["containers"][0]
 
-    assert container["env"] == [
-        {
-            "name": "KAIRYU_ATTENTION_BACKEND",
-            "value": attention_backend,
-        }
-    ]
+    backend_env = [item for item in container["env"] if "ATTENTION" in item["name"]]
+    assert backend_env == [{"name": "KAIRYU_ATTENTION_BACKEND", "value": attention_backend}]
 
 
 def test_helm_chart_config_is_a_valid_deployment_spec():
@@ -1837,12 +1837,7 @@ def test_helm_gpu_values_render_real_engine_and_model_storage():
 
     container = pod_spec["containers"][0]
     assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
-    assert container["env"] == [
-        {
-            "name": "KAIRYU_ATTENTION_BACKEND",
-            "value": "auto",
-        }
-    ]
+    assert container["env"][0] == {"name": "KAIRYU_ATTENTION_BACKEND", "value": "auto"}
     model_mount = next(
         mount for mount in container["volumeMounts"] if mount["mountPath"] == "/models"
     )

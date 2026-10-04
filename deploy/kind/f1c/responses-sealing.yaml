@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: f1c-responses-sealing
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+type: Opaque
+immutable: true
+stringData:
+  # One Responses sealing secret shared by every gateway (m20 D6), so a sealed
+  # compaction token opens on whichever gateway the load balancer picks. This
+  # value is deliberately limited to the disposable kind fixture.
+  secret: f1c-kind-only-responses-sealing-secret-0123456789
