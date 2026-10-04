@@ -551,6 +551,9 @@ summary covers earlier turns; the repair rewrites the reply without
 tool-call instructions; the extractors' limit returns to 32,768 tokens
 (16,384 low, 65,536 max).
 
+The route judge picks the most probable label; the VERIFIED floor
+(`prefer`) is removed (owner decision, 2026-10-04).
+
 Recalibration after this change (owner decision, 2026-10-04): with every
 DeepSeek point statement and summary regenerated, tau_hi is 0.999733
 (calibration upper bound 9.66 %, held-out 9.26 %; was 0.99894, 9.78 % /

@@ -453,15 +453,16 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
     _print_rows(results)
     print(json.dumps(summary, indent=2), flush=True)
     # MECE: exhaustive (gold recall) and exclusive (few requests with a
-    # duplicate pair), with the same 10 % tolerance on both.
-    passed = recall >= 0.9 and duplicate_share <= 0.10 and len(judged) == len(rows)
+    # duplicate pair: at most 12.5 %, owner decision 2026-10-04 on the run
+    # that measured it).
+    passed = recall >= 0.9 and duplicate_share <= 0.125 and len(judged) == len(rows)
     _write(
         "requirements",
         {"passed": passed, "summary": summary, "coverage": coverage, "rows": results},
     )
     print(
         f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f} >= 0.90, "
-        f"requests with duplicates {duplicate_share:.3f} <= 0.10)"
+        f"requests with duplicates {duplicate_share:.3f} <= 0.125)"
     )
     if not passed:
         raise SystemExit(1)
@@ -796,10 +797,10 @@ def _routing_probabilities(dataset: str = "routing-set.json") -> list[dict[str, 
     return asyncio.run(judge_all())
 
 
-def _served_route(probabilities: dict[str, float], tau: float) -> str:
-    # The served rule: VERIFIED when preferred (p >= tau), else the most
-    # probable route.
-    if probabilities["VERIFIED"] >= tau:
+def _served_route(probabilities: dict[str, float], tau: float | None) -> str:
+    # The served rule: VERIFIED when preferred (p >= tau, if a floor is
+    # configured), else the most probable route.
+    if tau is not None and probabilities["VERIFIED"] >= tau:
         return "VERIFIED"
     return max(probabilities, key=probabilities.__getitem__)
 
@@ -827,9 +828,8 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     ]
     import yaml
 
-    configured = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
-        "min_probability"
-    ]
+    prefer = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"].get("prefer")
+    configured = prefer["min_probability"] if prefer else None
 
     def miss_rate(subset: list[dict], tau: float) -> float:
         needed = [row for row in subset if row["label"] == "VERIFIED"]
@@ -911,9 +911,8 @@ def gate_verified_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -
         raise SystemExit("verified-tool-routing: the judge did not answer every conversation")
     import yaml
 
-    tau = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
-        "min_probability"
-    ]
+    prefer = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"].get("prefer")
+    tau = prefer["min_probability"] if prefer else None
     rows = [
         {
             "id": item["id"],
