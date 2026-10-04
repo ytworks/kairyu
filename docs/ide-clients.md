@@ -7,7 +7,7 @@ agents embedded in an editor. The supported baseline is:
 - streamed and non-streamed `POST /v1/chat/completions`
 - function tools with `tool_choice`
 - `parallel_tool_calls`; `false` is enforced per generated choice
-- optional `POST /v1/responses`
+- optional `POST /v1/responses` (required by Codex CLI, below)
 
 Tool-bearing Chat Completions streams are validated before any SSE bytes are
 sent. This preserves a truthful `tool_choice` and `parallel_tool_calls`
@@ -144,6 +144,90 @@ code retrieval, and legacy completion `suffix` infill is not implemented.
 The two IDE example deployments in this guide are text-only; Kairyu's separate
 remote-VLM multimodal boundary does not by itself establish that an IDE's image
 workflow is compatible with either example.
+
+## Codex CLI
+
+Codex speaks only the Responses API (`wire_api = "responses"`). The supported
+setup is a custom provider plus a model catalog generated from the deployment;
+`python -m scripts.codex_gate.run_matrix` gates this configuration against
+real Codex binaries (pinned rust-v0.160.0; m20 D22). Server-side behavior and
+the live gate are in `docs/deployment.md` (Responses API and Codex).
+
+`~/.codex/config.toml`:
+
+```toml
+model = "qwen3-32b"                  # an ID returned by /v1/models
+model_provider = "kairyu"
+model_catalog_json = "/home/me/.codex/kairyu-models.json"
+review_model = "qwen3-32b"           # auxiliary slugs, see below
+
+[model_providers.kairyu]
+name = "Kairyu"
+base_url = "http://<kairyu-host>:<port>/v1"
+env_key = "KAIRYU_API_KEY"           # any non-empty value without Kairyu auth
+wire_api = "responses"
+stream_idle_timeout_ms = 300000      # Codex's default; Kairyu sends a data
+                                     # heartbeat after 15 s without events
+```
+
+Keep Codex's default `stream_max_retries` and `request_max_retries`.
+
+**Model catalog.** Without a catalog Codex warns that model metadata was not
+found and assumes a 272,000-token context window, image input and reasoning
+summaries: a smaller model overflows before Codex compacts, and an attached
+image gets a 400. Generate the catalog from the running deployment and
+regenerate it when served models or `max_model_len` change:
+
+```sh
+python -m scripts.codex_model_catalog --base-url http://<kairyu-host>:<port>/v1 \
+  --output ~/.codex/kairyu-models.json
+```
+
+Each `/v1/models` entry with a `max_model_len` becomes a Codex `ModelInfo`:
+`context_window` is `max_model_len` and auto-compaction starts at 90 % of it.
+Input stays text-only until `/v1/responses` accepts images, so Codex drops an
+attachment instead of sending it; the freeform `apply_patch` tool and
+reasoning summaries stay off until Kairyu executes them. Codex sends no
+reasoning effort unless you list the levels the model honors:
+`--reasoning-levels qwen3-32b=low,high --default-reasoning-level
+qwen3-32b=high`. Other options: `--model ID` (restrict), `--context-window
+ID=N` (models without `max_model_len`), `--vision ID`, `--static FILE` (a YAML
+list instead of a server) and `--base-instructions FILE` (otherwise Codex's own
+base instructions are fetched from its pinned tag). A catalog in use shows no
+"Model metadata ... not found" warning.
+
+**Auxiliary model slugs.** Some Codex features request their own OpenAI model
+IDs, which Kairyu answers with 404 `model_not_found`: set `review_model`
+(`/review`) and, with memories enabled, `[memories] extract_model` and
+`consolidation_model` to a served ID, and keep the default
+`approvals_reviewer` (the automatic reviewer uses `codex-auto-review` or
+`gpt-5.6-luna`). Do not serve IDs that start with a Codex bundled slug such as
+`gpt-5.5` or `gpt-6-`: without a catalog Codex would apply that slug's
+responses-lite wire profile.
+
+**Hosted web search.** Codex declares `web_search` on every request (live
+under `--dangerously-bypass-approvals-and-sandbox` or `danger-full-access`).
+Kairyu accepts every mode but runs no search; set `web_search = "disabled"` to
+drop the declaration.
+
+**Compaction.** With a custom provider Codex 0.160 compacts locally: an
+ordinary request summarizes the history, and on an in-band
+`context_length_exceeded` Codex drops the oldest items and retries. Remote
+compaction (`compaction_trigger`, a sealed `compaction` item) is used only by
+the built-in `openai` provider and Azure-named providers; the 0.162
+pre-release adds `capabilities = { remote_compaction = "v2" }` (and
+`external_web_access = false`) for custom providers. Gateways serving remote
+compaction need `server.responses_compaction_secret_env`.
+
+**Harbor/Terminal-Bench shape.** Repointing the built-in provider also works:
+`openai_base_url = "http://<kairyu-host>:<port>/v1"` with the key in
+`OPENAI_API_KEY` (plus `model` and `model_catalog_json`). Codex first tries a
+WebSocket upgrade, gets 426 and continues over HTTPS.
+
+**Local-provider shape.** `CODEX_OSS_BASE_URL=http://<kairyu-host>:<port>/v1
+codex --oss --local-provider lmstudio -m <model-id>` also works: Codex lists
+`/v1/models`, loads the model with a one-token request and shows raw
+reasoning.
 
 ## SOCKS validation
 

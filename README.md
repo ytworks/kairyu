@@ -912,9 +912,9 @@ The Responses stream uses OpenAI event names and gapless sequence numbers from
 terminate with typed error/failed events. Successful stored responses can be continued
 with `previous_response_id`, but IDs never cross tenant boundaries. Function-call
 arguments and outputs round-trip through the normal model chat template and request
-capability checks. Run `scripts/codex_responses_smoke.sh` against a serving model to
-exercise an unmodified Codex CLI over `wire_api="responses"`; deployment details and
-unsupported Responses features are listed in `docs/deployment.md`.
+capability checks. `python -m scripts.codex_gate.run_matrix --live` runs unmodified Codex
+CLI binaries against a serving model; Codex setup is in `docs/ide-clients.md`, deployment
+details and unsupported Responses features in `docs/deployment.md`.
 
 `POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
 template as actual chat before calling the Router's non-mutating `preview()`. It never

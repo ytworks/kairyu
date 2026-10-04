@@ -921,8 +921,8 @@ Responses ストリームは `response.created` から `response.completed` ま�
 は `previous_response_id` で継続できますが、ID はテナント境界を越えません。
 function call の引数と結果は通常のチャットテンプレートおよび capability 検証を通って
 往復します。稼働中モデルに対する未変更 Codex CLI の確認には
-`scripts/codex_responses_smoke.sh` を使えます。接続設定と未対応機能は
-`docs/deployment.md` に記載しています。
+`python -m scripts.codex_gate.run_matrix --live` を使えます。Codex の設定は
+`docs/ide-clients.md`、接続設定と未対応機能は `docs/deployment.md` にあります。
 
 `POST /v1/route` は `{model, messages}` を受け取り、実際のチャットと同じモデル別
 チャットテンプレートを描画してから Router の非破壊 `preview()` を呼びます。

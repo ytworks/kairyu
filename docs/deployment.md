@@ -639,69 +639,69 @@ The in-process store is bounded and intentionally not shared across gateways,
 so route a continued response to the same gateway or omit
 `previous_response_id` and send the full input history in an HA deployment.
 
-Codex can use Kairyu as a custom Responses provider without source changes:
+Codex uses Kairyu as a custom Responses provider without source changes; its
+client configuration (provider TOML, generated model catalog, auxiliary
+slugs, local providers) is in `docs/ide-clients.md`. The live Codex gate runs
+real Codex binaries against a deployment through a recording proxy:
 
 ```bash
-KAIRYU_BASE_URL=http://127.0.0.1:8000/v1 \
-KAIRYU_MODEL=qwen3-32b \
-KAIRYU_API_KEY=local \
-scripts/codex_responses_smoke.sh
+KAIRYU_API_KEY=local python -m scripts.codex_gate.run_matrix --codex 0.160.0 \
+  --live --base-url http://127.0.0.1:8000/v1 --model qwen3-32b
 ```
 
-The script creates an ephemeral Codex run with `wire_api="responses"` and a
-read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
-command event, its tool result, and a final message containing `PASS`;
-`KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke. Kairyu accepts Codex
-function namespaces. Every hosted `web_search` declaration (cached, live, or
-indexed, with its search configuration fields) is accepted, echoed, and hidden
-from the model, because no server-side search executor runs.
+Each run has an isolated `HOME`/`CODEX_HOME`, Codex's default retries and a
+catalog generated from `/v1/models`; it requires a final `PASS`, a real `pwd`
+command event, a full-access turn declaring live `web_search`, and no HTTP
+response >= 400 besides the WebSocket-upgrade 426 (CI: `codex-gate.yml`).
+Kairyu accepts Codex function namespaces. Every hosted `web_search`
+declaration (cached, live, or indexed, with its search configuration fields)
+is accepted, echoed, and hidden from the model, because no server-side search
+executor runs; Codex's `web_search = "disabled"` omits the tool instead.
 `background`, Conversations API objects, hosted prompt templates, moderation,
 automatic truncation, context management, `max_tool_calls`, and response
-top-logprobs fail before model dispatch. This explicit rejection boundary keeps
-the accepted compatibility surface truthful. `service_tier` supports only the
-neutral `auto` selection; explicit paid/priority tiers fail rather than being
-echoed as executed. Codex reasoning/include metadata is accepted for wire
-compatibility but Kairyu emits no reasoning or encrypted-reasoning output item;
-echoed `reasoning` history items and Codex-internal passthrough item fields are
-accepted and dropped. `text.verbosity` is applied as a model instruction, not
-claimed as a provider quality-of-service tier.
+top-logprobs fail before model dispatch, keeping the accepted surface
+truthful; `service_tier` accepts only `auto`. Codex reasoning/include metadata
+is accepted, but no reasoning item is emitted; echoed `reasoning` items and
+Codex passthrough item fields are dropped. `text.verbosity` is applied as a
+model instruction, not claimed as a provider quality-of-service tier.
 
 Since issue #530, `/v1/responses` serves every chat model `/v1/models`
-advertises: orchestrated (`kairyu-auto*`) models delegate to the Chat
-Completions orchestration contract, so `public_models` topologies that hide
-every L1 pool behind a single AUTO model work end to end (this includes the
-Terminal-Bench gateway shape). Additional Codex-derived behavior:
+advertises: AUTO (`kairyu-auto*`) models delegate to the Chat Completions
+orchestration contract, so `public_models` topologies that hide every L1 pool
+behind one AUTO model (the Terminal-Bench gateway shape) work end to end.
+Additional Codex-derived behavior:
 
-- **Streams never go silent.** Every streamed request replies
-  `response.created`/`response.in_progress` immediately and repeats
-  `response.in_progress` after 15 s without a data event while generation
-  runs. Codex retries SSE streams without a data event for 300 s, and comment
-  lines do not count. Failures after the stream opens surface as `error` +
-  `response.failed` events.
+- **Streams never go silent.** Every stream replies `response.created`/
+  `response.in_progress` at once and repeats `response.in_progress` after 15 s
+  without a data event; Codex retries a stream silent for 300 s (comments do
+  not count). Later failures are `error` + `response.failed` events.
 - **No server-side output cap.** An omitted `max_output_tokens` (Codex never
   sends one) bounds output by the model's remaining context, as on Chat
-  Completions. Tenant admission then reserves `max_model_len`; startup logs a
-  warning for every tenant whose token bucket cannot hold that reservation.
-- **WebSocket upgrades get 426.** Harbor/Terminal-Bench repoints Codex's
-  built-in `openai` provider (`openai_base_url` in `config.toml`), which
-  tries WebSocket first; 426 makes Codex fall back to HTTPS immediately and
-  silently. A custom `model_providers` entry defaults to HTTPS-only and
-  skips the attempt entirely.
-- **Remote compaction v2 is served.** Against an OpenAI-shaped base URL,
-  Codex auto-compacts near its assumed context budget by sending a terminal
-  `compaction_trigger` input item; Kairyu answers with one `compaction`
-  output item whose `encrypted_content` is an opaque self-issued token, and
-  echoed compaction items decode back into the summarized context. Tokens are
-  AES-256-GCM sealed and bound to the authenticated tenant; forged, modified,
-  or cross-tenant tokens fail closed. Set
-  `server.responses_compaction_secret_env` to the name of an environment
-  variable containing at least 32 random bytes. When unset, each process uses an
-  ephemeral key and tokens do not survive a restart or gateway hop.
+  Completions, so tenant admission reserves `max_model_len` per Codex request
+  and startup warns for every tenant whose bucket cannot hold one. Codex never
+  retries the resulting 429: size `token_burst` for that reservation times the
+  tenant's concurrent Codex turns, or leave tenant limits unset.
+- **WebSocket upgrades get 426.** Codex's built-in `openai` provider
+  repointed with `openai_base_url` (Harbor/Terminal-Bench) tries WebSocket
+  first and silently falls back to HTTPS; a custom provider never tries.
+- **Compaction.** Codex 0.160 compacts remotely only for its built-in
+  `openai` provider or an Azure-named one (the 0.162 pre-release adds
+  `capabilities.remote_compaction`): a terminal `compaction_trigger` item,
+  answered with one `compaction` item whose `encrypted_content` is an opaque
+  self-issued token; echoed items decode back into the summarized context.
+  Other custom providers compact locally with a `tools: []` summarization
+  request; on its in-band `context_length_exceeded` Codex drops the oldest
+  items and retries. Tokens are AES-256-GCM sealed and bound to the
+  authenticated tenant; forged, modified, or cross-tenant tokens fail closed.
+  Set `server.responses_compaction_secret_env` to the name of an environment
+  variable containing at least 32 random bytes; when unset, each process uses
+  an ephemeral key and tokens do not survive a restart or gateway hop.
+- **Model ids.** Never serve an id starting with a Codex bundled slug (`gpt-5.5`,
+  `gpt-5.6-*`, `gpt-6-*`, `gpt-daybreak-*`, `codex-auto-review`): without a
+  catalog Codex applies that slug's wire profile (responses-lite, no `tools`).
 - **`function_call_output.output` arrays** are accepted (text parts
   concatenated); image/audio tool-output parts are rejected explicitly.
-- **Codex never retries 429.** A tenant admission 429 fails the Codex turn
-  outright, so size tenant admission generously (or leave it unset) on
-  deployments that serve Codex/Terminal-Bench traffic.
+
 
 Operational notes:
 

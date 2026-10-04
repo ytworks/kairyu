@@ -1,8 +1,8 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
-Status: **Proposed** (2026-10-05). WP-00, 02, 02b and 03 implemented (parts of
-D1, D3/D7/D9); WP-01 (this record and the schema gate, D1) in progress. Each D-ID
-moves to Implemented when its last WP lands; WP-53 closes the milestone.
+Status: **Proposed** (2026-10-05). WP-00, 02, 02b, 03 and 05 implemented (parts
+of D1, D3/D7/D9, D22); WP-01 (this record and the schema gate, D1) in progress.
+Each D-ID moves to Implemented when its last WP lands; WP-53 closes the milestone.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -158,7 +158,7 @@ Responses suite and real-client gates.
 Each D-ID is Proposed until its last WP lands; partial implementation is noted.
 
 **D1 — Reference contract and conformance infrastructure** (WP-01, 02, 02b,
-05, 08a, 13, 14, 53; *WP-01 in progress; WP-02 and 02b implemented*). The §3
+05, 08a, 13, 14, 53; *WP-01 in progress; WP-02, 02b, 05 implemented*). The §3
 pins are the contract. WP-01 vendors the OpenAPI closure and gates every test:
 an ASGI recorder wraps the app of every in-process test transport,
 `ContractValidator` (Draft 2020-12)
@@ -325,12 +325,13 @@ disconnect cancellation for Chat unary/Messages/Responses, affinity precedence
 `prompt_cache_key` > `session-id` > `X-Session-ID` > conversation > chain root >
 `user` (tenant-bound hash) plus prefix fingerprint.
 
-**D22 — Codex catalog and provider docs** (WP-05, 53).
+**D22 — Codex catalog and provider docs** (WP-05, 53; *WP-05 implemented*).
 `scripts/codex_model_catalog.py` emits `model_catalog_json` (context window,
 auto-compact limit ≈0.9·ctx, modalities, `apply_patch_tool_type`, honest
 reasoning levels); provider TOML, `stream_idle_timeout_ms`, `web_search` modes,
 compaction gating, auxiliary slugs, sealing secret and tenant sizing are
-documented.
+documented. *2026-10-05, WP-05:* Codex 0.147.0, 0.153.4 and 0.160.0 decode the
+catalog and pass `scripts/codex_gate/run_matrix.py` (CI: `codex-gate.yml`).
 
 ### Design conflict resolutions referenced above
 
@@ -387,7 +388,7 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 0 | 02b | M D | `tests/support/scenario_backend.py`, `fake_vllm_upstream.py` | – | Done |
 | 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Done |
 | 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Planned |
-| 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Planned |
+| 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Done |
 | 1 | 06 | M A refactor | Package split, tests moved to `tests/server/responses/` | 03, 04 | Planned |
 | 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Planned |
 | 1 | 12a | M B refactor | `engine_admission.py` for Messages and the Chat engine path | 01 | Planned |
@@ -555,7 +556,7 @@ verifier-added gaps is mapped.
 | G-tools-10 | P2 | 23 → 50 | Policy + redaction → MCP executor |
 | G-tools-11 | P3 hosted | 23 → 48 → 49, 51 | Builders for all kinds; `programmatic_tool_calling` dropped, rejected under execute |
 | G-tools-12 | P3 | 08a | `parameters:null` → `{}` |
-| G-input-items-1 | P0 | 05 → 25 → 27 | Text-only catalog → message images → tool-output images |
+| G-input-items-1 | P0 | 05 → 25 → 27 | Text-only catalog (done in WP-05) → message images → tool-output images |
 | G-input-items-2 | P2 | 24 | `additional_tools` |
 | G-input-items-3 | P2 | 33 | `item_reference` |
 | G-input-items-4 | P2 | 25, 56, 57 | `text/*` files; URL fetch (56); document extraction port (57) |
@@ -579,22 +580,22 @@ verifier-added gaps is mapped.
 | G-endpoints-6 | P2 | 38a–c | Background lifecycle, HA |
 | G-state-store-1 | P1 | 32, 34a/b | Protocol + Postgres (c) |
 | G-state-store-2 | P2 | 32 | Incremental storage, immutable bytes |
-| G-other-1 | P1 | 05 (+flags per WP) | Catalog generator |
+| G-other-1 | P1 | 05 (+flags per WP) | Catalog generator; done in WP-05 |
 | G-other-2 | P2 | 08c | Body limit + off-loop parse |
 | G-other-3 | P2 | 17c | `engine_admission` |
 | G-other-4 | P2 | 26a/b, 27 | ChatPrompt (a) |
 | G-other-5 | P3 | 32, 43 | Affinity |
 | G-other-6 | P3 | 42 | Shared disconnect |
-| G-other-7 | P3 | 05, 34b, 53 | Docs |
+| G-other-7 | P3 | 05, 34b, 53 | Docs; Codex part done in WP-05 |
 | G-other-8 | P3 hosted | 55 | Optional HMAC webhook sink, default off (O-5 approved) |
 | G-conformance-1 | P1 | 01 | Schema gate |
-| G-conformance-2 | P1 | 02, 05, 53 | Fixtures + matrix; fixtures done in WP-02 |
+| G-conformance-2 | P1 | 02, 05, 53 | Fixtures + matrix; fixtures done in WP-02, matrix in WP-05 |
 | G-conformance-3 | P2 | 14 | Open Responses |
 | G-conformance-4 | P2 | 13, 53 | v3.24 + node/Agents |
 | G-compaction-1 | P2 | 36 | `context_management` |
 | G-compaction-2 | P2 | 36 | `/compact` (retained messages in clear + summary seal) |
 | G-compaction-3 | P3 | 20 | Key ring, kid, max age, per-token subkeys; `created_by` WND (C21) |
-| G-compaction-4 | P3 | 05 | Gating docs |
+| G-compaction-4 | P3 | 05 | Gating docs; done in WP-05 |
 | G-transport-1 | P2 | 44–47, 54 | WebSocket mode |
 | G-transport-2 | P3 | 15 | `ws="none"` while disabled |
 | G-transport-3 | P3 | 41 | gzip core, zstd extra |
@@ -630,7 +631,7 @@ verifier-added gaps is mapped.
 | M-ST-8 lenient SDK | P2 | 01 (2.44 strict), 13 | – |
 | M-ST-9 beta surface | P3 | 08a | – |
 | M-ST-10 CORS | P3 | 41 | – |
-| M-ST-11 Codex `/models` | P3 | 05 | Generator; served route WND (O-5) |
+| M-ST-11 Codex `/models` | P3 | 05 | Generator (done in WP-05); served route WND (O-5) |
 | M-ST-12 `/alpha/search` | P3 | 07 (envelope 404) | WND (O-5) |
 | M-ST-13 `context_length_exceeded` never emitted | – | 04 | – |
 
@@ -711,7 +712,7 @@ to `docs/design/m11-product.md` D4 and its amendments.
 | #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | Planned |
 | #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Planned |
 | D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Planned |
-| #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | In progress (WP-02 fixtures 2026-10-05) |
+| #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | In progress (WP-02 fixtures, WP-05 matrix 2026-10-05) |
 | D4/#201/A16: official SDK round-trips (lenient openai 2.44 tests) as binding coverage | WP-01 (strict 2.44 harness + schema gate) → WP-13 (v3.24 live server) → WP-53 (Agents, node) | In progress (WP-01) |
 
 m11 D3 (tenant tiers) and D6 (`flex` → batch class) receive their own dated
