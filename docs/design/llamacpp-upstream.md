@@ -63,6 +63,10 @@ sends `temperature=0.0` with nothing omitted.
 **Other settings**
 - `n`: llama-server hard-limits it to `1..n_parallel` and answers HTTP 400
   above that (a client error).
+- Upstream 400s (`n` above the slot count, prompt overflow) do not count
+  against replica health. Kairyu's L3 reports them as 502 `backend_error`
+  without upstream text; that is the existing policy for every upstream,
+  vLLM included.
 - `parallel_tool_calls` is forwarded.
 - `chat_template_kwargs` are allowlisted per deployment with
   `allow_chat_template_kwargs`.
@@ -182,6 +186,29 @@ adaptation is needed:
 
 The recorded request/reply pairs are the unit-test fixtures in
 `tests/fixtures/llamacpp/`.
+
+**End to end on the CPU (2026-10-04).** Two such llama-servers ran as a static
+ReplicaPool behind `kairyu serve`, with no L2/L3 code change:
+
+- The prober marked both ready through their `/health` URLs.
+- Chat, the Responses API, `/v1/messages/count_tokens` (llama.cpp `/tokenize`)
+  and `logprobs` with `top_logprobs: 0` (sampled-token logprobs, no
+  alternatives) answered 200.
+- `min_tokens` failed with 400 before dispatch.
+- A concurrent burst spread over both replicas.
+- Killing replica 0 failed one request (502), ejected the replica and moved
+  traffic to replica 1. After a restart the prober restored it and traffic
+  spread again.
+
+The random model's tool calls run out of tokens with arbitrary arguments, and
+L3 correctly refused them as `tool_choice_not_satisfied`. The tool path is
+therefore covered by the replayed fixtures and the examples' GPU
+`tool-calling` gate.
+
+That run also showed that llama.cpp's Gemma 4 tool-call grammar (b11391)
+does not constrain arguments to the schema: an `enum` with
+`additionalProperties: false` still admitted arbitrary text. This is one more
+reason `strict_tools` stays off for this profile.
 
 ## Winnow-12B examples
 
