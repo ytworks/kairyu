@@ -1492,6 +1492,34 @@ def _choice_logprobs(completion: CompletionOutput) -> ChoiceLogprobs | None:
     return ChoiceLogprobs(content=_logprob_entries(completion.logprob_content))
 
 
+def _text_beside_calls(text: str) -> str | None:
+    """The prose of a reply that publishes tool calls, or None if there is none.
+
+    OpenAI allows content next to tool_calls, and agent frameworks ask for
+    the reasoning text with every call. Well-formed generic call envelopes
+    are removed (published or filtered by the tool choice); malformed markup
+    stays as text, as it would without calls. Whole-text protocols (Qwen,
+    DSML) leave no prose by construction.
+    """
+
+    kept: list[str] = []
+    cursor = 0
+    for match in _TOOL_CALL_PATTERN.finditer(text):
+        try:
+            payload = _strict_json_loads(match.group(1))
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if _tool_call_from_payload(payload) is None:
+            continue
+        kept.append(text[cursor : match.start()])
+        cursor = match.end()
+    if not kept:
+        return None
+    kept.append(text[cursor:])
+    prose = "".join(kept).strip()
+    return prose or None
+
+
 def _build_choice(
     index: int,
     text: str,
@@ -1524,7 +1552,7 @@ def _build_choice(
         return Choice(
             index=index,
             message=ResponseMessage(
-                content=None,
+                content=_text_beside_calls(text),
                 reasoning_content=reasoning_content,
                 tool_calls=tool_calls,
             ),

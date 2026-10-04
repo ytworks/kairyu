@@ -49,6 +49,225 @@ Two exchange defects found on the GPUs and fixed:
   reasoning tokens on a "non-thinking" call, occasionally an empty answer).
   The pool now allows that kwarg, so the state builder runs in chat mode.
 
+## GPU gates on the final configuration (2026-10-03, `0bfbf46d`, 17:35-18:06 JST)
+
+VCO-D15 as served: explicit points always kept; implicit points read the
+explicit ones and only they are adopted (skipped when none); history at the
+caller's effort; every Jev checklist read with four denoise passes; tau_hi
+0.99894, tau_accept 0.99. Evidence in `model-volumes/<env>/results/`.
+
+| gate | result | detail |
+|---|---|---|
+| requirements (InFoBench 40, c8) | PASS | gold recall 0.989, requests with a duplicate 0 / 40; guaranteed 29 / 40 (11 `refinement_limit`), repaired 16; latency p50 213 s, p95 356 s; orchestration tokens 309,464 in / 830,403 out |
+| structured | PASS | |
+| fallback | PASS | |
+| routing (80 conversations) | PASS | held-out miss rate 0.0; everyday to THINK 1.0; judge wall 1.28 s |
+| think-route | PASS | 6 / 6 routed to THINK, p50 0.83 s, TTFT p50 0.74 s |
+| effort | PASS | every DeepSeek step, history included, carries the caller's effort |
+
+The run before on `0bf8bb11` (same code, extraction prompts without the
+overlap examples) failed requirements on duplicates: 6 / 40 requests (gate
+10 %; recall 0.989, guaranteed 28 / 40, p50 219 s, p95 426 s); the run on
+`c2a3d842` had 3 / 40. The prompts now name the overlaps found (a heading and
+its section's content, a table's columns and rows; an implicit restatement
+or converse of an explicit point).
+
+## Recalibration with four denoise passes (2026-10-03, 12:16 JST)
+
+Owner decision: every Jev checklist read uses `steps: 4`. Same InFoBench
+answers, split and DeepSeek point statements as below; only the Jev reads
+are new (`judged-coverage-v3.jsonl`, `judged-acceptance-v2.jsonl`).
+
+| | tau | calibration accepted / violations / upper | held-out accepted / violations / upper |
+|---|---|---|---|
+| coverage (per point) | **0.99894** | 340 / 24 / 9.78 % | 381 / 21 / 7.84 % |
+
+Held-out answers passing every point: 39 of 125 (4 violated). Acceptance
+read (AUROC 0.794), held-out half:
+
+| tau_accept | guaranteed | missing a requirement | rate | upper bound |
+|---|---|---|---|---|
+| 0.5 | 62 | 15 | 24.2 % | 34.8 % |
+| 0.9 | 56 | 10 | 17.9 % | 28.4 % |
+| **0.99 (kept)** | **46** | **7** | **15.2 %** | **26.7 %** |
+| 0.999 | 23 | 4 | 17.4 % | 35.5 % |
+
+Why: a DeepSWE agent turn (11 points) read with one pass gave a present bash
+call p 0.37-0.67 and "executes a command" 0.11-0.38; with four questions
+0.99 / 0.92; with `steps: 4` and all 11 questions 0.90-0.99 / 0.92-0.99 on
+both replicas (`think` and `samples` did not help).
+
+## Explicit-points check, tried and removed (2026-10-03, 10:24-11:10 JST, `3c96d9a8`)
+
+InFoBench rows 40-119 (the requirements gate uses rows 0-39), production API,
+8 concurrent. Label: the gate's coverage judge on the first explicit list
+(all gold questions covered: 71 of 80). The first lists covered 96.2 % of
+the gold questions (after one re-extraction 95.2 %); 3 had a duplicate pair.
+
+| sufficiency cut | re-extracted | of them already complete | incomplete lists passed |
+|---|---|---|---|
+| 0.1 | 2 | 2 | 9 of 9 |
+| 0.5 | 20 | 18 | 7 of 9 |
+| 0.9 | 44 | 41 | 6 of 9 |
+
+Sufficiency AUROC 0.41. The per-point necessity question has no gold label
+(at 0.5 it failed 98 of 483 points, in 25 lists, 23 of them complete). The
+owner removed the check. The same run showed adoption with no implicit point
+unavailable (14 of 66 runs unverified), fixed by `on_empty: pass`.
+
+## Acceptance read for VCO-D15 item 7 (2026-10-03, `cf4ad653`)
+
+InFoBench (249 answers; an answer is acceptable when every expert label is
+yes: 125), the same split as below, cached per-point p from the coverage
+calibration (`judged-coverage-v2.jsonl`). One acceptance read per answer:
+the prompt, the answer and the point results `{id, point, p, passed}`.
+Variants differ in the question and state (`calibrate.py` runs production).
+
+| variant | AUROC | best calibration upper bound (response level) |
+|---|---|---|
+| "May this answer be adopted as the official reply?" + results | 0.787 | 0.339 |
+| same question, no results | 0.786 | 0.326 |
+| point statements only, "meets every point?" | 0.799 | 0.377 |
+| strict "does everything the prompt asks?" + results | 0.789 | 0.348 |
+| missed points only | 0.795 | 0.379 |
+| **"can it be adopted as the reply the user expects?" + results (production)** | **0.809** | **0.259** |
+| reference: every point p >= tau_hi (no acceptance read) | 0.800 (min p) | 0.396 |
+
+No variant and no threshold meets alpha 0.10 at 95 % at the response level.
+Production thresholds (held-out half, 125 answers):
+
+| tau_accept | guaranteed | missing a requirement | rate | upper bound |
+|---|---|---|---|---|
+| 0.5 | 59 | 14 | 23.7 % | 34.6 % |
+| 0.9 | 52 | 10 | 19.2 % | 30.4 % |
+| **0.99 (owner choice)** | **43** | **7** | **16.3 %** | **28.4 %** |
+| 0.999 | 24 | 4 | 16.7 % | 34.2 % |
+
+### Point results in the acceptance read: with (X) or without (Y) (2026-10-03, 08:43-08:44 JST)
+
+Same 249 answers and split, measured back to back. X is production (prompt,
+candidate answer and point results); Y gives the prompt and the candidate
+answer only ("Reading the prompt and the candidate answer, can this answer
+be adopted as the reply the user expects?"). The owner kept X.
+
+| | AUROC | best calibration upper bound | held-out at 0.99 |
+|---|---|---|---|
+| X (rerun) | 0.805 | 0.238 | 45 guaranteed, 7 missing a requirement (15.6 %, upper 27.2 %) |
+| Y | 0.754 | 0.416 | 62 guaranteed, 20 missing a requirement (32.3 %, upper 43.3 %) |
+
+Caveat: in this calibration the points whose results X reads are
+InFoBench's own labelled requirements (rewritten as statements), the same
+items the response label is built from; in serving the points come from the
+extractors. X's advantage here may be larger than in serving. "Missing a
+requirement" means at least one expert label is no; it stands in for "not
+the reply the user expects", which InFoBench does not label directly.
+
+## Coverage calibration for VCO-D15 (2026-10-02, 23:33-00:05 JST)
+
+InFoBench expert labels (249 answers, 1,129 labels, 239 violations), the same
+split as below (25 / 25 instructions, seed 20261001), alpha 0.10 at 95 %.
+DeepSeek rewrites each labelled question as a point; OpenJev reads one
+coverage question per point through the production checklist code, every
+point of an answer in one System One request. Variants differ only in the
+coverage question and its state, measured on the same point statements
+(`coverage_variants`; production `calibrate.py` re-run below).
+
+| Variant | state | question | AUROC | tau_hi | held-out acceptance | held-out upper bound | held-out answers passing every point |
+|---|---|---|---:|---:|---:|---:|---:|
+| earlier design (2026-10-01) | conversation, checklist, answer, claims | does the answer satisfy the requirement | 0.850 | 0.9966 | - | 8.7 % | 54 / 125 |
+| V0 (owner's first form) | answer | does the answer contain this point | 0.791 | 0.99966 | 49 % | **12.4 %** | 20 / 125 |
+| V1 | request, answer | contain | 0.809 | 0.99973 | 53 % | **11.1 %** | 23 / 125 |
+| V2 | answer | satisfy the requirement (default) | 0.815 | 0.999986 | 26 % | 8.4 % | 4 / 125 |
+| V3 | answer | strict | 0.815 | 0.9977 | 52 % | 9.7 % | 19 / 125 |
+| V4 | request, answer | strict | 0.848 | 0.9950 | 59 % | 7.9 % | 39 / 125 |
+| **V5 (adopted)** | **request, history, answer** | **strict** | **0.852** | **0.9894** | **64 %** | **8.6 %** | **45 / 125** |
+
+Strict question: "Does the answer fully and correctly do what this point
+requires?" (yes: every part met exactly as the point states it; no: missing,
+partly met or met incorrectly). The history summary is the production
+`history` role (non-thinking DeepSeek); InFoBench requests are single turns, so
+247 of 249 summaries are "none". V0 and V1 fail alpha on the held-out half;
+V5 is the configuration in `verified.yaml`.
+
+Production re-run (`./verify.sh calibrate`, statements and history summaries
+regenerated, `calibration/judged-coverage-v2.jsonl`, `calibration/tau.json`):
+
+| Half | tau | accepted | violations | rate | upper bound |
+|---|---:|---:|---:|---:|---:|
+| calibration | 0.98887 | 383 (70 %) | 28 | 7.3 % | 9.89 % |
+| held-out | 0.98887 | 374 (64 %) | 25 | 6.7 % | 9.21 % |
+
+Held-out answers passing every point: 45 / 125 (7 violated). The threshold 0.9895 is at
+least both calibrated values (0.98941, 0.98887).
+
+## VERIFIED_TOOL criteria wording E on `805229c4` (2026-10-04, 16:53-17:45 JST)
+
+The criteria now say the next reply must return a tool call, and that a reply
+which only reports tool results already in the conversation, or answers from
+the assistant's own knowledge, returns text. The routing-dependent gates were
+run again on the deployment.
+
+| Gate | Result | Key numbers (before -> after) |
+|---|---|---|
+| routing | PASS | held-out miss 8.3 % -> 4.2 %, tool-free to VERIFIED_TOOL 0 |
+| think-route | PASS | 6/6 THINK |
+| effort | PASS | — |
+| verified-tool-routing | PASS | requiring a call to VERIFIED_TOOL 95 % -> 90 %; not requiring one 0 % -> 5 % |
+| verified-tool-route | FAIL | 34/40: t11 and t16 routed to THINK, t13 and t15 answered without a call (the route's content is out of scope for now, owner decision) |
+| serving-routed | PASS | VERIFIED p50 179 / 158 / 232 / 268 s at c1-c16; guaranteed 1/1, 6/6, 9/10, 13/16; judge p50 <= 0.11 s |
+| replay (83 DeepSWE turns) | **PASS** | VERIFIED_TOOL 72 -> **80 (96 %, >= 90 %)**, THINK 3, VERIFIED 0; all 200 with a bash call, no submission; text with the call 80/83 (the 3 without text are first-step `pwd`/`ls` replies of 73-94 completion tokens); p50 17 s, p90 157 s (recorded 197 s) |
+
+The effort `max` reaches the model: vLLM puts the request's
+`reasoning_effort` into the chat template arguments and the DeepSeek V4.1
+template writes `Reasoning Effort: 100` (`low` 50, `high` 75). The
+`/tokenize` endpoint ignores the field and always shows 75.
+
+## VERIFIED_TOOL criteria fix on `78d6f411` (2026-10-04, 15:03-15:48 JST)
+
+The criteria now name when a call is needed and exclude a reply that only
+reports tool results already in the conversation. Offline (route judge only)
+the second wording met every bound; the routing-dependent gates were then run
+again on the deployment.
+
+| Gate | Result | Key numbers (before -> after) |
+|---|---|---|
+| routing | PASS | held-out miss 4.2 % -> 8.3 %, tool-free to VERIFIED_TOOL 0 |
+| think-route | PASS | — |
+| effort | PASS | — |
+| verified-tool-routing | **PASS** | not requiring a call to VERIFIED_TOOL 35 % -> **0 %**; requiring one 95 % -> 95 % |
+| verified-tool-route | FAIL | 37/40 (was 38/40): t11 (read a second file) routed to THINK twice, t15 one stream answered without a call |
+| serving-routed | PASS | VERIFIED p50 134 / 159 / 218 / 296 s at c1-c16; judge p50 <= 0.12 s |
+| replay (83 DeepSWE turns) | FAIL | VERIFIED_TOOL 65 -> 72 (87 %, >= 90 %), THINK 11, VERIFIED 0; all 200 with a bash call, no submission; p50 16 s, p90 103 s |
+
+## GPU gates on `e0de4631`/`bbd63539` (2026-10-04, 11:51-14:39 JST)
+
+Verified-tool route (VCO-D17), tau_hi 0.999733, acceptance 0.99. All gates
+from `l1` on `e0de4631`; after the route judge moved to the most probable
+label (`bbd63539`, no VERIFIED floor) the routing-dependent gates were run
+again (routing to serving-routed, and the replay).
+
+| Gate | Result | Key numbers |
+|---|---|---|
+| l1 | PASS | — |
+| calibrate | PASS | tau_hi 0.999733 |
+| requirements | PASS (duplicate limit 12.5 %, owner decision) | gold recall 0.978, requests with duplicates 12.5 %, guaranteed 26/40, p50 197 s / p95 411 s |
+| implicit | PASS | recall 0.825, control kept 0, guaranteed 22/30, p50 136 s |
+| repair | PASS | guaranteed constraint violations 0, guaranteed 10/16 |
+| structured | PASS | — |
+| fallback | PASS | both judges down: a tool request still gets tool_calls |
+| serving | PASS | 72/72 answered; p50 110 / 164 / 159 / 204 s at c1 / c4 / c8 / c16; guaranteed 6/8, 9/16, 12/16, 20/32 |
+| routing | PASS | held-out miss 4.2 %, tool-free to VERIFIED_TOOL 0, everyday to THINK 100 % |
+| think-route | PASS | 6/6 THINK, p50 0.76 s, TTFT p50 0.60 s |
+| effort | PASS | — |
+| serving-routed | PASS | 72/72 answered; VERIFIED_TOOL judge p50 0.11-0.15 s; VERIFIED p50 160 / 201 / 226 / 330 s at c1-c16 |
+| verified-tool-routing | FAIL | requiring a call to VERIFIED_TOOL 95 % (>= 90 %); not requiring one 35 % (< 10 %): 6 of 8 conversations the latest tool result already answers, 1 of 8 unrelated questions |
+| verified-tool-route | FAIL | 38/40 pass; 2 routed to VERIFIED_TOOL answered without a tool call |
+| replay (83 recorded DeepSWE turns) | FAIL | VERIFIED_TOOL 65/83 (78 %, >= 90 %), THINK 15, VERIFIED 3; every reply 200 with a bash call, none submits; VERIFIED_TOOL effort max 65/65; p50 19 s, p90 145 s (was 197 s) |
+
+The failures are routing: some DeepSWE turns go to THINK or VERIFIED, and
+conversations the latest tool result already answers go to VERIFIED_TOOL.
+Inside the verified-tool route the behaviour is as designed.
+
 ## tau_hi calibration (2026-10-01)
 
 `./verify.sh calibrate`, full production checklist path (DeepSeek rewrites

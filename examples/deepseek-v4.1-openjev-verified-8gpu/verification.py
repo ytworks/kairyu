@@ -8,9 +8,8 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   l1            DeepSeek grammar-constrained JSON on every DP rank (thinking and
                 chat) and System One on each OpenJev replica
   calibrate     tau_hi on InFoBench expert labels (calibrate.py)
-  calibrate-g1  can per-claim G1 be calibrated (RAGTruth / PRM800K / FEVER)? today:
-                no, so G1 is advisory (calibrate_g1.py, VCO-D11)
-  requirements  extracted checklists cover InFoBench's gold decomposed questions
+  requirements  the adopted points are MECE: they cover InFoBench's gold
+                decomposed questions and no two require the same thing
   repair        constraint-heavy requests: repairs happen and every guaranteed
                 answer meets the stated constraint (independent check)
   structured    a caller json_schema survives drafting and repair
@@ -22,6 +21,10 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   think-route   everyday requests stream from deepseek_think at the default effort
   effort        the caller's effort reaches every DeepSeek step on both routes
   implicit      situational requirements are extracted and kept only when expected
+  verified-tool-routing  Jev routes a request that requires a tool call to
+                VERIFIED_TOOL, and no other
+  verified-tool-route    a VERIFIED_TOOL request gets one DeepSeek call at max
+                effort, returned as tool_calls
   serving-routed  kairyu-verified under load: route mix, latency, tokens per route
 """
 
@@ -94,6 +97,21 @@ def _route(trace: dict | None, model: str) -> tuple[str, float | None]:
     return ("verified" if verdict == "primary" else verdict), p_verified
 
 
+def _judge_seconds(trace: dict | None) -> float | None:
+    """Wall time of the route judge's read, from the trace."""
+
+    for event in (trace or {}).get("events") or []:
+        if event.get("node") == "profile_judge":
+            timing = event.get("timing") or {}
+            try:
+                start = datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00"))
+                end = datetime.fromisoformat(timing["completed_at"].replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError):
+                return None
+            return round((end - start).total_seconds(), 3)
+    return None
+
+
 def _efforts(trace: dict | None) -> list[str | None]:
     """The reasoning effort of every DeepSeek generation in the trace."""
 
@@ -119,6 +137,8 @@ def _post_stream(
     started = time.monotonic()
     first: float | None = None
     content, reasoning = [], []
+    calls: dict[int, dict] = {}
+    finish = None
     body: dict = {"choices": [{"message": {}}]}
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for raw in response:
@@ -132,13 +152,23 @@ def _post_stream(
                     first = time.monotonic() - started
                 content.append(delta.get("content") or "")
                 reasoning.append(delta.get("reasoning_content") or "")
+                for call in delta.get("tool_calls") or []:
+                    if first is None:
+                        first = time.monotonic() - started
+                    slot = calls.setdefault(call.get("index", 0), {"name": "", "arguments": ""})
+                    function = call.get("function") or {}
+                    slot["name"] += function.get("name") or ""
+                    slot["arguments"] += function.get("arguments") or ""
+                finish = choice.get("finish_reason") or finish
             for key in ("usage", "kairyu_verification", "kairyu_trace_v2", "kairyu_route"):
                 if chunk.get(key) is not None:
                     body[key] = chunk[key]
     body["choices"][0]["message"] = {
         "content": "".join(content),
         "reasoning_content": "".join(reasoning),
+        "tool_calls": [{"type": "function", "function": calls[index]} for index in sorted(calls)],
     }
+    body["choices"][0]["finish_reason"] = finish
     return body, first
 
 
@@ -185,11 +215,13 @@ def chat(
     elapsed = time.monotonic() - started
     usage = body.get("usage") or {}
     report = body.get("kairyu_verification") or {}
-    message = (body.get("choices") or [{}])[0].get("message") or {}
+    choice = (body.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
     output_tokens = usage.get("orchestration_output_tokens") or usage.get("completion_tokens") or 0
     trace_body = body.get("kairyu_trace_v2")
     route, p_verified = _route(trace_body, model)
-    verified_route = route.startswith("verified")
+    # The verified-tool route answers without verification.
+    verified_route = route.startswith("verified") and route != "verified_tool"
     return {
         "status": status,
         "seconds": round(elapsed, 2),
@@ -198,6 +230,7 @@ def chat(
         "route": route,
         "p_verified": p_verified,
         "efforts": _efforts(trace_body),
+        "judge_s": _judge_seconds(trace_body),
         "public_completion_tokens": usage.get("completion_tokens"),
         "orchestration_input_tokens": usage.get("orchestration_input_tokens")
         or usage.get("prompt_tokens"),
@@ -209,6 +242,14 @@ def chat(
         "requirements": report.get("requirements") or [],
         "has_verification": "kairyu_verification" in body,
         "content": message.get("content") or "",
+        "tool_calls": [
+            {
+                "name": (call.get("function") or {}).get("name"),
+                "arguments": (call.get("function") or {}).get("arguments"),
+            }
+            for call in message.get("tool_calls") or []
+        ],
+        "finish_reason": choice.get("finish_reason"),
         "reasoning_chars": len(message.get("reasoning_content") or ""),
         "error": body.get("error"),
         "verification_error": (
@@ -304,13 +345,11 @@ def gate_calibrate(_env: dict[str, str]) -> None:
     subprocess.run([sys.executable, str(HERE / "calibrate.py")], check=True)
 
 
-def gate_calibrate_g1(_env: dict[str, str]) -> None:
-    subprocess.run([sys.executable, str(HERE / "calibrate_g1.py")], check=True)
-
-
 _COVERAGE_PROMPT = """For each GOLD question below, decide whether the CHECKLIST contains a \
-condition that requires what the question checks (alone or together with other conditions). \
-Answer as JSON {{"covered": [true/false per gold question, in order]}}.
+point that requires what the question checks (alone or together with other points). Then \
+count the pairs of CHECKLIST points that require the same thing (one makes the other \
+redundant). Answer as JSON {{"covered": [true/false per gold question, in order], \
+"duplicate_pairs": <number>}}.
 GOLD QUESTIONS:
 {gold}
 CHECKLIST:
@@ -330,7 +369,7 @@ def _build_key() -> str:
 
 
 def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float = 7200) -> None:
-    """Sufficiency: the judged checklist covers InFoBench's gold questions."""
+    """MECE: the adopted points cover InFoBench's gold questions, without duplicates."""
 
     deadline = Deadline("requirements", budget_s)
     rows = infobench(count, seed=1)
@@ -347,7 +386,7 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
     l1 = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
     coverage = []
     for row, result in zip(rows, results, strict=True):
-        extracted = [item for item in result["requirements"] if not item["id"].startswith("G")]
+        extracted = result["requirements"]
         if result["status"] != 200 or not extracted:
             coverage.append(
                 {"id": row["id"], "covered": None, "gold": len(row["decomposed_questions"])}
@@ -377,9 +416,10 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
                         "schema": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["covered"],
+                            "required": ["covered", "duplicate_pairs"],
                             "properties": {
-                                "covered": {"type": "array", "items": {"type": "boolean"}}
+                                "covered": {"type": "array", "items": {"type": "boolean"}},
+                                "duplicate_pairs": {"type": "integer"},
                             },
                         },
                     },
@@ -387,27 +427,43 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
             },
             timeout_s=600,
         )
-        covered = json.loads(body["choices"][0]["message"]["content"]).get("covered") or []
+        verdict = json.loads(body["choices"][0]["message"]["content"])
+        covered = verdict.get("covered") or []
         coverage.append(
             {
                 "id": row["id"],
                 "gold": len(row["decomposed_questions"]),
                 "covered": sum(1 for value in covered if value is True),
                 "requirements": len(extracted),
-                "padded": sum(1 for item in extracted if item["id"].startswith("P_")),
+                "duplicate_pairs": int(verdict.get("duplicate_pairs") or 0),
             }
         )
     judged = [entry for entry in coverage if entry["covered"] is not None]
     recall = sum(entry["covered"] for entry in judged) / max(1, sum(e["gold"] for e in judged))
-    summary = {**_summary(results), "gold_recall": round(recall, 4), "judged": len(judged)}
+    duplicates = sum(entry["duplicate_pairs"] for entry in judged)
+    with_duplicates = sum(1 for entry in judged if entry["duplicate_pairs"] > 0)
+    duplicate_share = with_duplicates / max(1, len(judged))
+    summary = {
+        **_summary(results),
+        "gold_recall": round(recall, 4),
+        "duplicate_pairs_per_request": round(duplicates / max(1, len(judged)), 3),
+        "requests_with_duplicates": round(duplicate_share, 4),
+        "judged": len(judged),
+    }
     _print_rows(results)
     print(json.dumps(summary, indent=2), flush=True)
-    passed = recall >= 0.9 and len(judged) == len(rows)
+    # MECE: exhaustive (gold recall) and exclusive (few requests with a
+    # duplicate pair: at most 12.5 %, owner decision 2026-10-04 on the run
+    # that measured it).
+    passed = recall >= 0.9 and duplicate_share <= 0.125 and len(judged) == len(rows)
     _write(
         "requirements",
         {"passed": passed, "summary": summary, "coverage": coverage, "rows": results},
     )
-    print(f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f}, gate 0.90)")
+    print(
+        f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f} >= 0.90, "
+        f"requests with duplicates {duplicate_share:.3f} <= 0.125)"
+    )
     if not passed:
         raise SystemExit(1)
 
@@ -589,6 +645,27 @@ def gate_fallback(env: dict[str, str], *, budget_s: float = 5400) -> None:
             findings.append(
                 f"routed with both down: status={routed['status']} route={routed['route']}"
             )
+        # A request that requires a tool call still gets one through the
+        # think fallback.
+        tool_item = next(
+            item
+            for item in _dataset("verified-tool-routing-set.json")
+            if item["label"] == "VERIFIED_TOOL"
+        )
+        tool_down = chat(
+            env,
+            messages=tool_item["messages"],
+            tools=tool_item["tools"],
+            model=control.ROUTED_MODEL,
+            trace=True,
+            max_tokens=65536,
+        )
+        phases["both_down_tool"] = [tool_down]
+        if tool_down["status"] != 200 or not tool_down["tool_calls"]:
+            findings.append(
+                f"tool request with both down: status={tool_down['status']} "
+                f"route={tool_down['route']} tool_calls={len(tool_down['tool_calls'])}"
+            )
         for row in both_down:
             if (
                 row["status"] != 200
@@ -662,8 +739,9 @@ def _dataset(name: str) -> list[dict]:
     return json.loads((DATASETS / name).read_text(encoding="utf-8"))
 
 
-def _routing_probabilities() -> list[float | None]:
-    """P(VERIFIED) for every routing-set conversation, through the served judge.
+def _routing_probabilities(dataset: str = "routing-set.json") -> list[dict[str, float] | None]:
+    """Every route's probability for each routing-set conversation, through
+    the served judge.
 
     The orchestrator is built from verified.yaml with the real System One
     backend pointed at both OpenJev replicas, so the request Jev reads is the
@@ -680,7 +758,7 @@ def _routing_probabilities() -> list[float | None]:
     from kairyu.orchestration.request import OrchestrationRequest
     from kairyu.sampling_params import SamplingParams
 
-    async def judge_all() -> list[float | None]:
+    async def judge_all() -> list[dict[str, float] | None]:
         backend = HTTPSystemOneBackend(
             base_urls=("http://127.0.0.1:8015", "http://127.0.0.1:8016"),
             upstream_model=SPEC["systemone"]["model"],
@@ -694,26 +772,37 @@ def _routing_probabilities() -> list[float | None]:
             systemone_refs={SPEC["systemone"]["model"]: backend},
         )
 
-        async def one(item: dict) -> float | None:
-            chat = ChatCompletionRequest(model=ROUTED, messages=item["messages"])
+        async def one(item: dict) -> dict[str, float] | None:
+            tools = item.get("tools") or None
+            chat = ChatCompletionRequest(model=ROUTED, messages=item["messages"], tools=tools)
             call = OrchestrationRequest(
                 prompt=validate_orchestration_chat_input(chat).prompt,
                 sampling_params=SamplingParams(max_tokens=1024),
+                tools=tuple(tools or ()),
             )
             judged = await orchestrator.judge_role_profile(call)
-            return judged.role_profile_judge_event.metadata.get("p_VERIFIED")
+            metadata = judged.role_profile_judge_event.metadata
+            probabilities = {
+                key.removeprefix("p_"): float(value)
+                for key, value in metadata.items()
+                if key.startswith("p_") and isinstance(value, (int, float))
+            }
+            return probabilities if "VERIFIED" in probabilities else None
 
         try:
-            return await asyncio.gather(*(one(item) for item in _dataset("routing-set.json")))
+            return await asyncio.gather(*(one(item) for item in _dataset(dataset)))
         finally:
             await backend.shutdown()
 
     return asyncio.run(judge_all())
 
 
-def _routes_verified(p: float, tau: float) -> bool:
-    # VERIFIED when preferred (p >= tau) or simply more probable.
-    return p >= tau or p > 0.5
+def _served_route(probabilities: dict[str, float], tau: float | None) -> str:
+    # The served rule: VERIFIED when preferred (p >= tau, if a floor is
+    # configured), else the most probable route.
+    if tau is not None and probabilities["VERIFIED"] >= tau:
+        return "VERIFIED"
+    return max(probabilities, key=probabilities.__getitem__)
 
 
 def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
@@ -721,7 +810,9 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
     tau_route (prefer.min_probability) is the largest value whose miss rate
     on the calibration half (even items) stays below 10 %; the gate is the
-    held-out half (odd items) at the configured tau.
+    held-out half (odd items) at the configured tau. Routes are chosen as in
+    serving, from every label's probability; a conversation of the set (none
+    uses tools) routed to VERIFIED_TOOL counts against the gate.
     """
 
     deadline = Deadline("routing", budget_s)
@@ -729,26 +820,31 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     started = time.monotonic()
     probabilities = _routing_probabilities()
     judge_seconds = time.monotonic() - started
+    if any(p is None for p in probabilities):
+        raise SystemExit("routing: the judge did not answer every conversation")
     rows = [
-        {**item, "p_verified": p, "messages": len(item["messages"])}
+        {**item, "p": p, "p_verified": p["VERIFIED"], "messages": len(item["messages"])}
         for item, p in zip(items, probabilities, strict=True)
     ]
-    if any(row["p_verified"] is None for row in rows):
-        raise SystemExit("routing: the judge did not answer every conversation")
     import yaml
 
-    configured = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"]["prefer"][
-        "min_probability"
-    ]
+    prefer = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"].get("prefer")
+    configured = prefer["min_probability"] if prefer else None
 
     def miss_rate(subset: list[dict], tau: float) -> float:
         needed = [row for row in subset if row["label"] == "VERIFIED"]
-        missed = [row for row in needed if not _routes_verified(row["p_verified"], tau)]
+        missed = [row for row in needed if _served_route(row["p"], tau) != "VERIFIED"]
         return len(missed) / len(needed)
 
     def easy_to_think(subset: list[dict], tau: float) -> float:
         easy = [row for row in subset if row["label"] == "THINK"]
-        return sum(1 for row in easy if not _routes_verified(row["p_verified"], tau)) / len(easy)
+        return sum(1 for row in easy if _served_route(row["p"], tau) == "THINK") / len(easy)
+
+    def to_verified_tool(subset: list[dict], tau: float) -> float:
+        # The routing set has no tool-using task: a VERIFIED_TOOL route is a mistake.
+        return sum(1 for row in subset if _served_route(row["p"], tau) == "VERIFIED_TOOL") / len(
+            subset
+        )
 
     calibration = rows[0::2]
     holdout = rows[1::2]
@@ -769,6 +865,7 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
         "calibration_miss_rate": round(miss_rate(calibration, configured), 4),
         "holdout_miss_rate": round(miss_rate(holdout, configured), 4),
         "everyday_to_think": round(easy_to_think(rows, configured), 4),
+        "to_verified_tool": round(to_verified_tool(rows, configured), 4),
         "p_verified_by_category": {
             category: {
                 "min": round(min(values), 4),
@@ -780,13 +877,170 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     }
     deadline.check()
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
-    passed = summary["holdout_miss_rate"] < 0.10 and summary["calibration_miss_rate"] < 0.10
+    # The same 10 % tolerance for conversations without tools sent to VERIFIED_TOOL.
+    passed = (
+        summary["holdout_miss_rate"] < 0.10
+        and summary["calibration_miss_rate"] < 0.10
+        and summary["to_verified_tool"] < 0.10
+    )
     _write("routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
         f"routing: {'PASS' if passed else 'FAIL'} "
-        f"(held-out miss rate {summary['holdout_miss_rate']})"
+        f"(held-out miss rate {summary['holdout_miss_rate']}, "
+        f"to VERIFIED_TOOL {summary['to_verified_tool']})"
     )
     if not passed:
+        raise SystemExit(1)
+
+
+def gate_verified_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
+    """Jev routes a request that requires a tool call to VERIFIED_TOOL, and no other.
+
+    The tool-routing set offers tools in every conversation: 20 require a
+    call (first turn, mid-loop after a tool result, a choice among tools), 20
+    do not (an unrelated question, a request the latest tool result already
+    answers, chit-chat). Routes are chosen as in serving.
+    """
+
+    deadline = Deadline("verified-tool-routing", budget_s)
+    items = _dataset("verified-tool-routing-set.json")
+    started = time.monotonic()
+    probabilities = _routing_probabilities("verified-tool-routing-set.json")
+    judge_seconds = time.monotonic() - started
+    if any(p is None for p in probabilities):
+        raise SystemExit("verified-tool-routing: the judge did not answer every conversation")
+    import yaml
+
+    prefer = yaml.safe_load((HERE / "verified.yaml").read_text())["profile_judge"].get("prefer")
+    tau = prefer["min_probability"] if prefer else None
+    rows = [
+        {
+            "id": item["id"],
+            "label": item["label"],
+            "category": item["category"],
+            "route": _served_route(p, tau),
+            "p": p,
+        }
+        for item, p in zip(items, probabilities, strict=True)
+    ]
+    needed = [row for row in rows if row["label"] == "VERIFIED_TOOL"]
+    not_needed = [row for row in rows if row["label"] == "NO_TOOL"]
+    by_category = {}
+    for row in rows:
+        entry = by_category.setdefault(row["category"], {})
+        entry[row["route"]] = entry.get(row["route"], 0) + 1
+    summary = {
+        "conversations": len(rows),
+        "judge_wall_s": round(judge_seconds, 2),
+        "needed_to_verified_tool": round(
+            sum(r["route"] == "VERIFIED_TOOL" for r in needed) / len(needed), 4
+        ),
+        "not_needed_to_verified_tool": round(
+            sum(r["route"] == "VERIFIED_TOOL" for r in not_needed) / len(not_needed), 4
+        ),
+        "routes_by_category": by_category,
+    }
+    deadline.check()
+    for row in rows:
+        print(f"  {row['id']} {row['label']:8} {row['category']:20} -> {row['route']} {row['p']}")
+    print(json.dumps(summary, indent=2), flush=True)
+    passed = (
+        summary["needed_to_verified_tool"] >= 0.90 and summary["not_needed_to_verified_tool"] < 0.10
+    )
+    _write("verified-tool-routing", {"passed": passed, "summary": summary, "rows": rows})
+    print(
+        f"verified-tool-routing: {'PASS' if passed else 'FAIL'} (needed to VERIFIED_TOOL "
+        f"{summary['needed_to_verified_tool']} >= 0.90, not needed to VERIFIED_TOOL "
+        f"{summary['not_needed_to_verified_tool']} < 0.10)"
+    )
+    if not passed:
+        raise SystemExit(1)
+
+
+def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
+    """A VERIFIED_TOOL request gets one DeepSeek call at max effort, returned as tool_calls.
+
+    Every tool-requiring conversation of the tool-routing set is sent unary
+    and streamed, with the caller's effort cycling through none, low, high
+    and max: each must route to VERIFIED_TOOL, return 200 with structured tool_calls
+    (finish_reason tool_calls) and no kairyu_verification, and run exactly
+    one DeepSeek generation at max effort.
+    """
+
+    deadline = Deadline("verified-tool-route", budget_s)
+    items = [
+        item
+        for item in _dataset("verified-tool-routing-set.json")
+        if item["label"] == "VERIFIED_TOOL"
+    ]
+    efforts = [None, "low", "high", "max"]
+    findings = []
+    rows = []
+    for index, item in enumerate(items):
+        for stream in (False, True):
+            effort = efforts[index % len(efforts)]
+            extra = {"reasoning_effort": effort} if effort else {}
+            row = chat(
+                env,
+                messages=item["messages"],
+                tools=item["tools"],
+                model=ROUTED,
+                trace=True,
+                stream=stream,
+                max_tokens=65536,
+                **extra,
+            )
+            row.update(
+                id=item["id"], category=item["category"], stream=stream, caller_effort=effort
+            )
+            rows.append(row)
+            problems = []
+            if row["status"] != 200:
+                problems.append(f"status {row['status']}")
+            if row["route"] != "verified_tool":
+                problems.append(f"route {row['route']}")
+            if not row["tool_calls"] or row["finish_reason"] != "tool_calls":
+                problems.append(
+                    f"tool_calls={len(row['tool_calls'])} finish={row['finish_reason']}"
+                )
+            if row["efforts"] != ["max"]:
+                problems.append(f"efforts {row['efforts']}")
+            if row["has_verification"]:
+                problems.append("carries kairyu_verification")
+            if problems:
+                findings.append(f"{item['id']} stream={stream} effort={effort}: {problems}")
+        deadline.check()
+    for row in rows:
+        print(
+            f"  {row['id']} stream={row['stream']} effort={row['caller_effort']} "
+            f"status={row['status']} {row['seconds']:.1f}s ttft={row['ttft_s']} "
+            f"route={row['route']} efforts={row['efforts']} "
+            f"calls={[call['name'] for call in row['tool_calls']]} finish={row['finish_reason']} "
+            f"text={bool(row['content'].strip())} in={row['orchestration_input_tokens']} "
+            f"out={row['orchestration_output_tokens']} "
+            f"({row['orchestration_output_tok_per_s']} tok/s)",
+            flush=True,
+        )
+    ok = [row for row in rows if row["status"] == 200]
+    seconds = sorted(row["seconds"] for row in ok)
+    summary = {
+        **_summary(rows),
+        "latency_p90_s": seconds[max(0, int(len(seconds) * 0.9) - 1)] if seconds else None,
+        "with_text": sum(1 for row in ok if row["content"].strip()),
+        "unary_vs_stream_same_tools": sum(
+            1
+            for a, b in zip(rows[0::2], rows[1::2], strict=True)
+            if sorted(c["name"] for c in a["tool_calls"])
+            == sorted(c["name"] for c in b["tool_calls"])
+        ),
+    }
+    print(json.dumps(summary, indent=2), flush=True)
+    _write(
+        "verified-tool-route",
+        {"passed": not findings, "findings": findings, "summary": summary, "rows": rows},
+    )
+    print(f"verified-tool-route: {'PASS' if not findings else 'FAIL'} {findings}")
+    if findings:
         raise SystemExit(1)
 
 
@@ -891,9 +1145,7 @@ def gate_implicit(env: dict[str, str], *, budget_s: float = 5400) -> None:
     spurious = []
     details = []
     for item, row in zip(items, rows, strict=True):
-        checklist = [
-            r for r in row["requirements"] if (r.get("tags") or {}).get("origin") != "common"
-        ]
+        checklist = row["requirements"]
         implicit = [r for r in checklist if (r.get("tags") or {}).get("origin") == "implicit"]
         entry = {"request": item["messages"][-1]["content"][:80], "implicit_kept": len(implicit)}
         if item["expected_implicit"]:
@@ -953,7 +1205,8 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
     """The routed product model under load: route mix, latency and tokens per route."""
 
     deadline = Deadline("serving-routed", budget_s)
-    items = _dataset("routing-set.json")
+    # Tool-free conversations and conversations that offer tools, mixed.
+    items = _dataset("routing-set.json") + _dataset("verified-tool-routing-set.json")
     random.Random(3).shuffle(items)
     plan = {1: 8, 4: 16, 8: 16, 16: 32}
     report = {}
@@ -964,14 +1217,26 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
         started = time.monotonic()
         rows = _run_concurrently(
             env,
-            [{"messages": item["messages"], "model": ROUTED, "trace": True} for item in batch],
+            [
+                {
+                    "messages": item["messages"],
+                    "model": ROUTED,
+                    "trace": True,
+                    **({"tools": item["tools"], "max_tokens": 65536} if item.get("tools") else {}),
+                }
+                for item in batch
+            ],
             concurrency,
         )
         wall = time.monotonic() - started
         per_route = {}
         for route in sorted({row["route"] for row in rows}):
             subset = [row for row in rows if row["route"] == route]
-            per_route[route] = _summary(subset)
+            judge = sorted(row["judge_s"] for row in subset if row.get("judge_s") is not None)
+            per_route[route] = {
+                **_summary(subset),
+                "judge_p50_s": statistics.median(judge) if judge else None,
+            }
         summary = {
             **_summary(rows),
             "wall_s": round(wall, 1),
@@ -990,6 +1255,8 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
         name
         for name, entry in report.items()
         if entry["summary"]["ok"] != entry["summary"]["requests"]
+        # The verified-tool route adds only the judge's read (p50 at most 2 s).
+        or (entry["summary"]["per_route"].get("verified_tool", {}).get("judge_p50_s") or 0) > 2.0
     ]
     _write("serving-routed", {"passed": not failures, "failed": failures, "report": report})
     print(f"serving-routed: {'PASS' if not failures else 'FAIL'}")
@@ -1000,7 +1267,6 @@ def gate_serving_routed(env: dict[str, str], *, budget_s: float = 14400) -> None
 GATES = {
     "l1": gate_l1,
     "calibrate": gate_calibrate,
-    "calibrate-g1": gate_calibrate_g1,
     "requirements": gate_requirements,
     "repair": gate_repair,
     "structured": gate_structured,
@@ -1010,6 +1276,8 @@ GATES = {
     "think-route": gate_think_route,
     "effort": gate_effort,
     "implicit": gate_implicit,
+    "verified-tool-routing": gate_verified_tool_routing,
+    "verified-tool-route": gate_verified_tool_route,
     "serving-routed": gate_serving_routed,
 }
 

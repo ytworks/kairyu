@@ -83,7 +83,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DeepSeek V4.1 Flash single-replica example (FN-D9 amendment, 2026-09-11) is GPU-verified on TP8/EP8 SM120 with the V4 ReplicaPool/API/UI structure and official thinking-high default; bounded L1 comparisons select DSpark 5, 16K batching and NCCL. The 320-request matrix, reasoning/tool/vision/cancellation, normal restart and retrieval through 1,039,909 prompt tokens pass; exact evidence and limitations are in its `MEASUREMENTS.md`.
 - DeepSeek V4.1 Flash six-GPU example (FN-D9 six-GPU amendment, 2026-09-30): one DP6/EP6 replica on GPUs 0–5 with the 8-GPU example's L2/L3 structure and its own scripts; official-first L1 (pinned vLLM nightly + SM120 overlay, Engram offload, 4K batch / 0.92 from the recipe's memory-bound arm, DSpark 5 with full verification). Serving 102 / 591 / 718 tok/s at c1/c32/c64; gate evidence in its `MEASUREMENTS.md`.
 - Qwen3.8 + DeepSeek-V4.1 ensemble example (DTO-D16/D17, 2026-10-01): V4.1 DP6/EP6 (GPU 0–5, the six-GPU example's L1) + Qwen TP1 × 2 (GPU 6, 7). A Qwen judge picks one of two routes: thinking DeepSeek, or the dual-track ensemble with two policies and a three-candidate synthesis. Every role takes images natively; DeepSeek uses the official V4.1 encoder with per-request effort, and the example's overlay continues the floor's assistant prefill. ENSEMBLE criteria loosened and judge fallback moved to `deepseek_think` (DTO-D17 amendments). GPU-verified 2026-10-01: all gates pass, including the ensemble TTFT gate at c1–c32 (c32 at 95.8 % of the limit); 4 of 128 coding requests exceed the 900 s turn envelope after two audit refinements.
-- Checklist-verified answers example (m1 D8 / VCO-D1..D6, 2026-10-01): DeepSeek-V4.1 DP6/EP6 (GPU 0-5) writes, OpenJev x 2 (GPU 6, 7) judges through System One, Kairyu L2 checklist verifiers (deterministic checks, Jev-shaped questions, tau_hi) publish `kairyu_verification` with every answer; tau_hi 0.9966 at alpha 0.10 on InFoBench expert labels (held-out upper bound 8.7 %). Per-claim G1 (OpenJev claim support) failed calibration on RAGTruth/PRM800K/FEVER and is advisory (VCO-D11); the guarantee covers tau_hi requirements plus deterministic grounding checks. Two-stage extraction, a source/action-only state builder and format-scoped units (VCO-D12/D13). All GPU gates pass on `e81db571` (2026-10-02): implicit recall 0.875, InFoBench gold recall 0.972, serving guaranteed 44-53 % (was 25-38 %), routed verified 65 %; owner latency target (p50 <= 180 s) not met (InFoBench p50 154-342 s). Evidence in its `MEASUREMENTS.md`.
+- Checklist-verified answers example (m1 D8 / VCO-D1..D6, 2026-10-01): DeepSeek-V4.1 DP6/EP6 (GPU 0-5) writes, OpenJev x 2 (GPU 6, 7) judges through System One, Kairyu L2 checklist verifiers (Jev-shaped questions, tau_hi, an acceptance read; no rule-based checks since PR #619) publish `kairyu_verification` with every answer; tau_hi 0.9966 at alpha 0.10 on InFoBench expert labels (held-out upper bound 8.7 %). Per-claim G1 (OpenJev claim support) failed calibration on RAGTruth/PRM800K/FEVER and is advisory (VCO-D11); the guarantee covers tau_hi requirements plus deterministic grounding checks. Two-stage extraction, a source/action-only state builder and format-scoped units (VCO-D12/D13). All GPU gates pass on `e81db571` (2026-10-02): implicit recall 0.875, InFoBench gold recall 0.972, serving guaranteed 44-53 % (was 25-38 %), routed verified 65 %; owner latency target (p50 <= 180 s) not met (InFoBench p50 154-342 s). Evidence in its `MEASUREMENTS.md`.
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -111,6 +111,31 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
+- What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.
+- Why: owner decision: tool requests take the verified-tool route, so the guarantee route assumes a complete answer.
+- Refs: VCO-D17 in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+
+### 2026-10-04 — [design] Verified example: tool route replaces step verification (PR #619)
+- What: Jev routes a request that requires a tool call to TOOL: one DeepSeek call at max effort with the caller's tools, unverified (kairyu-verified THINK/TOOL/VERIFIED; kairyu-verified-always TOOL/VERIFIED). The STEP route and `verified_step` profile are removed.
+- Why: owner decision. Verification failed correct intermediate agent steps and repairs jumped to the final move; step verification did not remove that risk.
+- Refs: VCO-D17 (supersedes VCO-D16) in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+
+### 2026-10-03 — [design] Verified example judges an agent turn as one step (PR #619 S3)
+- What: new profile `verified_step` and Jev route label STEP (kairyu-verified: THINK/STEP/VERIFIED; kairyu-verified-always: STEP/VERIFIED, no think route). Step points come from the task and the latest tool results; coverage and acceptance ask whether the reply is a sound next step (A0) over request, recent conversation (bounded `query`), summary and reply. Repairs in both profiles rewrite the same message in the draft's frame (B1); a step repair gets only points read below 0.5 (B2). Extractors may use 65,536 tokens (C2). STEP thresholds are placeholders until labelled DeepSWE turns (V3).
+- Why: complete-answer criteria failed sound mid-task turns and their repairs drifted to submission (closed PR #618: 73/83 turns hit the refinement limit).
+- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (A0, B1, B2, C2); example `verified.yaml`, `verified-always.yaml`
+
+### 2026-10-03 — [design] Checklist verifier minimised to what Jev verification needs (PR #619 S2)
+- What: removed from L2 rule-based checks (`checks.py`, inline claim roles, `on_exhausted`), `seed_from` (the answer role writes the draft itself), multi-list curation (one list: the verifier's target) and guarantee groups; kept Jev questions over JSON state (`request`/`tools` sources, conversation bounds), main's `max_questions_per_call`, the acceptance read with per-read accounting, and no guarantee for an empty answer. New: an acceptance FAIL with every point met is not repaired; it publishes unverified (`reason: not_accepted`).
+- Why: owner decision: the framework keeps only shared contracts; the removed parts served one example's workflow. A repair with no unmet point rewrote sound DeepSWE turns.
+- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (R1-R5, J2/B3); m1 D8 text follows in S4
+
+### 2026-10-03 — [progress] Chat API returns the reply's text with its tool calls (PR #619)
+- What: `/v1/chat/completions` publishes the model's prose as `content` beside `tool_calls` (well-formed call envelopes removed; malformed markup stays text; whole-text protocols unchanged). Stream and unary share the choice.
+- Why: `content` was nulled whenever calls existed, so agent frameworks never received the reasoning text they ask for every turn; a Jev judge of the reply then saw no text (DeepSWE, closed PR #618).
+- Refs: PR #619 S1; `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md`
+
 ### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
 - What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
 - Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
@@ -125,29 +150,3 @@ in `.claude/rules/progress-log.md`).
 - What: cache `touch()` keeps the residency generation; the live cache reader joins node evidence to the published inventory at the latest observation (hints live, inventory within the observation age); pre-stage pin owners name the ensure generation and an ensure drops lower-generation owners; actuation reauthorizes the leader after its last callback and rechecks evidence age before PATCH; Deployment claims accept the one-step generation advance.
 - Why: owner review reproduced five defects with CPU/HTTP mocks: a successful Runner-start verification invalidated its own binding, every current inventory was denied, a delayed release removed a successor's pin, an expired lease could still PATCH, and every first Deployment claim failed.
 - Refs: D3.1, D3.14 in `docs/design/node-model-cache-prestage-v1.md`; `docs/design/node-model-cache-index-v1.md`; `docs/design/runner-state-v1.md`; PR #615
-
-### 2026-10-02 — [design] Verified-answers example: two-stage extraction, slimmer state builder (VCO-D8 am. 2, VCO-D12)
-- What: stated and implicit conditions come from two parallel extractors (implicit: at most four, Jev-kept); the state builder lists only source/action claims (G1-computation/general removed); step budget 16 -> 24 (worst case 18 published `reason: budget`). InFoBench c8 p50 492 -> 297 s. The requirements gate no longer reuses answers from another build; the implicit gate's judge thinks.
-- Why: one combined extractor lost stated conditions (gold recall 0.867) and re-extraction dropped implicit ones (gate recall 0.525-0.675); owner latency target p50 <= 3 min (not yet met).
-- Refs: `docs/design/example-verified-checklist-orchestration.md` VCO-D8, VCO-D12; example `MEASUREMENTS.md`; PR #616
-
-### 2026-10-02 — [design] Verified-answers example: per-claim G1 is advisory (VCO-D11)
-- What: G1 split per claim kind and calibrated on 600 human-labelled answers each (RAGTruth, PRM800K, FEVER) through the production state builder and questions; no kind meets alpha 0.10 held-out (accepted violation 15-40 %, AUROC 0.69-0.89). The G1 questions now report p with threshold 0 (`guarantee: advisory`).
-- Why: owner choice (option A) — the flag must claim only what is calibrated; RAGTruth counts unsourced true additions, OpenJev misses math errors and false facts.
-- Refs: `docs/design/example-verified-checklist-orchestration.md` VCO-D11, example `calibrate_g1.py`, `MEASUREMENTS.md`, PR #616
-
-### 2026-10-01 — [progress] Runner and model-cache authority rebased on current main
-- What: rebased WP3.3–WP3.7 and WP4.1–WP4.7/D3.1–D3.20 onto current main,
-  retaining the fail-closed authority, cache, admission, lifecycle, and tests.
-- Refs: `docs/design/runner-state-v1.md`;
-  `docs/design/node-model-cache-prestage-v1.md`; `kairyu/runners/`
-
-### 2026-10-01 — [design] Checklist verifiers in L2; checklist-verified answers example
-- What: m1 D8: a verifier may judge with deterministic checks plus System One `noul` reads (Kairyu converts requirements into Jev questions with yes/no criteria and a JSON state), threshold verdicts, seeded targets with `refine_prompt`, inline claim roles, `on_unavailable: publish_unverified`, curation, internal `response_format`, `{conversation}`, and `kairyu_verification` on responses. m11 D8: System One `base_urls` replicas. New example `deepseek-v4.1-openjev-verified-8gpu`.
-- Why: owner request (requirement-checklist guarantee); L2 could only branch on generated PASS/FAIL text and could not call System One. Jev-shaped requests beat free text (AUROC 0.830 vs 0.814); alpha amended 0.05 -> 0.10 because InFoBench expert labels disagree at 9-10 %.
-- Refs: m1 D8, m11 D8 replica amendment, `docs/design/example-verified-checklist-orchestration.md` (VCO-D4 amendment), example `MEASUREMENTS.md`
-
-### 2026-10-01 — [amendment] System One second review round (PR #614)
-- What: `/v1/systemone` normalizes `samples`/`think`/`steps` ("32", 32.0) before reserving and forwarding (422 otherwise) and reserves `sequential` reads' repeated schema. The OpenJev overlay ends a thought cut at 512 with a budget sentence (budget forcing): empty answers after a cut thought 13/40 → 0/40; `l1` 8/8. Overlay re-pinned `5e8e2e08`; every gate passes.
-- Why: owner re-review: type changes and `sequential` still slipped past the reservation, and an answer pass could reopen a thought and return empty. vLLM refuses token bans for diffusion models, so the thought is closed in text.
-- Refs: m11 D8 metering; example `MEASUREMENTS.md` "Second review-fix rerun"
