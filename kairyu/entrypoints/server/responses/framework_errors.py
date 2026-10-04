@@ -5,8 +5,9 @@ unknown path, a wrong method or an undecodable body with ``{"detail": ...}``.
 On the Responses-dialect paths (``/v1/responses*``, ``/v1/conversations*``
 and Codex's ``/v1/alpha/search``) they are the OpenAI envelope instead:
 
-* 422 -> 400 with ``param`` joined from the first error's location
-  (``tools[0].name``);
+* 422 -> 400 with ``param`` joined from the first failing field's deepest
+  error location (``input[0]`` for a list sent to ``str | list[...]``, not the
+  ``str`` branch's error);
 * malformed or undecodable JSON -> 400 ``invalid_json``;
 * 404 -> ``Invalid URL (METHOD /path)`` and 405 likewise, keeping ``Allow``.
 
@@ -84,29 +85,55 @@ def _framework_error(request: Request, exc: HTTPException) -> ClassifiedError:
 
 
 def _schema_error(errors: Sequence[Mapping]) -> ClassifiedError:
-    first = errors[0] if errors else {}
-    kind = str(first.get("type", ""))
+    error = _most_specific(errors)
+    kind = str(error.get("type", ""))
     if kind == "json_invalid":
         return pre_stream_error(400, _INVALID, "invalid_json", _INVALID_JSON)
-    param = _param_from_loc(first.get("loc", ()))
+    param = _param_from_loc(error.get("loc", ()))
     if kind == "missing":
         message = f"Missing required parameter: '{param}'." if param else "Missing request body."
         return pre_stream_error(400, _INVALID, "missing_required_parameter", message, param=param)
     code = "invalid_type" if kind.endswith(("_type", "_parsing")) else "invalid_value"
-    message = f"Invalid value for '{param}': {first.get('msg', 'invalid')}."
+    subject = f"value for '{param}'" if param else "request body"
+    message = f"Invalid {subject}: {error.get('msg', 'invalid')}."
     return pre_stream_error(400, _INVALID, code, message, param=param)
+
+
+def _most_specific(errors: Sequence[Mapping]) -> Mapping:
+    """The deepest error of the first failing field.
+
+    Pydantic reports every branch of a union field; the deepest one is the
+    branch that matched the JSON type and failed inside it.
+    """
+
+    if not errors:
+        return {}
+    field = _param_segments(errors[0].get("loc", ()))[:1]
+    candidates = [e for e in errors if _param_segments(e.get("loc", ()))[:1] == field]
+    return max(candidates, key=lambda e: len(_param_segments(e.get("loc", ()))))
 
 
 def _param_from_loc(loc: Sequence[str | int]) -> str | None:
     """``("body", "tools", 0, "name")`` -> ``"tools[0].name"``."""
 
+    param = ""
+    for segment in _param_segments(loc):
+        if isinstance(segment, int):
+            param += f"[{segment}]"
+        else:
+            param += f".{segment}" if param else segment
+    return param or None
+
+
+def _param_segments(loc: Sequence[str | int]) -> tuple[str | int, ...]:
+    """The request-parameter path of a location: no ``body``, no union labels."""
+
     segments = tuple(loc)
     if segments[:1] == ("body",):
         segments = segments[1:]
-    param = ""
-    for segment in segments:
-        if isinstance(segment, int):
-            param += f"[{segment}]"
-        elif segment not in _SCALAR_UNION_MEMBERS and _FIELD.fullmatch(segment):
-            param += f".{segment}" if param else segment
-    return param or None
+    return tuple(
+        segment
+        for segment in segments
+        if isinstance(segment, int)
+        or (segment not in _SCALAR_UNION_MEMBERS and _FIELD.fullmatch(segment))
+    )

@@ -176,7 +176,7 @@ def delegated_error(
             exceeds_capacity=admission.exceeds_token_capacity,
         )
     if status == 429:
-        return backpressure(message, code or "rate_limit_exceeded", retry_after_s=1.0)
+        return backpressure(message, code or "rate_limit_exceeded")
     error_type = _text(member.get("type")) or (
         "invalid_request_error" if status < 500 else "server_error"
     )

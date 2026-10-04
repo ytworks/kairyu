@@ -86,11 +86,7 @@ class ChatAdmissionErrors:
 
     def slo_shed(self) -> JSONResponse:
         return classified_response(
-            backpressure(
-                "predicted TTFT exceeds the configured SLO",
-                "slo_admission_shed",
-                retry_after_s=1.0,
-            )
+            backpressure("predicted TTFT exceeds the configured SLO", "slo_admission_shed")
         )
 
     def invalid(self, message: str) -> JSONResponse:

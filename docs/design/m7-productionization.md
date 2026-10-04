@@ -185,15 +185,27 @@ transient backpressure — the concurrency guard, a tenant quota or in-flight
 refusal, a tenant token reservation the bucket will refill for, and (once the
 Responses engine path adopts it, WP-17c) the SLO shed — with 503
 `service_unavailable_error`/`slow_down` plus `Retry-After` and
-`retry-after-ms`, the wait derived from the bucket refill where one exists.
-Why: Codex treats every HTTP 429 as terminal and 503 `server_is_overloaded`
-as non-retryable, but retries 503 `slow_down` after `Retry-After` (0.160;
-0.153.4 ignores `Retry-After` and fails the turn as overloaded after its four
-HTTP retries), and the OpenAI SDKs retry any 503. A reservation larger than
-the tenant bucket's capacity can never fit, so it stays a non-retryable 429
-`tenant_budget_too_small` naming `max_output_tokens`. Chat, Messages and Jev
-keep their 429 + `Retry-After: 1`; every OpenAI-envelope error now carries the
-nullable `param`.
+`retry-after-ms`. The wait is the bucket refill where one exists; for a
+refused token reservation it is capped at 10 s while another reservation of
+the tenant is in flight, because settling it refunds unused tokens long
+before the refill (Codex sleeps out any `Retry-After`; the OpenAI SDKs ignore
+one over 60 s). Why: Codex treats every HTTP 429 as terminal and 503
+`server_is_overloaded` as non-retryable, but retries 503 `slow_down` after
+`Retry-After` (0.160; 0.153.4 ignores `Retry-After` and fails the turn as
+overloaded after its four HTTP retries), and the OpenAI SDKs retry any 503. A
+reservation larger than the tenant bucket's capacity can never fit, so it
+stays a non-retryable 429 `tenant_budget_too_small` naming
+`max_output_tokens`, sent with `x-should-retry: false` because the SDKs
+otherwise retry every 429. Chat, Messages and Jev keep their 429 +
+`Retry-After: 1`. The nullable `param` is on every Responses-dialect error
+and on the classified Chat sources (request errors, backend failures,
+middleware; m9 D6 amendment). Known limits: (a) a streamed AUTO request with
+tools or compaction takes the buffered path, which reserves after
+`response.created`, so a refusal there — never-fits included — ends in-band
+`response.failed{rate_limit_exceeded}`, which Codex retries; WP-18 reserves
+before the stream opens. (b) Hand-built Chat-family bodies (embeddings, async
+requests, batches and the batch worker, admin routes, Chat stream error
+frames) still omit `param`; they are outside M20's Responses scope.
 
 ### D6 — The cache layer is per-replica radix KV + pool session affinity; no Redis
 

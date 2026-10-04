@@ -28,6 +28,10 @@ from kairyu.entrypoints.server.middleware import send_error
 
 logger = logging.getLogger(__name__)
 
+# A refused reservation's refill wait overstates while the tenant has
+# reservations in flight: settling them refunds unused tokens (m7 D5).
+_SETTLEMENT_RETRY_AFTER_S = 10.0
+
 
 @dataclass(frozen=True)
 class TenantLimits:
@@ -239,7 +243,7 @@ class TenantLimiter:
         limits = self._config.limits_for(tenant)
         active = self._in_flight.get(tenant, 0)
         if limits.max_in_flight is not None and active >= limits.max_in_flight:
-            return TenantAdmission.rejected(tenant, "in_flight", retry_after_s=1.0)
+            return TenantAdmission.rejected(tenant, "in_flight")
         request_bucket = self._request_bucket(tenant)
         if not request_bucket.take(1.0, now):
             wait_s = request_bucket.wait_s(1.0)
@@ -312,7 +316,10 @@ class TenantLimiter:
         """Reserve ``tokens``; on refusal, the seconds until they fit (``inf``: never)."""
         bucket = self._token_bucket(tenant)
         if not bucket.take(float(tokens), self._now()):
-            return bucket.wait_s(tokens)
+            wait_s = bucket.wait_s(tokens)
+            if self._reserved_tokens.get(tenant) and math.isfinite(wait_s):
+                return min(wait_s, _SETTLEMENT_RETRY_AFTER_S)
+            return wait_s
         self._reserved_tokens[tenant] = self._reserved_tokens.get(tenant, 0) + tokens
         return None
 
@@ -591,7 +598,7 @@ class TenantLimitMiddleware:
                     )
             if not admitted:
                 message = f"tenant {tenant!r} async submission limit exceeded"
-                refusal = backpressure(message, "tenant_rate_limited", retry_after_s=1.0)
+                refusal = backpressure(message, "tenant_rate_limited")
                 await send_error(send, scope, refusal)
                 return
             await self.app(scope, receive, send)

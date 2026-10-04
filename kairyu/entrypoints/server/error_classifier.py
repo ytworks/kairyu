@@ -24,7 +24,8 @@ the Chat handler and the Responses routes build a ``ClassifiedError`` and
 ``render_openai`` renders its OpenAI envelope, ``param`` always present. On a
 Responses-dialect path (C25: decided by the path alone, so nothing inspects a
 body) a retryable 429 becomes 503 ``slow_down`` with ``Retry-After`` and
-``retry-after-ms`` (O-2, m7 D5 amendment); Chat and Messages keep their 429.
+``retry-after-ms``, and a non-retryable 429 carries ``x-should-retry: false``
+(O-2, m7 D5 amendment); Chat and Messages keep their 429.
 """
 
 from __future__ import annotations
@@ -59,8 +60,12 @@ _SERVER_ERROR_MESSAGE = "The server had an error while processing your request."
 # /v1/alpha holds Codex's standalone search endpoint (POST {base}/alpha/search).
 _RESPONSES_DIALECT_PREFIXES = ("/v1/responses", "/v1/conversations", "/v1/alpha")
 _MS_PER_S = 1000
+# The wait advertised for backpressure that has no refill-derived wait.
+DEFAULT_RETRY_AFTER_S = 1.0
 # Chat, Messages and Jev keep their historical 429 + Retry-After: 1 (m7 D5).
-_LEGACY_RETRY_HEADERS = {"retry-after": "1"}
+_LEGACY_RETRY_HEADERS = {"retry-after": str(math.ceil(DEFAULT_RETRY_AFTER_S))}
+# The OpenAI SDKs retry every 429 unless the server says otherwise.
+_NO_RETRY_HEADERS = {"x-should-retry": "false"}
 _TENANT_BUDGET_TOO_SMALL = (
     "tenant {tenant!r} token budget can never hold this request's reservation; "
     "set a lower max_output_tokens (an omitted max_output_tokens reserves the "
@@ -186,7 +191,9 @@ def backend_failure(error: BaseException) -> ClassifiedError:
     )
 
 
-def backpressure(message: str, code: str, *, retry_after_s: float) -> ClassifiedError:
+def backpressure(
+    message: str, code: str, *, retry_after_s: float = DEFAULT_RETRY_AFTER_S
+) -> ClassifiedError:
     """Transient overload or quota: a retryable 429 (503 on the Responses dialect)."""
 
     return replace(
@@ -204,7 +211,7 @@ def tenant_rate_limited(
     return backpressure(
         f"tenant {tenant!r} admission limit exceeded ({reason})",
         "tenant_rate_limited",
-        retry_after_s=retry_after_s or 1.0,
+        retry_after_s=retry_after_s or DEFAULT_RETRY_AFTER_S,
     )
 
 
@@ -234,7 +241,8 @@ def render_openai(error: ClassifiedError, *, responses: bool) -> HttpError:
     Responses (O-2): Codex treats every 429 as terminal and 503
     ``server_is_overloaded`` as non-retryable, but retries 503 ``slow_down``
     after ``Retry-After``; the OpenAI SDKs retry any 503 and read
-    ``retry-after-ms`` first. Chat keeps its 429 and ``Retry-After: 1``.
+    ``retry-after-ms`` first, and retry a 429 unless ``x-should-retry: false``
+    marks it terminal. Chat keeps its 429 and ``Retry-After: 1``.
     """
 
     if not responses:
@@ -246,7 +254,9 @@ def render_openai(error: ClassifiedError, *, responses: bool) -> HttpError:
 
 
 def _retry_headers(error: ClassifiedError) -> dict[str, str]:
-    if not error.retryable or error.retry_after_s is None:
+    if not error.retryable:
+        return dict(_NO_RETRY_HEADERS) if error.status == 429 else {}
+    if error.retry_after_s is None:
         return {}
     wait_ms = max(1, math.ceil(error.retry_after_s * _MS_PER_S))
     return {

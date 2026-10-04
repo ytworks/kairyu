@@ -261,9 +261,7 @@ class ConcurrencyLimitMiddleware:
 
     async def _reject(self, scope: dict, send: Callable, message: str) -> None:
         # 429 + Retry-After, or 503 slow_down on the Responses dialect (O-2)
-        await send_error(
-            send, scope, backpressure(message, "concurrency_exceeded", retry_after_s=1.0)
-        )
+        await send_error(send, scope, backpressure(message, "concurrency_exceeded"))
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if (

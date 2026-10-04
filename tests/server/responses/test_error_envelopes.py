@@ -4,8 +4,10 @@ Framework (422, malformed JSON, 404, 405), middleware (401, 403, concurrency,
 tenant quota) and handler (reservation, previous_response_id) failures on
 ``/v1/responses*`` all answer ``{"error": {message, type, param, code}}``.
 Transient backpressure is 503 ``slow_down`` with ``Retry-After`` and
-``retry-after-ms`` (Codex retries it; it treats any 429 as terminal); only a
-reservation the tenant's bucket can never hold stays a 429.
+``retry-after-ms`` (Codex retries it; it treats any 429 as terminal), the wait
+derived from the bucket refill and capped while the tenant's reservations are
+in flight; only a reservation the tenant's bucket can never hold stays a 429,
+marked ``x-should-retry: false`` for the OpenAI SDKs.
 
 A 413 case joins this table with WP-08c: no body limit applies to
 ``/v1/responses`` before it.
@@ -14,6 +16,7 @@ A 413 case joins this table with WP-08c: no body limit applies to
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -34,10 +37,10 @@ _TENANT_BOUND_TOKENS = 100
 
 
 class _FixedBoundBackend(MockBackend):
-    """Reserves a fixed, non-refundable bound so a second turn finds the bucket short."""
+    """Reserves a fixed bound, so a concurrent second turn finds the bucket short."""
 
     def admission_upper_bound(self, request) -> AdmissionUpperBound:
-        return AdmissionUpperBound(tokens=_TENANT_BOUND_TOKENS, refundable_on_exact_usage=False)
+        return AdmissionUpperBound(tokens=_TENANT_BOUND_TOKENS, refundable_on_exact_usage=True)
 
 
 def _plain() -> FastAPI:
@@ -87,13 +90,15 @@ class _Case:
     content: bytes | None = None
     headers: dict[str, str] = field(default_factory=dict)
     first: str | None = None  # "concurrent": occupy the slot; "completed": spend quota
-    retryable: bool = False
+    retry_after: str | None = None  # the exact Retry-After; None: no retry headers
+    should_retry: str | None = None  # x-should-retry (OpenAI SDKs)
 
 
 _CASES = {
-    "schema-error": _Case(
-        _plain, "POST", "/v1/responses", 400, _INVALID, "invalid_type", "tools[0]",
-        json={"model": "m", "tools": [5]},
+    "schema-error": _Case(  # a union field reports the branch that matched the JSON type
+        _plain, "POST", "/v1/responses", 400, _INVALID, "invalid_type", "input[0]",
+        message="Invalid value for 'input[0]': Input should be a valid dictionary.",
+        json={"model": "m", "input": [5]},
     ),
     "malformed-json": _Case(
         _plain, "POST", "/v1/responses", 400, _INVALID, "invalid_json",
@@ -118,24 +123,30 @@ _CASES = {
     ),
     "concurrency-limit": _Case(
         _one_slot, "POST", "/v1/responses", 503, "service_unavailable_error", "slow_down",
-        first="concurrent", retryable=True,
+        first="concurrent", retry_after="1",
     ),
-    "tenant-request-quota": _Case(
-        lambda: _tenant(MockBackend(), TenantLimits(requests_per_minute=6, request_burst=1)),
+    "tenant-request-quota": _Case(  # burst 1 refilled at 4/min: the wait is the 15 s refill
+        lambda: _tenant(MockBackend(), TenantLimits(requests_per_minute=4, request_burst=1)),
         "POST", "/v1/responses", 503, "service_unavailable_error", "slow_down",
-        first="completed", retryable=True,
+        first="completed", retry_after="15",
     ),
-    "tenant-token-quota": _Case(
+    "tenant-token-quota": _Case(  # a 3000 s refill, capped while the held turn settles
         lambda: _tenant(
-            _FixedBoundBackend(),
+            _FixedBoundBackend(latency_s=0.2),
             TenantLimits(tokens_per_minute=1, token_burst=_TENANT_BOUND_TOKENS * 3 // 2),
         ),
         "POST", "/v1/responses", 503, "service_unavailable_error", "slow_down",
-        first="completed", retryable=True,
+        first="concurrent", retry_after="10",
+    ),
+    "engine-tenant-budget-too-small": _Case(
+        lambda: _tenant(_FixedBoundBackend(), TenantLimits(token_burst=_TENANT_BOUND_TOKENS // 2)),
+        "POST", "/v1/responses", 429, "rate_limit_error", "tenant_budget_too_small",
+        should_retry="false",
     ),
     "auto-tenant-budget-too-small": _Case(
         _auto_tenant_budget_of_one_token, "POST", "/v1/responses", 429, "rate_limit_error",
         "tenant_budget_too_small", json={"model": "kairyu-auto", "input": "hello"},
+        should_retry="false",
     ),
     "previous-response-not-found": _Case(
         _plain, "POST", "/v1/responses", 400, _INVALID, "previous_response_not_found",
@@ -180,10 +191,10 @@ async def test_framework_errors_use_openai_envelope(case: _Case) -> None:
     )
     if case.message is not None:
         assert error["message"] == case.message
-    retry_after = response.headers.get("retry-after")
+    assert response.headers.get("retry-after") == case.retry_after
     retry_after_ms = response.headers.get("retry-after-ms")
-    if case.retryable:
-        assert int(retry_after) >= 1
-        assert int(retry_after_ms) >= 1
+    if case.retry_after is None:
+        assert retry_after_ms is None
     else:
-        assert (retry_after, retry_after_ms) == (None, None)
+        assert math.ceil(int(retry_after_ms) / 1000) == int(case.retry_after)
+    assert response.headers.get("x-should-retry") == case.should_retry
