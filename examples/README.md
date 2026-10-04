@@ -1,4 +1,4 @@
-# Kairyu L3 + vLLM L1 examples
+# Kairyu L3 + vLLM / llama.cpp L1 examples
 
 `examples/` contains these complete environments:
 
@@ -15,11 +15,15 @@
 | [`deepseek-v4-flash-vision-exp-dp2-8gpu`](deepseek-v4-flash-vision-exp-dp2-8gpu/README.md) | DeepSeek-V4-Flash-Vision-Exp TP4+EP4 x 2 replicas (GPU 0-3, 4-7) | one public text + image model with OpenAI tool calling and a Chat UI reasoning-effort dropdown (default/low/high/max); replica pool only |
 | [`deepseek-v4.1-flash-8gpu`](deepseek-v4.1-flash-8gpu/README.md) | DeepSeek-V4.1-Flash, one TP8 replica (GPU 0-7) | text + image, OpenAI tools, default thinking high; V4 ReplicaPool/API/UI structure |
 | [`qwen3.8-flash-next-dp2-8gpu`](qwen3.8-flash-next-dp2-8gpu/README.md) | Qwen3.8-Flash-Next-FP8 TP4 x 2 replicas (GPU 0-3, 4-7) | one public text + image model with OpenAI tool calling and a Chat UI reasoning-effort dropdown (default/low/medium/xhigh); replica pool only |
+| [`winnow-12b-q8-1gpu`](winnow-12b-q8-1gpu/README.md) | Winnow-12B Q8_0 GGUF on llama.cpp (`winnow-server`), one selected RTX PRO 6000 Blackwell | text + image, OpenAI tools, 8 slots x 65,536 tokens; Winnow's typed decisions on `/v1/systemone` |
+| [`winnow-12b-q8-dp8-8gpu`](winnow-12b-q8-dp8-8gpu/README.md) | Winnow-12B Q8_0 GGUF on llama.cpp x 8 replicas, one per card | one public model behind a Kairyu ReplicaPool (`upstream: llamacpp`); System One over the same 8 servers |
 
 All of them use Kairyu as L3 and Open WebUI as the public chat surface (the
 checklist-verified example uses its own answer page instead). L1 is
 vLLM, except in `openjev-diffusiongemma-26b-1gpu`, whose L1 is OpenJev (vLLM
-inside its container).
+inside its container), and in the two `winnow-12b-q8` environments, whose L1 is
+llama.cpp serving a GGUF checkpoint (`upstream: llamacpp`,
+`docs/design/llamacpp-upstream.md`).
 The four `dp` environments add no orchestration: Kairyu L2 only spreads requests
 over identical L1 replicas, and their `verify.sh` proves the per-replica split
 and the OpenAI tool-calling agent contract (`tool-calling`); the two vision
@@ -50,6 +54,8 @@ Start everything and print the local Chat UI URL:
 ./examples/deepseek-v4-flash-0731-dp2-8gpu/run.sh
 ./examples/deepseek-v4-flash-vision-exp-dp2-8gpu/run.sh
 ./examples/qwen3.8-flash-next-dp2-8gpu/run.sh
+./examples/winnow-12b-q8-1gpu/run.sh
+./examples/winnow-12b-q8-dp8-8gpu/run.sh
 ```
 
 Run serving verification through the Kairyu L3 endpoint:
@@ -64,6 +70,8 @@ Run serving verification through the Kairyu L3 endpoint:
 ./examples/deepseek-v4-flash-0731-dp2-8gpu/verify.sh serving
 ./examples/deepseek-v4-flash-vision-exp-dp2-8gpu/verify.sh serving
 ./examples/qwen3.8-flash-next-dp2-8gpu/verify.sh serving
+./examples/winnow-12b-q8-1gpu/verify.sh serving
+./examples/winnow-12b-q8-dp8-8gpu/verify.sh serving
 ```
 
 List the supported operations with `verify.sh list`. Model and product
