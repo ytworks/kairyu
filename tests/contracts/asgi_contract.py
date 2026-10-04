@@ -28,7 +28,7 @@ import httpx
 
 from tests.contracts.divergences import Divergence, triage
 from tests.contracts.openai_contract import Violation, contract_validator, is_gated
-from tests.contracts.wire_capture import WireCapture, WireRecord
+from tests.contracts.wire_capture import REQUEST_BODY_LIMIT, WireCapture, WireRecord
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -141,15 +141,20 @@ class RecordingApp:
         if scope["type"] != "http" or not self._gate.wants(scope["path"]):
             await self.app(scope, receive, send)
             return
-        request_body = bytearray()
+        # Only a bounded request prefix is kept: memory-bound upload tests stay valid.
+        request_head = bytearray()
+        request_size = 0
         start: dict[str, Any] = {}
         body = bytearray()
         complete = False
 
         async def observe_receive() -> Message:
+            nonlocal request_size
             message = await receive()
             if message["type"] == "http.request":
-                request_body.extend(message.get("body", b""))
+                chunk = message.get("body", b"")
+                request_size += len(chunk)
+                request_head.extend(chunk[: max(0, REQUEST_BODY_LIMIT - len(request_head))])
             return message
 
         async def observe_send(message: Message) -> None:
@@ -163,7 +168,8 @@ class RecordingApp:
 
         await self.app(scope, observe_receive, observe_send)
         if complete:
-            self._gate.record(WireRecord.from_asgi(scope, bytes(request_body), start, bytes(body)))
+            request = (bytes(request_head), request_size)
+            self._gate.record(WireRecord.from_asgi(scope, request, start, bytes(body)))
 
 
 def install_recorders(gate: ContractGate) -> Callable[[], None]:
