@@ -338,12 +338,11 @@ roles:
         - {key: request, source: request, max_total_chars: 100000}
         - {key: history, source: history}
         - {key: answer, source: answer}
-      # tau_hi (InFoBench expert labels, four denoise passes, alpha = 0.10 at
-      # 95 % confidence; recalibrated 2026-10-04 with every point statement
-      # and summary regenerated: calibration upper bound 0.0966, held-out
-      # 0.0926; owner decision) marks a point as missed for the repair; the
-      # acceptance read decides the guarantee.
-      threshold: 0.999733
+      # tau_hi marks a point as missed for the repair; the acceptance read,
+      # which sees those marks, decides the guarantee. Chosen by calibrate.py
+      # (2026-10-04) as the candidate guaranteeing the most correct InFoBench
+      # answers net of wrong ones (tie: lower error).
+      threshold: 0.99
       # Four OpenJev denoise passes, for this read and the acceptance read
       # (owner decision): with one pass, a 10-14 point agent turn read even a
       # present bash call at p 0.07-0.77.

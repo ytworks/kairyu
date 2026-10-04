@@ -15,7 +15,8 @@ sees those marks, so the guarantee is measured for every candidate tau_hi:
   Q1 error  guaranteed answers (acceptance >= tau_accept) that miss a label
   Q2 miss   correct answers that get no guarantee
 tau_hi is chosen on the calibration half as the candidate with the most
-correct answers guaranteed net of wrong ones guaranteed; the held-out half
+correct answers guaranteed net of wrong ones guaranteed (a tie goes to the
+lower error); the held-out half
 is reported for it and decides the gate: error at most 15.2 % and miss at
 most 36 % (the held-out values measured when the owner set tau_accept 0.99).
 
@@ -363,9 +364,14 @@ def main() -> None:
                 [row for row in scored if row["id"] not in calibration_ids], tau_accept, confidence
             ),
         }
+    # Most correct answers guaranteed net of wrong ones; a tie goes to the
+    # candidate with the lower error.
     chosen = max(
         TAU_HI_CANDIDATES,
-        key=lambda tau: report["candidates"][str(tau)]["calibration"]["net_correct_guaranteed"],
+        key=lambda tau: (
+            report["candidates"][str(tau)]["calibration"]["net_correct_guaranteed"],
+            -(report["candidates"][str(tau)]["calibration"]["error_rate"] or 1.0),
+        ),
     )
     holdout = report["candidates"][str(chosen)]["holdout"]
     report["chosen_tau_hi"] = chosen
