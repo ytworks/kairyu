@@ -13,7 +13,8 @@ text of the legacy-rendered prompt; tool loops use index-based ``turns``
 envelopes, so AUTO scripts use ``turns`` and ``default`` only.
 
 A scenario a later work package delivers carries ``xfail`` (gap, WP): it is
-expected to fail, and an unexpected pass fails the matrix so that WP flips it.
+expected to fail with its ``signature`` failure (any other failure is FAIL),
+and an unexpected pass fails the matrix so that WP flips it.
 ``LIVE_SCENARIOS`` replace ``scripts/codex_responses_smoke.sh`` for a real
 deployment (``run_matrix --live``): natural-language prompts, no script.
 """
@@ -76,6 +77,7 @@ class XFail:
     gap: str
     wp: str
     reason: str
+    signature: str  # a failure containing it is the expected one; other failures FAIL
 
 
 @dataclass(frozen=True)
@@ -196,14 +198,17 @@ SCENARIOS: tuple[MatrixScenario, ...] = (
         prompt="Run pwd, then reply PASS.",
         script=Scenario(turns=(Turn(_pwd()),), default=Turn("PASS")),
         outcome=Outcome(command="pwd"),
-        # A burst of two (the matrix's catalog fetch, Codex's first request)
-        # refilled once per 10 s: the tool loop's follow-up is refused.
-        tenant_limits=(("requests_per_minute", 6), ("request_burst", 2)),
+        # Codex's own tenant (launcher.py; harness traffic is not counted) with
+        # a burst of one refilled once per 10 s: Codex's second request is
+        # refused -- the tool loop's follow-up, or on the openai_base_url shape
+        # (whose 426 WebSocket probe spends the burst today) the first POST.
+        tenant_limits=(("requests_per_minute", 6), ("request_burst", 1)),
         xfail=XFail(
             gap="G-errors-5",
             wp="WP-07",
             reason="a transient tenant refusal is a 429, which Codex never retries; "
             "503 slow_down with Retry-After is (O-2)",
+            signature="HTTP 429 POST /v1/responses (tenant_rate_limited)",
         ),
     ),
 )

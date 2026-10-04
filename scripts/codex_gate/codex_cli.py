@@ -28,7 +28,9 @@ CUSTOM = "custom-responses"
 OPENAI_BASE_URL = "openai-base-url"
 PROVIDER_ID = "kairyu"
 CUSTOM_KEY_ENV = "KAIRYU_API_KEY"
-OPENAI_KEY_ENV = "OPENAI_API_KEY"
+# The built-in openai provider has no env_key: ``codex exec`` reads its key
+# from CODEX_API_KEY (codex-rs exec/src/lib.rs, login auth/manager.rs).
+EXEC_KEY_ENV = "CODEX_API_KEY"
 INSTALL_TIMEOUT_S = 600
 # The trace line Codex writes after each sampling response names the
 # auto-compaction limit it derived from the model metadata (catalog).
@@ -205,7 +207,7 @@ def isolated_env(run_dir: Path, api_key: str) -> dict[str, str]:
         "LANG": "C.UTF-8",
         "RUST_LOG": TRACE_FILTER,
         CUSTOM_KEY_ENV: api_key,
-        OPENAI_KEY_ENV: api_key,
+        EXEC_KEY_ENV: api_key,
     }
 
 
@@ -216,6 +218,20 @@ def prepare_home(run_dir: Path, provider: Provider) -> Path:
         (run_dir / name).mkdir(parents=True, exist_ok=True)
     (run_dir / "codex-home" / "config.toml").write_text(provider_toml(provider), "utf-8")
     return run_dir / "work"
+
+
+def exec_command(
+    program: str,
+    prompt: str,
+    exec_args: Sequence[str] = (),
+    config: Sequence[tuple[str, str]] = (),
+) -> list[str]:
+    """The ``codex exec`` argv of one turn (``config``: ``-c KEY=TOML-VALUE``)."""
+
+    command = [program, "exec", "--json", "--skip-git-repo-check", *exec_args]
+    for key, value in config:
+        command += ["-c", f"{key}={value}"]
+    return [*command, prompt]
 
 
 def run_turn(
@@ -230,10 +246,7 @@ def run_turn(
 ) -> TurnResult:
     """Run one turn; stdout/stderr are kept as ``codex.jsonl``/``codex.log``."""
 
-    command = [str(binary.path), "exec", "--json", "--skip-git-repo-check", *exec_args]
-    for key, value in config:
-        command += ["-c", f"{key}={value}"]
-    command.append(prompt)
+    command = exec_command(str(binary.path), prompt, exec_args, config)
     stdout_path = run_dir / "codex.jsonl"
     stderr_path = run_dir / "codex.log"
     with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w") as err:

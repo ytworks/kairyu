@@ -20,10 +20,11 @@ deployment instead (it replaces ``scripts/codex_responses_smoke.sh``)::
     python -m scripts.codex_gate.run_matrix --codex 0.160.0 \\
         --live --base-url http://kairyu:8000/v1 --model qwen3-32b
 
-A scenario marked ``xfail`` must fail (``XFAIL``); an unexpected pass is
-``XPASS`` and, like ``FAIL``, makes the exit status 1. Artifacts (Codex
-events and logs, captures, exchange log, catalog, ``report.json``) are kept in
-``--out``.
+A scenario marked ``xfail`` must fail with its signature failure (``XFAIL``);
+an unexpected pass is ``XPASS`` and, like ``FAIL`` (also any other failure of
+an ``xfail`` scenario), makes the exit status 1. Artifacts (Codex events and
+logs, captures with the run's paths redacted to the committed fixtures'
+placeholders, exchange log, catalog, ``report.json``) are kept in ``--out``.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import base64
 import contextlib
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -51,12 +53,14 @@ from scripts.codex_gate.codex_cli import (
     CodexBinary,
     Provider,
     TurnResult,
+    exec_command,
     prepare_home,
     resolve_codex,
     run_turn,
 )
 from scripts.codex_gate.exchange_log import read_exchanges
-from scripts.codex_gate.scenarios import LIVE_SCENARIOS, SCENARIOS, MatrixScenario
+from scripts.codex_gate.launcher import CODEX_KEY, HARNESS_KEY
+from scripts.codex_gate.scenarios import LIVE_SCENARIOS, SCENARIOS, MatrixScenario, XFail
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CODEX = catalog_gen.CODEX_TAG.removeprefix("rust-v")
@@ -66,6 +70,8 @@ TURN_TIMEOUT_S = 600.0
 # provider tries a WebSocket upgrade first; 426 sends it to HTTPS (D-e, WP-47).
 EXPECTED_ERRORS = {OPENAI_BASE_URL: (("GET", "/responses", 426),)}
 AUTO_COMPACT_KEY = "model_auto_compact_token_limit"
+# Run-directory paths in captures become the committed fixtures' placeholders.
+CAPTURE_REDACTIONS = (("work", "{{CWD}}"), ("codex-home", "{{CODEX_HOME}}"), ("home", "{{HOME}}"))
 IMAGE_NAME = "pixel.png"
 PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -90,7 +96,8 @@ class Options:
     cache_dir: Path
     live_base_url: str | None
     live_model: str | None
-    api_key: str
+    api_key: str  # Codex's
+    catalog_key: str  # the catalog fetch's (its own tenant on a launcher)
     catalog: Path | None
     turn_timeout_s: float
 
@@ -237,12 +244,22 @@ def evaluate(
     if auto_compact_limit is not None:
         override = dict(scenario.codex_config).get(AUTO_COMPACT_KEY, auto_compact_limit)
         expected = min(int(override), auto_compact_limit)
-        if set(turn.auto_compact_limits) - {expected}:
-            failures.append(
-                f"Codex auto-compact limit {sorted(set(turn.auto_compact_limits))}, "
-                f"catalog gives {expected}"
-            )
+        traced = sorted(set(turn.auto_compact_limits))
+        if not traced:
+            failures.append("no auto-compaction trace line (does TRACE_FILTER match this Codex?)")
+        elif traced != [expected]:
+            failures.append(f"Codex auto-compact limit {traced}, catalog gives {expected}")
     return failures
+
+
+def outcome_of(xfail: XFail | None, failures: Sequence[str]) -> str:
+    """PASS/FAIL, or for an ``xfail`` scenario XFAIL only on its signature failure."""
+
+    if xfail is None:
+        return "FAIL" if failures else "PASS"
+    if not failures:
+        return "XPASS"
+    return "XFAIL" if any(xfail.signature in failure for failure in failures) else "FAIL"
 
 
 def _start_server(
@@ -263,6 +280,19 @@ def _start_server(
     return upstream, scenario.served_model
 
 
+def _exec_args(scenario: MatrixScenario) -> tuple[str, ...]:
+    if scenario.attach_image:
+        return (*scenario.codex_args, f"--image={IMAGE_NAME}")
+    return scenario.codex_args
+
+
+def _invocation(scenario: MatrixScenario, model: str) -> str:
+    """The Codex command line of a run, for the captures' provenance."""
+
+    argv = exec_command("codex", scenario.prompt, _exec_args(scenario), scenario.codex_config)
+    return f"{shlex.join(argv)} [model: {model}]"
+
+
 def _start_proxy(
     stack: contextlib.ExitStack,
     upstream: str,
@@ -270,12 +300,16 @@ def _start_proxy(
     scenario: MatrixScenario,
     shape: str,
     run_dir: Path,
+    model: str,
 ) -> int:
     port = free_port()
     command = ["scripts.codex_gate.record_proxy", "serve", "--upstream", upstream]
     command += ["--port", str(port), "--out", str(run_dir / "captures")]
     command += ["--codex-version", binary.version, "--provider-shape", shape]
     command += ["--scenario", scenario.name, "--exchange-log", str(run_dir / "exchanges.jsonl")]
+    command += ["--invocation", _invocation(scenario, model)]
+    for name, placeholder in CAPTURE_REDACTIONS:
+        command += ["--redact", f"{run_dir / name}={placeholder}"]
     proxy = stack.enter_context(background(command, run_dir / "proxy.log"))
     _wait(lambda: _port_open(port), "record proxy", proxy)
     return port
@@ -284,16 +318,14 @@ def _start_proxy(
 def _codex_turn(
     binary: CodexBinary, scenario: MatrixScenario, run_dir: Path, options: Options
 ) -> TurnResult:
-    exec_args = scenario.codex_args
     if scenario.attach_image:
         (run_dir / "work" / IMAGE_NAME).write_bytes(PIXEL_PNG)
-        exec_args = (*exec_args, f"--image={IMAGE_NAME}")
     return run_turn(
         binary,
         run_dir,
         prompt=scenario.prompt,
         api_key=options.api_key,
-        exec_args=exec_args,
+        exec_args=_exec_args(scenario),
         config=scenario.codex_config,
         timeout_s=options.turn_timeout_s,
     )
@@ -307,12 +339,14 @@ def run_one(
     run_dir.mkdir(parents=True, exist_ok=True)
     with contextlib.ExitStack() as stack:
         upstream, model = _start_server(stack, scenario, run_dir, options)
-        proxy_port = _start_proxy(stack, upstream, binary, scenario, shape, run_dir)
+        proxy_port = _start_proxy(stack, upstream, binary, scenario, shape, run_dir, model)
         catalog, limit = options.catalog, None
         if catalog is None:
             catalog = run_dir / "catalog.json"
             instructions = base_instructions(options.cache_dir)
-            limit = write_catalog(catalog, f"{upstream}/v1", model, options.api_key, instructions)
+            limit = write_catalog(
+                catalog, f"{upstream}/v1", model, options.catalog_key, instructions
+            )
         provider = Provider(
             shape=shape,
             base_url=f"http://127.0.0.1:{proxy_port}/v1",
@@ -325,15 +359,11 @@ def run_one(
     exchanges = read_exchanges(run_dir / "exchanges.jsonl")
     failures = evaluate(scenario, shape, turn, exchanges, limit)
     xfail = scenario.xfail
-    if xfail is None:
-        outcome = "FAIL" if failures else "PASS"
-    else:
-        outcome = "XFAIL" if failures else "XPASS"
     return RunResult(
         codex=binary.version,
         shape=shape,
         scenario=scenario.name,
-        outcome=outcome,
+        outcome=outcome_of(xfail, failures),
         failures=tuple(failures),
         xfail=None if xfail is None else f"{xfail.gap} / {xfail.wp}: {xfail.reason}",
         seconds=round(time.monotonic() - started, 1),
@@ -352,7 +382,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="target --base-url, not a launcher")
     parser.add_argument("--base-url", help="live Kairyu OpenAI base URL (with /v1)")
     parser.add_argument("--model", help="live model id")
-    parser.add_argument("--api-key-env", default="KAIRYU_API_KEY")
+    parser.add_argument("--api-key-env", default="KAIRYU_API_KEY", help="the --live key")
     parser.add_argument("--catalog", type=Path, help="use this catalog instead of generating one")
     parser.add_argument("--turn-timeout", type=float, default=TURN_TIMEOUT_S)
     args = parser.parse_args(argv)
@@ -375,13 +405,16 @@ def _select(args: argparse.Namespace) -> list[MatrixScenario]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     scenarios = _select(args)
-    out = args.out or Path(tempfile.mkdtemp(prefix="codex-gate-"))
+    # Absolute: the launcher and proxy run from the repository root.
+    out = (args.out or Path(tempfile.mkdtemp(prefix="codex-gate-"))).resolve()
+    live_key = os.environ.get(args.api_key_env) or CODEX_KEY
     options = Options(
         out=out,
         cache_dir=args.cache_dir,
         live_base_url=args.base_url if args.live else None,
         live_model=args.model,
-        api_key=os.environ.get(args.api_key_env) or "kairyu-codex-gate",
+        api_key=live_key if args.live else CODEX_KEY,
+        catalog_key=live_key if args.live else HARNESS_KEY,
         catalog=args.catalog.resolve() if args.catalog else None,
         turn_timeout_s=args.turn_timeout,
     )

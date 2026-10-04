@@ -8,11 +8,16 @@ ordinary ``DeploymentSpec`` built by ``build_app_from_spec`` and served by
 uvicorn with ``ws="none"`` (WebSocket upgrades are plain 426 GETs, D-e), so
 Codex meets the production HTTP stack. The scenario backend is registered here
 only; importing this module registers nothing.
+
+A scenario's ``tenant_limits`` apply to Codex alone: the deployment then
+requires API keys, ``CODEX_KEY`` maps to its own limited tenant, and the
+harness (the matrix's catalog fetch) uses ``HARNESS_KEY`` on the default tenant.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -27,6 +32,11 @@ from scripts.codex_gate.scenarios import (
 )
 
 BACKEND = "codex-gate-scenario"
+# Dummy keys of a scenario deployment: Codex's and the matrix harness's.
+CODEX_KEY = "kairyu-codex-gate"
+HARNESS_KEY = "kairyu-codex-gate-harness"
+KEYS_ENV = "KAIRYU_CODEX_GATE_API_KEYS"
+CODEX_TENANT = "codex"
 # Thresholds no Codex prompt reaches: AUTO always routes to one direct tier.
 DIRECT_ROUTE = {
     "multi_step_markers": 10**6,
@@ -64,7 +74,11 @@ def deployment(scenario: MatrixScenario, host: str, port: int, workdir: Path) ->
         "legacy_chat_models": [ENGINE_MODEL],
     }
     if scenario.tenant_limits:
-        spec["tenants"] = {"limits": {"default": dict(scenario.tenant_limits)}}
+        spec["server"]["api_keys_env"] = KEYS_ENV
+        spec["tenants"] = {
+            "key_tenants": {CODEX_KEY: CODEX_TENANT},
+            "limits": {CODEX_TENANT: dict(scenario.tenant_limits)},
+        }
     if scenario.model == "auto":
         path = workdir / "auto-orchestrator.yaml"
         path.write_text(yaml.safe_dump(orchestrator_spec(), sort_keys=False), encoding="utf-8")
@@ -79,6 +93,8 @@ def build_app(scenario: MatrixScenario, host: str, port: int, workdir: Path):
 
     if scenario.script is None:
         raise SystemExit(f"scenario {scenario.name!r} targets a live deployment (--live)")
+    # This launcher process owns its environment; the spec reads the keys from it.
+    os.environ[KEYS_ENV] = f"{CODEX_KEY},{HARNESS_KEY}"
     register_scenario_backend(scenario.script, name=BACKEND)
     spec = DeploymentSpec.model_validate(deployment(scenario, host, port, workdir))
     return build_app_from_spec(spec, base_dir=workdir)
