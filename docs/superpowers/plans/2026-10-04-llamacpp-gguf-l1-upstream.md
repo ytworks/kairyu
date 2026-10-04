@@ -1,9 +1,11 @@
 # llama.cpp as a Kairyu L1 worker: serve GGUF models with zero L2 change
 
-Status: proposed (2026-10-04), awaiting owner approval. Base: `main` at
-`a8d242b`. llama.cpp reference: `ggml-org/llama.cpp` master `46847e6`
-(tag `b11391`, 2026-10-04); every llama.cpp claim below was read in that
-source (paths are relative to its repo root).
+Status: owner-approved 2026-10-04 (decisions under "Owner decisions"). Base:
+`main` at `a8d242b`. llama.cpp reference: `ggml-org/llama.cpp` master
+`46847e6` (tag `b11391`, 2026-10-04); every llama.cpp claim below was read in
+that source (paths are relative to its repo root). The example runtime's base
+`911f6cd` (`b11036`, 2026-09-18) was re-checked for every row of LCP-D2/D3/D4
+and behaves the same.
 
 ## Goal
 
@@ -358,10 +360,38 @@ showing nothing.
 - `PROGRESS.md`: one `[design]` Change Log entry and a "What works today"
   line, in the same commit as the design doc.
 
-### Phase 3: GPU-verified example (example-owned policy)
+### Phase 3: GPU-verified examples (example-owned policy)
 
-`examples/<model>-gguf-llamacpp-1gpu/` (the model and quantization are the
-owner's choice, see Q1). It follows the 1-GPU vLLM example's structure:
+Model (owner, Q1): [EldanRing/Winnow-12B](https://huggingface.co/EldanRing/Winnow-12B)
+`gguf/Winnow-12B-Q8_0.gguf` (12,669,646,592 bytes, sha256 `b710efc4…18ea`)
+with `gguf/mmproj-F16.gguf` at model revision `b2b14213`. It is a merged
+Gemma 4 12B IT fine-tune for typed decisions that also chats and takes images.
+
+Its runtime is not stock llama.cpp. [EldanRing/winnow-inference](https://github.com/EldanRing/winnow-inference)
+(`77d1458`) pins llama.cpp `911f6cd` (`b11036`) plus four patches:
+
+- Gemma 4 tied embedding;
+- bounded SWA fork;
+- classifier head;
+- a server patch that adds `/v1/systemone`, Jev's typed-decision wire shape.
+
+Its `winnow-server` keeps llama-server's `/v1/chat/completions`, `/health`
+and `/props` unchanged. The example therefore builds that image (`CUDA_ARCH=120`,
+digest recorded in `example.json`) as its L1. The patched runtime is
+example-owned, like the vLLM SM120 overlays.
+
+Because Kairyu's existing System One forwarder is wire-transparent
+(`kairyu/engine/systemone.py`; `usage.input_tokens`/`output_tokens`), each
+example also publishes Winnow's typed decisions through a `systemone:` entry,
+with no framework change.
+
+Two examples (Q4):
+
+- `examples/winnow-12b-q8-1gpu/`: one `winnow-server` on one RTX PRO 6000.
+- `examples/winnow-12b-q8-dp8-8gpu/`: eight `winnow-server`s, one per card,
+  behind one ReplicaPool for chat and one multi-replica `systemone:` entry.
+
+They follow the vLLM 1-GPU and DP8 examples' structure:
 
 - `compose.yaml` with the pinned llama-server, Kairyu and Open WebUI;
 - `kairyu.yaml` with `upstream: llamacpp` and an explicit `health_url`;
@@ -423,16 +453,12 @@ report states the head count and this rationale.
 - **Logprob semantics.** These are pre-sampling softmax probabilities (the
   llama.cpp default, the same as vLLM's raw default). Documented, not altered.
 
-## Open questions for the owner
+## Owner decisions (2026-10-04)
 
-- **Q1.** Example model, GGUF quantization and source (official GGUF repo
-  and revision), and GPU. Should it be a GGUF of a model already served in the
-  examples, so the output can be compared with its vLLM example?
-- **Q2.** `response_format` with `json_schema`. Recommended: forward it and
-  document the `pattern` relaxation (parity with the `vllm` profile, which
-  also forwards to its upstream's grammar engine). Alternative: reject schemas
-  containing `pattern` on `llamacpp`.
-- **Q3.** Batch/AsyncRequest on llama.cpp engines. Recommended: accept the
-  existing fail-closed limitation for now (LCP-D6).
-- **Q4.** Single replica only, or also a DP example (N llama-servers behind one
-  ReplicaPool) in Phase 3?
+- **Q1 (example model).** Winnow-12B Q8_0 (see Phase 3).
+- **Q2 (`response_format` with `json_schema`).** Forward it unchanged and
+  document llama.cpp's relaxation of unsupported regex `pattern`.
+- **Q3 (Batch/AsyncRequest).** Keep the existing fail-closed limitation
+  (LCP-D6).
+- **Q4 (replicas).** Include a DP example: several llama-servers behind one
+  ReplicaPool.
