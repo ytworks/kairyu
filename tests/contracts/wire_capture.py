@@ -55,6 +55,19 @@ NONDETERMINISTIC_TESTS: Mapping[str, str] = MappingProxyType(
         "tests/server/test_usage_truth.py::test_include_usage_final_chunk_contract": (
             "native engine stream chunking depends on scheduling"
         ),
+        "tests/server/test_usage_truth.py::test_usage_key_omitted_without_stream_options": (
+            "native engine stream chunking depends on scheduling"
+        ),
+        f"{_LOGPROBS}test_streaming_logprobs_on_chunk_choice": (
+            "native engine stream chunking depends on scheduling"
+        ),
+        "tests/server/test_batches.py::test_batch_lifecycle_end_to_end": (
+            "status poll count depends on worker timing"
+        ),
+        "tests/server/test_serve_builder.py::"
+        "test_builder_wires_async_request_routes_worker_and_store_lifespan": (
+            "status poll count depends on worker timing"
+        ),
         f"{_STRUCTURED}test_invalid_strict_tool_schema_is_400_and_engine_stays_healthy": (
             "unseeded grammar-constrained sampling"
         ),
