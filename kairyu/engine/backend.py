@@ -339,7 +339,6 @@ def validate_backend_request_before_prepare(
     validate_backend_request(backend, request)
 
 
-
 def _strict_tool_response_format(
     request: GenerationRequest,
 ) -> dict[str, object] | None:
