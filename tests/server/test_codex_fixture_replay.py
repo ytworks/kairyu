@@ -62,6 +62,7 @@ EXPECT_KEYS = frozenset(
         "backend_tools_include",
         "backend_tools_exclude",
         "backend_tools_none",
+        "backend_reasoning_effort",
     }
 )
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -176,6 +177,9 @@ def _assert_backend(backend: ScenarioBackend, expect: Mapping[str, Any]) -> None
     assert not set(expect.get("backend_tools_exclude", ())) & offered, sorted(offered)
     if expect.get("backend_tools_none"):
         assert calls and not offered, sorted(offered)
+    if "backend_reasoning_effort" in expect:
+        efforts = {call.request.reasoning_effort for call in calls}
+        assert efforts == {expect["backend_reasoning_effort"]}, efforts
 
 
 @pytest.mark.parametrize("fixture", list(_fixture_params()))

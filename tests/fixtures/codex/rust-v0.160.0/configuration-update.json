@@ -3,16 +3,16 @@
   "gap_ids": [
     "G-input-items-7"
   ],
-  "contract": "A configuration_update item ({reasoning:{effort}}) inside the history (built-in openai provider, reasoning_effort_override, a model with supports_reasoning_effort_updates); the last one wins.",
+  "contract": "Two configuration_update items ({reasoning:{effort}}) in the history. Codex sends them only on the built-in openai provider (openai_base_url) with reasoning_effort_override and a catalog model with supports_reasoning_effort_updates; elsewhere it strips them. The last one wins: the backend runs at low, not the earlier high.",
   "provenance": {
     "source": "derived",
     "recorder": "scripts/codex_gate/record_proxy.py",
     "codex_version": "0.160.0",
     "codex_tag": "rust-v0.160.0",
-    "provider_shape": "custom-responses",
-    "scenario": "default-turn",
-    "invocation": "codex exec --skip-git-repo-check \"Say hello.\" [model: kairyu-coder]",
-    "sequence": 1,
+    "provider_shape": "openai-base-url",
+    "scenario": "harbor-turn",
+    "invocation": "codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \"Say hello.\" [model: kairyu-coder]",
+    "sequence": 2,
     "observed_status": 200,
     "placeholders": [
       "{{CODEX_HOME}}",
@@ -25,11 +25,37 @@
       "{{TIMEZONE}}",
       "{{TIME}}=0"
     ],
-    "derived_from": "recorded capture default-turn (sequence 1)",
-    "edit": "inserted a configuration_update item before the user's message",
+    "derived_from": "recorded capture harbor-turn (sequence 2)",
+    "edit": "inserted two configuration_update items (high, then low) before the user's message",
     "codex_rs": [
       "codex-rs/protocol/src/models.rs@rust-v0.160.0:1238",
-      "codex-rs/protocol/src/models/configuration_update.rs@rust-v0.160.0:12"
+      "codex-rs/protocol/src/models/configuration_update.rs@rust-v0.160.0:12",
+      "codex-rs/core/src/client.rs@rust-v0.160.0:552-556",
+      "codex-rs/core/src/client.rs@rust-v0.160.0:896-900"
+    ],
+    "derivation": [
+      {
+        "op": "insert",
+        "before": {
+          "type": "message",
+          "role": "user",
+          "last": true
+        },
+        "items": [
+          {
+            "type": "configuration_update",
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          {
+            "type": "configuration_update",
+            "reasoning": {
+              "effort": "low"
+            }
+          }
+        ]
+      }
     ]
   },
   "request": {
@@ -43,19 +69,21 @@
       "session-id": "{{ID_2}}",
       "thread-id": "{{ID_2}}",
       "user-agent": "codex_exec/0.160.0 ({{PLATFORM}})",
+      "version": "0.160.0",
       "x-client-request-id": "{{ID_2}}",
       "x-codex-beta-features": "remote_compaction_v2",
-      "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+      "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
       "x-codex-window-id": "{{ID_2}}:0"
     },
     "body": {
       "client_metadata": {
+        "mcp_attribution": "{\"status\":\"none\"}",
         "root_turn_id": "{{ID_1}}",
         "session_id": "{{ID_2}}",
         "thread_id": "{{ID_2}}",
         "turn_id": "{{ID_1}}",
         "x-codex-installation-id": "{{ID_3}}",
-        "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+        "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
         "x-codex-window-id": "{{ID_2}}:0"
       },
       "include": [
@@ -69,22 +97,37 @@
               "type": "input_text"
             },
             {
-              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
               "type": "input_text"
             }
           ],
           "id": "msg_{{ID_5}}",
+          "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": [
+              "host_skills.instructions",
+              "permissions.instructions"
+            ],
+            "create_time": 0,
+            "turn_id": "{{ID_1}}"
+          },
           "role": "developer",
           "type": "message"
         },
         {
           "content": [
             {
-              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>",
               "type": "input_text"
             }
           ],
           "id": "msg_{{ID_6}}",
+          "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": [
+              "environments.environment_context"
+            ],
+            "create_time": 0,
+            "turn_id": "{{ID_1}}"
+          },
           "role": "user",
           "type": "message"
         },
@@ -95,6 +138,12 @@
           }
         },
         {
+          "type": "configuration_update",
+          "reasoning": {
+            "effort": "low"
+          }
+        },
+        {
           "content": [
             {
               "text": "Say hello.",
@@ -102,6 +151,13 @@
             }
           ],
           "id": "msg_{{ID_7}}",
+          "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": [
+              "user.text"
+            ],
+            "create_time": 0,
+            "turn_id": "{{ID_1}}"
+          },
           "role": "user",
           "type": "message"
         }
@@ -548,7 +604,7 @@
           "type": "function"
         },
         {
-          "external_web_access": false,
+          "external_web_access": true,
           "type": "web_search"
         }
       ]
@@ -574,7 +630,8 @@
       ],
       "prompt_contains": [
         "Say hello."
-      ]
+      ],
+      "backend_reasoning_effort": "low"
     },
     "xfail": {
       "gap": "G-input-items-7",
