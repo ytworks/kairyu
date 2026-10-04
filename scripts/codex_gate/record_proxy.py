@@ -29,9 +29,9 @@ Recording procedure (D1; repeat within 7 days of a new Codex stable):
 
 1. start a Kairyu server; any server answers the single-turn shapes. The
    multi-turn shapes (tool loop, namespace loop, view_image, compaction) need a
-   server scripted over ``tests/support/scenario_backend.py``: WP-05's
-   ``scripts/codex_gate`` scenarios launcher provides it; until it lands those
-   fixtures keep their recording at the tag they name;
+   server scripted over ``tests/support/scenario_backend.py``:
+   ``python -m scripts.codex_gate.launcher --scenario NAME`` serves one, and
+   ``run_matrix.py --out DIR`` keeps every matrix run's captures under ``DIR``;
 2. ``python -m scripts.codex_gate.record_proxy serve --upstream URL --port 8010
    --out DIR --codex-version 0.160.0 --provider-shape custom-responses
    --scenario default-turn --redact /work/dir={{CWD}}``;
@@ -61,6 +61,7 @@ from typing import Any
 from urllib.parse import parse_qsl
 
 from scripts.codex_gate.derivation import DerivationError, apply_derivation
+from scripts.codex_gate.exchange_log import StreamObserver, append_exchange, request_facts
 
 RECORDER = "scripts/codex_gate/record_proxy.py"
 PROVIDER_SHAPES = ("custom-responses", "openai-base-url", "oss-lmstudio", "oss-ollama")
@@ -341,8 +342,14 @@ def _promoted(
     }
 
 
-def create_proxy_app(upstream: str, out_dir: Path, context: CaptureContext):
-    """Starlette app that forwards everything and records the Codex routes."""
+def create_proxy_app(
+    upstream: str, out_dir: Path, context: CaptureContext, exchange_log: Path | None = None
+):
+    """Starlette app that forwards everything and records the Codex routes.
+
+    With ``exchange_log``, every exchange (any route) is also appended there
+    when its response body ends (``exchange_log.py``).
+    """
 
     import httpx
     from starlette.applications import Starlette
@@ -353,9 +360,10 @@ def create_proxy_app(upstream: str, out_dir: Path, context: CaptureContext):
 
     client = httpx.AsyncClient(base_url=upstream, timeout=None)
     sequence = 0
+    exchanges = 0
 
     async def forward(request: Request) -> StreamingResponse:
-        nonlocal sequence
+        nonlocal sequence, exchanges
         body = await request.body()
         headers = [
             (name, value)
@@ -386,8 +394,19 @@ def create_proxy_app(upstream: str, out_dir: Path, context: CaptureContext):
             for name, value in response.headers.items()
             if name.lower() not in _HOP_BY_HOP
         }
+        body_iterator = response.aiter_raw()
+        if exchange_log is not None:
+            exchanges += 1
+            entry = {
+                "exchange": exchanges,
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                **request_facts(body),
+            }
+            body_iterator = _observed(body_iterator, exchange_log, entry, response.headers)
         return StreamingResponse(
-            response.aiter_raw(),
+            body_iterator,
             status_code=response.status_code,
             headers=response_headers,
             background=BackgroundTask(response.aclose),
@@ -402,6 +421,23 @@ def create_proxy_app(upstream: str, out_dir: Path, context: CaptureContext):
 
     methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
     return Starlette(routes=[Route("/{path:path}", forward, methods=methods)], lifespan=lifespan)
+
+
+async def _observed(
+    chunks: AsyncIterator[bytes],
+    log_path: Path,
+    entry: Mapping[str, Any],
+    headers: Mapping[str, str],
+) -> AsyncIterator[bytes]:
+    """Relay ``chunks`` unchanged; log the exchange once the body ends."""
+
+    observer = StreamObserver(sse="text/event-stream" in headers.get("content-type", ""))
+    try:
+        async for chunk in chunks:
+            observer.feed(chunk)
+            yield chunk
+    finally:
+        append_exchange(log_path, {**entry, **observer.summary()})
 
 
 def _redactions(pairs: Sequence[str]) -> tuple[tuple[str, str], ...]:
@@ -432,6 +468,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--invocation", default="", help="the Codex command line and config, for provenance"
     )
     serve.add_argument("--redact", action="append", default=[], metavar="LITERAL=PLACEHOLDER")
+    serve.add_argument(
+        "--exchange-log", type=Path, help="append every exchange's status and events (JSONL)"
+    )
     promote_cmd = commands.add_parser("promote", help="merge a capture into a fixture")
     promote_cmd.add_argument("capture", type=Path)
     promote_cmd.add_argument("fixture", type=Path)
@@ -453,7 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         redactions=_redactions(args.redact),
         user=getpass.getuser(),
     )
-    app = create_proxy_app(args.upstream, args.out, context)
+    app = create_proxy_app(args.upstream, args.out, context, args.exchange_log)
     # ws="none": a Codex WebSocket probe reaches Kairyu as a plain GET (426).
     uvicorn.run(app, host=args.host, port=args.port, ws="none", log_level="warning")
     return 0
