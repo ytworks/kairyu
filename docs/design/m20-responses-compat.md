@@ -1,7 +1,7 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
 Status: **Proposed** (2026-10-05). Phase 0 (WP-00–05) implemented (parts of D1,
-D3/D7/D9, D10, D22), Phase 1 refactors 06/06b/12a and WP-07; WP-53 closes M20.
+D3/D7/D9, D10, D22) and Phase 1 06/06b/12a/07/15; WP-53 closes M20.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
