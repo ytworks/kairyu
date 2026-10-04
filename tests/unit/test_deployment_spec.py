@@ -143,7 +143,9 @@ def test_kubernetes_endpoint_slice_discovery_rejects_invalid_identity(
         )
 
 
-@pytest.mark.parametrize("upstream", ["openai", "anthropic", "gemini", "kairyu", "vllm"])
+@pytest.mark.parametrize(
+    "upstream", ["openai", "anthropic", "gemini", "kairyu", "llamacpp", "vllm"]
+)
 def test_openai_capability_profile_is_validated_while_loading(upstream):
     spec = load_deployment_spec(
         f"""

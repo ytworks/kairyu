@@ -268,6 +268,11 @@ def _validate_openai(options: Mapping[str, object]) -> None:
             "openai backend completion_reasoning_end_tag requires upstream='vllm' "
             "and allow_templated_chat_passthrough=true"
         )
+    if allow_passthrough and capabilities.upstream == "llamacpp":
+        raise ValueError(
+            "openai backend allow_templated_chat_passthrough is not supported "
+            "with upstream='llamacpp'"
+        )
     for field in (
         "chat_tokenizer",
         "model_revision",

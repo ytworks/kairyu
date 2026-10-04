@@ -16,14 +16,16 @@ MockBackend's count-only ids).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
 import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BytesIO
 
 import httpx
 
@@ -502,6 +504,13 @@ def _sampling_payload(
         and value is not None
         and field in capabilities.sampling_fields
     )
+    if (
+        "repetition_penalty" in payload
+        and capabilities.repetition_penalty_wire_name != "repetition_penalty"
+    ):
+        payload[capabilities.repetition_penalty_wire_name] = payload.pop(
+            "repetition_penalty"
+        )
     if params.max_tokens is not None and "max_tokens" in capabilities.sampling_fields:
         payload[capabilities.max_tokens_wire_name] = params.max_tokens
     if params.logprobs is not None and "logprobs" in capabilities.sampling_fields:
@@ -594,7 +603,66 @@ def _validated_request_payload(
                 + ", ".join(sorted(unsupported)),
             )
         payload["chat_template_kwargs"] = dict(request.chat_template_kwargs)
+    if capabilities.upstream == "llamacpp":
+        _adapt_llamacpp_sampling(payload)
     return payload
+
+
+def _adapt_llamacpp_sampling(payload: dict[str, object]) -> None:
+    """Express Kairyu sampling intent in llama.cpp's executed values."""
+
+    # llama.cpp disables top-k with 0; Kairyu and vLLM use -1.
+    if payload.get("top_k") == -1:
+        payload["top_k"] = 0
+    # ``top_logprobs: 0`` becomes ``n_probs: 0``, which disables probabilities
+    # entirely. Ask for one alternative; the response is trimmed back to the
+    # requested count (the sampled token's logprob does not depend on it).
+    if payload.get("logprobs") is True and payload.get("top_logprobs") == 0:
+        payload["top_logprobs"] = 1
+
+
+def _llamacpp_named_tool(
+    tools: tuple[Mapping[str, object], ...],
+    tool_choice: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    """Return the tool a named ``tool_choice`` selects, if declared."""
+
+    function = tool_choice.get("function")
+    name = function.get("name") if isinstance(function, Mapping) else None
+    for tool in tools:
+        declared = tool.get("function")
+        if isinstance(declared, Mapping) and declared.get("name") == name:
+            return tool
+    return None
+
+
+_WEBP_DATA_URL_PREFIX = "data:image/webp;base64,"
+
+
+def _png_data_urls(urls: tuple[str, ...]) -> tuple[str, ...]:
+    """Re-encode validated WebP data URLs as lossless PNG; keep PNG/JPEG.
+
+    llama.cpp decodes images with stb_image, which has no WebP support (WebP
+    needs an ffmpeg-enabled build), and reports a failed decode as HTTP 500.
+    The input was already fully decoded by ``ImageInputPolicy``, so this
+    changes the container, not the pixels.
+    """
+
+    from PIL import Image
+
+    converted: list[str] = []
+    for url in urls:
+        if not url.startswith(_WEBP_DATA_URL_PREFIX):
+            converted.append(url)
+            continue
+        encoded = url[len(_WEBP_DATA_URL_PREFIX) :]
+        with Image.open(BytesIO(base64.b64decode(encoded))) as image:
+            output = BytesIO()
+            image.save(output, format="PNG")
+        converted.append(
+            "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+        )
+    return tuple(converted)
 
 
 def _upstream_reasoning(message: object) -> str | None:
@@ -691,6 +759,12 @@ class OpenAICompatBackend:
             raise ValueError(
                 "completion_reasoning_end_tag requires upstream='vllm' and "
                 "allow_templated_chat_passthrough=true"
+            )
+        if allow_templated_chat_passthrough and self._capabilities.upstream == "llamacpp":
+            # llama-server would apply its own chat template to the rendered text.
+            raise ValueError(
+                "allow_templated_chat_passthrough is not supported with "
+                "upstream='llamacpp'"
             )
         unsupported_prompt_kinds = self._capabilities.prompt_kinds - {
             "text",
@@ -853,13 +927,22 @@ class OpenAICompatBackend:
                     + ", ".join(sorted(unsupported)),
                 )
         if request.assistant_prefill is not None and (
-            self._capabilities.upstream != "vllm"
+            not self._capabilities.assistant_prefill
             or isinstance(request.prompt, TemplatedPrompt)
         ):
             raise _client_error(
                 self._capabilities.upstream,
-                "does not support assistant_prefill (a vLLM chat-template "
+                "does not support assistant_prefill (a chat-template "
                 "continuation of the final assistant message)",
+            )
+        if (
+            self._capabilities.upstream == "llamacpp"
+            and isinstance(request.tool_choice, Mapping)
+            and _llamacpp_named_tool(request.tools, request.tool_choice) is None
+        ):
+            raise _client_error(
+                self._capabilities.upstream,
+                "requires a named tool_choice to select a declared tool",
             )
         if isinstance(request.prompt, MultimodalPrompt):
             if type(request.prompt.base) is not str and not isinstance(
@@ -974,24 +1057,31 @@ class OpenAICompatBackend:
     async def count_prompt_tokens_async(
         self, prompt: str, *, timeout_s: float = 2.0
     ) -> int | None:
-        """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
+        """Best-effort exact count via the upstream's ``POST /tokenize``.
 
         Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
-        fail-soft ``None`` on any transport or shape problem. Only a vLLM
-        upstream is known to expose the endpoint.
+        fail-soft ``None`` on any transport or shape problem. Only vLLM and
+        llama.cpp upstreams are known to expose the endpoint; llama.cpp gets
+        ``add_special`` to match vLLM's default special-token handling.
         """
 
-        if self._capabilities.upstream != "vllm":
+        upstream = self._capabilities.upstream
+        if upstream not in {"vllm", "llamacpp"}:
             return None
         root = (
             self._base_url[: -len("/v1")]
             if self._base_url.endswith("/v1")
             else self._base_url
         )
+        body: dict[str, object] = (
+            {"model": self._model, "prompt": prompt}
+            if upstream == "vllm"
+            else {"content": prompt, "add_special": True}
+        )
         try:
             response = await self._get_client().post(
                 f"{root}/tokenize",
-                json={"model": self._model, "prompt": prompt},
+                json=body,
                 headers=self._headers(),
                 timeout=timeout_s,
             )
@@ -1003,7 +1093,12 @@ class OpenAICompatBackend:
             payload = response.json()
         except ValueError:
             return None
-        count = payload.get("count") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        if upstream == "llamacpp":
+            tokens = payload.get("tokens")
+            return len(tokens) if isinstance(tokens, list) else None
+        count = payload.get("count")
         return count if type(count) is int and count >= 0 else None
 
     def _api_key(self) -> str:
@@ -1263,16 +1358,21 @@ class OpenAICompatBackend:
             return None
         assert self._image_input_policy is not None
         try:
-            cached = self._image_input_policy.cached_validated_prompt(prompt)
-            if cached is not None:
-                return cached
-            # Pillow must decompress the complete raster to reject truncated
-            # or malicious compressed inputs. Keep that bounded CPU work off
-            # the server event loop and do it once, before admission/headers.
-            return await run_prompt_work(
-                self._image_input_policy.validate_prompt,
-                prompt,
-            )
+            urls = self._image_input_policy.cached_validated_prompt(prompt)
+            if urls is None:
+                # Pillow must decompress the complete raster to reject
+                # truncated or malicious compressed inputs. Keep that bounded
+                # CPU work off the server event loop and do it once, before
+                # admission/headers.
+                urls = await run_prompt_work(
+                    self._image_input_policy.validate_prompt,
+                    prompt,
+                )
+            if self._capabilities.upstream == "llamacpp" and any(
+                url.startswith(_WEBP_DATA_URL_PREFIX) for url in urls
+            ):
+                urls = await run_prompt_work(_png_data_urls, urls)
+            return urls
         except InvalidImageInput as error:
             raise UpstreamClientError(
                 str(error),
@@ -1472,10 +1572,38 @@ class OpenAICompatBackend:
         # template, so duplicating the structured tool fields would create two
         # competing prompt owners.
         if request.tools and not isinstance(prompt, TemplatedPrompt):
-            payload["tools"] = list(request.tools)
-            if request.tool_choice is not None:
-                payload["tool_choice"] = request.tool_choice
+            tools = list(request.tools)
+            tool_choice = request.tool_choice
+            if self._capabilities.upstream == "llamacpp" and isinstance(
+                tool_choice, Mapping
+            ):
+                # llama-server parses only string tool_choice values and turns
+                # an object into "auto". Offering only the named tool and
+                # requiring a call is the OpenAI meaning of a named choice.
+                named = _llamacpp_named_tool(request.tools, tool_choice)
+                assert named is not None  # validated before dispatch
+                tools = [named]
+                tool_choice = "required"
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         return payload
+
+    def _token_logprobs(
+        self,
+        request: GenerationRequest,
+        raw_items: list[dict],
+    ) -> tuple[TokenLogprob, ...]:
+        items = tuple(_token_logprob(item) for item in raw_items)
+        requested = request.sampling_params.logprobs
+        if self._capabilities.upstream != "llamacpp" or requested is None:
+            return items
+        # A request for zero alternatives is sent as one (see
+        # ``_adapt_llamacpp_sampling``); return only what was requested.
+        return tuple(
+            replace(item, top=item.top[:requested]) if len(item.top) > requested else item
+            for item in items
+        )
 
     def _uses_vllm_completions(self, request: GenerationRequest) -> bool:
         """Send Kairyu-rendered text without a second vLLM chat template."""
@@ -1588,7 +1716,7 @@ class OpenAICompatBackend:
         for i, choice in enumerate(choices):
             raw_content = (choice.get("logprobs") or {}).get("content")
             logprob_content = (
-                None if raw_content is None else tuple(_token_logprob(item) for item in raw_content)
+                None if raw_content is None else self._token_logprobs(request, raw_content)
             )
             text = (
                 choice.get("text", "")
@@ -1866,7 +1994,7 @@ class OpenAICompatBackend:
                     raw_logprobs = (choice.get("logprobs") or {}).get("content")
                     if raw_logprobs:
                         logprobs.setdefault(index, []).extend(
-                            _token_logprob(item) for item in raw_logprobs
+                            self._token_logprobs(request, raw_logprobs)
                         )
                         changed = True
                 if changed:

@@ -1650,6 +1650,7 @@ def test_upstream_profile_names_are_explicit_and_unknown_fails_at_construction()
         "gemini",
         "generic",
         "kairyu",
+        "llamacpp",
         "openai",
         "vllm",
     )
