@@ -409,6 +409,43 @@ async def test_vllm_backend_rejects_unhonored_intents_before_dispatch(
     assert engine.calls == []
 
 
+# Intents the native engine also treats as unconstrained: the explicit default
+# response_format, and strict tools that tool_choice="none" leaves ungrammared.
+_UNCONSTRAINED_INTENTS = {
+    "response_format_text": {
+        "sampling_params": SamplingParams(
+            max_tokens=1,
+            extra_args={"response_format": {"type": "text"}},
+        )
+    },
+    "strict_tool_choice_none": {"tools": (_STRICT_TOOL,), "tool_choice": "none"},
+}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    list(_UNCONSTRAINED_INTENTS.values()),
+    ids=list(_UNCONSTRAINED_INTENTS),
+)
+async def test_vllm_backend_dispatches_intents_needing_no_constraint(
+    monkeypatch,
+    overrides,
+):
+    backend, engine = _capturing_backend(monkeypatch)
+    request = GenerationRequest(
+        **{
+            "request_id": "unconstrained",
+            "prompt": "hello",
+            "sampling_params": SamplingParams(max_tokens=1),
+            **overrides,
+        }
+    )
+
+    backend.validate_request(request)
+    await backend.generate(request)
+    assert len(engine.calls) == 1
+
+
 def test_vllm_backend_rejects_unrendered_tool_intent_for_token_prompt(monkeypatch):
     backend, _ = _capturing_backend(monkeypatch)
     request = GenerationRequest(

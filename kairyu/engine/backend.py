@@ -339,13 +339,17 @@ def validate_backend_request_before_prepare(
     validate_backend_request(backend, request)
 
 
-def _strict_tool_response_format(
+def grammar_tool_candidates(
     request: GenerationRequest,
-) -> dict[str, object] | None:
-    """Build the parser-matched xgrammar format for selected strict tools."""
+) -> tuple[tuple[int, Mapping[str, object], Mapping[str, object]], ...]:
+    """``(index, tool, function)`` for each tool a native tool grammar covers.
+
+    Empty for ``tool_choice="none"``; a named choice narrows to that function.
+    Backends without a grammar use it to decide whether ``strict`` takes effect.
+    """
 
     if not request.tools:
-        return None
+        return ()
     choice = request.tool_choice
     candidates: list[tuple[int, Mapping[str, object], Mapping[str, object]]] = []
     for index, tool in enumerate(request.tools):
@@ -357,6 +361,8 @@ def _strict_tool_response_format(
             raise ValueError(f"tools[{index}].function.strict must be a boolean")
         candidates.append((index, tool, function))
 
+    if choice == "none":
+        return ()
     if isinstance(choice, Mapping):
         function_choice = choice.get("function")
         selected_name = (
@@ -369,9 +375,16 @@ def _strict_tool_response_format(
             for candidate in candidates
             if candidate[2].get("name") == selected_name
         ]
+    return tuple(candidates)
 
-    if choice == "none":
-        return None
+
+def _strict_tool_response_format(
+    request: GenerationRequest,
+) -> dict[str, object] | None:
+    """Build the parser-matched xgrammar format for selected strict tools."""
+
+    choice = request.tool_choice
+    candidates = grammar_tool_candidates(request)
     if not any(
         function.get("strict") is True
         for _index, _tool, function in candidates

@@ -21,6 +21,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    grammar_tool_candidates,
     prompt_with_tool_intent,
 )
 from kairyu.engine.prompt import (
@@ -35,7 +36,18 @@ from kairyu.engine.prompt import (
 from kairyu.engine.registry import register_backend
 from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import RESPONSE_FORMAT_EXTRA_ARG, SamplingParams
+
+# Response formats that constrain nothing; the native engine compiles no
+# grammar for them either, so this adapter honors them by doing nothing.
+_UNCONSTRAINED_RESPONSE_FORMAT_TYPES = frozenset({None, "text"})
+
+
+def _is_unconstrained_response_format(value: object) -> bool:
+    return value is None or (
+        isinstance(value, Mapping)
+        and value.get("type") in _UNCONSTRAINED_RESPONSE_FORMAT_TYPES
+    )
 
 
 def _unhonored_sampling_fields(params: SamplingParams) -> tuple[str, ...]:
@@ -43,7 +55,8 @@ def _unhonored_sampling_fields(params: SamplingParams) -> tuple[str, ...]:
 
     Logprobs would need a ``TokenLogprob`` conversion and ``extra_args`` (the
     ``response_format`` carrier included) a structured-output translation;
-    neither exists here, so both are rejected rather than dropped.
+    neither exists here, so both are rejected rather than dropped. Only an
+    unconstrained ``response_format`` (``text`` or no type) is a no-op.
     """
 
     unmapped = tuple(
@@ -59,7 +72,15 @@ def _unhonored_sampling_fields(params: SamplingParams) -> tuple[str, ...]:
     extra_args = params.extra_args
     if not isinstance(extra_args, Mapping):
         return (*unmapped, "extra_args")
-    return (*unmapped, *(f"extra_args.{key}" for key in extra_args))
+    return (
+        *unmapped,
+        *(
+            f"extra_args.{key}"
+            for key, value in extra_args.items()
+            if key != RESPONSE_FORMAT_EXTRA_ARG
+            or not _is_unconstrained_response_format(value)
+        ),
+    )
 
 
 def _unhonored_request_fields(request: GenerationRequest) -> tuple[str, ...]:
@@ -73,13 +94,14 @@ def _unhonored_request_fields(request: GenerationRequest) -> tuple[str, ...]:
         )
         if value is not None
     )
-    # Strict tools are a grammar intent; the native engine compiles one and
-    # OpenAI-compatible upstreams without strict support reject it.
+    # Strict tools are a grammar intent wherever the native engine would
+    # compile one (not under tool_choice="none" or for an unselected tool).
+    # OpenAI-compatible upstreams without strict support reject it too; M20
+    # WP-28's best-effort vLLM fallback is meant to relax both (m9 D4).
     strict_tools = tuple(
         f"tools[{index}].function.strict"
-        for index, tool in enumerate(request.tools)
-        if isinstance(function := tool.get("function"), Mapping)
-        and function.get("strict") is True
+        for index, _tool, function in grammar_tool_candidates(request)
+        if function.get("strict") is True
     )
     return (
         *_unhonored_sampling_fields(request.sampling_params),
