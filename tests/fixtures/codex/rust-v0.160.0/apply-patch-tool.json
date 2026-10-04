@@ -1,0 +1,451 @@
+{
+  "id": "apply-patch-tool",
+  "gap_ids": [
+    "G-tools-8",
+    "G-tools-6"
+  ],
+  "contract": "A bundled slug with apply_patch_tool_type freeform (gpt-5.5): the custom apply_patch tool with its Lark grammar and a client tool_search tool, then the replayed custom_tool_call (raw patch input) and custom_tool_call_output.",
+  "provenance": {
+    "source": "derived",
+    "recorder": "scripts/codex_gate/record_proxy.py",
+    "codex_version": "0.160.0",
+    "codex_tag": "rust-v0.160.0",
+    "provider_shape": "custom-responses",
+    "scenario": "apply-patch",
+    "invocation": "codex exec --skip-git-repo-check \"Say hello.\" [model: gpt-5.5]",
+    "sequence": 1,
+    "observed_status": 400,
+    "placeholders": [
+      "{{CODEX_HOME}}",
+      "{{CODEX_INSTRUCTIONS}}",
+      "{{CWD}}",
+      "{{DATE}}",
+      "{{DESCRIPTION}}",
+      "{{ID_n}}",
+      "{{SHELL}}",
+      "{{TEXT}}",
+      "{{TIMEZONE}}",
+      "{{TIME}}=0"
+    ],
+    "derived_from": "recorded capture apply-patch (sequence 1)",
+    "edit": "appended a custom_tool_call and its custom_tool_call_output",
+    "codex_rs": [
+      "codex-rs/protocol/src/models.rs@rust-v0.160.0:1134",
+      "codex-rs/protocol/src/models.rs@rust-v0.160.0:1155",
+      "codex-rs/tools/src/tool_spec.rs@rust-v0.160.0:55"
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "query": "",
+    "headers": {
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "session-id": "{{ID_2}}",
+      "thread-id": "{{ID_2}}",
+      "user-agent": "codex_exec/0.160.0 ({{PLATFORM}})",
+      "x-client-request-id": "{{ID_2}}",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"gpt-5.5\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"reasoning_effort\":\"medium\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+      "x-codex-window-id": "{{ID_2}}:0"
+    },
+    "body": {
+      "client_metadata": {
+        "root_turn_id": "{{ID_1}}",
+        "session_id": "{{ID_2}}",
+        "thread_id": "{{ID_2}}",
+        "turn_id": "{{ID_1}}",
+        "x-codex-installation-id": "{{ID_3}}",
+        "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"gpt-5.5\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"reasoning_effort\":\"medium\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+        "x-codex-window-id": "{{ID_2}}:0"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "{{TEXT sha256:b2bdc9bfa2349f58 chars:4506}}",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_5}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_6}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "Say hello.",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_7}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "type": "custom_tool_call",
+          "id": "ctc_{{ID_20}}",
+          "status": "completed",
+          "call_id": "call_{{ID_21}}",
+          "name": "apply_patch",
+          "input": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_{{ID_21}}",
+          "output": "Success. Updated the following files:\nA hello.txt\n"
+        }
+      ],
+      "instructions": "{{CODEX_INSTRUCTIONS sha256:804aa6a088130237 chars:21299}}",
+      "model": "gpt-5.5",
+      "parallel_tool_calls": true,
+      "prompt_cache_key": "{{ID_2}}",
+      "reasoning": {
+        "effort": "medium"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+          "name": "exec_command",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "cmd": {
+                "description": "Shell command to execute.",
+                "type": "string"
+              },
+              "justification": {
+                "description": "User-facing approval question for `require_escalated`; omit otherwise.",
+                "type": "string"
+              },
+              "login": {
+                "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true.",
+                "type": "boolean"
+              },
+              "max_output_tokens": {
+                "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
+                "type": "number"
+              },
+              "prefix_rule": {
+                "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sandbox_permissions": {
+                "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                "enum": [
+                  "use_default",
+                  "require_escalated"
+                ],
+                "type": "string"
+              },
+              "shell": {
+                "description": "Shell binary to launch. Defaults to the user's default shell.",
+                "type": "string"
+              },
+              "tty": {
+                "description": "True allocates a PTY for the command; false or omitted uses plain pipes.",
+                "type": "boolean"
+              },
+              "workdir": {
+                "description": "Working directory for the command. Defaults to the turn cwd.",
+                "type": "string"
+              },
+              "yield_time_ms": {
+                "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Writes characters to an existing unified exec session and returns recent output.",
+          "name": "write_stdin",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "chars": {
+                "description": "Bytes to write to stdin. Defaults to empty, which polls without writing.",
+                "type": "string"
+              },
+              "max_output_tokens": {
+                "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
+                "type": "number"
+              },
+              "session_id": {
+                "description": "Identifier of the running unified exec session.",
+                "type": "number"
+              },
+              "yield_time_ms": {
+                "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "session_id"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+          "name": "request_user_input",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "questions": {
+                "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "header": {
+                      "description": "Short header label shown in the UI (12 or fewer chars).",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable identifier for mapping answers (snake_case).",
+                      "type": "string"
+                    },
+                    "options": {
+                      "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "description": {
+                            "description": "One short sentence explaining impact/tradeoff if selected.",
+                            "type": "string"
+                          },
+                          "label": {
+                            "description": "User-facing label (1-5 words).",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "description"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "question": {
+                      "description": "Single-sentence prompt shown to the user.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header",
+                    "question",
+                    "options"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "questions"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+          "format": {
+            "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n",
+            "syntax": "lark",
+            "type": "grammar"
+          },
+          "name": "apply_patch",
+          "type": "custom"
+        },
+        {
+          "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+          "name": "view_image",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "description": "Image detail level. Defaults to `high`; use `original` to preserve exact resolution.",
+                "enum": [
+                  "high",
+                  "original"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "description": "Local filesystem path to an image file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+          "name": "get_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:b16e4399147ca736 chars:265}}",
+          "name": "create_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "objective": {
+                "description": "Required. The concrete objective to start pursuing. This starts a new active goal when no goal exists or replaces the current goal when it is complete.",
+                "type": "string"
+              },
+              "token_budget": {
+                "description": "Positive token budget for the new goal. Omit unless explicitly requested.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "objective"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:5d7192dc91754c25 chars:1541}}",
+          "name": "update_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "description": "{{DESCRIPTION sha256:04973a4e19e0e73f chars:370}}",
+                "enum": [
+                  "complete",
+                  "blocked",
+                  "paused"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:8cca88be41a90139 chars:475}}",
+          "execution": "client",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "limit": {
+                "description": "Maximum number of tools to return. Defaults to 8.",
+                "type": "number"
+              },
+              "query": {
+                "description": "Search query for deferred tools.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "type": "tool_search"
+        },
+        {
+          "external_web_access": false,
+          "search_content_types": [
+            "text",
+            "image"
+          ],
+          "type": "web_search"
+        }
+      ]
+    }
+  },
+  "replay": {
+    "model": "engine",
+    "turns": [
+      {
+        "parts": [
+          {
+            "text": "Done: the fixture command ran."
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "status": 200,
+      "terminal": "response.completed",
+      "response_status": "completed",
+      "output_types": [
+        "message"
+      ],
+      "prompt_contains": [
+        "*** Add File: hello.txt"
+      ],
+      "backend_tools_include": [
+        "apply_patch"
+      ]
+    },
+    "xfail": {
+      "gap": "G-tools-8",
+      "wp": "WP-24",
+      "reason": "custom tools (WP-22) and client tool_search (G-tools-6, WP-24) are rejected"
+    }
+  }
+}

@@ -1,0 +1,590 @@
+{
+  "id": "shell-command-loop",
+  "gap_ids": [
+    "R-28",
+    "G-conformance-2"
+  ],
+  "contract": "0.147 regression shape (unified_exec off): the shell_command function tool with parallel_tool_calls false, and its replayed function_call/function_call_output.",
+  "provenance": {
+    "source": "recorded",
+    "recorder": "scripts/codex_gate/record_proxy.py",
+    "codex_version": "0.147.0",
+    "codex_tag": "rust-v0.147.0",
+    "provider_shape": "custom-responses",
+    "scenario": "shell-command-loop",
+    "invocation": "codex exec --skip-git-repo-check \"Run the fixture command.\" [model: kairyu-coder] [config: [features]; unified_exec = false]",
+    "sequence": 2,
+    "observed_status": 200,
+    "placeholders": [
+      "{{CODEX_HOME}}",
+      "{{CODEX_INSTRUCTIONS}}",
+      "{{CWD}}",
+      "{{DATE}}",
+      "{{DESCRIPTION}}",
+      "{{ID_n}}",
+      "{{SHELL}}",
+      "{{TIMEZONE}}",
+      "{{TIME}}=0"
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "query": "",
+    "headers": {
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "session-id": "{{ID_1}}",
+      "thread-id": "{{ID_1}}",
+      "user-agent": "codex_exec/0.147.0 ({{PLATFORM}})",
+      "x-client-request-id": "{{ID_1}}",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-turn-metadata": "{\"installation_id\":\"{{ID_3}}\",\"request_kind\":\"turn\",\"sandbox\":\"seatbelt\",\"session_id\":\"{{ID_1}}\",\"thread_id\":\"{{ID_1}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_2}}\",\"turn_started_at_unix_ms\":0,\"window_id\":\"{{ID_1}}:0\"}",
+      "x-codex-window-id": "{{ID_1}}:0"
+    },
+    "body": {
+      "client_metadata": {
+        "session_id": "{{ID_1}}",
+        "thread_id": "{{ID_1}}",
+        "turn_id": "{{ID_2}}",
+        "x-codex-installation-id": "{{ID_3}}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"{{ID_3}}\",\"request_kind\":\"turn\",\"sandbox\":\"seatbelt\",\"session_id\":\"{{ID_1}}\",\"thread_id\":\"{{ID_1}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_2}}\",\"turn_started_at_unix_ms\":0,\"window_id\":\"{{ID_1}}:0\"}",
+        "x-codex-window-id": "{{ID_1}}:0"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator. `file` locators are on the host filesystem, `environment resource` locators are owned by an execution environment, `orchestrator resource` locators are opaque non-filesystem resources, and `custom resource` locators use their provider's access mechanism.\n### Available skills\n- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas. (file: {{CODEX_HOME}}/skills/.system/imagegen/SKILL.md)\n- openai-docs: Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge—including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex—and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex. (file: {{CODEX_HOME}}/skills/.system/openai-docs/SKILL.md)\n- plugin-creator: Create and scaffold plugin directories for Codex with a required `.codex-plugin/plugin.json`, optional plugin folders/files, valid manifest defaults, and personal-marketplace entries by default. Use when Codex needs to create a new personal plugin, add optional plugin structure, generate or update marketplace entries for plugin ordering and availability metadata, or update an existing local plugin during development with the CLI-driven cachebuster and reinstall flow. (file: {{CODEX_HOME}}/skills/.system/plugin-creator/SKILL.md)\n- skill-creator: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations. (file: {{CODEX_HOME}}/skills/.system/skill-creator/SKILL.md)\n- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: {{CODEX_HOME}}/skills/.system/skill-installer/SKILL.md)\n</skills_instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_4}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_5}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "Run the fixture command.",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_6}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "arguments": "{\"command\": \"echo kairyu-fixture\"}",
+          "call_id": "call_{{ID_7}}",
+          "id": "fc_{{ID_8}}",
+          "name": "shell_command",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_{{ID_7}}",
+          "id": "fco_{{ID_9}}",
+          "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nkairyu-fixture\n",
+          "type": "function_call_output"
+        }
+      ],
+      "instructions": "{{CODEX_INSTRUCTIONS sha256:ac8ae107a0d72fe3 chars:20751}}",
+      "model": "kairyu-coder",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "{{ID_1}}",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.",
+          "name": "shell_command",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "description": "Shell script to run in the user's default shell.",
+                "type": "string"
+              },
+              "justification": {
+                "description": "User-facing approval question for `require_escalated`; omit otherwise.",
+                "type": "string"
+              },
+              "login": {
+                "description": "True runs with login shell semantics; false disables them. Defaults to true.",
+                "type": "boolean"
+              },
+              "prefix_rule": {
+                "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sandbox_permissions": {
+                "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                "enum": [
+                  "use_default",
+                  "require_escalated"
+                ],
+                "type": "string"
+              },
+              "timeout_ms": {
+                "description": "Maximum command runtime. Defaults to 10000 ms.",
+                "type": "number"
+              },
+              "workdir": {
+                "description": "Working directory for the command. Defaults to the turn cwd.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
+          "name": "update_plan",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "explanation": {
+                "description": "Optional explanation for this plan update.",
+                "type": "string"
+              },
+              "plan": {
+                "description": "The list of steps",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "description": "Step status.",
+                      "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed"
+                      ],
+                      "type": "string"
+                    },
+                    "step": {
+                      "description": "Task step text.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "step",
+                    "status"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "plan"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+          "name": "request_user_input",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "questions": {
+                "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "header": {
+                      "description": "Short header label shown in the UI (12 or fewer chars).",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable identifier for mapping answers (snake_case).",
+                      "type": "string"
+                    },
+                    "options": {
+                      "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "description": {
+                            "description": "One short sentence explaining impact/tradeoff if selected.",
+                            "type": "string"
+                          },
+                          "label": {
+                            "description": "User-facing label (1-5 words).",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "description"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "question": {
+                      "description": "Single-sentence prompt shown to the user.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header",
+                    "question",
+                    "options"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "questions"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+          "name": "view_image",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Local filesystem path to an image file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Tools for spawning and managing sub-agents.",
+          "name": "multi_agent_v1",
+          "tools": [
+            {
+              "description": "{{DESCRIPTION sha256:4800ade915f6f7dc chars:298}}",
+              "name": "close_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "description": "Agent id to close (from spawn_agent).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "Resume a previously closed agent by id so it can receive send_input and wait_agent calls.",
+              "name": "resume_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "description": "Agent id to resume.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.",
+              "name": "send_input",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "interrupt": {
+                    "description": "True interrupts the current task and handles this message immediately; false or omitted queues it.",
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "description": "Structured input items. Use this to pass explicit mentions (for example app:// connector paths).",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "audio_url": {
+                          "description": "Audio data URL when type is audio.",
+                          "type": "string"
+                        },
+                        "image_url": {
+                          "description": "Image URL when type is image.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Display name when type is skill or mention.",
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Text content when type is text.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "Input item type: text, image, local_image, audio, local_audio, skill, or mention.",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "description": "Legacy plain-text message to send to the agent. Use either message or items.",
+                    "type": "string"
+                  },
+                  "target": {
+                    "description": "Agent id to message (from spawn_agent).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "{{DESCRIPTION sha256:5ec67941b0e1f37e chars:5056}}",
+              "name": "spawn_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "fork_context": {
+                    "description": "True forks the current thread history into the new agent; false or omitted starts with only the initial prompt.",
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "description": "Structured input items. Use this to pass explicit mentions (for example app:// connector paths).",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "audio_url": {
+                          "description": "Audio data URL when type is audio.",
+                          "type": "string"
+                        },
+                        "image_url": {
+                          "description": "Image URL when type is image.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Display name when type is skill or mention.",
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Text content when type is text.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "Input item type: text, image, local_image, audio, local_audio, skill, or mention.",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "description": "Initial plain-text task for the new agent. Use either message or items.",
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Model override for the new agent. Omit unless an explicit override is needed.",
+                    "type": "string"
+                  },
+                  "reasoning_effort": {
+                    "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
+                    "type": "string"
+                  },
+                  "service_tier": {
+                    "description": "Service tier override for the new agent. Omit unless explicitly requested.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "{{DESCRIPTION sha256:4ee4cd26ef64f726 chars:252}}",
+              "name": "wait_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "targets": {
+                    "description": "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "timeout_ms": {
+                    "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000. Prefer longer waits (minutes) to avoid busy polling.",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "targets"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        },
+        {
+          "description": "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+          "name": "get_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:b16e4399147ca736 chars:265}}",
+          "name": "create_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "objective": {
+                "description": "Required. The concrete objective to start pursuing. This starts a new active goal when no goal exists or replaces the current goal when it is complete.",
+                "type": "string"
+              },
+              "token_budget": {
+                "description": "Positive token budget for the new goal. Omit unless explicitly requested.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "objective"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:905e44e63b25ee94 chars:1362}}",
+          "name": "update_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "description": "{{DESCRIPTION sha256:e35f97559dac0bc5 chars:326}}",
+                "enum": [
+                  "complete",
+                  "blocked"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "external_web_access": false,
+          "type": "web_search"
+        }
+      ]
+    }
+  },
+  "replay": {
+    "model": "engine",
+    "turns": [
+      {
+        "parts": [
+          {
+            "text": "Done: the fixture command ran."
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "status": 200,
+      "terminal": "response.completed",
+      "response_status": "completed",
+      "output_types": [
+        "message"
+      ],
+      "prompt_contains": [
+        "kairyu-fixture"
+      ],
+      "backend_tools_include": [
+        "shell_command"
+      ]
+    }
+  }
+}

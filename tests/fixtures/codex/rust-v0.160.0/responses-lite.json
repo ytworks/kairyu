@@ -1,0 +1,510 @@
+{
+  "id": "responses-lite",
+  "gap_ids": [
+    "G-input-items-2"
+  ],
+  "contract": "A bundled responses-lite slug (gpt-6-sol): no tools, an additional_tools input item holding the functions namespace and the freeform exec tool, empty instructions, reasoning {effort, context:all_turns}, text.verbosity low, parallel_tool_calls false and the x-openai-internal-codex-responses-lite header.",
+  "provenance": {
+    "source": "recorded",
+    "recorder": "scripts/codex_gate/record_proxy.py",
+    "codex_version": "0.160.0",
+    "codex_tag": "rust-v0.160.0",
+    "provider_shape": "custom-responses",
+    "scenario": "responses-lite",
+    "invocation": "codex exec --skip-git-repo-check \"Say hello.\" [model: gpt-6-sol]",
+    "sequence": 1,
+    "observed_status": 400,
+    "placeholders": [
+      "{{CODEX_HOME}}",
+      "{{CWD}}",
+      "{{DATE}}",
+      "{{DESCRIPTION}}",
+      "{{ID_n}}",
+      "{{SHELL}}",
+      "{{TEXT}}",
+      "{{TIMEZONE}}",
+      "{{TIME}}=0"
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "query": "",
+    "headers": {
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "session-id": "{{ID_2}}",
+      "thread-id": "{{ID_2}}",
+      "user-agent": "codex_exec/0.160.0 ({{PLATFORM}})",
+      "x-client-request-id": "{{ID_2}}",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"gpt-6-sol\",\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"reasoning_effort\":\"medium\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+      "x-codex-window-id": "{{ID_2}}:0",
+      "x-openai-internal-codex-responses-lite": "true"
+    },
+    "body": {
+      "client_metadata": {
+        "root_turn_id": "{{ID_1}}",
+        "session_id": "{{ID_2}}",
+        "thread_id": "{{ID_2}}",
+        "turn_id": "{{ID_1}}",
+        "x-codex-installation-id": "{{ID_3}}",
+        "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"gpt-6-sol\",\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"reasoning_effort\":\"medium\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+        "x-codex-window-id": "{{ID_2}}:0"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "id": "at_{{ID_5}}",
+          "role": "developer",
+          "tools": [
+            {
+              "description": "",
+              "name": "functions",
+              "tools": [
+                {
+                  "description": "{{DESCRIPTION sha256:6f2d7be762852fd9 chars:10520}}",
+                  "format": {
+                    "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n",
+                    "syntax": "lark",
+                    "type": "grammar"
+                  },
+                  "name": "exec",
+                  "type": "custom"
+                },
+                {
+                  "description": "{{DESCRIPTION sha256:582eb96e50ee4481 chars:769}}",
+                  "name": "wait",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "cell_id": {
+                        "description": "Identifier of the running exec cell.",
+                        "type": "string"
+                      },
+                      "max_tokens": {
+                        "description": "Output token budget for this wait call. Defaults to 10000 tokens.",
+                        "type": "number"
+                      },
+                      "terminate": {
+                        "description": "True stops the running exec cell; false or omitted waits for output.",
+                        "type": "boolean"
+                      },
+                      "yield_time_ms": {
+                        "description": "Wait before yielding more output. Defaults to 10000 ms.",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "cell_id"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+                  "name": "request_user_input",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "questions": {
+                        "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "header": {
+                              "description": "Short header label shown in the UI (12 or fewer chars).",
+                              "type": "string"
+                            },
+                            "id": {
+                              "description": "Stable identifier for mapping answers (snake_case).",
+                              "type": "string"
+                            },
+                            "options": {
+                              "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "description": {
+                                    "description": "One short sentence explaining impact/tradeoff if selected.",
+                                    "type": "string"
+                                  },
+                                  "label": {
+                                    "description": "User-facing label (1-5 words).",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label",
+                                  "description"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "question": {
+                              "description": "Single-sentence prompt shown to the user.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "header",
+                            "question",
+                            "options"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "questions"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "{{DESCRIPTION sha256:f7f47603a91513a7 chars:556}}",
+                  "name": "request_user_input_async",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "questions": {
+                        "description": "One or more self-contained questions to present together, in display order.",
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "options": {
+                              "description": "{{DESCRIPTION sha256:87ff8a281fd73104 chars:324}}",
+                              "items": {
+                                "type": "string"
+                              },
+                              "minItems": 1,
+                              "type": "array"
+                            },
+                            "title": {
+                              "description": "The complete question shown to the user, including any context needed to answer it.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "title"
+                          ],
+                          "type": "object"
+                        },
+                        "minItems": 1,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "questions"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "type": "namespace"
+            },
+            {
+              "description": "Tools for reading and waiting on time.",
+              "name": "clock",
+              "tools": [
+                {
+                  "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+                  "name": "sleep",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "duration_ms": {
+                        "description": "How long to sleep in milliseconds. Must be between 1 and 43200000.",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "duration_ms"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "type": "namespace"
+            },
+            {
+              "description": "Tools for spawning and managing sub-agents.",
+              "name": "collaboration",
+              "tools": [
+                {
+                  "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "description": "Message text to send to the target agent.",
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "message"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "description": "Agent id or canonical task name to interrupt (from spawn_agent).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "description": "Message text to queue on the target agent.",
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "description": "Relative or canonical task name to message (from spawn_agent).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "message"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "{{DESCRIPTION sha256:0b7d0bfcc5ad985c chars:1829}}",
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "fork_turns": {
+                        "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns.",
+                        "type": "string"
+                      },
+                      "message": {
+                        "description": "Initial plain-text task for the new agent.",
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "description": "Model override for the new agent. Omit unless an explicit override is needed.",
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "description": "Task name for the new agent. Use lowercase letters, digits, and underscores.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "task_name",
+                      "message"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "{{DESCRIPTION sha256:6efad2e8999e3516 chars:383}}",
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.",
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "type": "namespace"
+            }
+          ],
+          "type": "additional_tools"
+        },
+        {
+          "content": [
+            {
+              "text": "{{TEXT sha256:b1dd8718c037906c chars:18992}}",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_6}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `{{CODEX_HOME}}/skills/.system`\n### Available skills\n- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas. (file: r0/imagegen/SKILL.md)\n- openai-docs: Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge—including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex—and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex. (file: r0/openai-docs/SKILL.md)\n- skill-creator: Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources. (file: r0/skill-creator/SKILL.md)\n- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: r0/skill-installer/SKILL.md)\n</skills_instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<collaboration_mode># Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\n\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\n\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\n</collaboration_mode>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_7}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.\n\nAt the start of your turn, you are the active agent.\nYou can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.\nAll agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.\n\nYou can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn.\n`send_message` calls may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.\nChild agents can also spawn their own sub-agents.\nYou can decide how much context you want to propagate to your sub-agents with the `fork_turns` parameter.\n\nYou will receive messages in the analysis channel in the form:\n```\nMessage Type: MESSAGE | FINAL_ANSWER\nTask name: <recipient>\nSender: <author>\nPayload:\n<payload text>\n```\nThey may be addressed as to=/root\n\nNote that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.\n\nAll agents share the same directory. In detail:\n- All agents have access to the same container and filesystem as you.\n- All agents use the same current working directory.\n- As a result, edits made by one agent are immediately visible to all other agents.\n\nWhen calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.\n\nThere are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.\n\nFull-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.</multi_agent_role>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_8}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_9}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_10}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "Say hello.",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_11}}",
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "gpt-6-sol",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "{{ID_2}}",
+      "reasoning": {
+        "context": "all_turns",
+        "effort": "medium"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      },
+      "tool_choice": "auto"
+    }
+  },
+  "replay": {
+    "model": "engine",
+    "turns": [
+      {
+        "parts": [
+          {
+            "text": "Hello from Kairyu."
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "status": 200,
+      "terminal": "response.completed",
+      "response_status": "completed",
+      "output_types": [
+        "message"
+      ],
+      "prompt_contains": [
+        "Say hello."
+      ]
+    },
+    "xfail": {
+      "gap": "G-input-items-2",
+      "wp": "WP-24",
+      "reason": "the additional_tools input item is rejected"
+    }
+  }
+}

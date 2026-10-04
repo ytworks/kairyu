@@ -29,6 +29,16 @@ owner_wp = "WP-07"
 kind = "temporary"
 note = "Responses error bodies (400, 404, 426, 429, 5xx) omit the required nullable param."
 
+[[divergence]]
+id = "framework-error-detail"
+schema = "ErrorResponse"
+pointer_glob = "/error"
+keyword = "required"
+gap_id = "M-ST-5"
+owner_wp = "WP-07"
+kind = "temporary"
+note = "Framework errors under /v1/responses* answer {detail}: an unparseable (zstd) body, and the 404 of the absent POST /v1/responses/compact (Codex fixtures harbor-zstd, compact-v1)."
+
 # --- Response envelope (unary body and the response object inside events) -----
 
 [[divergence]]
@@ -118,6 +128,17 @@ gap_id = "G-errors-5"
 owner_wp = "WP-18"
 kind = "temporary"
 note = "compaction_failed is outside the ResponseError code enum; C4 maps compaction failures to context_length_exceeded or server_error."
+
+[[divergence]]
+id = "generation-failure-backend-error-code"
+schema = "ResponseFailedEvent"
+pointer_glob = "/response/error/code"
+keyword = "enum"
+value = "backend_error"
+gap_id = "G-errors-5"
+owner_wp = "WP-07"
+kind = "temporary"
+note = "A generation failure after the stream opened ends response.failed with code backend_error; Principle 4 maps it to server_error (Codex fixture call-then-upstream-error)."
 
 [[divergence]]
 id = "context-length-exceeded-in-band"

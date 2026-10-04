@@ -1,0 +1,624 @@
+{
+  "id": "effort-disabled",
+  "gap_ids": [
+    "G-reasoning-4"
+  ],
+  "contract": "reasoning.effort \"disabled\" (persistent) is a lossless effort the server accepts (\"disabled\" is the Codex alias of none, C9).",
+  "provenance": {
+    "source": "recorded",
+    "recorder": "scripts/codex_gate/record_proxy.py",
+    "codex_version": "0.160.0",
+    "codex_tag": "rust-v0.160.0",
+    "provider_shape": "custom-responses",
+    "scenario": "effort-disabled",
+    "invocation": "codex exec --skip-git-repo-check \"Say hello.\" [model: kairyu-coder] [config: model_reasoning_effort = \"persistent\"]",
+    "sequence": 1,
+    "observed_status": 400,
+    "placeholders": [
+      "{{CODEX_HOME}}",
+      "{{CODEX_INSTRUCTIONS}}",
+      "{{CWD}}",
+      "{{DATE}}",
+      "{{DESCRIPTION}}",
+      "{{ID_n}}",
+      "{{SHELL}}",
+      "{{TIMESTAMP}}",
+      "{{TIMEZONE}}",
+      "{{TIME}}=0"
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "query": "",
+    "headers": {
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "session-id": "{{ID_2}}",
+      "thread-id": "{{ID_2}}",
+      "user-agent": "codex_exec/0.160.0 ({{PLATFORM}})",
+      "x-client-request-id": "{{ID_2}}",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"reasoning_effort\":\"persistent\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+      "x-codex-window-id": "{{ID_2}}:0"
+    },
+    "body": {
+      "client_metadata": {
+        "root_turn_id": "{{ID_1}}",
+        "session_id": "{{ID_2}}",
+        "thread_id": "{{ID_2}}",
+        "turn_id": "{{ID_1}}",
+        "x-codex-installation-id": "{{ID_3}}",
+        "x-codex-turn-metadata": "{\"agent_name\":\"/root\",\"analytics_enabled\":true,\"auto_review_enabled\":false,\"context_window_id\":\"{{ID_4}}\",\"installation_id\":\"{{ID_3}}\",\"model\":\"kairyu-coder\",\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"reasoning_effort\":\"persistent\",\"request_kind\":\"turn\",\"root_turn_id\":\"{{ID_1}}\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"session_id\":\"{{ID_2}}\",\"thread_id\":\"{{ID_2}}\",\"thread_source\":\"user\",\"turn_id\":\"{{ID_1}}\",\"turn_started_at_unix_ms\":0,\"turn_trigger\":\"exec\",\"window_id\":\"{{ID_2}}:0\",\"window_number\":0}",
+        "x-codex-window-id": "{{ID_2}}:0"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `{{CODEX_HOME}}/skills/.system`\n### Available skills\n- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas. (file: r0/imagegen/SKILL.md)\n- openai-docs: Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge—including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex—and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex. (file: r0/openai-docs/SKILL.md)\n- skill-creator: Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources. (file: r0/skill-creator/SKILL.md)\n- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: r0/skill-installer/SKILL.md)\n</skills_instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<persistent_mode>\n## Proactivity\n\nAfter you've completed the user task and delivered the final answer, if you are sampled again without a new user request, look for useful follow-ups that directly support the completed work. Favor closing a known open loop, establishing an awaited result, or verifying that a change took effect over inventing unrelated work. Use past user instructions and your knowledge of the user to prioritize follow-ups, not to infer new authorization.\n\nAvoid duplicate user-visible messages within a turn or across turns. For a simple greeting, thanks, or acknowledgment, one brief response or reaction is enough; do not send equivalent text through both `functions.send_user_message_async` and `final`. Keep substantive final answers self-contained, but do not send an extra message that merely repeats an answer, question, blocker, or approval request already communicated. Repeat one only when the user asks again, new information materially changes it, or a requested reminder or reply is due. Being sampled again or receiving environment-only context is not a new user request and does not itself warrant a message. Keep unanswered questions pending; continue useful authorized work that does not depend on the answer, or wait quietly.\n\nBefore starting a follow-up, identify its scope, the outcome you want to establish, the evidence needed, and a stopping condition justified by the original task or external process. Once started, treat it as active ongoing work across sleeps and automatic continuations until the outcome is established, the user cancels or replaces it, it is no longer relevant, a relevant observation window ends, or progress genuinely requires user input or additional authorization. Bound a follow-up by its purpose, scope, and outcome, not an arbitrary number of checks. A pending, running, inconclusive, or unchanged result is not by itself completion. Never invent an early stopping point for monitoring the user explicitly asked to continue.\n\nPrefer an existing completion notification or product-provided wait mechanism. Otherwise, schedule the next useful check according to the expected rate of progress. Preserve a user-specified cadence; absent one, use short, proportionate waits, often 1–3 minutes for active near-term work, and back off when slower progress justifies it. Do not switch to a long idle sleep while a useful earlier check is still due. Keep the target, last known state, stopping condition, and next check in the available task/checkpoint state so the follow-up survives sleep and context resets. Continue quietly between meaningful changes, and surface the outcome, a genuine blocker, or anything that requires the user's attention.\n\nMake these updates feel like a natural continuation of the conversation. Lead with the useful finding, result, or decision; avoid announcing a \"follow-up task,\" declaring \"the follow-up is complete,\" narrating internal task bookkeeping, or adding unnecessary disclaimers about actions you are not taking.\n\nYou may perform safe, non-mutating follow-ups that remain within the user-authorized scope. Persistence does not broaden that scope. For follow-ups or next actions that require new authority, materially expand scope, or make external state changes not already authorized, describe the proposed action and obtain approval before executing it.\n</persistent_mode>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_5}}",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>{{CWD}}</cwd>\n  <shell>{{SHELL}}</shell>\n  <current_date>{{DATE}}</current_date>\n  <timezone>{{TIMEZONE}}</timezone>\n  <filesystem><workspace_roots><root>{{CWD}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_6}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "Say hello.",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_7}}",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<current_time_reminder>It is {{TIMESTAMP}}.</current_time_reminder>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_{{ID_8}}",
+          "role": "developer",
+          "type": "message"
+        }
+      ],
+      "instructions": "{{CODEX_INSTRUCTIONS sha256:3b08633fa6729066 chars:16979}}",
+      "model": "kairyu-coder",
+      "parallel_tool_calls": true,
+      "prompt_cache_key": "{{ID_2}}",
+      "reasoning": {
+        "effort": "disabled",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+          "name": "exec_command",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "cmd": {
+                "description": "Shell command to execute.",
+                "type": "string"
+              },
+              "justification": {
+                "description": "User-facing approval question for `require_escalated`; omit otherwise.",
+                "type": "string"
+              },
+              "login": {
+                "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true.",
+                "type": "boolean"
+              },
+              "max_output_tokens": {
+                "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
+                "type": "number"
+              },
+              "prefix_rule": {
+                "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sandbox_permissions": {
+                "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                "enum": [
+                  "use_default",
+                  "require_escalated"
+                ],
+                "type": "string"
+              },
+              "shell": {
+                "description": "Shell binary to launch. Defaults to the user's default shell.",
+                "type": "string"
+              },
+              "tty": {
+                "description": "True allocates a PTY for the command; false or omitted uses plain pipes.",
+                "type": "boolean"
+              },
+              "workdir": {
+                "description": "Working directory for the command. Defaults to the turn cwd.",
+                "type": "string"
+              },
+              "yield_time_ms": {
+                "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Writes characters to an existing unified exec session and returns recent output.",
+          "name": "write_stdin",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "chars": {
+                "description": "Bytes to write to stdin. Defaults to empty, which polls without writing.",
+                "type": "string"
+              },
+              "max_output_tokens": {
+                "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
+                "type": "number"
+              },
+              "session_id": {
+                "description": "Identifier of the running unified exec session.",
+                "type": "number"
+              },
+              "yield_time_ms": {
+                "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "session_id"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+          "name": "request_user_input",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "questions": {
+                "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "header": {
+                      "description": "Short header label shown in the UI (12 or fewer chars).",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable identifier for mapping answers (snake_case).",
+                      "type": "string"
+                    },
+                    "options": {
+                      "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "description": {
+                            "description": "One short sentence explaining impact/tradeoff if selected.",
+                            "type": "string"
+                          },
+                          "label": {
+                            "description": "User-facing label (1-5 words).",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "description"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "question": {
+                      "description": "Single-sentence prompt shown to the user.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header",
+                    "question",
+                    "options"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "questions"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Tools for reading and waiting on time.",
+          "name": "clock",
+          "tools": [
+            {
+              "description": "Return the current time in UTC.",
+              "name": "curr_time",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+              "name": "sleep",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "duration_ms": {
+                    "description": "How long to sleep in milliseconds. Must be between 1 and 43200000.",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "duration_ms"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        },
+        {
+          "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+          "name": "view_image",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Local filesystem path to an image file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "Tools for spawning and managing sub-agents.",
+          "name": "multi_agent_v1",
+          "tools": [
+            {
+              "description": "{{DESCRIPTION sha256:4800ade915f6f7dc chars:298}}",
+              "name": "close_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "description": "Agent id to close (from spawn_agent).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "Resume a previously closed agent by id so it can receive send_input and wait_agent calls.",
+              "name": "resume_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "description": "Agent id to resume.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.",
+              "name": "send_input",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "interrupt": {
+                    "description": "True interrupts the current task and handles this message immediately; false or omitted queues it.",
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "description": "Structured input items. Use this to pass explicit mentions (for example app:// connector paths).",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "audio_url": {
+                          "description": "Audio data URL when type is audio.",
+                          "type": "string"
+                        },
+                        "image_url": {
+                          "description": "Image URL when type is image.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Display name when type is skill or mention.",
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Text content when type is text.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "Input item type: text, image, local_image, audio, local_audio, skill, or mention.",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "description": "Legacy plain-text message to send to the agent. Use either message or items.",
+                    "type": "string"
+                  },
+                  "target": {
+                    "description": "Agent id to message (from spawn_agent).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "{{DESCRIPTION sha256:5dfbcec2bbf5ba2d chars:5033}}",
+              "name": "spawn_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "fork_context": {
+                    "description": "True forks the current thread history into the new agent; false or omitted starts with only the initial prompt.",
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "description": "Structured input items. Use this to pass explicit mentions (for example app:// connector paths).",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "audio_url": {
+                          "description": "Audio data URL when type is audio.",
+                          "type": "string"
+                        },
+                        "image_url": {
+                          "description": "Image URL when type is image.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Display name when type is skill or mention.",
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Text content when type is text.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "Input item type: text, image, local_image, audio, local_audio, skill, or mention.",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "description": "Initial plain-text task for the new agent. Use either message or items.",
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Model override for the new agent. Omit unless an explicit override is needed.",
+                    "type": "string"
+                  },
+                  "reasoning_effort": {
+                    "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "{{DESCRIPTION sha256:4ee4cd26ef64f726 chars:252}}",
+              "name": "wait_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "targets": {
+                    "description": "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "timeout_ms": {
+                    "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000. Prefer longer waits (minutes) to avoid busy polling.",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "targets"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        },
+        {
+          "description": "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+          "name": "get_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:b16e4399147ca736 chars:265}}",
+          "name": "create_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "objective": {
+                "description": "Required. The concrete objective to start pursuing. This starts a new active goal when no goal exists or replaces the current goal when it is complete.",
+                "type": "string"
+              },
+              "token_budget": {
+                "description": "Positive token budget for the new goal. Omit unless explicitly requested.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "objective"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "description": "{{DESCRIPTION sha256:5d7192dc91754c25 chars:1541}}",
+          "name": "update_goal",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "description": "{{DESCRIPTION sha256:04973a4e19e0e73f chars:370}}",
+                "enum": [
+                  "complete",
+                  "blocked",
+                  "paused"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        },
+        {
+          "external_web_access": false,
+          "type": "web_search"
+        }
+      ]
+    }
+  },
+  "replay": {
+    "model": "engine",
+    "turns": [
+      {
+        "parts": [
+          {
+            "text": "Hello from Kairyu."
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "status": 200,
+      "terminal": "response.completed",
+      "response_status": "completed",
+      "output_types": [
+        "message"
+      ]
+    },
+    "xfail": {
+      "gap": "G-reasoning-4",
+      "wp": "WP-10",
+      "reason": "reasoning.effort \"disabled\" (persistent) is rejected"
+    }
+  }
+}

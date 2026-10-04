@@ -1,0 +1,49 @@
+{
+  "id": "lmstudio-probe",
+  "gap_ids": [
+    "G-request-fields-11"
+  ],
+  "contract": "--oss --local-provider lmstudio loads the model with a non-streaming {model, input:\"\", max_output_tokens:1} and requires a 2xx (no spec minimum of 16).",
+  "provenance": {
+    "source": "recorded",
+    "recorder": "scripts/codex_gate/record_proxy.py",
+    "codex_version": "0.160.0",
+    "codex_tag": "rust-v0.160.0",
+    "provider_shape": "oss-lmstudio",
+    "scenario": "lmstudio-probe",
+    "invocation": "codex exec --skip-git-repo-check --oss --local-provider lmstudio -m kairyu-coder \"Say hello.\" [model: kairyu-coder]",
+    "sequence": 3,
+    "observed_status": 200,
+    "placeholders": []
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "query": "",
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "body": {
+      "input": "",
+      "max_output_tokens": 1,
+      "model": "kairyu-coder"
+    }
+  },
+  "replay": {
+    "model": "engine",
+    "turns": [
+      {
+        "parts": [
+          {
+            "text": "Hello there."
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "status": 200,
+      "response_status": "incomplete"
+    }
+  }
+}

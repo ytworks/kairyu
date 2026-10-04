@@ -21,6 +21,7 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.prompt import prompt_kind, prompt_text, supplied_prompt_token_ids
 from kairyu.engine.registry import register_backend, uses_builtin_backend_contract
+from kairyu.engine.request_errors import resolve_output_budget
 from kairyu.outputs import CompletionOutput
 from tests.support.scenario_script import (
     Part,
@@ -148,27 +149,13 @@ class ScenarioBackend:
     async def count_prompt_tokens_async(self, prompt: str) -> int:
         return len(toy_tokens(prompt))
 
-    def context_length_error(self, prompt_tokens: int, max_tokens: int | None) -> Exception:
-        """Build the context-overflow error; the only place it is constructed.
-
-        Mirrors ``EngineLoop._max_new_tokens`` and ``_validate_context_length``
-        (``kairyu/engine/engine_loop.py``), which raise ``ValueError`` today.
-        WP-04 replaces this with its typed ``ContextLengthExceededError``.
-        """
-
-        if max_tokens is None:
-            return ValueError(
-                f"prompt tokens ({prompt_tokens}) already fill "
-                f"max_model_len ({self.max_model_len})"
-            )
-        return ValueError(
-            f"prompt tokens ({prompt_tokens}) plus max_tokens "
-            f"({max_tokens}) exceed max_model_len "
-            f"({self.max_model_len})"
-        )
-
     def _admitted_prompt(self, request: GenerationRequest) -> tuple[str, int, int | None]:
-        """Return (execution text, prompt tokens, output budget) or raise overflow."""
+        """Return (execution text, prompt tokens, output budget) or raise overflow.
+
+        With a ``max_model_len`` the budget comes from the engine's own rule
+        (``resolve_output_budget``), so overflow raises the typed
+        ``ContextLengthExceededError`` exactly as the native engine does.
+        """
 
         prompt = prompt_with_tool_intent(request)
         token_ids = supplied_prompt_token_ids(prompt)
@@ -177,15 +164,9 @@ class ScenarioBackend:
         max_tokens = request.sampling_params.max_tokens
         if self.max_model_len is None:
             return text, prompt_tokens, max_tokens
-        if max_tokens is None:
-            # OpenAI contract for an omitted limit: the remaining context.
-            remaining = self.max_model_len - prompt_tokens
-            if remaining < 1:
-                raise self.context_length_error(prompt_tokens, None)
-            return text, prompt_tokens, remaining
-        if prompt_tokens + max_tokens > self.max_model_len:
-            raise self.context_length_error(prompt_tokens, max_tokens)
-        return text, prompt_tokens, max_tokens
+        return text, prompt_tokens, resolve_output_budget(
+            prompt_tokens, max_tokens, self.max_model_len
+        )
 
     def _dispatch(self, request: GenerationRequest) -> _Plan:
         # Rejections precede the call log so refused work is never "dispatched".
