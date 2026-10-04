@@ -10,7 +10,9 @@
 #   keyword      the failing JSON Schema keyword, or a gate check:
 #                route | event-type | sse-event-name | content-type | json;
 #   value        (optional) the offending scalar exactly, e.g. one out-of-enum
-#                code or unknown event type, so the entry allows nothing else.
+#                code or unknown event type, so the entry allows nothing else;
+#   route        (optional) fnmatch glob over "METHOD /path -> status", for an
+#                entry that must not cover the same violation on other routes.
 # gap_id names the research gap (G-*, M-*), review requirement (R-*) or m20
 # decision/deviation (D<n>, D-<x>); owner_wp is the work package that deletes a
 # "temporary" entry. "codex-extension" and "kairyu-extension" entries are
@@ -30,14 +32,26 @@ kind = "temporary"
 note = "Responses error bodies (400, 404, 426, 429, 5xx) omit the required nullable param."
 
 [[divergence]]
-id = "framework-error-detail"
+id = "framework-error-detail-undecoded-body"
 schema = "ErrorResponse"
 pointer_glob = "/error"
 keyword = "required"
+route = "POST /v1/responses -> 400"
 gap_id = "M-ST-5"
 owner_wp = "WP-07"
 kind = "temporary"
-note = "Framework errors under /v1/responses* answer {detail}: an unparseable (zstd) body, and the 404 of the absent POST /v1/responses/compact (Codex fixtures harbor-zstd, compact-v1)."
+note = "A body the server cannot decode (zstd, Codex fixture harbor-zstd) gets Starlette's {detail} 400."
+
+[[divergence]]
+id = "framework-error-detail-compact-404"
+schema = "ErrorResponse"
+pointer_glob = "/error"
+keyword = "required"
+route = "POST /v1/responses/compact -> 404"
+gap_id = "M-ST-5"
+owner_wp = "WP-07"
+kind = "temporary"
+note = "The absent POST /v1/responses/compact (Codex fixture compact-v1, WP-36) gets the framework {detail} 404."
 
 # --- Response envelope (unary body and the response object inside events) -----
 

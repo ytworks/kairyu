@@ -2,9 +2,10 @@
 
 Every entry names the gap it tracks and the work package that removes it
 (``kind = "temporary"``), or records a deliberate extension
-(``codex-extension`` / ``kairyu-extension``). Entries are validated when the
-file is loaded, so a malformed allowlist fails the session instead of
-silently allowing violations.
+(``codex-extension`` / ``kairyu-extension``). An optional ``route`` glob
+(``"METHOD /path -> status"``) narrows an entry to the exchanges it was added
+for. Entries are validated when the file is loaded, so a malformed allowlist
+fails the session instead of silently allowing violations.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from tests.contracts.openai_contract import Violation
 DIVERGENCES_FILE = Path(__file__).with_name("divergences.toml")
 KINDS = frozenset({"temporary", "codex-extension", "kairyu-extension"})
 REQUIRED_FIELDS = ("id", "schema", "pointer_glob", "keyword", "gap_id", "owner_wp", "kind")
-OPTIONAL_FIELDS = ("value", "note")
+OPTIONAL_FIELDS = ("value", "route", "note")
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _OWNER_WP = re.compile(r"^WP-\d{2}[a-c]?$")
 # Research gap IDs, verifier-added gaps, review requirements, and m20 decisions.
@@ -43,6 +44,7 @@ class Divergence:
     owner_wp: str
     kind: str
     value: str | None = None
+    route: str | None = None
     note: str = ""
 
     def matches(self, violation: Violation) -> bool:
@@ -51,6 +53,7 @@ class Divergence:
             and fnmatchcase(violation.pointer, self.pointer_glob)
             and fnmatchcase(violation.schema, self.schema)
             and (self.value is None or violation.value == self.value)
+            and (self.route is None or fnmatchcase(violation.route, self.route))
         )
 
 
@@ -70,6 +73,7 @@ def _entry(raw: Mapping[str, Any], index: int) -> Divergence:
         "owner_wp": _OWNER_WP.match(text["owner_wp"]),
         "kind": text["kind"] in KINDS,
         "value": isinstance(raw.get("value", ""), str),
+        "route": isinstance(raw.get("route", ""), str),
         "note": isinstance(raw.get("note", ""), str),
     }
     invalid = [name for name, ok in checks.items() if not ok]
@@ -84,6 +88,7 @@ def _entry(raw: Mapping[str, Any], index: int) -> Divergence:
         owner_wp=raw["owner_wp"],
         kind=raw["kind"],
         value=raw.get("value"),
+        route=raw.get("route"),
         note=raw.get("note", ""),
     )
 
