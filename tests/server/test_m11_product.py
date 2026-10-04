@@ -932,6 +932,36 @@ class TestTenancy:
         assert "tenant-a" in admin_usage.json()["usage"]
         assert set(app.state.tenant_limiter._buckets) == {"tenant-a"}
 
+    def test_startup_warns_when_token_budget_cannot_fit_remaining_context(
+        self, tmp_path, caplog
+    ):
+        # Requests that omit an output cap (every Codex turn) reserve the whole
+        # remaining context; a tenant bucket that can never hold it refuses all
+        # of them, so operators are told at startup instead of by silent 429s.
+        class LongContextBackend(MockBackend):
+            max_model_len = 262_144
+
+        class ShortContextBackend(MockBackend):
+            max_model_len = 8_192
+
+        config = TenantConfig(
+            key_tenants={"key-a": "tenant-a"},
+            limits={"tenant-a": TenantLimits(token_burst=1_000_000)},
+        )
+        with caplog.at_level(logging.WARNING):
+            create_legacy_app(
+                {"long": LongContextBackend(), "short": ShortContextBackend()},
+                settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+                tenant_config=config,
+            )
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if "max_model_len" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "'default'" in warnings[0] and "'long'" in warnings[0]
+
     def test_rate_isolation_and_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KAIRYU_M11_KEYS", "key-a,key-b")
         config = TenantConfig(

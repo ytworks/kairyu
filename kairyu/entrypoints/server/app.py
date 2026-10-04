@@ -2114,14 +2114,13 @@ def create_app(
             exempt_paths=(SYSTEMONE_PATH,) if served_systemone else (),
         )
     if tenant_config is not None:
-        from kairyu.entrypoints.server.tenancy import (
-            TenantLimiter,
-            TenantLimitMiddleware,
-        )
+        from kairyu.entrypoints.server.tenancy import TenantLimiter, TenantLimitMiddleware
+        from kairyu.entrypoints.server.tenant_budget import warn_unreachable_output_budgets
 
         # added BEFORE auth => auth wraps it: 401 wins over 429 and
         # unauthenticated requests never drain buckets (m11 A6)
         limiter = TenantLimiter(tenant_config)
+        warn_unreachable_output_budgets(tenant_config, engines)
         app.state.tenant_limiter = limiter
         if metrics is not None:
             metrics.track_tenant_limiter(limiter)

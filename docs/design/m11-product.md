@@ -374,6 +374,35 @@ override) tool smoke — against a mock deployment mirroring the issue
 topology (all engines hidden behind `public_models`, one orchestrated
 model).
 
+**Codex P0 amendment (2026-10-05, M20 WP-03).** An audit against codex-rs
+rust-v0.160.0 (the M20 Responses-compatibility program) found three #530
+behaviors that still fail Codex turns; they are superseded here, without
+rewriting the text above:
+- *Output cap.* An omitted `max_output_tokens` no longer defaults to 1024,
+  and compaction summaries lose their 4096 cap: both follow the chat
+  remaining-context contract (#496). Codex never sends `max_output_tokens` and
+  retries `response.incomplete(max_output_tokens)` up to five times, so the
+  default failed every turn longer than 1024 tokens. The response echoes
+  `max_output_tokens: null` when the request omitted it.
+- *Liveness.* Codex's 300 s idle timer resets only on SSE events that carry
+  data; comment lines never reach its parser, so the `: keep-alive` comments
+  above did not keep buffered turns alive, and the live engine and AUTO relay
+  paths emitted nothing during silent generation. Every Responses stream path
+  now repeats `response.in_progress` (the current in-progress envelope, next
+  sequence number) after 15 s without a data event; orchestrator `: status`
+  comments are no longer relayed on `/v1/responses`. The SDK stream
+  accumulator and Codex both ignore the repeated event.
+- *Hosted web search.* Without a server-side executor, every `web_search`
+  declaration (cached, live `external_web_access: true`, and indexed
+  `indexed_web_access: true`, which Codex sends under full-access sandboxes)
+  is accepted, echoed, and hidden from the model, generalizing the disabled
+  case above. Live declarations previously failed every full-access Codex
+  turn with a terminal 400.
+
+Because an omitted cap now reserves `max_model_len` for tenant admission,
+startup warns for every tenant whose token bucket cannot hold that
+reservation for a served model.
+
 ### D5 — Vision wire format
 
 `protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat

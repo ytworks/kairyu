@@ -19,8 +19,11 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, UsageLedger
+from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
 
@@ -137,51 +140,43 @@ class LengthBackend(MockBackend):
         )
 
 
-def test_buffered_stream_opens_before_generation_and_keeps_alive(
-    tmp_path, monkeypatch
-):
-    # Codex closes SSE streams that stay silent for 300s while buffered
-    # generation on orchestrated models can run for minutes: the opening
-    # events must be emitted before generation finishes and keep-alive
-    # comments must cover the generation window.
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        ("m", {"tools": [_tool()], "tool_choice": "auto"}),
+        ("m", {}),
+        ("kairyu-auto", {}),
+    ],
+    ids=["buffered-tool-stream", "live-text-stream", "auto-relay"],
+)
+def test_every_sse_path_emits_data_heartbeat(tmp_path, monkeypatch, model, payload):
+    # Codex resets its 300 s SSE idle timer only on events that carry data;
+    # comment keep-alives never reach its parser. Every Responses stream path
+    # must emit a real data event (a repeated response.in_progress) while
+    # generation is silent, without breaking the gapless sequence numbers.
     from kairyu.entrypoints.server import responses_service
 
-    monkeypatch.setattr(responses_service, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
-
-    class SlowBackend(MockBackend):
-        async def generate(self, request):
-            await asyncio.sleep(0.25)
-            return await super().generate(request)
-
-    app = _app(tmp_path, backend=SlowBackend({"hello": "done"}))
+    monkeypatch.setattr(responses_service, "_HEARTBEAT_SECONDS", 0.05)
+    backend = MockBackend({"hello": "done"}, latency_s=0.3)
+    app = create_legacy_app(
+        {"m": backend},
+        orchestrators={
+            "kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})
+        },
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
     with TestClient(app) as client:
         response = client.post(
             "/v1/responses",
-            json={
-                "model": "m",
-                "input": "hello",
-                "stream": True,
-                "tools": [_tool()],
-                "tool_choice": "auto",
-            },
+            json={"model": model, "input": "hello", "stream": True, **payload},
         )
     assert response.status_code == 200
-    lines = [line for line in response.text.splitlines() if line]
-    # The opening events precede generation output; keep-alive comments can
-    # only appear while generation is still pending, so their presence in
-    # the middle of the stream proves the connection never goes silent.
-    assert lines[0] == "event: response.created"
-    keepalive_positions = [
-        index for index, line in enumerate(lines) if line == ": keep-alive"
-    ]
-    assert keepalive_positions
-    first_item_index = next(
-        index
-        for index, line in enumerate(lines)
-        if line == "event: response.output_item.added"
-    )
-    assert all(position < first_item_index for position in keepalive_positions)
-    assert "event: response.completed" in lines
+    assert not any(line.startswith(":") for line in response.text.splitlines())
+    events = _sse_events(response.text)
+    assert [event["sequence_number"] for event in events] == list(range(len(events)))
+    assert events[0]["type"] == "response.created"
+    assert sum(event["type"] == "response.in_progress" for event in events) >= 2
+    assert events[-1]["type"] == "response.completed"
 
 
 @pytest.mark.parametrize(
@@ -1050,32 +1045,57 @@ def test_websocket_upgrade_get_returns_426(tmp_path):
     assert response.json()["error"]["code"] == "upgrade_required"
 
 
-def test_disabled_web_search_tolerates_search_configuration(tmp_path):
-    with TestClient(_app(tmp_path)) as http:
+_CACHED_WEB_SEARCH = {
+    "type": "web_search",
+    "external_web_access": False,
+    "filters": {"allowed_domains": ["example.test"]},
+    "search_context_size": "medium",
+}
+_LIVE_INDEXED_WEB_SEARCH = {
+    "type": "web_search",
+    "external_web_access": True,
+    "indexed_web_access": True,
+}
+
+
+@pytest.mark.parametrize(
+    ("tools", "rendered"),
+    [
+        ([_tool(), _CACHED_WEB_SEARCH], "tools:add"),
+        ([_LIVE_INDEXED_WEB_SEARCH], "plain:hello"),
+    ],
+    ids=["codex-cached-with-function", "codex-live-indexed-only"],
+)
+def test_hosted_tool_policy(tmp_path, tools, rendered):
+    # Codex declares its hosted web_search on every turn (live under
+    # full-access sandboxes). Without a configured executor the declaration is
+    # accepted and echoed, but the model sees neither the tool nor, when it is
+    # the only tool, any tool scaffolding.
+    backend = MockBackend()
+    template = ChatTemplate(
+        {
+            "default": "plain:{{ messages[-1].content }}",
+            "tool_use": "tools:{% for tool in tools %}{{ tool.function.name }}{% endfor %}",
+        }
+    )
+    app = create_app(
+        {"m": backend},
+        chat_templates={"m": template},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    with TestClient(app) as http:
         response = http.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "input": "hello",
-                "tools": [
-                    {
-                        "type": "web_search",
-                        "external_web_access": False,
-                        "filters": {"allowed_domains": ["example.test"]},
-                        "search_context_size": "medium",
-                    }
-                ],
-            },
+            "/v1/responses", json={"model": "m", "input": "hello", "tools": tools}
         )
     assert response.status_code == 200
-    assert response.json()["tools"][0]["type"] == "web_search"
+    assert response.json()["tools"] == tools
+    assert backend.prompts_seen == (rendered,)
 
 
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
         ({"mystery": True}, "unsupported request fields"),
-        ({"tools": [{"type": "web_search"}]}, "expected 'function'"),
         ({"context_management": [{"type": "compaction"}]}, "context_management"),
         ({"include": ["message.output_text.logprobs"]}, "unsupported include values"),
         ({"service_tier": "priority"}, "service_tier is not supported"),
@@ -1411,28 +1431,6 @@ def test_flattened_namespace_name_collisions_fail_before_dispatch(tmp_path):
     assert response.status_code == 400
     assert "duplicate function name" in response.json()["error"]["message"]
     assert backend.prompts_seen == ()
-
-
-def test_codex_disabled_web_search_declaration_is_a_truthful_noop(tmp_path):
-    backend = MockBackend({"hello": "PASS"})
-    with TestClient(_app(tmp_path, backend)) as http:
-        response = http.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "input": "hello",
-                "tools": [
-                    _tool(),
-                    {"type": "web_search", "external_web_access": False},
-                ],
-            },
-        )
-    assert response.status_code == 200
-    assert len(backend.prompts_seen) == 1
-    assert response.json()["tools"][-1] == {
-        "type": "web_search",
-        "external_web_access": False,
-    }
 
 
 def test_unknown_function_call_output_fails_before_dispatch(tmp_path):

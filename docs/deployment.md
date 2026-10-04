@@ -652,8 +652,9 @@ The script creates an ephemeral Codex run with `wire_api="responses"` and a
 read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
 command event, its tool result, and a final message containing `PASS`;
 `KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke. Kairyu accepts Codex
-function namespaces and its disabled web-search declaration (including its
-search configuration fields); enabled hosted web search remains unsupported.
+function namespaces. Every hosted `web_search` declaration (cached, live, or
+indexed, with its search configuration fields) is accepted, echoed, and hidden
+from the model, because no server-side search executor runs.
 `background`, Conversations API objects, hosted prompt templates, moderation,
 automatic truncation, context management, `max_tool_calls`, and response
 top-logprobs fail before model dispatch. This explicit rejection boundary keeps
@@ -671,11 +672,16 @@ Completions orchestration contract, so `public_models` topologies that hide
 every L1 pool behind a single AUTO model work end to end (this includes the
 Terminal-Bench gateway shape). Additional Codex-derived behavior:
 
-- **Buffered streams never go silent.** Any streamed request with tools
-  replies `response.created`/`response.in_progress` immediately and emits
-  `: keep-alive` comments while generation runs; Codex aborts SSE streams
-  that stay silent for 300 s. Failures after the stream opens surface as
-  `error` + `response.failed` events.
+- **Streams never go silent.** Every streamed request replies
+  `response.created`/`response.in_progress` immediately and repeats
+  `response.in_progress` after 15 s without a data event while generation
+  runs. Codex retries SSE streams without a data event for 300 s, and comment
+  lines do not count. Failures after the stream opens surface as `error` +
+  `response.failed` events.
+- **No server-side output cap.** An omitted `max_output_tokens` (Codex never
+  sends one) bounds output by the model's remaining context, as on Chat
+  Completions. Tenant admission then reserves `max_model_len`; startup logs a
+  warning for every tenant whose token bucket cannot hold that reservation.
 - **WebSocket upgrades get 426.** Harbor/Terminal-Bench repoints Codex's
   built-in `openai` provider (`openai_base_url` in `config.toml`), which
   tries WebSocket first; 426 makes Codex fall back to HTTPS immediately and

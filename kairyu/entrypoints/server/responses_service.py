@@ -35,6 +35,7 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound_async,
     prepare_backend_request,
 )
+from kairyu.entrypoints.server import stream_util
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
@@ -68,16 +69,17 @@ _CODEX_INTERNAL_ITEM_FIELDS = {
     "internal_chat_message_metadata_passthrough",
     "encrypted_function_args",
 }
-# Buffered generation can run for minutes on orchestrated models while the
-# strictest known client budget (Codex) closes idle SSE streams at 300s.
-_BUFFERED_KEEPALIVE_SECONDS = 15.0
+# Generation can stay silent for minutes (prefill, thinking, orchestrated
+# stages) while Codex retries any SSE stream without a *data* event for 300s;
+# comment lines never reset its idle timer. Every stream path therefore
+# repeats response.in_progress after this much data silence.
+_HEARTBEAT_SECONDS = 15.0
 # Remote compaction v2 (Codex against an OpenAI-shaped provider): a terminal
 # compaction_trigger input item requests exactly one compaction output item
 # whose encrypted_content is opaque to the client and echoed back verbatim.
 _COMPACTION_TOKEN_PREFIX = "kcp1."
 _COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
 _COMPACTION_NONCE_BYTES = 12
-_COMPACTION_MAX_OUTPUT_TOKENS = 4096
 _COMPACTION_INSTRUCTION_ITEM = {
     "type": "message",
     "role": "user",
@@ -762,13 +764,15 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
                     )
                 )
             continue
-        if kind == "web_search" and tool.get("external_web_access") is False:
-            # Codex attaches search configuration (filters, location, context
-            # size) even when external access is disabled; the settings of a
-            # tool that can never run are accepted and ignored.
+        if kind == "web_search":
+            # No server-side executor: accept and drop. Codex declares hosted
+            # web search on every turn (live/indexed under full-access
+            # sandboxes); the declaration is echoed but never offered to the
+            # model, so it can be neither selected nor executed.
             unknown = set(tool) - {
                 "type",
                 "external_web_access",
+                "indexed_web_access",
                 "filters",
                 "user_location",
                 "search_context_size",
@@ -779,10 +783,9 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
                     f"tools[{index}] has unsupported fields: "
                     + ", ".join(sorted(unknown))
                 )
-            # Codex declares its built-in web tool even when the current run
-            # explicitly disables external access.  Keeping it in the response
-            # envelope but omitting it from model-visible callable functions is
-            # truthful: the disabled tool cannot be selected or executed.
+            for flag in ("external_web_access", "indexed_web_access"):
+                if tool.get(flag) is not None and not isinstance(tool[flag], bool):
+                    raise ChatRequestError(f"tools[{index}].{flag} must be a boolean")
             continue
         if kind != "function":
             keys = sorted(tool)
@@ -797,7 +800,8 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
             raise ChatRequestError(f"tools[{index}].name {name!r} is duplicated")
         names.add(name)
         converted.append(_function_tool(tool, path=f"tools[{index}]"))
-    return converted
+    # Templates gate on `tools is not none`: dropped hosted tools leave none.
+    return converted or None
 
 
 def _chat_tool_choice(
@@ -907,9 +911,9 @@ def _to_chat_request(
     return ChatCompletionRequest(
         model=request.model,
         messages=messages,
-        max_completion_tokens=(
-            request.max_output_tokens if request.max_output_tokens is not None else 1024
-        ),
+        # None follows the OpenAI contract: output is bounded by the model's
+        # remaining context (issue #496), as on /v1/chat/completions.
+        max_completion_tokens=request.max_output_tokens,
         stream=request.stream,
         tools=_chat_tools(request.tools),
         tool_choice=_chat_tool_choice(request.tool_choice, request.tools),
@@ -1154,8 +1158,9 @@ async def _buffered_events(
 
     ``produce`` runs the whole generation and returns ``(output, usage,
     status, incomplete_details)`` or raises ``_BufferedFailure``. The opening
-    events flush immediately and keep-alive comments cover the generation
-    window, so long orchestrated turns never trip client idle timeouts.
+    events flush immediately and repeated ``response.in_progress`` data events
+    cover the generation window, so long orchestrated turns never trip client
+    idle timeouts.
     """
     in_progress = _response_envelope(
         request,
@@ -1173,12 +1178,11 @@ async def _buffered_events(
     task = asyncio.ensure_future(produce())
     try:
         while True:
-            done, _pending = await asyncio.wait(
-                {task}, timeout=_BUFFERED_KEEPALIVE_SECONDS
-            )
+            done, _pending = await asyncio.wait({task}, timeout=_HEARTBEAT_SECONDS)
             if done:
                 break
-            yield ": keep-alive\n\n"
+            yield _sse("response.in_progress", sequence, response=in_progress)
+            sequence += 1
     except BaseException:
         task.cancel()
         with contextlib.suppress(BaseException):
@@ -1396,30 +1400,43 @@ async def _live_text_events(
             part=empty_part,
         )
         sequence += 1
+        heartbeat = stream_util.DataHeartbeat(_HEARTBEAT_SECONDS)
+        partials = stream_util.iter_with_idle_markers(
+            validated.engine.stream(validated.generation_request),
+            idle_seconds=_HEARTBEAT_SECONDS,
+        )
         try:
             usage_owner.mark_dispatched()
-            async for partial in validated.engine.stream(validated.generation_request):
-                last = partial
-                usage_owner.observe(partial.usage, partial.completions)
-                completion = min(partial.completions, key=lambda item: item.index, default=None)
-                if completion is None:
-                    continue
-                delta, sent = completion.delta_after(sent)
-                if not delta:
-                    continue
-                if type(delta) is str:
-                    yield text_delta_encoder.encode(sequence, delta)
-                else:
-                    yield _sse(
-                        "response.output_text.delta",
-                        sequence,
-                        item_id=message_id,
-                        output_index=0,
-                        content_index=0,
-                        delta=delta,
-                        logprobs=[],
+            async for partial in partials:
+                if partial is not stream_util.IDLE_MARKER:
+                    last = partial
+                    usage_owner.observe(partial.usage, partial.completions)
+                    completion = min(
+                        partial.completions, key=lambda item: item.index, default=None
                     )
-                sequence += 1
+                    delta = ""
+                    if completion is not None:
+                        delta, sent = completion.delta_after(sent)
+                    if delta:
+                        if type(delta) is str:
+                            yield text_delta_encoder.encode(sequence, delta)
+                        else:
+                            yield _sse(
+                                "response.output_text.delta",
+                                sequence,
+                                item_id=message_id,
+                                output_index=0,
+                                content_index=0,
+                                delta=delta,
+                                logprobs=[],
+                            )
+                        sequence += 1
+                        heartbeat.mark()
+                        continue
+                if heartbeat.due():
+                    yield _sse("response.in_progress", sequence, response=in_progress)
+                    sequence += 1
+                    heartbeat.mark()
         except Exception as error:
             logger.exception("Responses API upstream stream failed")
             safe_message = f"upstream backend error ({type(error).__name__})"
@@ -1471,6 +1488,8 @@ async def _live_text_events(
             )
             yield _sse("response.failed", sequence, response=failed)
             return
+        finally:
+            await partials.aclose()
 
         completions = last.completions if last is not None else ()
         usage_owner.mark_completed()
@@ -1561,7 +1580,8 @@ async def _relay_auto_chat_stream(
     ``upstream`` is this process's own chat-chunk stream for an AUTO model, so
     the frames are the internal wire format this release emits: ``: status``
     keep-alive comments, ``data: {chat chunk}`` frames, ``data: {"error": ...}``
-    frames, and a final ``data: [DONE]``.
+    frames, and a final ``data: [DONE]``. Status comments are not relayed:
+    liveness is the repeated ``response.in_progress`` data event.
     """
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     text_delta_encoder = ResponsesTextDeltaSSEEncoder(message_id)
@@ -1578,18 +1598,10 @@ async def _relay_auto_chat_stream(
     finish_reason: str | None = None
     wire_usage: dict | None = None
     error_payload: dict | None = None
-
-    async def frames() -> AsyncIterator[str]:
-        buffer = ""
-        async for chunk in upstream:
-            buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
-            while "\n\n" in buffer:
-                frame, buffer = buffer.split("\n\n", 1)
-                if frame:
-                    yield frame
-        if buffer:
-            yield buffer
-
+    heartbeat = stream_util.DataHeartbeat(_HEARTBEAT_SECONDS)
+    frames = stream_util.iter_with_idle_markers(
+        stream_util.sse_frames(upstream), idle_seconds=_HEARTBEAT_SECONDS
+    )
     try:
         yield _sse("response.created", sequence, response=in_progress)
         sequence += 1
@@ -1618,42 +1630,38 @@ async def _relay_auto_chat_stream(
             part={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
         )
         sequence += 1
-        async for frame in frames():
-            if frame.startswith(":"):
-                # Orchestrator keep-alive comments stay comments on the
-                # Responses stream (invisible to SDKs, reset idle timers).
-                yield f"{frame}\n\n"
-                continue
-            if not frame.startswith("data:"):
-                continue
-            payload_text = frame[len("data:"):].strip()
-            if payload_text == "[DONE]":
-                break
-            try:
-                chunk_payload = json.loads(payload_text)
-            except ValueError:
-                continue
-            if "error" in chunk_payload and "choices" not in chunk_payload:
-                error_payload = chunk_payload["error"]
-                break
-            usage_value = chunk_payload.get("usage")
-            if isinstance(usage_value, dict):
-                wire_usage = usage_value
-            for choice in chunk_payload.get("choices") or ():
-                if choice.get("index", 0) != 0:
-                    continue
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-                delta = choice.get("delta") or {}
-                content = delta.get("content")
-                if isinstance(content, str) and content:
+        heartbeat.mark()
+        async for frame in frames:
+            if frame is not stream_util.IDLE_MARKER and frame.startswith("data:"):
+                payload_text = frame[len("data:"):].strip()
+                if payload_text == "[DONE]":
+                    break
+                try:
+                    chunk_payload = json.loads(payload_text)
+                except ValueError:
+                    chunk_payload = {}
+                if "error" in chunk_payload and "choices" not in chunk_payload:
+                    error_payload = chunk_payload["error"]
+                    break
+                if isinstance(chunk_payload.get("usage"), dict):
+                    wire_usage = chunk_payload["usage"]
+                content, reason = stream_util.primary_chat_delta(chunk_payload)
+                finish_reason = reason or finish_reason
+                if content:
                     yield text_delta_encoder.encode(sequence, content)
                     sequence += 1
+                    heartbeat.mark()
                     text_parts.append(content)
+            if heartbeat.due():
+                yield _sse("response.in_progress", sequence, response=in_progress)
+                sequence += 1
+                heartbeat.mark()
     except Exception as error:
         logger.exception("Responses API orchestrated relay failed")
         error_payload = {"message": f"upstream backend error ({type(error).__name__})"}
     finally:
+        # Stop the frame pump first: closing a generator that is running raises.
+        await frames.aclose()
         aclose = getattr(upstream, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -1968,17 +1976,9 @@ def add_responses_route(
             if compaction_request:
                 # The summary is a plain text turn: tools cannot help it and a
                 # tool call in its place would break the client's compaction
-                # collection, so the summarization call runs tool-free with
-                # enough room for a useful summary.
+                # collection, so the summarization call runs tool-free.
                 chat_request = chat_request.model_copy(
-                    update={
-                        "tools": None,
-                        "tool_choice": None,
-                        "max_completion_tokens": (
-                            request.max_output_tokens
-                            or _COMPACTION_MAX_OUTPUT_TOKENS
-                        ),
-                    }
+                    update={"tools": None, "tool_choice": None}
                 )
             if not orchestrated:
                 cache_key = request.prompt_cache_key or request.previous_response_id

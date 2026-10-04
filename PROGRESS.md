@@ -105,6 +105,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [amendment] Responses: Codex P0 fixes (M20 WP-03)
+- What: `/v1/responses` drops the 1024 default output cap and the 4096 compaction cap (remaining context, #496); every SSE path repeats `response.in_progress` after 15 s data silence instead of `: keep-alive` comments; live/indexed hosted `web_search` is accepted, echoed, and hidden; startup warns when a tenant token bucket cannot hold a model's `max_model_len` reservation.
+- Why: audit vs codex-rs rust-v0.160.0: Codex never sends `max_output_tokens` and retries `incomplete` 5x, resets its 300 s idle timer only on data events, and declares live web search under full-access sandboxes (terminal 400).
+- Refs: m11 D4 "Codex P0 amendment"; `kairyu/entrypoints/server/{responses_service,stream_util,tenant_budget}.py`; `docs/deployment.md`
+
 ### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
 - What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
 - Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.

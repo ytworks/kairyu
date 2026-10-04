@@ -2158,17 +2158,33 @@ async def test_chat_max_tokens_precedes_modern_alias_when_both_are_present():
     assert engine.requests[0].sampling_params.max_tokens == 5
 
 
-async def test_responses_default_output_token_limit_is_1024():
+@pytest.mark.parametrize(
+    "input_items",
+    [
+        "hello",
+        [
+            {"type": "message", "role": "user", "content": "hello"},
+            {"type": "compaction_trigger"},
+        ],
+    ],
+    ids=["turn", "compaction"],
+)
+async def test_omitted_max_output_tokens_uses_remaining_context(input_items):
+    # Codex never sends max_output_tokens and retries response.incomplete, so
+    # a server-side default cap fails every long turn; omission must leave the
+    # output bounded only by the model's remaining context (#496 semantics).
     engine = StubBackend(text="done", finish_reason="stop")
     app = create_legacy_app(engines={"stub": engine})
 
     async with _client(app) as client:
         response = await client.post(
-            "/v1/responses", json={"model": "stub", "input": "hello"}
+            "/v1/responses",
+            json={"model": "stub", "input": input_items, "store": False},
         )
 
     assert response.status_code == 200
-    assert engine.requests[0].sampling_params.max_tokens == 1024
+    assert response.json()["max_output_tokens"] is None
+    assert engine.requests[0].sampling_params.max_tokens is None
 
 
 @pytest.mark.parametrize(
