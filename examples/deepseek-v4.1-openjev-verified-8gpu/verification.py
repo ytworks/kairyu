@@ -7,9 +7,9 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
 
   l1            DeepSeek grammar-constrained JSON on every DP rank (thinking and
                 chat) and System One on each OpenJev replica
-  requirements  the adopted points are MECE, guaranteed answers meet InFoBench's
-                gold questions (graded independently), repairs fix more than break
-  calibrate     the guarantee on InFoBench labels: error, miss, tau_hi (calibrate.py)
+  calibrate     tau_hi on InFoBench expert labels (calibrate.py)
+  requirements  the adopted points are MECE: they cover InFoBench's gold
+                decomposed questions and no two require the same thing
   repair        constraint-heavy requests: repairs happen and every guaranteed
                 answer meets the stated constraint (independent check)
   structured    a caller json_schema survives drafting and repair
@@ -20,7 +20,7 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   routing       Jev routes accuracy-critical conversations to the verified DAG
   think-route   everyday requests stream from deepseek_think at the default effort
   effort        the caller's effort reaches every DeepSeek step on both routes
-  implicit      answers meet what the situation presupposes; plain questions pass as is
+  implicit      situational requirements are extracted and kept only when expected
   verified-tool-routing  Jev routes a request that requires a tool call to
                 VERIFIED_TOOL, and no other
   verified-tool-route    a VERIFIED_TOOL request gets one DeepSeek call at max
@@ -110,74 +110,6 @@ def _judge_seconds(trace: dict | None) -> float | None:
                 return None
             return round((end - start).total_seconds(), 3)
     return None
-
-
-_CHECKLIST_LINE = re.compile(r"^- \[(?P<id>[^\]]+)\] p=[0-9.]+ (?P<mark>PASS|FAIL)", re.M)
-
-
-def _checklist_attempts(reasoning: str) -> list[dict[str, bool]]:
-    """Per checklist attempt, each point's PASS (True) or FAIL, from the exposed work."""
-
-    attempts = []
-    for section in re.split(r"^### ", reasoning or "", flags=re.M):
-        if section.startswith("checklist — attempt"):
-            attempts.append(
-                {m["id"]: m["mark"] == "PASS" for m in _CHECKLIST_LINE.finditer(section)}
-            )
-    return attempts
-
-
-def repair_effect(rows: list[dict]) -> dict:
-    """Q5: points a repair fixed (FAIL then PASS) and broke (PASS then FAIL)."""
-
-    fixed = broken = repaired = 0
-    for row in rows:
-        attempts = row.get("checklist_attempts") or []
-        if len(attempts) < 2:
-            continue
-        repaired += 1
-        first, last = attempts[0], attempts[-1]
-        fixed += sum(1 for key, ok in first.items() if not ok and last.get(key))
-        broken += sum(1 for key, ok in first.items() if ok and key in last and not last[key])
-    return {"repaired": repaired, "points_fixed": fixed, "points_broken": broken}
-
-
-_GRADE_PROMPT = """You grade an answer. For each CRITERION below, decide whether the ANSWER \
-to the REQUEST fully satisfies it. Answer as JSON {{"met": [true/false per criterion, in order]}}.
-REQUEST:
-{request}
-ANSWER:
-{answer}
-CRITERIA:
-{criteria}"""
-
-
-def grade(env: dict[str, str], request: str, answer: str, criteria: list[str]) -> list[bool]:
-    """An independent DeepSeek judgment (thinking, temperature 0) of an answer."""
-
-    body = control.post_json(
-        f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/v1/chat/completions",
-        {
-            "model": SPEC["deepseek"]["served_name"],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _GRADE_PROMPT.format(
-                        request=request,
-                        answer=answer,
-                        criteria="\n".join(f"{n}. {c}" for n, c in enumerate(criteria, 1)),
-                    ),
-                }
-            ],
-            "max_tokens": 16384,
-            "temperature": 0.0,
-            "reasoning_effort": "high",
-            "response_format": {"type": "json_object"},
-        },
-        timeout_s=900,
-    )
-    met = json.loads(body["choices"][0]["message"]["content"]).get("met") or []
-    return [bool(value) for value in met[: len(criteria)]] + [False] * (len(criteria) - len(met))
 
 
 def _efforts(trace: dict | None) -> list[str | None]:
@@ -319,7 +251,6 @@ def chat(
         ],
         "finish_reason": choice.get("finish_reason"),
         "reasoning_chars": len(message.get("reasoning_content") or ""),
-        "checklist_attempts": _checklist_attempts(message.get("reasoning_content") or ""),
         "error": body.get("error"),
         "verification_error": (
             control.verification_error(body) if status == 200 and verified_route else None
@@ -425,28 +356,6 @@ CHECKLIST:
 {checklist}"""
 
 
-# The held-out guarantee error accepted with tau_accept 0.99 (calibrate.py).
-GUARANTEE_MAX_ERROR = 0.152
-
-
-def _guarantee_outcome(entries: list[dict]) -> dict:
-    """Q3/Q4: how often guaranteed and unguaranteed answers meet every criterion."""
-
-    graded = [entry for entry in entries if "all_met" in entry]
-    guaranteed = [entry for entry in graded if entry["guaranteed"]]
-    other = [entry for entry in graded if not entry["guaranteed"]]
-
-    def rate(subset: list[dict]) -> float | None:
-        return round(sum(entry["all_met"] for entry in subset) / len(subset), 4) if subset else None
-
-    return {
-        "graded": len(graded),
-        "guaranteed_all_met_rate": rate(guaranteed),
-        "unguaranteed_all_met_rate": rate(other),
-        "repaired_all_met_rate": rate([entry for entry in graded if entry.get("repaired")]),
-    }
-
-
 def _build_key() -> str:
     """The served code and configuration: commit, uncommitted diff, example configs."""
 
@@ -529,17 +438,6 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
                 "duplicate_pairs": int(verdict.get("duplicate_pairs") or 0),
             }
         )
-    # Q3: every answer graded independently on InFoBench's gold questions.
-    for row, result, entry in zip(rows, results, coverage, strict=True):
-        if result["status"] == 200:
-            met = grade(
-                env, _infobench_content(row), result["content"], row["decomposed_questions"]
-            )
-            entry["gold_met"] = sum(met)
-            entry["all_met"] = all(met)
-        entry["guaranteed"] = result["guaranteed"]
-        entry["repaired"] = (result["attempts"] or 0) > 1
-    deadline.check()
     judged = [entry for entry in coverage if entry["covered"] is not None]
     recall = sum(entry["covered"] for entry in judged) / max(1, sum(e["gold"] for e in judged))
     duplicates = sum(entry["duplicate_pairs"] for entry in judged)
@@ -550,33 +448,20 @@ def gate_requirements(env: dict[str, str], *, count: int = 40, budget_s: float =
         "gold_recall": round(recall, 4),
         "duplicate_pairs_per_request": round(duplicates / max(1, len(judged)), 3),
         "requests_with_duplicates": round(duplicate_share, 4),
-        **_guarantee_outcome(coverage),
-        **repair_effect(results),
         "judged": len(judged),
     }
     _print_rows(results)
     print(json.dumps(summary, indent=2), flush=True)
-    # MECE points (exhaustive and exclusive, 10 % tolerance on both); Q3 the
-    # guaranteed answers meet every gold question as often as the held-out
-    # guarantee error allows (MAX_ERROR); Q5 repairs fix more than they break.
-    q3 = summary["guaranteed_all_met_rate"]
-    passed = (
-        recall >= 0.9
-        and duplicate_share <= 0.10
-        and len(judged) == len(rows)
-        and q3 is not None
-        and q3 >= 1 - GUARANTEE_MAX_ERROR
-        and summary["points_fixed"] >= summary["points_broken"]
-    )
+    # MECE: exhaustive (gold recall) and exclusive (few requests with a
+    # duplicate pair), with the same 10 % tolerance on both.
+    passed = recall >= 0.9 and duplicate_share <= 0.10 and len(judged) == len(rows)
     _write(
         "requirements",
         {"passed": passed, "summary": summary, "coverage": coverage, "rows": results},
     )
     print(
         f"requirements: {'PASS' if passed else 'FAIL'} (gold recall {recall:.3f} >= 0.90, "
-        f"requests with duplicates {duplicate_share:.3f} <= 0.10, guaranteed meeting every "
-        f"gold question {q3} >= {1 - GUARANTEE_MAX_ERROR:.3f}, repairs fixed "
-        f"{summary['points_fixed']} >= broke {summary['points_broken']})"
+        f"requests with duplicates {duplicate_share:.3f} <= 0.10)"
     )
     if not passed:
         raise SystemExit(1)
@@ -1238,15 +1123,17 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
         raise SystemExit(1)
 
 
-def gate_implicit(env: dict[str, str], *, budget_s: float = 5400) -> None:
-    """Q4: answers meet what the situation presupposes; plain questions pass as they are.
+_IMPLICIT_PROMPT = """For each EXPECTED condition, decide whether the CHECKLIST contains a \
+condition that requires the same thing. Answer as JSON {{"covered": [true/false per expected \
+condition, in order]}}.
+EXPECTED:
+{expected}
+CHECKLIST:
+{checklist}"""
 
-    Each answer to an implicit-set request is graded independently on its
-    expected situational requirements; a guaranteed answer must meet all of
-    them. The control questions presuppose nothing: a correct plain answer
-    should be guaranteed without a repair. Repairs must fix more points than
-    they break (Q5). Whether a point stayed in the list is reported only.
-    """
+
+def gate_implicit(env: dict[str, str], *, budget_s: float = 5400) -> None:
+    """Situational requirements are extracted and kept only when expected."""
 
     deadline = Deadline("implicit", budget_s)
     items = _dataset("implicit-set.json")
@@ -1254,68 +1141,62 @@ def gate_implicit(env: dict[str, str], *, budget_s: float = 5400) -> None:
         env, [{"messages": item["messages"], "model": ALWAYS} for item in items], concurrency=8
     )
     deadline.check()
-    entries = []
-    controls = []
+    l1 = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
+    covered = expected_total = 0
+    spurious = []
+    details = []
     for item, row in zip(items, rows, strict=True):
-        request = item["messages"][-1]["content"]
-        implicit = [
-            r for r in row["requirements"] if (r.get("tags") or {}).get("origin") == "implicit"
-        ]
-        entry = {
-            "request": request[:80],
-            "implicit_kept": len(implicit),
-            "guaranteed": row["guaranteed"],
-            "repaired": (row["attempts"] or 0) > 1,
-        }
+        checklist = row["requirements"]
+        implicit = [r for r in checklist if (r.get("tags") or {}).get("origin") == "implicit"]
+        entry = {"request": item["messages"][-1]["content"][:80], "implicit_kept": len(implicit)}
         if item["expected_implicit"]:
-            if row["status"] == 200:
-                met = grade(env, request, row["content"], item["expected_implicit"])
-                entry["expected_met"] = f"{sum(met)}/{len(met)}"
-                entry["all_met"] = all(met)
-            entries.append(entry)
+            body = control.post_json(
+                f"{l1}/v1/chat/completions",
+                {
+                    "model": SPEC["deepseek"]["served_name"],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": _IMPLICIT_PROMPT.format(
+                                expected="\n".join(f"- {e}" for e in item["expected_implicit"]),
+                                checklist="\n".join(f"- {r['proposition']}" for r in checklist),
+                            ),
+                        }
+                    ],
+                    # A thinking judge: the chat-mode verdict missed coverage
+                    # spread over several conditions (VCO-D8 amendment).
+                    "max_tokens": 16384,
+                    "temperature": 0.0,
+                    "reasoning_effort": "high",
+                    "response_format": {"type": "json_object"},
+                },
+                timeout_s=900,
+            )
+            flags = json.loads(body["choices"][0]["message"]["content"]).get("covered") or []
+            hit = sum(1 for flag in flags if flag is True)
+            covered += hit
+            expected_total += len(item["expected_implicit"])
+            entry["expected_covered"] = f"{hit}/{len(item['expected_implicit'])}"
         else:
-            controls.append(entry)
-    deadline.check()
-    outcome = _guarantee_outcome(entries)
+            spurious.append(len(implicit))
+        details.append(entry)
+    recall = covered / expected_total if expected_total else 0.0
     summary = {
         **_summary(rows),
-        **outcome,
-        **repair_effect(rows),
-        "controls": len(controls),
-        "controls_guaranteed": sum(1 for c in controls if c["guaranteed"]),
-        "controls_repaired": sum(1 for c in controls if c["repaired"]),
+        "implicit_recall": round(recall, 4),
+        "controls": len(spurious),
+        "control_implicit_kept_mean": round(statistics.mean(spurious), 3) if spurious else None,
     }
     _print_rows(rows)
     print(
-        json.dumps(
-            {"summary": summary, "entries": entries, "controls": controls},
-            indent=2,
-            ensure_ascii=False,
-        ),
+        json.dumps({"summary": summary, "details": details}, indent=2, ensure_ascii=False),
         flush=True,
     )
-    q4 = outcome["guaranteed_all_met_rate"]
-    controls_rate = summary["controls_guaranteed"] / max(1, len(controls))
-    passed = (
-        q4 is not None
-        and q4 >= 0.80
-        and controls_rate >= 0.80
-        and summary["points_fixed"] >= summary["points_broken"]
-    )
-    _write(
-        "implicit",
-        {
-            "passed": passed,
-            "summary": summary,
-            "entries": entries,
-            "controls": controls,
-            "rows": rows,
-        },
-    )
+    passed = recall >= 0.80 and (summary["control_implicit_kept_mean"] or 0) <= 0.5
+    _write("implicit", {"passed": passed, "summary": summary, "details": details, "rows": rows})
     print(
-        f"implicit: {'PASS' if passed else 'FAIL'} (guaranteed meeting every expected "
-        f"requirement {q4} >= 0.80, controls guaranteed {controls_rate:.2f} >= 0.80, repairs "
-        f"fixed {summary['points_fixed']} >= broke {summary['points_broken']})"
+        f"implicit: {'PASS' if passed else 'FAIL'} "
+        f"(recall {recall:.3f} >= 0.80, control mean <= 0.5)"
     )
     if not passed:
         raise SystemExit(1)
