@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
@@ -22,14 +23,8 @@ from pathlib import Path
 from typing import IO
 
 from kairyu.audit_io import BoundedJsonlWriter
-from kairyu.entrypoints.server.messages_protocol import (
-    anthropic_error_payload,
-    wants_anthropic_envelope,
-)
-from kairyu.entrypoints.server.systemone_service import (
-    jev_error_payload,
-    wants_jev_envelope,
-)
+from kairyu.entrypoints.server.error_classifier import backpressure, tenant_rate_limited
+from kairyu.entrypoints.server.middleware import send_error
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +166,12 @@ class _Bucket:
         self.tokens = min(self.capacity, self.tokens + elapsed * self.rate + amount)
         self.updated = max(self.updated, now)
 
+    def wait_s(self, amount: float) -> float:
+        """Seconds of refill until ``amount`` fits (``inf`` above the capacity)."""
+        if amount > self.capacity:
+            return math.inf
+        return max(0.0, amount - self.tokens) / self.rate
+
 
 class TenantLimiter:
     """Per-tenant request-rate AND token-rate buckets (single-gateway; the
@@ -233,13 +234,16 @@ class TenantLimiter:
         token_bucket = self._token_bucket(tenant)
         token_bucket.take(0.0, now)  # refill only
         if token_bucket.tokens < 1.0:
-            return TenantAdmission.rejected(tenant, "token_quota")
+            wait_s = token_bucket.wait_s(1.0)
+            return TenantAdmission.rejected(tenant, "token_quota", retry_after_s=wait_s)
         limits = self._config.limits_for(tenant)
         active = self._in_flight.get(tenant, 0)
         if limits.max_in_flight is not None and active >= limits.max_in_flight:
-            return TenantAdmission.rejected(tenant, "in_flight")
-        if not self._request_bucket(tenant).take(1.0, now):
-            return TenantAdmission.rejected(tenant, "request_quota")
+            return TenantAdmission.rejected(tenant, "in_flight", retry_after_s=1.0)
+        request_bucket = self._request_bucket(tenant)
+        if not request_bucket.take(1.0, now):
+            wait_s = request_bucket.wait_s(1.0)
+            return TenantAdmission.rejected(tenant, "request_quota", retry_after_s=wait_s)
         self._in_flight[tenant] = active + 1
         return TenantAdmission.acquired(tenant, self)
 
@@ -259,11 +263,8 @@ class TenantLimiter:
         if tokens > token_bucket.capacity:
             return TenantAdmission.rejected(tenant, "token_request_too_large")
         if token_bucket.tokens + 1e-9 < tokens:
-            return TenantAdmission.rejected(
-                tenant,
-                "token_quota",
-                retry_after_s=(tokens - token_bucket.tokens) / token_bucket.rate,
-            )
+            wait_s = token_bucket.wait_s(tokens)
+            return TenantAdmission.rejected(tenant, "token_quota", retry_after_s=wait_s)
         limits = self._config.limits_for(tenant)
         active = self._in_flight.get(tenant, 0)
         if limits.max_in_flight is not None and active >= limits.max_in_flight:
@@ -271,11 +272,8 @@ class TenantLimiter:
         request_bucket = self._request_bucket(tenant)
         request_bucket.take(0.0, now)
         if request_bucket.tokens + 1e-9 < 1.0:
-            return TenantAdmission.rejected(
-                tenant,
-                "request_quota",
-                retry_after_s=(1.0 - request_bucket.tokens) / request_bucket.rate,
-            )
+            wait_s = request_bucket.wait_s(1.0)
+            return TenantAdmission.rejected(tenant, "request_quota", retry_after_s=wait_s)
         request_taken = request_bucket.take(1.0, now)
         token_taken = token_bucket.take(float(tokens), now)
         if not request_taken or not token_taken:  # defensive: synchronous checks above
@@ -310,13 +308,13 @@ class TenantLimiter:
         """Debit a completed request's tokens from the tenant's token bucket."""
         self._token_bucket(tenant).debit(float(tokens), self._now())  # may go negative
 
-    def _reserve_tokens(self, tenant: str, tokens: int) -> bool:
-        if not self._token_bucket(tenant).take(float(tokens), self._now()):
-            return False
-        self._reserved_tokens[tenant] = (
-            self._reserved_tokens.get(tenant, 0) + tokens
-        )
-        return True
+    def _reserve_tokens(self, tenant: str, tokens: int) -> float | None:
+        """Reserve ``tokens``; on refusal, the seconds until they fit (``inf``: never)."""
+        bucket = self._token_bucket(tenant)
+        if not bucket.take(float(tokens), self._now()):
+            return bucket.wait_s(tokens)
+        self._reserved_tokens[tenant] = self._reserved_tokens.get(tenant, 0) + tokens
+        return None
 
     def _finish_reservation(self, tenant: str, reserved: int) -> None:
         outstanding = self._reserved_tokens.get(tenant, 0)
@@ -394,6 +392,7 @@ class TenantAdmission:
         "tenant",
         "reason",
         "retry_after_s",
+        "exceeds_token_capacity",
         "_limiter",
         "_released",
         "_reserved_tokens",
@@ -412,6 +411,7 @@ class TenantAdmission:
         self.tenant = tenant
         self.reason = reason
         self.retry_after_s = retry_after_s
+        self.exceeds_token_capacity = False
         self._limiter = limiter
         self._released = False
         self._reserved_tokens = 0
@@ -465,8 +465,13 @@ class TenantAdmission:
             return False
         if self._reserved_tokens:
             raise RuntimeError("tenant admission already has a token reservation")
-        if not self._limiter._reserve_tokens(self.tenant, tokens):
+        wait_s = self._limiter._reserve_tokens(self.tenant, tokens)
+        if wait_s is not None:
+            # The reason stays token_quota (Chat's wire); Responses answers a
+            # reservation above the bucket's capacity as never fitting (O-2).
             self.reason = "token_quota"
+            self.exceeds_token_capacity = math.isinf(wait_s)
+            self.retry_after_s = None if self.exceeds_token_capacity else wait_s
             return False
         self._reserved_tokens = tokens
         self._refundable_on_exact_usage = refundable_on_exact_usage
@@ -585,28 +590,9 @@ class TenantLimitMiddleware:
                         source="async_submit",
                     )
             if not admitted:
-                body = json.dumps(
-                    {
-                        "error": {
-                            "message": (
-                                f"tenant {tenant!r} async submission limit exceeded"
-                            ),
-                            "type": "rate_limit_error",
-                            "code": "tenant_rate_limited",
-                        }
-                    }
-                ).encode()
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 429,
-                        "headers": [
-                            (b"content-type", b"application/json"),
-                            (b"retry-after", b"1"),
-                        ],
-                    }
-                )
-                await send({"type": "http.response.body", "body": body})
+                message = f"tenant {tenant!r} async submission limit exceeded"
+                refusal = backpressure(message, "tenant_rate_limited", retry_after_s=1.0)
+                await send_error(send, scope, refusal)
                 return
             await self.app(scope, receive, send)
             return
@@ -625,40 +611,12 @@ class TenantLimitMiddleware:
                 reason=admission.reason,
             )
         if not admission.admitted:
-            message = (
-                f"tenant {tenant!r} admission limit exceeded "
-                f"({admission.reason})"
+            # Every refusal here is transient: 429 in the route's dialect
+            # (Anthropic #508, Jev m11 D8), 503 slow_down on Responses (O-2).
+            refusal = tenant_rate_limited(
+                tenant, admission.reason, retry_after_s=admission.retry_after_s
             )
-            if wants_anthropic_envelope(path):
-                # /v1/messages speaks the Anthropic error envelope (issue #508)
-                payload = anthropic_error_payload(
-                    message,
-                    error_type="rate_limit_error",
-                    request_id=state.get("request_id"),
-                )
-            elif wants_jev_envelope(path):
-                # /v1/systemone speaks Jev's {"detail": ...} envelope (m11 D8)
-                payload = jev_error_payload("rate_limit_error", message)
-            else:
-                payload = {
-                    "error": {
-                        "message": message,
-                        "type": "rate_limit_error",
-                        "code": "tenant_rate_limited",
-                    }
-                }
-            body = json.dumps(payload).encode()
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 429,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"retry-after", b"1"),
-                    ],
-                }
-            )
-            await send({"type": "http.response.body", "body": body})
+            await send_error(send, scope, refusal)
             return
         try:
             await self.app(scope, receive, send)

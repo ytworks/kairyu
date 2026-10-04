@@ -112,7 +112,7 @@ def compaction_output_from_message(
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
     if not isinstance(content, str) or not content.strip():
-        raise BufferedFailure(
+        raise BufferedFailure.from_payload(
             {
                 "message": "upstream model returned an empty compaction summary",
                 "type": "upstream_error",

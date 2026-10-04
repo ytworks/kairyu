@@ -1,4 +1,8 @@
-"""Shared OpenAI-style error payloads and HTTP responses."""
+"""Shared OpenAI-style error payloads and HTTP responses.
+
+Every body is rendered from an ``error_classifier.ClassifiedError``, so the
+error member always carries ``message``, ``type``, ``param`` and ``code``.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,15 @@ from typing import TYPE_CHECKING
 from fastapi.responses import JSONResponse
 
 from kairyu.entrypoints.server.chat_errors import ChatRequestError, chat_error_from_value_error
-from kairyu.entrypoints.server.error_classifier import classify_request_error
+from kairyu.entrypoints.server.error_classifier import (
+    ClassifiedError,
+    backend_failure,
+    backpressure,
+    classify_request_error,
+    pre_stream_error,
+    render_openai,
+    tenant_rate_limited,
+)
 
 if TYPE_CHECKING:
     from kairyu.entrypoints.server.engine_admission import AdmissionStage, TenantRefusal
@@ -18,12 +30,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def classified_response(error: ClassifiedError, *, responses: bool = False) -> JSONResponse:
+    """The HTTP answer for ``error`` in the Chat or the Responses dialect."""
+
+    rendered = render_openai(error, responses=responses)
+    return JSONResponse(
+        status_code=rendered.status, content=rendered.body, headers=dict(rendered.headers)
+    )
+
+
 def invalid_request_payload(message: str, code: str = "invalid_request") -> dict:
-    return {
-        "message": message,
-        "type": "invalid_request_error",
-        "code": code,
-    }
+    return pre_stream_error(400, "invalid_request_error", code, message).openai_payload()
 
 
 def invalid_request(message: str) -> JSONResponse:
@@ -46,11 +63,7 @@ def model_not_found(model: str) -> JSONResponse:
 
 def sanitize_backend_error(error: BaseException) -> dict:
     """Return a tenant-safe backend failure without arbitrary exception text."""
-    return {
-        "message": f"upstream backend error ({type(error).__name__})",
-        "type": "upstream_error",
-        "code": "backend_error",
-    }
+    return backend_failure(error).openai_payload()
 
 
 def upstream_error(error: BaseException) -> JSONResponse:
@@ -67,20 +80,18 @@ def chat_error_response(error: ChatRequestError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
 
 
-def _rate_limited(message: str, code: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        headers={"Retry-After": "1"},
-        content={"error": {"message": message, "type": "rate_limit_error", "code": code}},
-    )
-
-
 @dataclass(frozen=True)
 class ChatAdmissionErrors:
     """OpenAI rendering of the engine admission chain's failures (Chat family)."""
 
     def slo_shed(self) -> JSONResponse:
-        return _rate_limited("predicted TTFT exceeds the configured SLO", "slo_admission_shed")
+        return classified_response(
+            backpressure(
+                "predicted TTFT exceeds the configured SLO",
+                "slo_admission_shed",
+                retry_after_s=1.0,
+            )
+        )
 
     def invalid(self, message: str) -> JSONResponse:
         return invalid_request(message)
@@ -95,10 +106,8 @@ class ChatAdmissionErrors:
         return upstream_error(error)
 
     def tenant_limited(self, refusal: TenantRefusal) -> JSONResponse:
-        return _rate_limited(
-            f"tenant {refusal.tenant!r} admission limit exceeded ({refusal.reason})",
-            "tenant_rate_limited",
-        )
+        # Chat answers every tenant refusal with a retryable 429 (O-2).
+        return classified_response(tenant_rate_limited(refusal.tenant, refusal.reason))
 
 
 def orchestration_failure(error: OrchestratorExecutionError) -> tuple[int, dict]:

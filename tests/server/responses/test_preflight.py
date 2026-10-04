@@ -132,6 +132,7 @@ def test_responses_prepare_failure_precedes_stream_headers_and_dispatch(
     assert response.json()["error"] == {
         "message": expected_message,
         "type": expected_type,
+        "param": None,
         "code": expected_code,
     }
     if not isinstance(failure, ValueError):

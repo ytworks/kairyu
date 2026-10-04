@@ -54,10 +54,16 @@ AdmissionStage = Literal["backend_prepare", "admission"]
 
 @dataclass(frozen=True)
 class TenantRefusal:
-    """A tenant token reservation that did not fit."""
+    """A tenant token reservation that did not fit.
+
+    ``exceeds_token_capacity``: no refill can ever hold it (Responses answers
+    429 ``tenant_budget_too_small``, O-2); Chat and Messages ignore it.
+    """
 
     tenant: str
     reason: str
+    retry_after_s: float | None = None
+    exceeds_token_capacity: bool = False
 
 
 class AdmissionErrors(Protocol):
@@ -157,7 +163,12 @@ def reserve_tenant_tokens(
     if admitted:
         http_request.state.tenant_metric_admitted = True
         return None
-    return TenantRefusal(tenant=tenant, reason=admission.reason)
+    return TenantRefusal(
+        tenant=tenant,
+        reason=admission.reason,
+        retry_after_s=admission.retry_after_s,
+        exceeds_token_capacity=admission.exceeds_token_capacity,
+    )
 
 
 def _begin_slo_lease(

@@ -66,6 +66,7 @@ def test_sanitize_backend_error_exposes_only_exception_class():
     assert payload == {
         "message": "upstream backend error (RuntimeError)",
         "type": "upstream_error",
+        "param": None,
         "code": "backend_error",
     }
     serialized = str(payload)

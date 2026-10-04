@@ -1535,14 +1535,6 @@ class TestResponsesApi:
             )
             assert second.output_text
 
-    def test_unknown_previous_id_404(self, tmp_path):
-        with TestClient(_auto_app(tmp_path)) as client:
-            response = client.post(
-                "/v1/responses",
-                json={"model": "m", "input": "x", "previous_response_id": "resp_nope"},
-            )
-            assert response.status_code == 404
-
     def test_stream_is_typed_responses_sse(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(

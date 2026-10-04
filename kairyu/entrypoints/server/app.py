@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import EndpointContext, RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
@@ -135,6 +134,7 @@ from kairyu.entrypoints.server.protocol import (
     Usage,
 )
 from kairyu.entrypoints.server.request_body import reuse_prevalidated_model
+from kairyu.entrypoints.server.responses.framework_errors import renders_default_validation
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.slo import AdmissionController, AdmissionLease
 from kairyu.entrypoints.server.sse_encode import (
@@ -358,7 +358,7 @@ class _OffloadedRequestBodyRoute(APIRoute):
                 raise parse_error from prepared.body_parse_exception
             if prepared.error_response is not None:
                 handler = request.app.exception_handlers.get(RequestValidationError)
-                if handler is request_validation_exception_handler:
+                if renders_default_validation(handler, request.url.path):
                     return prepared.error_response
                 assert prepared.validation_errors is not None
                 endpoint_ctx = EndpointContext(base_endpoint_ctx)

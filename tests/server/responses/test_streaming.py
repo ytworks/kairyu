@@ -165,4 +165,4 @@ def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):
     assert failed["usage"]["input_tokens"] == totals["prompt_tokens"]
     assert failed["usage"]["output_tokens"] == totals["completion_tokens"]
     assert "secret upstream endpoint" not in response.text
-    assert lookup.status_code == 404
+    assert lookup.status_code == 400

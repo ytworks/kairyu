@@ -20,6 +20,13 @@ from functools import lru_cache
 
 from starlette.requests import ClientDisconnect
 
+from kairyu.entrypoints.server.error_classifier import (
+    ClassifiedError,
+    backpressure,
+    pre_stream_error,
+    render_openai,
+    speaks_responses_dialect,
+)
 from kairyu.entrypoints.server.messages_protocol import (
     anthropic_error_payload,
     anthropic_error_type_for_status,
@@ -80,34 +87,33 @@ def _state(scope: dict) -> dict:
     return scope.setdefault("state", {})
 
 
-async def _send_error(
+async def send_error(
     send: Callable,
     scope: dict,
-    *,
-    status: int,
-    message: str,
-    openai_type: str,
-    code: str,
+    error: ClassifiedError,
     headers: dict[str, str] | None = None,
 ) -> None:
-    """Render one middleware error in the envelope the route's dialect expects.
+    """Render one ingress error in the envelope the route's dialect expects.
 
     ``/v1/messages`` (Anthropic Messages, issue #508) must never receive the
     OpenAI ``{"error": ...}`` envelope, and ``/v1/systemone`` answers in Jev's
-    ``{"detail": ...}`` shape; every other route keeps the OpenAI envelope.
+    ``{"detail": ...}`` shape; every other route gets the OpenAI envelope from
+    ``error_classifier``, in the Responses dialect on its paths (C25, O-2).
     """
 
-    if wants_anthropic_envelope(scope.get("path", "")):
+    path = scope.get("path", "")
+    rendered = render_openai(error, responses=speaks_responses_dialect(path))
+    if wants_anthropic_envelope(path):
         payload = anthropic_error_payload(
-            message,
-            error_type=anthropic_error_type_for_status(status),
+            error.message,
+            error_type=anthropic_error_type_for_status(error.status),
             request_id=_state(scope).get("request_id"),
         )
-    elif wants_jev_envelope(scope.get("path", "")):
-        payload = jev_error_payload(jev_error_type_for_status(status), message)
+    elif wants_jev_envelope(path):
+        payload = jev_error_payload(jev_error_type_for_status(error.status), error.message)
     else:
-        payload = {"error": {"message": message, "type": openai_type, "code": code}}
-    await _send_json(send, status, payload, headers or {})
+        payload = rendered.body
+    await _send_json(send, rendered.status, payload, {**(headers or {}), **rendered.headers})
 
 
 class AuthMiddleware:
@@ -166,30 +172,32 @@ class AuthMiddleware:
             return
         if self._authorized(scope):
             if path.startswith(_GUARDED_PREFIX) and not _state(scope)["is_data_plane"]:
-                await _send_error(
+                await send_error(
                     send,
                     scope,
-                    status=403,
-                    message="data-plane API key required",
-                    openai_type="invalid_request_error",
-                    code="data_plane_required",
+                    pre_stream_error(
+                        403,
+                        "invalid_request_error",
+                        "data_plane_required",
+                        "data-plane API key required",
+                    ),
                 )
                 return
             await self.app(scope, receive, send)
             return
-        await _send_error(
+        await send_error(
             send,
             scope,
-            status=401,
-            message="missing or invalid API key",
-            openai_type="invalid_request_error",
-            code="invalid_api_key",
+            pre_stream_error(
+                401, "invalid_request_error", "invalid_api_key", "missing or invalid API key"
+            ),
             headers={"www-authenticate": "Bearer"},
         )
 
 
 class ConcurrencyLimitMiddleware:
-    """Bound active and queued /v1/* work; saturation returns 429 (m7 D5).
+    """Bound active and queued /v1/* work; saturation returns 429 (m7 D5),
+    503 ``slow_down`` on the Responses dialect (O-2, m7 D5 amendment).
 
     Fine-grained per-client rate limiting is the edge WAF/LB's job — this guard
     only protects the process from overload.
@@ -252,14 +260,9 @@ class ConcurrencyLimitMiddleware:
         self._publish_depth()
 
     async def _reject(self, scope: dict, send: Callable, message: str) -> None:
-        await _send_error(
-            send,
-            scope,
-            status=429,
-            message=message,
-            openai_type="rate_limit_error",
-            code="concurrency_exceeded",
-            headers={"retry-after": "1"},
+        # 429 + Retry-After, or 503 slow_down on the Responses dialect (O-2)
+        await send_error(
+            send, scope, backpressure(message, "concurrency_exceeded", retry_after_s=1.0)
         )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
@@ -350,16 +353,15 @@ class ChatBodyLimitMiddleware:
         self._paths = frozenset(self._PATHS if paths is None else paths)
 
     async def _reject(self, scope: dict, send: Callable) -> None:
-        await _send_error(
+        await send_error(
             send,
             scope,
-            status=413,
-            message=(
-                "chat request body exceeds the configured "
-                f"{self._limit}-byte limit"
+            pre_stream_error(
+                413,
+                "invalid_request_error",
+                "request_too_large",
+                f"chat request body exceeds the configured {self._limit}-byte limit",
             ),
-            openai_type="invalid_request_error",
-            code="request_too_large",
         )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:

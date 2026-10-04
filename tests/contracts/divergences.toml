@@ -19,40 +19,6 @@
 # deliberate. With CONTRACT_STRICT=1 an entry that matches nothing in a full
 # run fails the session, so remove an entry in the WP that fixes its behavior.
 
-# --- Error envelope -----------------------------------------------------------
-
-[[divergence]]
-id = "error-param-missing"
-schema = "ErrorResponse"
-pointer_glob = "/error/param"
-keyword = "required"
-gap_id = "M-ST-6"
-owner_wp = "WP-07"
-kind = "temporary"
-note = "Responses error bodies (400, 404, 426, 429, 5xx) omit the required nullable param."
-
-[[divergence]]
-id = "framework-error-detail-undecoded-body"
-schema = "ErrorResponse"
-pointer_glob = "/error"
-keyword = "required"
-route = "POST /v1/responses -> 400"
-gap_id = "M-ST-5"
-owner_wp = "WP-07"
-kind = "temporary"
-note = "A body the server cannot decode (zstd, Codex fixture harbor-zstd) gets Starlette's {detail} 400."
-
-[[divergence]]
-id = "framework-error-detail-compact-404"
-schema = "ErrorResponse"
-pointer_glob = "/error"
-keyword = "required"
-route = "POST /v1/responses/compact -> 404"
-gap_id = "M-ST-5"
-owner_wp = "WP-07"
-kind = "temporary"
-note = "The absent POST /v1/responses/compact (Codex fixture compact-v1, WP-36) gets the framework {detail} 404."
-
 # --- Response envelope (unary body and the response object inside events) -----
 
 [[divergence]]
@@ -142,17 +108,6 @@ gap_id = "G-errors-5"
 owner_wp = "WP-18"
 kind = "temporary"
 note = "compaction_failed is outside the ResponseError code enum; C4 maps compaction failures to context_length_exceeded or server_error."
-
-[[divergence]]
-id = "generation-failure-backend-error-code"
-schema = "ResponseFailedEvent"
-pointer_glob = "/response/error/code"
-keyword = "enum"
-value = "backend_error"
-gap_id = "G-errors-5"
-owner_wp = "WP-07"
-kind = "temporary"
-note = "A generation failure after the stream opened ends response.failed with code backend_error; Principle 4 maps it to server_error (Codex fixture call-then-upstream-error)."
 
 [[divergence]]
 id = "context-length-exceeded-in-band"

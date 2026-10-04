@@ -92,5 +92,6 @@ def test_store_false_and_cross_tenant_stream_ids_are_not_readable(
             },
         )
     assert first.status_code == 200
-    assert cross_tenant.status_code == 404
-    assert not_found.status_code == 404
+    # Tenant-blind (D-d): another tenant's id answers like an unknown one.
+    assert cross_tenant.status_code == not_found.status_code == 400
+    assert cross_tenant.json()["error"]["code"] == not_found.json()["error"]["code"]

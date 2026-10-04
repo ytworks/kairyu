@@ -24,6 +24,9 @@ timeout lets a single local built-in backend use its advertised sequence budget
 as the active-request cap and hold only the remaining configured allowance in a
 bounded, timed FIFO queue. Omission, multiple models, and unknown/pool backends
 retain the configured cap and historical immediate saturation 429.
+**Amended 2026-10-05** (D5, M20 WP-07, owner decision O-2): on the Responses
+dialect paths the transient 429s become 503 `slow_down` with `Retry-After`; see
+the D5 amendment below.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -174,6 +177,23 @@ cap and therefore have no implicit queue.
 Replica nodes inside the DC accept keyless traffic (m6 D2's
 `api_key_env=None`) or a shared key — deployment guide shows both. Kairyu
 builds no WAF and no per-key rate accounting.
+
+**Responses-dialect amendment (2026-10-05, M20 WP-07, O-2).** Ingress errors
+are classified once (`error_classifier`) and rendered by path, never by body
+(m20 C25): `/v1/responses*`, `/v1/conversations*` and `/v1/alpha*` answer
+transient backpressure — the concurrency guard, a tenant quota or in-flight
+refusal, a tenant token reservation the bucket will refill for, and (once the
+Responses engine path adopts it, WP-17c) the SLO shed — with 503
+`service_unavailable_error`/`slow_down` plus `Retry-After` and
+`retry-after-ms`, the wait derived from the bucket refill where one exists.
+Why: Codex treats every HTTP 429 as terminal and 503 `server_is_overloaded`
+as non-retryable, but retries 503 `slow_down` after `Retry-After` (0.160;
+0.153.4 ignores `Retry-After` and fails the turn as overloaded after its four
+HTTP retries), and the OpenAI SDKs retry any 503. A reservation larger than
+the tenant bucket's capacity can never fit, so it stays a non-retryable 429
+`tenant_budget_too_small` naming `max_output_tokens`. Chat, Messages and Jev
+keep their 429 + `Retry-After: 1`; every OpenAI-envelope error now carries the
+nullable `param`.
 
 ### D6 — The cache layer is per-replica radix KV + pool session affinity; no Redis
 

@@ -29,7 +29,11 @@ from kairyu.entrypoints.server.responses.envelope import (
     response_envelope,
     usage_payload_from_wire,
 )
-from kairyu.entrypoints.server.responses.errors import BufferedFailure, delegated_failure
+from kairyu.entrypoints.server.responses.errors import (
+    BufferedFailure,
+    delegated_error,
+    delegated_failure,
+)
 from kairyu.entrypoints.server.responses.events import responses_sse as _sse
 from kairyu.entrypoints.server.responses.output import (
     apply_terminal_item_status,
@@ -229,13 +233,14 @@ async def orchestrated_response(
     metering), so this branch never runs the engine-only pipeline below and
     never records usage itself.
     """
+    admission = getattr(http_request.state, "tenant_admission", None)
     if request.stream and not request.tools and not compaction_request:
         live_request = chat_request.model_copy(
             update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
         )
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
-            return delegated_failure(request, delegated)
+            return delegated_failure(request, delegated, admission)
         return sse_response(
             _relay_auto_chat_stream(
                 request,
@@ -272,7 +277,7 @@ async def orchestrated_response(
         async def produce() -> tuple[list[dict], dict, str, dict | None]:
             delegated = await chat_dispatch(buffered_request, http_request)
             if not isinstance(delegated, JSONResponse):
-                raise BufferedFailure(
+                raise BufferedFailure.from_payload(
                     {
                         "message": "unexpected non-JSON chat dispatch reply",
                         "type": "upstream_error",
@@ -283,13 +288,7 @@ async def orchestrated_response(
             payload = json.loads(bytes(delegated.body))
             if delegated.status_code != 200:
                 raise BufferedFailure(
-                    payload.get("error")
-                    or {
-                        "message": "upstream backend error",
-                        "type": "upstream_error",
-                        "code": "backend_error",
-                    },
-                    delegated.status_code,
+                    delegated_error(delegated.status_code, payload, admission)
                 )
             return outcome_from_payload(payload)
 
@@ -309,7 +308,7 @@ async def orchestrated_response(
     if not isinstance(delegated, JSONResponse):
         return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
     if delegated.status_code != 200:
-        return delegated_failure(request, delegated)
+        return delegated_failure(request, delegated, admission)
     try:
         output, usage, status, incomplete_details = outcome_from_payload(
             json.loads(bytes(delegated.body))

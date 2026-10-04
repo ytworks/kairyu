@@ -15,6 +15,7 @@ from kairyu.engine.backend import UpstreamClientError
 from kairyu.entrypoints.server.error_classifier import (
     ClassifiedError,
     classify_request_error,
+    pre_stream_error,
 )
 
 if TYPE_CHECKING:
@@ -53,15 +54,17 @@ class ChatRequestError(Exception):
             param=classified.param,
         )
 
+    def classified(self) -> ClassifiedError:
+        """This failure for the shared renderers (WP-07)."""
+
+        return pre_stream_error(
+            self.status_code, self.error_type, self.code, str(self), param=self.param
+        )
+
     def payload(self) -> dict:
-        payload = {
-            "message": str(self),
-            "type": self.error_type,
-            "code": self.code,
-        }
-        if self.param is not None:
-            payload["param"] = self.param
-        return payload
+        """The OpenAI error member; ``param`` is always present (nullable)."""
+
+        return self.classified().openai_payload()
 
 
 def chat_error_from_upstream_client_error(

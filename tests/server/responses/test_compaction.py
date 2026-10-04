@@ -231,8 +231,8 @@ def test_truncated_compaction_is_incomplete(tmp_path, stream):
                 "input": "continue",
             },
         )
-    assert continued.status_code == 404
-    assert "previous response not found" in continued.json()["error"]["message"]
+    assert continued.status_code == 400
+    assert continued.json()["error"]["code"] == "previous_response_not_found"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])

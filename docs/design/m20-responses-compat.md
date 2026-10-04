@@ -1,7 +1,7 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
 Status: **Proposed** (2026-10-05). Phase 0 (WP-00–05) implemented (parts of D1,
-D3/D7/D9, D10, D22) and Phase 1 refactors 06/06b/12a; WP-53 closes M20.
+D3/D7/D9, D10, D22), Phase 1 refactors 06/06b/12a and WP-07; WP-53 closes M20.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -254,11 +254,11 @@ implemented in WP-03*). Modes drop (default) / reject / execute;
 echo and persistence; `defer_loading` and `allowed_callers` rules; hosted
 `tool_choice` routing; hosted history items dropped.
 
-**D10 — Error classification** (WP-04, 07). L1 `ContextLengthExceededError`
-and `resolve_output_budget`; upstream error classification with fixed public
-messages; L3 `error_classifier` with `surface` and `placement`; scoped
-envelopes including middleware; the backpressure mapping table of O-2
-(m7 D5 amendment).
+**D10 — Error classification** (WP-04, 07 *implemented*; pending: WebSocket
+frames, Responses SLO shed 17c, follow-up refusals 18). L1 overflow error and
+`resolve_output_budget`; fixed-message upstream classification; L3
+`error_classifier` (`surface`, `placement`, `param` always); scoped envelopes
+incl. middleware, framework 422/404/405; O-2 table by path (C25, m7 D5 amendment).
 
 **D11 — Usage details** (WP-08b, 19, 31). `reasoning_tokens` (native, ZMQ,
 upstream `completion_tokens_details`), AUTO public cached/reasoning tokens,
@@ -393,7 +393,7 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 1 | 06b | M B refactor | Extract `engine/admission.py`, `engine/openai_payload.py`, `chat_render.py` | 01, 04 | Done |
 | 1 | 12a | M B refactor | `engine_admission.py` for Messages and the Chat engine path | 01 | Done |
 | 1 | 15 | S D | uvicorn `ws="none"`, reliable 426 | 06 | Planned |
-| 1 | 07 | M A | Error contract: `param` everywhere, scoped handlers, middleware via classifier, O-2 table | 06 | Planned |
+| 1 | 07 | M A | Error contract: `param` everywhere, scoped handlers, middleware via classifier, O-2 table | 06 | Done |
 | 1 | 17a | L A | Shared `segment_stream`; Responses emitter and engine path | 06, 07, 12a | Planned |
 | 1 | 17b | M A | Progressive calls, in-stream gates, terminal rule, call finality, `phase` | 17a, SP-4 | Planned |
 | 1 | 17c | S/M A | SLO admission, obfuscation opt-in, `content_filter` → incomplete | 17a, 07 | Planned |
@@ -482,7 +482,7 @@ decision 4; O-1 = approved by the owner on 2026-10-05.
 | WP | Change | Shared contract / code path | Why extension points do not suffice | Independent regression | Smallest mechanism; example-owned part | Auth |
 |---|---|---|---|---|---|---|
 | 04 | Typed `ContextLengthExceededError`, `resolve_output_budget`, upstream classification, `placement` | `context_length_exceeded` on all surfaces (`engine_loop.py`, `zmq_backend.py`, `openai_backend.py`) | Errors are untyped `ValueError`s; upstream text hidden behind 502 | Chat on vLLM overflow → 502; ZMQ preflight assumes 16 tokens | `code` attribute + classifier table | O-1 |
-| 07 | Middleware `_send_error` via the classifier; Responses-dialect 503 `slow_down`; scoped 422/404/405 | Shared ingress errors (m7 D5) | Middleware builds its own envelope without `param` | Chat errors omit the spec-required `param` (M-ST-6) | Dialect switch + classifier; limits deployment-owned | O-1 |
+| 07 | Middleware `send_error` via the classifier; Responses-dialect 503 `slow_down`; scoped 422/404/405; `TenantAdmission.exceeds_token_capacity` + refill-based `retry_after_s` | Shared ingress errors (m7 D5) | Middleware builds its own envelope without `param`; a refused reservation cannot tell never-fits from transient | Chat errors omit the spec-required `param` (M-ST-6) | Dialect switch + classifier; limits deployment-owned | O-1 |
 | 08c | Off-loop parse set + Responses body default | `app.py` parse set; middleware body limits | Parse set and body paths are fixed | `max_chat_body_bytes` defaults to None; unbounded bodies | Set entry + `ResponsesConfig.max_body_bytes` | O-1 |
 | 10 | Lossless effort + default fold map | Shared validator and L1/L2 effort vocabulary | Folding happens in the shared validator | Chat `none` → 400; Chat `medium` reaches vLLM as `high` | Enum, `reasoning_level()`, per-model map defaulting to the legacy fold; opt-in and budgets example-owned | b |
 | 11 | Tenant service tiers | OpenAI `service_tier` on Chat and Responses | No field exists | Chat `service_tier` → 400 | `service_tier.py`; tiers deployment-owned | O-1 |
@@ -710,8 +710,8 @@ to `docs/design/m11-product.md` D4 and its amendments.
 | #201: unknown or unsupported fields rejected (shape of the rejection) | WP-08a (400 `unknown_parameter` with `param`, extension inventory) | Planned |
 | #530: without a configured secret, a process-local key limits tokens to one gateway lifetime | WP-20 (secret required at any replica count, Helm-generated, kst2) | Planned |
 | #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | Planned |
-| #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Planned |
-| D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Planned |
+| #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Done (2026-10-05) |
+| D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Done (2026-10-05) |
 | #530: "Acceptance: … unmodified codex-cli 0.147.0 runs" | WP-02 (fixtures) → WP-05 (0.160 matrix) → WP-53 | In progress (WP-02 fixtures, WP-05 matrix 2026-10-05) |
 | D4/#201/A16: official SDK round-trips (lenient openai 2.44 tests) as binding coverage | WP-01 (strict 2.44 harness + schema gate) → WP-13 (v3.24 live server) → WP-53 (Agents, node) | In progress (WP-01) |
 
@@ -724,7 +724,7 @@ All amendments are dated new entries; old text is never rewritten.
 
 - m11 D4: WP-03 Codex P0 amendment (done); WP-01 pointer to §10 (done); rows
   above flip per WP. m11 D3/D6: WP-11.
-- m7 D5: Responses-dialect backpressure (WP-07).
+- m7 D5: Responses-dialect backpressure (WP-07; done 2026-10-05).
 - m9: D1 usage (19); D2 ChatPrompt, `upstream_chat_models`, declared
   reasoning/developer template capabilities (16, 26b, 27); D3 logprob
   partition and in-process fail-closed (30, 31); D4 tool grammar, vLLM strict

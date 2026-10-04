@@ -18,13 +18,21 @@ Prompt overflow is classified by the public prompt it concerns:
   outputs, …) is a server failure. An L2 error declares that boundary with a
   ``context_overflow_reason`` attribute; the overflow is logged with it and
   never reported as the client's context window.
+
+Ingress and admission failures are classified here too (WP-07): middleware,
+the Chat handler and the Responses routes build a ``ClassifiedError`` and
+``render_openai`` renders its OpenAI envelope, ``param`` always present. On a
+Responses-dialect path (C25: decided by the path alone, so nothing inspects a
+body) a retryable 429 becomes 503 ``slow_down`` with ``Retry-After`` and
+``retry-after-ms`` (O-2, m7 D5 amendment); Chat and Messages keep their 429.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from kairyu.engine.request_errors import (
@@ -48,6 +56,16 @@ _CHAT_OVERFLOW_MESSAGE = (
     "Please reduce the length of the messages or completion."
 )
 _SERVER_ERROR_MESSAGE = "The server had an error while processing your request."
+# /v1/alpha holds Codex's standalone search endpoint (POST {base}/alpha/search).
+_RESPONSES_DIALECT_PREFIXES = ("/v1/responses", "/v1/conversations", "/v1/alpha")
+_MS_PER_S = 1000
+# Chat, Messages and Jev keep their historical 429 + Retry-After: 1 (m7 D5).
+_LEGACY_RETRY_HEADERS = {"retry-after": "1"}
+_TENANT_BUDGET_TOO_SMALL = (
+    "tenant {tenant!r} token budget can never hold this request's reservation; "
+    "set a lower max_output_tokens (an omitted max_output_tokens reserves the "
+    "model's whole remaining context)"
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +137,122 @@ def anthropic_stream_failure(error: BaseException) -> tuple[str, str]:
         return classified.message, classified.type
     # M3: only the class name crosses the wire, never the backend's text.
     return f"upstream backend error ({type(error).__name__})", "api_error"
+
+
+@dataclass(frozen=True)
+class HttpError:
+    """One error as an HTTP response: status, JSON body and headers."""
+
+    status: int
+    body: dict
+    headers: Mapping[str, str]
+
+
+def speaks_responses_dialect(path: str) -> bool:
+    """Whether errors on ``path`` render the Responses way (C25)."""
+
+    return any(
+        path == prefix or path.startswith(prefix + "/") for prefix in _RESPONSES_DIALECT_PREFIXES
+    )
+
+
+def pre_stream_error(
+    status: int,
+    error_type: str,
+    code: str | None,
+    message: str,
+    *,
+    param: str | None = None,
+) -> ClassifiedError:
+    """A failure decided before any output: rendered as the HTTP answer, never retried."""
+
+    return ClassifiedError(
+        status=status,
+        type=error_type,
+        code=code,
+        message=message,
+        param=param,
+        retryable=False,
+        retry_after_s=None,
+        placement="pre_stream",
+    )
+
+
+def backend_failure(error: BaseException) -> ClassifiedError:
+    """A tenant-safe upstream failure: only the class name crosses the wire (M3)."""
+
+    return pre_stream_error(
+        502, "upstream_error", "backend_error", f"upstream backend error ({type(error).__name__})"
+    )
+
+
+def backpressure(message: str, code: str, *, retry_after_s: float) -> ClassifiedError:
+    """Transient overload or quota: a retryable 429 (503 on the Responses dialect)."""
+
+    return replace(
+        pre_stream_error(429, "rate_limit_error", code, message),
+        retryable=True,
+        retry_after_s=retry_after_s,
+    )
+
+
+def tenant_rate_limited(
+    tenant: str, reason: str, *, retry_after_s: float | None = None
+) -> ClassifiedError:
+    """A tenant quota refusal that a later attempt can pass."""
+
+    return backpressure(
+        f"tenant {tenant!r} admission limit exceeded ({reason})",
+        "tenant_rate_limited",
+        retry_after_s=retry_after_s or 1.0,
+    )
+
+
+def tenant_reservation_refused(
+    tenant: str,
+    reason: str,
+    *,
+    retry_after_s: float | None,
+    exceeds_capacity: bool,
+) -> ClassifiedError:
+    """Responses: a reservation above the bucket's capacity is terminal (O-2).
+
+    Retrying it can never succeed, so it is a non-retryable 429 naming
+    ``max_output_tokens``; anything else is transient backpressure. Chat and
+    Messages render every tenant refusal with ``tenant_rate_limited``.
+    """
+
+    if exceeds_capacity:
+        message = _TENANT_BUDGET_TOO_SMALL.format(tenant=tenant)
+        return pre_stream_error(429, "rate_limit_error", "tenant_budget_too_small", message)
+    return tenant_rate_limited(tenant, reason, retry_after_s=retry_after_s)
+
+
+def render_openai(error: ClassifiedError, *, responses: bool) -> HttpError:
+    """The OpenAI-envelope HTTP answer, in the Responses or the Chat dialect.
+
+    Responses (O-2): Codex treats every 429 as terminal and 503
+    ``server_is_overloaded`` as non-retryable, but retries 503 ``slow_down``
+    after ``Retry-After``; the OpenAI SDKs retry any 503 and read
+    ``retry-after-ms`` first. Chat keeps its 429 and ``Retry-After: 1``.
+    """
+
+    if not responses:
+        headers = dict(_LEGACY_RETRY_HEADERS) if error.retryable else {}
+        return HttpError(error.status, {"error": error.openai_payload()}, headers)
+    if error.retryable and error.status == 429:
+        error = replace(error, status=503, type="service_unavailable_error", code="slow_down")
+    return HttpError(error.status, {"error": error.openai_payload()}, _retry_headers(error))
+
+
+def _retry_headers(error: ClassifiedError) -> dict[str, str]:
+    if not error.retryable or error.retry_after_s is None:
+        return {}
+    wait_ms = max(1, math.ceil(error.retry_after_s * _MS_PER_S))
+    return {
+        "retry-after": str(math.ceil(wait_ms / _MS_PER_S)),
+        "retry-after-ms": str(wait_ms),
+    }
 
 
 def _find_overflow(error: BaseException) -> _Overflow | None:

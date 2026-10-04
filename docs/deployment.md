@@ -37,7 +37,7 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 | DDoS, bot filtering, per-client rate limits | Cloud WAF | — |
 | TLS termination, certificates | Cloud LB (or DC reverse proxy) | serves plain HTTP behind it |
 | Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare) |
-| Process overload | Gateway/replica | `server.max_concurrency`; optional single-local-backend admission queue → 429 + Retry-After |
+| Process overload | Gateway/replica | `server.max_concurrency`; optional single-local-backend admission queue → 429 + Retry-After (503 `slow_down` on `/v1/responses*`) |
 | TTFT SLO overload | Gateway | optional `server.ttft_slo_s` → admit, batch-defer, or 429 + Retry-After |
 | Routing inspection | Gateway | `/v1/route` uses data-plane auth; `/routing` remains inside the configured API-key boundary |
 | Node-to-node auth inside the DC | Deployment choice | keyless (`api_key_env: null`) or a shared key env var |
@@ -676,11 +676,11 @@ Additional Codex-derived behavior:
   without a data event; Codex retries a stream silent for 300 s (comments do
   not count). Later failures are `error` + `response.failed` events.
 - **No server-side output cap.** An omitted `max_output_tokens` (Codex never
-  sends one) bounds output by the model's remaining context, as on Chat
-  Completions, so tenant admission reserves `max_model_len` per Codex request
-  and startup warns for every tenant whose bucket cannot hold one. Codex never
-  retries the resulting 429: size `token_burst` for that reservation times the
-  tenant's concurrent Codex turns, or leave tenant limits unset.
+  sends one) bounds output by the remaining context, so tenant admission
+  reserves `max_model_len` per Codex request: a bucket that cannot hold one
+  answers a terminal 429 `tenant_budget_too_small` (startup warns); a drained
+  one 503 `slow_down` + `Retry-After`, which Codex 0.160 waits out. Size
+  `token_burst` for that reservation times the tenant's concurrent Codex turns.
 - **WebSocket upgrades get 426.** Codex's built-in `openai` provider
   repointed with `openai_base_url` (Harbor/Terminal-Bench) tries WebSocket
   first and silently falls back to HTTPS; a custom provider never tries.

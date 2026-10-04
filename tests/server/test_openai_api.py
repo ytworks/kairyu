@@ -1117,7 +1117,7 @@ async def test_unexpected_upstream_4xx_is_sanitized_and_not_forwarded():
     assert payload == {
         "message": "upstream backend rejected the request",
         "type": "upstream_error",
-        "code": "backend_error",
+        "param": None, "code": "backend_error",
     }
     assert "SUPER_SECRET" not in response.text
     assert "internal-vlm" not in response.text
@@ -1348,7 +1348,7 @@ async def test_unsupported_litellm_message_metadata_is_rejected_before_dispatch(
     assert response.json()["error"] == {
         "message": f"messages[0] has unsupported fields: {unsupported}",
         "type": "invalid_request_error",
-        "code": "invalid_request",
+        "param": None, "code": "invalid_request",
     }
     assert backend.prompts_seen == ()
 
@@ -2122,7 +2122,7 @@ async def test_nonpositive_auto_output_limits_are_predispatch_400(
     assert response.json()["error"] == {
         "message": f"max_tokens must be >= 1, got {limit}",
         "type": "invalid_request_error",
-        "code": "invalid_request",
+        "param": None, "code": "invalid_request",
     }
     assert orchestrator.run_calls == 0
     assert orchestrator.run_chat_calls == 0

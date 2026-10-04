@@ -50,7 +50,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 | M13 Attention backends | Complete; FA3/FA4 added, `auto` stays FlashInfer (measured faster on SM120) |
 | M14 Quant compute | GPU-validated: FP8/INT8/AWQ/GPTQ/NVFP4 production-dispatch, fail-closed |
 | M15–M18 MoE/MLA, distributed, graphs/drafts, KV transport | Complete |
-| M20 Responses compatibility | In progress: Phase 0 (WP-00–05) done; Phase 1 next |
+| M20 Responses compatibility | In progress: Phase 0 (WP-00–05) done; Phase 1: 06/06b/12a/07 done |
 
 ### Formal gates
 
@@ -108,6 +108,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-05 — [amendment] Responses error contract; Codex-retryable backpressure (M20 WP-07)
+- What: every OpenAI-envelope error carries nullable `param` (Chat errors, backend failures, middleware via `error_classifier.render_openai`). `/v1/responses*`, `/v1/conversations*`, `/v1/alpha*` render framework 422→400 (`param` from loc), bad JSON 400 `invalid_json`, 404 `Invalid URL (…)`, 405 and middleware errors in the envelope; transient overload/tenant quota there is 503 `slow_down` + `Retry-After`/`retry-after-ms` (refill-derived wait), a reservation above the bucket capacity 429 `tenant_budget_too_small`; unknown `previous_response_id` 400 `previous_response_not_found` (tenant-blind); AUTO delegated errors re-rendered; in-band generation failure `server_error`. Chat/Messages keep their 429s.
+- Why: owner decision O-2: Codex treats any 429 as terminal but retries 503 `slow_down` after `Retry-After` (matrix `backpressure-retry` passes on 0.160.0; 0.153.4 ignores Retry-After); spec-required `param` (M-ST-5/6), D-d.
+- Refs: m7 D5 amendment 2026-10-05; m20 D10, D-d, D-g; `kairyu/entrypoints/server/{error_classifier,middleware,tenancy}.py`, `responses/{errors,framework_errors}.py`
 
 ### 2026-10-05 — [amendment] Prompt overflow is `context_length_exceeded` on every surface (M20 WP-04)
 - What: typed `ContextLengthExceededError` + one `resolve_output_budget` (engine loop, `kairyu-proc` preflight with the child's model-config limit); upstream 400 overflow bodies classified with a fixed public message; L3 `error_classifier` renders Chat 400 `param:"messages"`, Messages "prompt is too long", Responses unary 400 `param:"input"` and in-band `response.failed{context_length_exceeded}` on pre-dispatch and buffered/tool stream paths incl. AUTO (an AUTO direct route sends the client prompt). Internal orchestration-stage overflow stays a server error (`internal_stage_context_overflow`). Known limits: AUTO `_stream_orchestrator` streams → WP-18; live-path item events → WP-17a; upstream Chat/Messages streams stay in-band (deviation).

@@ -18,7 +18,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from kairyu.engine.backend import (
-    AdmissionUpperBound,
     CacheHint,
     EngineBackend,
     UpstreamClientError,
@@ -32,6 +31,7 @@ from kairyu.entrypoints.server.chat_service import (
     chat_error_from_upstream_client_error,
     validate_chat_request_async,
 )
+from kairyu.entrypoints.server.engine_admission import reserve_tenant_tokens
 from kairyu.entrypoints.server.errors import upstream_error
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 from kairyu.entrypoints.server.responses.canonical import (
@@ -46,9 +46,12 @@ from kairyu.entrypoints.server.responses.compaction import (
 from kairyu.entrypoints.server.responses.deps import ChatDispatch, ResponsesDeps
 from kairyu.entrypoints.server.responses.errors import (
     chat_error,
+    previous_response_not_found,
     request_error,
     request_failure,
+    tenant_refused,
 )
+from kairyu.entrypoints.server.responses.framework_errors import install_scoped_error_handlers
 from kairyu.entrypoints.server.responses.paths_legacy_buffered import (
     engine_buffered_response,
 )
@@ -64,7 +67,6 @@ from kairyu.entrypoints.server.sse_response import sse_response
 
 if TYPE_CHECKING:
     from kairyu.entrypoints.server.metrics import ServerMetrics
-    from kairyu.entrypoints.server.tenancy import TenantAdmission
 
 _SCHEDULING_CLASSES = frozenset({"interactive", "batch"})
 
@@ -100,24 +102,18 @@ def add_responses_route(
         chat_dispatch=chat_dispatch,
     )
 
+    install_scoped_error_handlers(app)
+
     @app.get("/v1/responses")
     async def responses_upgrade_required() -> JSONResponse:
         # Codex tries a WebSocket upgrade first when it targets the built-in
         # openai provider (the Harbor/Terminal-Bench shape). The upgrade
         # arrives as a GET; 426 makes Codex fall back to HTTPS immediately
         # and silently instead of burning its stream-retry budget.
-        return JSONResponse(
+        return request_error(
+            "WebSocket transport is not supported; retry over HTTPS",
             status_code=426,
-            content={
-                "error": {
-                    "message": (
-                        "WebSocket transport is not supported; "
-                        "retry over HTTPS"
-                    ),
-                    "type": "invalid_request_error",
-                    "code": "upgrade_required",
-                }
-            },
+            code="upgrade_required",
         )
 
     @app.post("/v1/responses")
@@ -156,7 +152,7 @@ async def _create_response(
     if request.previous_response_id:
         previous = deps.store.get(request.previous_response_id, owner=owner)
         if previous is None:
-            return request_error("previous response not found", status_code=404)
+            return previous_response_not_found(request.previous_response_id)
         context.extend(previous)
     validation_started_ns = time.perf_counter_ns()
     try:
@@ -281,7 +277,7 @@ async def _engine_response(
     if failure is not None:
         return failure
     admission = getattr(http_request.state, "tenant_admission", None)
-    failure = await _admit(validated, http_request, admission, metrics, owner=owner)
+    failure = await _admit(validated, http_request, metrics)
     if failure is not None:
         return failure
     response_id = f"resp_{uuid.uuid4().hex}"
@@ -339,10 +335,7 @@ async def _prepare_backend(
 async def _admit(
     validated: ValidatedChatRequest,
     http_request: Request,
-    admission: TenantAdmission | None,
     metrics: ServerMetrics | None,
-    *,
-    owner: str,
 ) -> Response | None:
     admission_started_ns = time.perf_counter_ns()
     try:
@@ -356,10 +349,9 @@ async def _admit(
         return upstream_error(error)
     admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
     reserve_started_ns = time.perf_counter_ns()
-    if admission is not None and not _reserve_tenant_tokens(
-        admission, bound, http_request, metrics, owner=owner
-    ):
-        return _tenant_rate_limited(owner, admission.reason)
+    refusal = reserve_tenant_tokens(http_request, bound)
+    if refusal is not None:
+        return tenant_refused(refusal)
     admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
     if metrics is not None:
         metrics.record_preplacement_phase(
@@ -372,41 +364,3 @@ async def _admit(
             source="http",
         )
     return None
-
-
-def _reserve_tenant_tokens(
-    admission: TenantAdmission,
-    bound: AdmissionUpperBound,
-    http_request: Request,
-    metrics: ServerMetrics | None,
-    *,
-    owner: str,
-) -> bool:
-    admitted = admission.reserve_tokens(
-        bound.tokens,
-        refundable_on_exact_usage=bound.refundable_on_exact_usage,
-    )
-    if metrics is not None:
-        metrics.record_tenant_admission(
-            owner,
-            source="http",
-            admitted=admitted,
-            reason=admission.reason,
-        )
-    if admitted:
-        http_request.state.tenant_metric_admitted = True
-    return admitted
-
-
-def _tenant_rate_limited(owner: str, reason: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        headers={"Retry-After": "1"},
-        content={
-            "error": {
-                "message": f"tenant {owner!r} admission limit exceeded ({reason})",
-                "type": "rate_limit_error",
-                "code": "tenant_rate_limited",
-            }
-        },
-    )

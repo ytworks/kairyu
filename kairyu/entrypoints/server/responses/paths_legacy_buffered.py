@@ -22,6 +22,7 @@ from kairyu.entrypoints.server.chat_service import (
     ValidatedChatRequest,
     execute_chat,
 )
+from kairyu.entrypoints.server.error_classifier import backend_failure
 from kairyu.entrypoints.server.responses import events
 from kairyu.entrypoints.server.responses.compaction import (
     CompactionCodec,
@@ -102,14 +103,8 @@ async def buffered_events(
     try:
         output, usage, status, incomplete_details = task.result()
     except BufferedFailure as failure:
-        message = failure.payload.get("message") or "generation failed"
-        yield _sse(
-            "error",
-            sequence,
-            code=failure.payload.get("code") or "server_error",
-            message=message,
-            param=failure.payload.get("param"),
-        )
+        code, message = failure.in_band_code, failure.error.message
+        yield _sse("error", sequence, code=code, message=message, param=failure.error.param)
         sequence += 1
         failed = response_envelope(
             request,
@@ -118,10 +113,7 @@ async def buffered_events(
             status="failed",
             output=[],
             usage=usage_payload_from_wire(None),
-            error={
-                "code": failure.payload.get("code") or "server_error",
-                "message": message,
-            },
+            error={"code": code, "message": message},
         )
         yield _sse("response.failed", sequence, response=failed)
         return
@@ -313,14 +305,7 @@ async def _execute_engine_turn(
         raise BufferedFailure.from_chat_error(error) from error
     except Exception as error:
         logger.exception("Responses API upstream generation failed")
-        raise BufferedFailure(
-            {
-                "message": f"upstream backend error ({type(error).__name__})",
-                "type": "upstream_error",
-                "code": "backend_error",
-            },
-            502,
-        ) from error
+        raise BufferedFailure(backend_failure(error)) from error
     try:
         validate_parallel_tool_calls(request, execution)
     except ChatRequestError as error:

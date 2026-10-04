@@ -10,7 +10,8 @@
   disagrees with it);
 - every error body (status >= 400) against ``ErrorResponse``.
 
-A route under those prefixes with no operation in the spec is a violation too.
+A route under those prefixes with no operation in the spec is a violation too,
+unless the server declined it (404 or 405; its error body is still checked).
 One gate rule goes beyond the declared media types: the pinned spec documents
 the ``stream`` query parameter of ``GET /responses/{response_id}`` (stream
 resume) but declares only JSON for its 200, so a ``stream=true`` retrieve
@@ -46,6 +47,8 @@ JSON_MEDIA = "application/json"
 SSE_MEDIA = "text/event-stream"
 # Operations whose ``stream=true`` query switches the 200 body to stream events.
 STREAM_QUERY_OPERATIONS = frozenset({("GET", "/responses/{response_id}")})
+# Answers that decline an unmapped route rather than serve it (M20 WP-07).
+DECLINED_STATUSES = frozenset({404, 405})
 # Gate checks that are not JSON Schema keywords (``Violation.keyword``).
 ROUTE = "route"
 EVENT_TYPE = "event-type"
@@ -337,7 +340,7 @@ class ContractValidator:
         media = exchange.content_type.split(";", 1)[0].strip().lower()
         operation = self._operation(exchange.method, exchange.path)
         route_violations: tuple[Violation, ...] = ()
-        if operation is None:
+        if operation is None and exchange.status not in DECLINED_STATUSES:
             locator = f"{exchange.method} {exchange.path}"
             message = "no operation for this method and path in the pinned spec"
             route_violations = (Violation(ROUTE, locator, ROUTE, message, exchange.route),)

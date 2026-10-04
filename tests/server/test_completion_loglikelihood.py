@@ -420,6 +420,7 @@ async def test_malformed_tokenizer_evidence_is_sanitized_502(tokenized: object):
     assert response.json()["error"] == {
         "message": "upstream backend error (RuntimeError)",
         "type": "upstream_error",
+        "param": None,
         "code": "backend_error",
     }
     assert backend.requests == []

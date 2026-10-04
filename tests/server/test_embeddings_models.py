@@ -43,6 +43,7 @@ def test_unknown_embedding_model_is_rejected_before_backend_work():
         "error": {
             "message": "model 'does-not-exist' not found",
             "type": "invalid_request_error",
+            "param": None,
             "code": "model_not_found",
         }
     }
