@@ -20,10 +20,13 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
   mid MoE 100–300B, frontier MoE 500B+ (multi-node EP).
 - Parallelism/quantization strategy is derived per measured hardware profile,
   never assumed. Details: `docs/goals/g2..g6-*.md`.
+- M20 (2026-10-05, G6 P-C2 reopened): full OpenAI Responses API compatibility so
+  Codex, the OpenAI SDKs and the Agents SDK run unmodified
+  (`docs/design/m20-responses-compat.md`).
 
 ## Current Status
 
-Snapshot date: 2026-09-30. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-10-05. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -47,6 +50,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 | M13 Attention backends | Complete; FA3/FA4 added, `auto` stays FlashInfer (measured faster on SM120) |
 | M14 Quant compute | GPU-validated: FP8/INT8/AWQ/GPTQ/NVFP4 production-dispatch, fail-closed |
 | M15–M18 MoE/MLA, distributed, graphs/drafts, KV transport | Complete |
+| M20 Responses compatibility | In progress (WP-00/03 done; WP-01 gate) |
 
 ### Formal gates
 
@@ -63,7 +67,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G4 E-KV: unit-scale and calibrated per-layer K/V FP8-E4M3 re-bakes **FAIL** retained; calibrated cache metrics/logprobs pass but 16K/32K exact tokens and decode envelope do not; `fp8_e4m3` startup rejected
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
-- G6: P-A, P-B1–P-B4, P-C2/C3/C4 green (incl. Open WebUI P-B3 browser gate); remaining P-C gates continue
+- G6: P-A, P-B1–P-B4, P-C3/C4 green (incl. Open WebUI P-B3 browser gate); P-C2 reopened for M20; remaining P-C gates continue
 - #150 TP8 long-generation stability gate: passed after deadlock fix; #364 `logits_dtype`: valid negative, withdrawn
 
 ### What works today
@@ -104,6 +108,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-05 — [design] M20 Responses compatibility proposed; schema gate (WP-01)
+- What: m20 (Proposed) records D1–D22, deviations D-a..D-j, the WP roadmap, the admission table, the gap matrix and the m11 supersession table; g6 P-C2 reopened. WP-01 gates every test: pinned OpenAPI closure, ASGI recorder, `divergences.toml` (`CONTRACT_STRICT=1`), opt-in wire capture, strict SDK.
+- Why: owner decisions 2026-10-05 (full scope, O-1..O-5) after the audit (80 + 31 gaps, six Codex P0).
+- Refs: `docs/design/m20-responses-compat.md`; m11 D4 pointer amendment; `tests/contracts/`; `scripts/vendor_openai_schema.py`
 
 ### 2026-10-05 — [amendment] Responses: Codex P0 fixes (M20 WP-03)
 - What: `/v1/responses` drops the 1024 default output cap and the 4096 compaction cap (remaining context, #496); every SSE path repeats `response.in_progress` after 15 s data silence instead of `: keep-alive` comments; live/indexed hosted `web_search` is accepted, echoed, and hidden; startup warns when a tenant token bucket cannot hold a model's `max_model_len` reservation.

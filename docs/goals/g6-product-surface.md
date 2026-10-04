@@ -1,7 +1,8 @@
 # Goal G6: Product Surface — Truthful API, Fugu-Class Orchestrated Product, Competitive Proof (Roadmap Track P)
 
-Status: Goal defined (2026-07-03). P-A, all of P-B, P-C2, P-C3, and P-C4 are
-green. P-C's scoreboard needs real engines for the Kairyu column but runs
+Status: Goal defined (2026-07-03). P-A, all of P-B, P-C3, and P-C4 are
+green; P-C2 was reopened on 2026-10-05 for M20 (see the P-C2 note below).
+P-C's scoreboard needs real engines for the Kairyu column but runs
 against frontier APIs immediately.
 Depends on: M1/M7 server stack; real token accounting quality gates depend on
 Track E1 (real tokenizer). See `docs/roadmap.md` §4 Track P.
@@ -116,6 +117,19 @@ loop against Qwen3-32B TP8 on all eight RTX PRO 6000 GPUs. The exact Codex
 version, HTTP attempts, usage, command result, and unsupported hosted-search
 negative gate are recorded in
 `bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`.
+
+**P-C2 reopened and re-scoped (2026-10-05, M20).** An audit against codex-rs
+rust-v0.160.0, openai-python v3.24 and the pinned OpenAI OpenAPI document
+found that the 2026-07-28 evidence covers a narrow configuration only (80
+verified gaps, six P0 for Codex). P-C2 now means full OpenAI Responses API
+compatibility: Codex CLI (pinned stable plus a version matrix), openai-python
+v3.24 with strict response validation, openai-node and the OpenAI Agents SDK
+work unmodified across every Responses endpoint (create, retrieve and stream
+resume, delete, cancel, `input_items`, `input_tokens`, `compact`), background
+mode, the Conversations API, WebSocket mode and hosted-tool executors. Proof:
+the pinned schema gate over every test, the Open Responses suite, Codex fixture
+replay and nightly matrix, and real-client smokes. The design and work packages
+are in `docs/design/m20-responses-compat.md`; WP-53 closes the gate.
 
 P-C3 is CPU-green as of 2026-07-31 (issue #202). The production `fastembed`
 backend loads a revision- and SHA-pinned all-MiniLM-L6-v2 ONNX snapshot

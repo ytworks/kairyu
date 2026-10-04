@@ -140,6 +140,13 @@ repo's CPU-first discipline.
 | **P-B Fugu-class product** | Chat-native streaming orchestrator (`Orchestrator.run_chat(messages, tools, stream=True)` — route fast, stream the synthesizer stage token-by-token, keep-alive status events); `usage.orchestration_input/output_tokens` + opt-in trace disclosure (the anti-Fugu transparency feature); Open WebUI as a compose service (custom UI only for the trace viewer); tiered `kairyu-auto` / `kairyu-auto-max`; tenancy v1 (key→tenant map, in-gateway token-bucket limits, append-only usage ledger, `/admin/usage`) | `kairyu-auto` TTFT ≤1.5× the underlying engine on the direct-route path; every auto request logs internal token spend; fresh user chats with `kairyu-auto` in one `docker compose up`; two keys get isolated 429s; ledger reconciles to <0.1% | `orchestrator.py`, `conductor.py`, `moa.py`, `budget.py`, `settings.py`, `middleware.py`, `batch/store.py` pattern |
 | **P-C Competitive proof + completeness** | `verification/product/performance/frontier_compare.py` (multi-target: Kairyu, Anthropic, OpenAI, DeepSeek; identical prompts; TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly scoreboard with documented methodology); `/v1/responses` (Responses API subset — vLLM gap, Fugu parity); `/v1/embeddings` (+rerank) as a new backend kind; vision content-parts | One command → dated scoreboard vs ≥3 frontier APIs, runs unattended nightly; OpenAI SDK `responses.create` + a Codex-class agent work unmodified; Open WebUI RAG end-to-end on Kairyu alone | P-A bench, `batch/store.py` state pattern, `registry.py` |
 
+**M20 note (2026-10-05).** The P-C `/v1/responses` deliverable grows from a
+"Responses API subset" to full OpenAI Responses API compatibility (milestone
+M20, `docs/design/m20-responses-compat.md`): every endpoint, streaming/error/
+usage conformance, background mode, Conversations, WebSocket mode and hosted
+tools, gated by a pinned schema gate, Open Responses and real Codex/SDK/Agents
+clients. G6 P-C2 is reopened until M20 WP-53.
+
 ## 5. Design decisions amended by this roadmap
 
 Recorded as amendment entries in PROGRESS.md (2026-07-03); originals untouched per

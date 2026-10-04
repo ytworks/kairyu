@@ -1,6 +1,7 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D4 amended 2026-10-05 and superseded progressively
+by m20; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -402,6 +403,12 @@ rewriting the text above:
 Because an omitted cap now reserves `max_model_len` for tenant admission,
 startup warns for every tenant whose token bucket cannot hold that
 reservation for a served model.
+
+**M20 pointer amendment (2026-10-05, M20 WP-01).** D4 and its amendments are
+superseded progressively by `docs/design/m20-responses-compat.md` (OpenAI
+Responses API full compatibility). The m20 supersession table (§10 there) is
+the single list of superseded D4 statements and the work package that
+supersedes each; the text above stays as written.
 
 ### D5 — Vision wire format
 
