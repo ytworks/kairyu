@@ -68,8 +68,9 @@ def chat_error_response(error: ChatRequestError) -> JSONResponse:
 def orchestration_failure(error: OrchestratorExecutionError) -> tuple[int, dict]:
     """Status and error member of a failed AUTO run.
 
-    An internal stage that overflowed its context window is a server error
-    (WP-04), never reported as the client's context window.
+    A direct route that overflowed sent the client prompt itself: 400
+    ``context_length_exceeded``. An internal stage that overflowed is a server
+    error (WP-04), never reported as the client's context window.
     """
 
     classified = classify_request_error(error, "chat")

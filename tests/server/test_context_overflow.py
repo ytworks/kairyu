@@ -6,7 +6,8 @@ Chat and Messages clients look for the OpenAI code and Anthropic's "prompt is
 too long" text. Each case drives one public surface from the HTTP request to
 the rendered error, over the native engine (Kairyu's own tokenizer preflight),
 an OpenAI-compatible upstream (vLLM rejects the prompt), or an AUTO model
-(orchestration preflight of the client prompt).
+(orchestration preflight of the client prompt, or a direct route that sends the
+client prompt to such an upstream).
 """
 
 from __future__ import annotations
@@ -73,6 +74,15 @@ def _overflow_app(tmp_path, source: str):
     if source == "upstream":
         backend = _upstream_backend()
         return create_legacy_app({"m": backend}, settings=settings), "m", [backend]
+    if source == "auto-upstream":
+        # The preflight cannot tokenize for vLLM, so the direct route (and its
+        # tier2 failover) dispatches exactly the client prompt.
+        backend = _upstream_backend()
+        orchestrator = Orchestrator({"tier1": backend, "tier2": backend})
+        app = create_legacy_app(
+            {}, orchestrators={"kairyu-auto": orchestrator}, settings=settings
+        )
+        return app, "kairyu-auto", [backend]
     native = KairyuBackend(num_pages=64, max_model_len=_MAX_MODEL_LEN)
     if source == "native":
         return create_legacy_app({"m": native}, settings=settings), "m", [native]
@@ -137,7 +147,7 @@ async def _assert_responses_overflow(app, response, *, stream, source) -> None:
     events = _responses_events(response.text)
     assert [event["sequence_number"] for event in events] == list(range(len(events)))
     types = [event["type"] for event in events]
-    if source == "upstream":
+    if source in {"upstream", "auto-upstream"}:
         # vLLM reports the overflow only after dispatch; the stream is open.
         assert types[:2] == ["response.created", "response.in_progress"]
         assert types[-2:] == ["error", "response.failed"]
@@ -217,6 +227,7 @@ def _assert_messages_overflow(response, *, stream, source) -> None:
         ("responses", "auto", False, False),
         ("responses", "auto", True, False),
         ("responses", "auto", True, True),
+        ("responses", "auto-upstream", True, True),
         ("chat", "native", False, False),
         ("chat", "upstream", False, False),
         ("chat", "upstream", True, False),
@@ -234,6 +245,7 @@ def _assert_messages_overflow(response, *, stream, source) -> None:
         "responses-unary-auto",
         "responses-stream-auto-relay",
         "responses-stream-auto-buffered-tools",
+        "responses-stream-auto-upstream-buffered-tools",
         "chat-unary-native",
         "chat-unary-upstream",
         "chat-stream-upstream",

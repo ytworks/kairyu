@@ -54,8 +54,9 @@ def request_failure(request: ResponsesRequest, error: BaseException) -> Response
 def delegated_failure(request: ResponsesRequest, delegated: JSONResponse) -> Response:
     """Re-render a delegated Chat error (AUTO) the Responses way when classified.
 
-    The Chat handler rejects an overflowing AUTO prompt before any dispatch;
-    other delegated errors are returned unchanged.
+    The Chat handler reports an overflow of the client prompt (AUTO preflight,
+    or a direct route's upstream on a unary run); other delegated errors are
+    returned unchanged.
     """
 
     try:

@@ -165,18 +165,19 @@ class OrchestratorEvent:
 class OrchestratorExecutionError(RuntimeError):
     """Backend failure plus the partial accounting/trace safe to return."""
 
-    # Dispatched stage prompts are orchestration-built: an overflow beneath
-    # this error is a server failure, not the client's context (WP-04).
-    context_overflow_reason = "internal_stage_context_overflow"
-
     def __init__(
         self,
         cause: BaseException,
         result: OrchestratorResult,
+        *,
+        # A stage prompt is orchestration-built, so an overflow beneath it is a
+        # server failure (WP-04). A direct route sent the client prompt: None.
+        context_overflow_reason: str | None = "internal_stage_context_overflow",
     ) -> None:
         super().__init__(str(cause))
         self.cause = cause
         self.result = result
+        self.context_overflow_reason = context_overflow_reason
 
 
 class _DirectExecutionError(RuntimeError):
@@ -2564,29 +2565,26 @@ class Orchestrator:
                 and "tier2" in self._engines
                 and (
                     call.multimodal_prompt is None
-                    or backend_supports_prompt_kind(
-                        self._engines["tier2"],
-                        "multimodal",
-                    )
+                    or backend_supports_prompt_kind(self._engines["tier2"], "multimodal")
                 )
             ):
                 notes.append("failover: tier1 failed; retrying once on tier2")
                 try:
                     direct_result, usage, direct_event = await self._run_direct(
-                        call,
-                        "tier2",
-                        notes,
+                        call, "tier2", notes
                     )
                 except _DirectExecutionError as failover_error:
                     trace_events.append(failover_error.event)
                     raise OrchestratorExecutionError(
                         failover_error.cause,
                         result_with_trace(text=""),
+                        context_overflow_reason=None,  # the client prompt itself
                     ) from failover_error.cause
             else:
                 raise OrchestratorExecutionError(
                     error.cause,
                     result_with_trace(text=""),
+                    context_overflow_reason=None,  # the client prompt itself
                 ) from error.cause
         trace_events.append(direct_event)
         return result_with_trace(
