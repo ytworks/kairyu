@@ -110,7 +110,7 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-10-05 — [amendment] In-process vLLM fails closed, reports exact usage (M20 WP-30)
-- What: `VLLMBackend.validate_request` (and `stream`) reject `best_of`, `logprobs`, `prompt_logprobs`, `forced_token_ids`, any `extra_args` key (incl. `response_format`), `chat_template_kwargs`, `assistant_prefill` and strict tools before dispatch (400); results carry exact `usage` from `RequestOutput` (`prompt_token_ids`, completion token IDs, `num_cached_tokens`). Logprobs/structured output in-process stay unsupported (use the `openai` backend, `upstream: vllm`).
+- What: `VLLMBackend.validate_request` (and `stream`) reject `best_of`, `logprobs`, `prompt_logprobs`, `forced_token_ids`, any `extra_args` key (incl. a non-`text` `response_format`), `chat_template_kwargs`, `assistant_prefill` and grammar-selected strict tools before dispatch (400; WP-28 relaxes strict on both vLLM paths); results carry exact `usage` from `RequestOutput` (`prompt_token_ids`, completion token IDs, `num_cached_tokens`). Logprobs/structured output in-process stay unsupported (use the `openai` backend, `upstream: vllm`).
 - Why: those intents were silently dropped and usage fell back to the word-split approximation (m9 D1 recorded limitation; G-usage-4).
 - Refs: m9 D6 amendment 2026-10-05 (WP-30); m20 admission row 30; `kairyu/engine/vllm_backend.py`
 

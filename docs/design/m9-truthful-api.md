@@ -335,10 +335,10 @@ amendment, known limit b).
 and reports exact usage.** `VLLMBackend` mapped only vLLM's sampling fields and
 validated only `forced_token_ids`, `chat_template_kwargs`, `assistant_prefill`
 and the prompt kind. Chat `logprobs`, `prompt_logprobs`, `best_of`, every
-`extra_args` key (so `response_format` and Responses `text.format`) and strict
-tools were dropped and the request ran unconstrained; every result had
-`usage=None`, so the D1 word-split fallback (its recorded limitation) billed
-and settled tenant budgets from an approximation.
+`extra_args` key (so a constraining `response_format` or Responses
+`text.format`) and strict tools were dropped and the request ran unconstrained;
+every result had `usage=None`, so the D1 word-split fallback (its recorded
+limitation) billed and settled tenant budgets from an approximation.
 
 - `validate_request`, and `stream` for direct `EngineBackend` callers, raise
   one `ValueError` naming each unhonored field (`best_of`, `logprobs`,
@@ -347,6 +347,16 @@ and settled tenant budgets from an approximation.
   before dispatch, so the server answers 400 `invalid_request` as for the
   native engine's surface check. `to_vllm_sampling_kwargs` rejects its own
   unmapped sampling fields.
+- Only constraints the native engine would apply are rejected. A
+  `response_format` of type `text` (or none), the OpenAI default that Chat and
+  Responses `text.format` clients send explicitly, is a no-op and dispatches.
+  `strict` counts only for the tools the native grammar covers
+  (`grammar_tool_candidates`, shared with `native_sampling_params`): none under
+  `tool_choice: "none"`, and only the selected one for a named choice.
+- Strict tools: the rejection matches the `openai` backend's 400 for upstreams
+  without strict support (m20 admission row 28 lists that regression). D4's
+  M20 WP-28 best-effort vLLM `strict_tools_fallback` is meant to relax both
+  vLLM paths together, so its owner updates this adapter too.
 - Usage follows D1 from each cumulative `RequestOutput`: `prompt_tokens` is
   `len(prompt_token_ids)` once (also for `n > 1`), `completion_tokens` sums the
   completions' token IDs, and `cached_tokens` is `num_cached_tokens` (0 when
