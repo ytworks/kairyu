@@ -200,6 +200,23 @@ regenerated, `calibration/judged-coverage-v2.jsonl`, `calibration/tau.json`):
 Held-out answers passing every point: 45 / 125 (7 violated). The threshold 0.9895 is at
 least both calibrated values (0.98941, 0.98887).
 
+## VERIFIED_TOOL criteria fix on `78d6f411` (2026-10-04, 15:03-15:48 JST)
+
+The criteria now name when a call is needed and exclude a reply that only
+reports tool results already in the conversation. Offline (route judge only)
+the second wording met every bound; the routing-dependent gates were then run
+again on the deployment.
+
+| Gate | Result | Key numbers (before -> after) |
+|---|---|---|
+| routing | PASS | held-out miss 4.2 % -> 8.3 %, tool-free to VERIFIED_TOOL 0 |
+| think-route | PASS | — |
+| effort | PASS | — |
+| verified-tool-routing | **PASS** | not requiring a call to VERIFIED_TOOL 35 % -> **0 %**; requiring one 95 % -> 95 % |
+| verified-tool-route | FAIL | 37/40 (was 38/40): t11 (read a second file) routed to THINK twice, t15 one stream answered without a call |
+| serving-routed | PASS | VERIFIED p50 134 / 159 / 218 / 296 s at c1-c16; judge p50 <= 0.12 s |
+| replay (83 DeepSWE turns) | FAIL | VERIFIED_TOOL 65 -> 72 (87 %, >= 90 %), THINK 11, VERIFIED 0; all 200 with a bash call, no submission; p50 16 s, p90 103 s |
+
 ## GPU gates on `e0de4631`/`bbd63539` (2026-10-04, 11:51-14:39 JST)
 
 Verified-tool route (VCO-D17), tau_hi 0.999733, acceptance 0.99. All gates
