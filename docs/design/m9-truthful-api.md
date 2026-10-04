@@ -1,8 +1,9 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
 Status: **Implemented** (2026-07-03; D2 amended 2026-08-04; D3 amended
-2026-08-05; D6 amended 2026-10-05). Reviewed — APPROVE-WITH-AMENDMENTS
-(2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
+2026-08-05; D6 amended 2026-10-05 by M20 WP-04 and WP-07). Reviewed —
+APPROVE-WITH-AMENDMENTS (2-reviewer agent panel, 2026-07-03; amendments
+applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
 Date: 2026-07-03
@@ -316,6 +317,19 @@ semantics). Codex compacts only on an in-band `response.failed` with
   and `response.content_part.added` before `error` (fixed by WP-17a's lazy
   item open). (c) A stage failure the conductor swallows loses its overflow
   cause and stays a generic 502.
+
+**Amendment 2026-10-05 (M20 WP-07) — nullable `param` on Chat errors.**
+OpenAI's `ErrorResponse` requires `param` (null when no single parameter is
+at fault); Kairyu's Chat bodies had it only when one was. Every error rendered
+through `error_classifier` now carries it: `ChatRequestError.payload()`,
+`sanitize_backend_error` (the 502 `backend_error`),
+`invalid_request_payload`, the engine admission 429s (`ChatAdmissionErrors`)
+and the middleware's 401, 403, 413 and 429 (`send_error`, tenant limits
+included). Status, type, code, message and `Retry-After: 1` are unchanged;
+Messages keeps the Anthropic envelope and Jev its own. Hand-built Chat-family
+bodies (embeddings, async requests, batches, admin routes, Chat stream error
+frames) still omit it; they are outside M20's Responses scope (m7 D5
+amendment, known limit b).
 
 ## 3. Non-goals
 

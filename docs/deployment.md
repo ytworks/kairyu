@@ -676,11 +676,11 @@ Additional Codex-derived behavior:
   without a data event; Codex retries a stream silent for 300 s (comments do
   not count). Later failures are `error` + `response.failed` events.
 - **No server-side output cap.** An omitted `max_output_tokens` (Codex never
-  sends one) bounds output by the remaining context, so tenant admission
-  reserves `max_model_len` per Codex request: a bucket that cannot hold one
-  answers a terminal 429 `tenant_budget_too_small` (startup warns); a drained
-  one 503 `slow_down` + `Retry-After`, which Codex 0.160 waits out. Size
-  `token_burst` for that reservation times the tenant's concurrent Codex turns.
+  sends one) reserves `max_model_len` in tenant admission: a bucket that cannot
+  hold it answers 429 `tenant_budget_too_small` (terminal; startup warns), a
+  drained one 503 `slow_down` + `Retry-After` (Codex 0.160 waits); AUTO tool
+  turns end in-band `rate_limit_exceeded` (retried) until WP-18. Size
+  `token_burst` for it times the tenant's concurrent Codex turns.
 - **WebSocket upgrades get 426.** Codex's built-in `openai` provider
   repointed with `openai_base_url` (Harbor/Terminal-Bench) tries WebSocket
   first and silently falls back to HTTPS; a custom provider never tries.

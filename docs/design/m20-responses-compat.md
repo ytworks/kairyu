@@ -160,14 +160,14 @@ Each D-ID is Proposed until its last WP lands; partial implementation is noted.
 05, 08a, 13, 14, 53; *WP-01 in progress; WP-02, 02b, 05 implemented*). The §3
 pins are the contract. WP-01 vendors the OpenAPI closure and gates every test:
 an ASGI recorder wraps the app of every in-process test transport,
-`ContractValidator` (Draft 2020-12)
-validates each `/v1/responses*` and `/v1/conversations*` body, each SSE event by
-its `type` (unknown types fail) and each error body against `ErrorResponse`,
-and an unmapped route under those prefixes fails. `tests/contracts/divergences.toml`
-allowlists current behavior, one entry per gap with its owner WP;
-`CONTRACT_STRICT=1` fails a full run on stale entries or on zero validated
-items. The same recorder captures every route's wire bytes when
-`KAIRYU_WIRE_CAPTURE=<dir>` is set (DoD #9). Its comparison
+`ContractValidator` (Draft 2020-12) validates each `/v1/responses*` and
+`/v1/conversations*` body, each SSE event by its `type` (unknown types fail) and
+each error body against `ErrorResponse`, and an unmapped route under those
+prefixes fails unless declined with 404/405 (WP-07; its error body is still
+validated). `tests/contracts/divergences.toml` allowlists current behavior, one
+entry per gap with its owner WP; `CONTRACT_STRICT=1` fails a full run on stale
+entries or on zero validated items. The same recorder captures every route's
+wire bytes when `KAIRYU_WIRE_CAPTURE=<dir>` is set (DoD #9). Its comparison
 (`python -m tests.contracts.wire_capture diff`) masks only run-to-run volatile
 values (ids keep their prefix and are numbered per test), skips the tests it
 lists as nondeterministic, and pairs tests moved between modules with
@@ -255,10 +255,10 @@ echo and persistence; `defer_loading` and `allowed_callers` rules; hosted
 `tool_choice` routing; hosted history items dropped.
 
 **D10 — Error classification** (WP-04, 07 *implemented*; pending: WebSocket
-frames, Responses SLO shed 17c, follow-up refusals 18). L1 overflow error and
-`resolve_output_budget`; fixed-message upstream classification; L3
-`error_classifier` (`surface`, `placement`, `param` always); scoped envelopes
-incl. middleware, framework 422/404/405; O-2 table by path (C25, m7 D5 amendment).
+frames, Responses SLO shed 17c, reservations refused after `response.created` 18).
+L1 overflow error, `resolve_output_budget`; fixed-message upstream classification;
+L3 `error_classifier` (`surface`, `placement`, `param`); scoped envelopes incl.
+middleware, 422/404/405; O-2 table by path (C25; m7 D5 amendment, known limits).
 
 **D11 — Usage details** (WP-08b, 19, 31). `reasoning_tokens` (native, ZMQ,
 upstream `completion_tokens_details`), AUTO public cached/reasoning tokens,
