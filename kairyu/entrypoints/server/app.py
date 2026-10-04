@@ -20,7 +20,7 @@ import uuid
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
@@ -49,7 +49,6 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound_async,
     backend_max_model_len,
     backend_sequence_budget,
-    backend_supports_slo_defer,
     prepare_backend_request,
     validate_backend_request_before_prepare,
 )
@@ -78,7 +77,13 @@ from kairyu.entrypoints.server.chat_service import (
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
 )
+from kairyu.entrypoints.server.engine_admission import (
+    AdmissionSurface,
+    admit_engine_request,
+    reserve_tenant_tokens,
+)
 from kairyu.entrypoints.server.errors import (
+    ChatAdmissionErrors,
     chat_error_response,
     invalid_request,
     model_not_found,
@@ -163,8 +168,9 @@ if TYPE_CHECKING:
     from kairyu.entrypoints.server.extra_routes import EmbeddingBackend
 
 logger = logging.getLogger(__name__)
-_LOWEST_SCHEDULER_PRIORITY = 2**63 - 1
-_SLO_INTERACTIVE_PRIORITY_CEILING = _LOWEST_SCHEDULER_PRIORITY - 1
+_CHAT_ADMISSION = AdmissionSurface(
+    endpoint="chat", errors=ChatAdmissionErrors(), record_refused_admission_phase=True
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,70 +615,12 @@ def _tenant_reservation(http_request: Request):
     return getattr(http_request.state, "tenant_admission", None)
 
 
-def _tenant_limit_response(tenant: str, reason: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        headers={"Retry-After": "1"},
-        content={
-            "error": {
-                "message": (f"tenant {tenant!r} admission limit exceeded ({reason})"),
-                "type": "rate_limit_error",
-                "code": "tenant_rate_limited",
-            }
-        },
-    )
-
-
-def _slo_shed_response() -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        headers={"Retry-After": "1"},
-        content={
-            "error": {
-                "message": "predicted TTFT exceeds the configured SLO",
-                "type": "rate_limit_error",
-                "code": "slo_admission_shed",
-            }
-        },
-    )
-
-
-def _slo_defer_to_shed_response(
-    http_request: Request,
-    lease: AdmissionLease,
-) -> JSONResponse:
-    state = http_request.scope.setdefault("state", {})
-    if state.get(_SLO_ADMISSION_LEASE_STATE_KEY) is lease:
-        state.pop(_SLO_ADMISSION_LEASE_STATE_KEY)
-    if lease.active:
-        lease.completed()
-    return _slo_shed_response()
-
-
 def _reserve_tenant_work(
     http_request: Request,
     bound: AdmissionUpperBound,
 ) -> JSONResponse | None:
-    admission = _tenant_reservation(http_request)
-    if admission is None:
-        return None
-    tenant = getattr(http_request.state, "tenant", None) or "default"
-    admitted = admission.reserve_tokens(
-        bound.tokens,
-        refundable_on_exact_usage=bound.refundable_on_exact_usage,
-    )
-    metrics = getattr(http_request.app.state, "metrics", None)
-    if metrics is not None:
-        metrics.record_tenant_admission(
-            tenant,
-            source="http",
-            admitted=admitted,
-            reason=admission.reason,
-        )
-    if admitted:
-        http_request.state.tenant_metric_admitted = True
-        return None
-    return _tenant_limit_response(tenant, admission.reason)
+    refusal = reserve_tenant_tokens(http_request, bound)
+    return None if refusal is None else _CHAT_ADMISSION.errors.tenant_limited(refusal)
 
 
 def _mark_tenant_dispatched(http_request: Request) -> None:
@@ -2723,112 +2671,15 @@ def create_app(
                 "request_validation",
                 validation_started_ns,
             )
-        slo_lease = None
-        if (
-            slo_admission is not None
-            and validated.generation_request.scheduling_class == "interactive"
-        ):
-            ingress_ns = getattr(http_request.state, "placement_started_ns", None)
-            elapsed_s = (
-                max(0, time.perf_counter_ns() - ingress_ns) / 1_000_000_000
-                if type(ingress_ns) is int
-                else 0.0
-            )
-            lease = slo_admission.begin(elapsed_s=elapsed_s)
-            if lease.decision.action == "shed":
-                return _slo_shed_response()
-            slo_lease = lease
-            http_request.scope.setdefault("state", {})[_SLO_ADMISSION_LEASE_STATE_KEY] = lease
-            generation_request = validated.generation_request
-            if lease.decision.action == "defer":
-                admission_request = replace(
-                    generation_request,
-                    priority=_LOWEST_SCHEDULER_PRIORITY,
-                    scheduling_class="batch",
-                )
-                if not backend_supports_slo_defer(
-                    validated.engine,
-                    admission_request,
-                ):
-                    return _slo_defer_to_shed_response(http_request, lease)
-            elif generation_request.priority > _SLO_INTERACTIVE_PRIORITY_CEILING:
-                admission_request = replace(
-                    generation_request,
-                    priority=_SLO_INTERACTIVE_PRIORITY_CEILING,
-                )
-            else:
-                admission_request = generation_request
-            if admission_request is not generation_request:
-                try:
-                    validate_backend_request_before_prepare(
-                        validated.engine,
-                        admission_request,
-                    )
-                except ValueError as error:
-                    return invalid_request(str(error))
-                validated = replace(
-                    validated,
-                    generation_request=admission_request,
-                )
-        prepare_started_ns = time.perf_counter_ns()
-        try:
-            await prepare_backend_request(
-                validated.engine,
-                validated.generation_request,
-            )
-        except ValueError as error:
-            return chat_error_response(chat_error_from_value_error(error))
-        except UpstreamClientError as error:
-            chat_error = chat_error_from_upstream_client_error(error)
-            return JSONResponse(
-                status_code=chat_error.status_code,
-                content={"error": chat_error.payload()},
-            )
-        except RuntimeError as error:
-            return upstream_error(error)
-        finally:
-            _record_preplacement_phase(
-                http_request,
-                "chat",
-                "backend_prepare",
-                prepare_started_ns,
-            )
-        if (
-            slo_lease is not None
-            and slo_lease.decision.action == "defer"
-            and not backend_supports_slo_defer(
-                validated.engine,
-                validated.generation_request,
-            )
-        ):
-            return _slo_defer_to_shed_response(http_request, slo_lease)
-        admission_started_ns = time.perf_counter_ns()
-        try:
-            bound = await backend_admission_upper_bound_async(
-                validated.engine,
-                validated.generation_request,
-            )
-        except ValueError as error:
-            return invalid_request(str(error))
-        except RuntimeError as error:
-            return upstream_error(error)
-        admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
-        reserve_started_ns = time.perf_counter_ns()
-        reservation_error = _reserve_tenant_work(http_request, bound)
-        admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
-        if metrics is not None:
-            metrics.record_preplacement_phase(
-                "chat",
-                "admission",
-                admission_ns,
-            )
-        if reservation_error is not None:
-            return reservation_error
-        if metrics is not None:
-            metrics.record_priority(
-                validated.generation_request.scheduling_class,
-                source="http",
-            )
+        admitted = await admit_engine_request(
+            http_request,
+            validated,
+            surface=_CHAT_ADMISSION,
+            scheduling_class=validated.generation_request.scheduling_class,
+        )
+        if isinstance(admitted, Response):
+            return admitted
+        validated, slo_lease = admitted.validated, admitted.slo_lease
         if request.stream and not request.tools:
             return sse_response(
                 _stream_engine(

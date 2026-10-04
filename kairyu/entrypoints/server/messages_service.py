@@ -16,7 +16,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import replace
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -25,13 +26,8 @@ from pydantic import ValidationError
 from kairyu.engine.backend import (
     CacheHint,
     GenerationResult,
-    UpstreamClientError,
-    backend_admission_upper_bound_async,
     backend_count_prompt_tokens_async,
-    backend_supports_slo_defer,
-    prepare_backend_request,
     render_tool_intent,
-    validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import prompt_text
 from kairyu.entrypoints.chat_template import ToolCallProtocol
@@ -42,11 +38,16 @@ from kairyu.entrypoints.server.chat_service import (
     ReasoningDeltaParser,
     ValidatedChatRequest,
     _normalize_tool_choice,
-    chat_error_from_upstream_client_error,
     execute_chat,
     validate_chat_input_async,
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
+)
+from kairyu.entrypoints.server.engine_admission import (
+    AdmissionStage,
+    AdmissionSurface,
+    TenantRefusal,
+    admit_engine_request,
 )
 from kairyu.entrypoints.server.error_classifier import (
     anthropic_stream_failure,
@@ -95,8 +96,12 @@ from kairyu.entrypoints.server.tool_stream import (
 
 logger = logging.getLogger(__name__)
 
-_LOWEST_SCHEDULER_PRIORITY = 2**63 - 1
-_SLO_INTERACTIVE_PRIORITY_CEILING = _LOWEST_SCHEDULER_PRIORITY - 1
+_ADMISSION_FAILURE_LOGS: Mapping[AdmissionStage, str] = MappingProxyType(
+    {
+        "backend_prepare": "Anthropic Messages backend prepare failed",
+        "admission": "Anthropic Messages admission bound failed",
+    }
+)
 
 # Claude Code counts every relayed byte (including ping events) and aborts a
 # stream that goes silent for 300 seconds; protocol-valid pings every 15s keep
@@ -165,26 +170,44 @@ class _MessagesFailure(Exception):
         )
 
 
-def _slo_shed_response(request_id: str | None) -> JSONResponse:
-    return anthropic_error_response(
-        "predicted TTFT exceeds the configured SLO",
-        status_code=429,
-        request_id=request_id,
-        headers={"Retry-After": "1"},
-    )
+@dataclass(frozen=True)
+class _MessagesAdmissionErrors:
+    """Anthropic rendering of the shared engine admission chain's failures."""
 
+    request_id: str | None
 
-def _slo_defer_to_shed_response(
-    http_request: Request,
-    lease,
-    request_id: str | None,
-) -> JSONResponse:
-    state = http_request.scope.setdefault("state", {})
-    if state.get(_SLO_ADMISSION_LEASE_STATE_KEY) is lease:
-        state.pop(_SLO_ADMISSION_LEASE_STATE_KEY)
-    if lease.active:
-        lease.completed()
-    return _slo_shed_response(request_id)
+    def slo_shed(self) -> JSONResponse:
+        return anthropic_error_response(
+            "predicted TTFT exceeds the configured SLO",
+            status_code=429,
+            request_id=self.request_id,
+            headers={"Retry-After": "1"},
+        )
+
+    def invalid(self, message: str) -> JSONResponse:
+        return anthropic_error_response(message, request_id=self.request_id)
+
+    def rejected(self, error: ValueError | ChatRequestError) -> JSONResponse:
+        return _MessagesFailure.from_chat_error(error).json_response(self.request_id)
+
+    def upstream_failed(
+        self, stage: AdmissionStage, error: RuntimeError
+    ) -> JSONResponse:
+        logger.exception(_ADMISSION_FAILURE_LOGS[stage])
+        return anthropic_error_response(
+            f"upstream backend error ({type(error).__name__})",
+            status_code=502,
+            request_id=self.request_id,
+        )
+
+    def tenant_limited(self, refusal: TenantRefusal) -> JSONResponse:
+        return anthropic_error_response(
+            f"tenant {refusal.tenant!r} admission limit exceeded "
+            f"({refusal.reason})",
+            status_code=429,
+            request_id=self.request_id,
+            headers={"Retry-After": "1"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1799,140 +1822,18 @@ def add_messages_route(
                 message_id=message_id,
                 request_id=request_id,
             )
-        slo_lease = None
-        slo_admission = getattr(http_request.app.state, "slo_admission", None)
-        if (
-            slo_admission is not None
-            and validated.generation_request.scheduling_class == "interactive"
-        ):
-            ingress_ns = getattr(http_request.state, "placement_started_ns", None)
-            elapsed_s = (
-                max(0, time.perf_counter_ns() - ingress_ns) / 1_000_000_000
-                if type(ingress_ns) is int
-                else 0.0
-            )
-            lease = slo_admission.begin(elapsed_s=elapsed_s)
-            if lease.decision.action == "shed":
-                return _slo_shed_response(request_id)
-            slo_lease = lease
-            http_request.scope.setdefault("state", {})[
-                _SLO_ADMISSION_LEASE_STATE_KEY
-            ] = lease
-            generation_request = validated.generation_request
-            if lease.decision.action == "defer":
-                admission_request = replace(
-                    generation_request,
-                    priority=_LOWEST_SCHEDULER_PRIORITY,
-                    scheduling_class="batch",
-                )
-                if not backend_supports_slo_defer(
-                    validated.engine,
-                    admission_request,
-                ):
-                    return _slo_defer_to_shed_response(
-                        http_request, lease, request_id
-                    )
-            elif generation_request.priority > _SLO_INTERACTIVE_PRIORITY_CEILING:
-                admission_request = replace(
-                    generation_request,
-                    priority=_SLO_INTERACTIVE_PRIORITY_CEILING,
-                )
-            else:
-                admission_request = generation_request
-            if admission_request is not generation_request:
-                try:
-                    validate_backend_request_before_prepare(
-                        validated.engine,
-                        admission_request,
-                    )
-                except ValueError as error:
-                    return request_error(str(error))
-                validated = replace(
-                    validated,
-                    generation_request=admission_request,
-                )
-
-        prepare_started_ns = time.perf_counter_ns()
-        try:
-            await prepare_backend_request(
-                validated.engine,
-                validated.generation_request,
-            )
-        except UpstreamClientError as error:
-            return chat_error(chat_error_from_upstream_client_error(error))
-        except ValueError as error:
-            return chat_error(error)
-        except RuntimeError as error:
-            logger.exception("Anthropic Messages backend prepare failed")
-            return request_error(
-                f"upstream backend error ({type(error).__name__})",
-                status_code=502,
-            )
-        finally:
-            if metrics is not None:
-                metrics.record_preplacement_phase(
-                    "messages",
-                    "backend_prepare",
-                    max(0, time.perf_counter_ns() - prepare_started_ns),
-                )
-        if (
-            slo_lease is not None
-            and slo_lease.decision.action == "defer"
-            and not backend_supports_slo_defer(
-                validated.engine,
-                validated.generation_request,
-            )
-        ):
-            return _slo_defer_to_shed_response(
-                http_request, slo_lease, request_id
-            )
-
-        admission_started_ns = time.perf_counter_ns()
-        try:
-            bound = await backend_admission_upper_bound_async(
-                validated.engine,
-                validated.generation_request,
-            )
-        except ValueError as error:
-            return request_error(str(error))
-        except RuntimeError as error:
-            logger.exception("Anthropic Messages admission bound failed")
-            return request_error(
-                f"upstream backend error ({type(error).__name__})",
-                status_code=502,
-            )
-        admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
-        reserve_started_ns = time.perf_counter_ns()
+        admitted = await admit_engine_request(
+            http_request,
+            validated,
+            surface=AdmissionSurface(
+                endpoint="messages", errors=_MessagesAdmissionErrors(request_id)
+            ),
+            scheduling_class=validated.generation_request.scheduling_class,
+        )
+        if isinstance(admitted, Response):
+            return admitted
+        validated, slo_lease = admitted.validated, admitted.slo_lease
         admission = getattr(http_request.state, "tenant_admission", None)
-        if admission is not None:
-            admitted = admission.reserve_tokens(
-                bound.tokens,
-                refundable_on_exact_usage=bound.refundable_on_exact_usage,
-            )
-            if metrics is not None:
-                metrics.record_tenant_admission(
-                    owner,
-                    source="http",
-                    admitted=admitted,
-                    reason=admission.reason,
-                )
-            if admitted:
-                http_request.state.tenant_metric_admitted = True
-            if not admitted:
-                return anthropic_error_response(
-                    f"tenant {owner!r} admission limit exceeded "
-                    f"({admission.reason})",
-                    status_code=429,
-                    request_id=request_id,
-                    headers={"Retry-After": "1"},
-                )
-        admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
-        if metrics is not None:
-            metrics.record_preplacement_phase("messages", "admission", admission_ns)
-            metrics.record_priority(
-                validated.generation_request.scheduling_class,
-                source="http",
-            )
 
         if request.stream:
             if _tools_active(chat_request):
