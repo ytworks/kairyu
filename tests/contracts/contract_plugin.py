@@ -14,7 +14,7 @@ controller, which applies the strict checks to the union.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -43,14 +43,23 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         uninstall()
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_collection(session: pytest.Session) -> Generator[None, object, object]:
+    # Before any test module is imported or any fixture runs, so a client built
+    # at import time or by a module/session-scoped fixture is recorded no matter
+    # which test runs first. Inside the warnings plugin's (tryfirst) collection
+    # wrapper, so the transports' import-time warning is captured as usual.
+    config = session.config
+    config.stash[_UNINSTALL] = install_recorders(config.stash[_GATE])
+    return (yield)
+
+
 @pytest.fixture(autouse=True)
 def _openai_contract_gate(request: pytest.FixtureRequest) -> Iterator[None]:
     config = request.config
     gate = config.stash[_GATE]
     if _UNINSTALL not in config.stash:
-        # Installed inside the first test so the transports' import-time
-        # warnings stay in pytest's warning capture.
-        config.stash[_UNINSTALL] = install_recorders(gate)
+        raise RuntimeError("schema gate recorders were not installed at collection")
     gate.begin()
     yield
     outcome = gate.finish(request.node.nodeid)

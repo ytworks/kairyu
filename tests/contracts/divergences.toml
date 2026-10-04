@@ -8,7 +8,9 @@
 #                missing or undeclared property, the pointer ends with its
 #                name); for "route" it is "METHOD /path";
 #   keyword      the failing JSON Schema keyword, or a gate check:
-#                route | event-type | sse-event-name | content-type | json.
+#                route | event-type | sse-event-name | content-type | json;
+#   value        (optional) the offending scalar exactly, e.g. one out-of-enum
+#                code or unknown event type, so the entry allows nothing else.
 # gap_id names the research gap (G-*, M-*), review requirement (R-*) or m20
 # decision/deviation (D<n>, D-<x>); owner_wp is the work package that deletes a
 # "temporary" entry. "codex-extension" and "kairyu-extension" entries are
@@ -102,6 +104,7 @@ id = "compaction-failed-code"
 schema = "ResponseFailedEvent"
 pointer_glob = "/response/error/code"
 keyword = "enum"
+value = "compaction_failed"
 gap_id = "G-errors-5"
 owner_wp = "WP-18"
 kind = "temporary"

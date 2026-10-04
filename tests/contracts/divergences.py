@@ -22,7 +22,7 @@ from tests.contracts.openai_contract import Violation
 DIVERGENCES_FILE = Path(__file__).with_name("divergences.toml")
 KINDS = frozenset({"temporary", "codex-extension", "kairyu-extension"})
 REQUIRED_FIELDS = ("id", "schema", "pointer_glob", "keyword", "gap_id", "owner_wp", "kind")
-OPTIONAL_FIELDS = ("note",)
+OPTIONAL_FIELDS = ("value", "note")
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _OWNER_WP = re.compile(r"^WP-\d{2}[a-c]?$")
 # Research gap IDs, verifier-added gaps, review requirements, and m20 decisions.
@@ -42,6 +42,7 @@ class Divergence:
     gap_id: str
     owner_wp: str
     kind: str
+    value: str | None = None
     note: str = ""
 
     def matches(self, violation: Violation) -> bool:
@@ -49,6 +50,7 @@ class Divergence:
             violation.keyword == self.keyword
             and fnmatchcase(violation.pointer, self.pointer_glob)
             and fnmatchcase(violation.schema, self.schema)
+            and (self.value is None or violation.value == self.value)
         )
 
 
@@ -67,6 +69,7 @@ def _entry(raw: Mapping[str, Any], index: int) -> Divergence:
         "gap_id": _GAP_ID.match(text["gap_id"]),
         "owner_wp": _OWNER_WP.match(text["owner_wp"]),
         "kind": text["kind"] in KINDS,
+        "value": isinstance(raw.get("value", ""), str),
         "note": isinstance(raw.get("note", ""), str),
     }
     invalid = [name for name, ok in checks.items() if not ok]
@@ -80,6 +83,7 @@ def _entry(raw: Mapping[str, Any], index: int) -> Divergence:
         gap_id=raw["gap_id"],
         owner_wp=raw["owner_wp"],
         kind=raw["kind"],
+        value=raw.get("value"),
         note=raw.get("note", ""),
     )
 

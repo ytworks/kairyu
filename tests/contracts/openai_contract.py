@@ -11,6 +11,10 @@
 - every error body (status >= 400) against ``ErrorResponse``.
 
 A route under those prefixes with no operation in the spec is a violation too.
+One gate rule goes beyond the declared media types: the pinned spec documents
+the ``stream`` query parameter of ``GET /responses/{response_id}`` (stream
+resume) but declares only JSON for its 200, so a ``stream=true`` retrieve
+answered with SSE has its events validated like a create stream.
 Violations are reported per leaf (one per missing or unexpected property), so
 ``divergences.toml`` can allowlist them by schema, JSON pointer and keyword.
 """
@@ -24,7 +28,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
@@ -40,6 +44,8 @@ ERROR_ROOT = "ErrorResponse"
 SSE_DONE = "[DONE]"
 JSON_MEDIA = "application/json"
 SSE_MEDIA = "text/event-stream"
+# Operations whose ``stream=true`` query switches the 200 body to stream events.
+STREAM_QUERY_OPERATIONS = frozenset({("GET", "/responses/{response_id}")})
 # Gate checks that are not JSON Schema keywords (``Violation.keyword``).
 ROUTE = "route"
 EVENT_TYPE = "event-type"
@@ -59,6 +65,7 @@ class Exchange:
     status: int
     content_type: str
     body: bytes
+    query: str = ""
 
     @property
     def route(self) -> str:
@@ -72,7 +79,8 @@ class Violation:
     ``schema`` is the component (or operation) validated, or ``"route"``;
     ``pointer`` is a JSON pointer into the instance, or ``"METHOD /path"`` for
     a route failure; ``keyword`` is the failing JSON Schema keyword or one of
-    the gate checks defined above.
+    the gate checks defined above; ``value`` is the offending scalar (an
+    out-of-enum code, an unknown event type), or ``""``.
     """
 
     schema: str
@@ -80,6 +88,7 @@ class Violation:
     keyword: str
     message: str
     route: str
+    value: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,6 +189,14 @@ def _unexpected_properties(error: ValidationError) -> list[str]:
     return [name for name in error.instance if name not in declared]
 
 
+def _scalar_text(instance: Any) -> str:
+    if isinstance(instance, str):
+        return instance
+    if instance is None or isinstance(instance, bool | int | float):
+        return json.dumps(instance)
+    return ""
+
+
 def _violations(label: str, error: ValidationError, route: str) -> Iterator[Violation]:
     pointer = _pointer(error.absolute_path)
     if error.validator == "required":
@@ -198,7 +215,9 @@ def _violations(label: str, error: ValidationError, route: str) -> Iterator[Viol
                 route,
             )
         return
-    yield Violation(label, pointer, str(error.validator), error.message[:_MESSAGE_LIMIT], route)
+    message = error.message[:_MESSAGE_LIMIT]
+    value = _scalar_text(error.instance)
+    yield Violation(label, pointer, str(error.validator), message, route, value)
 
 
 def _sse_events(text: str) -> Iterator[tuple[str | None, str]]:
@@ -218,6 +237,12 @@ def _sse_events(text: str) -> Iterator[tuple[str | None, str]]:
                 data.append(value)
         if data:
             yield name, "\n".join(data)
+
+
+def _streams_by_query(operation: _Operation, exchange: Exchange) -> bool:
+    if (operation.method, operation.template) not in STREAM_QUERY_OPERATIONS:
+        return False
+    return parse_qs(exchange.query).get("stream", [""])[-1].lower() == "true"
 
 
 class ContractValidator:
@@ -276,7 +301,8 @@ class ContractValidator:
         variant = self._variants.get(event_type) if isinstance(event_type, str) else None
         if variant is None:
             message = f"unknown stream event type {event_type!r}"
-            return 1, (Violation(STREAM_ROOT, "/type", EVENT_TYPE, message, route),)
+            value = _scalar_text(event_type)
+            return 1, (Violation(STREAM_ROOT, "/type", EVENT_TYPE, message, route, value),)
         found = self.validate_component(variant, event, route)
         if name is not None and name != event_type:
             message = f"SSE event name {name!r} differs from type {event_type!r}"
@@ -300,7 +326,7 @@ class ContractValidator:
     def _validate_json(self, label: str, pointer: str, exchange: Exchange) -> ExchangeReport:
         try:
             body = json.loads(exchange.body)
-        except json.JSONDecodeError as error:
+        except ValueError as error:  # JSONDecodeError or UnicodeDecodeError
             violation = Violation(label, "", JSON_SYNTAX, str(error), exchange.route)
             return ExchangeReport(1, (violation,))
         return ExchangeReport(1, self.validate_instance(label, pointer, body, exchange.route))
@@ -329,7 +355,7 @@ class ContractValidator:
         self, operation: _Operation, media: str, exchange: Exchange
     ) -> ExchangeReport:
         declared = operation.responses.get(str(exchange.status), {})
-        if media == SSE_MEDIA and SSE_MEDIA in declared:
+        if media == SSE_MEDIA and (SSE_MEDIA in declared or _streams_by_query(operation, exchange)):
             return self._validate_stream(exchange)
         if media == JSON_MEDIA and JSON_MEDIA in declared:
             label, pointer = declared[JSON_MEDIA]
