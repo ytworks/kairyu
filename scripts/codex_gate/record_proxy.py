@@ -9,8 +9,10 @@ JSON file per request, numbered in arrival order.
 
 Normalization makes a capture reproducible and safe to commit:
 
-- credentials are never recorded: only allowlisted headers are kept, and any
-  credential-like header is dropped even when allowlisted;
+- credentials are never recorded: only allowlisted headers are kept, any
+  credential-like header is dropped even when allowlisted, and the value of a
+  credential-like query parameter (a provider's ``query_params``) becomes
+  ``{{CREDENTIAL}}``;
 - volatile values become numbered placeholders, consistently within one
   capture: UUIDs (session, thread, installation, window ids), server-issued
   item and call ids (``fc_…``, ``call_…``), ``prompt_cache_key``, and the ids
@@ -52,6 +54,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 RECORDER = "scripts/codex_gate/record_proxy.py"
 PROVIDER_SHAPES = ("custom-responses", "openai-base-url", "oss-lmstudio", "oss-ollama")
@@ -81,7 +84,7 @@ RECORDED_HEADERS = frozenset(
         "x-openai-subagent",
     }
 )
-_CREDENTIAL_HEADER = re.compile(
+_CREDENTIAL_NAME = re.compile(
     r"auth|cookie|token|secret|key|attestation|account|organization|project|fedramp",
     re.IGNORECASE,
 )
@@ -102,7 +105,9 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 _SERVER_ID = re.compile(r"\b(resp|msg|fc|fco|rs|cmp|call|ctc|at)_([A-Za-z0-9]{12,})\b")
 _ENV_TAGS = {"current_date": "{{DATE}}", "timezone": "{{TIMEZONE}}", "shell": "{{SHELL}}"}
 _ENV_TAG = re.compile(r"<(current_date|timezone|shell)>[^<]*</\1>")
-_TIMESTAMP = re.compile(r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z| UTC)?")
+_TIMESTAMP = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z| UTC|[+-]\d{2}:?\d{2})?"
+)
 _USER_AGENT = re.compile(r"^(codex_[A-Za-z_]+/[0-9][^ ]*) .*$")
 _ID_KEYS = frozenset({"prompt_cache_key"})
 _TIME_KEY = re.compile(r"^(create_time|created_at)$|_unix_ms$|_start_ms$|_at_ms$")
@@ -201,13 +206,25 @@ class Normalizer:
         recorded: dict[str, str] = {}
         for raw_name, raw_value in headers:
             name = raw_name.lower()
-            if name not in RECORDED_HEADERS or _CREDENTIAL_HEADER.search(name):
+            if name not in RECORDED_HEADERS or _CREDENTIAL_NAME.search(name):
                 continue
             if name == "user-agent":
                 recorded[name] = _USER_AGENT.sub(r"\1 ({{PLATFORM}})", raw_value)
             else:
                 recorded[name] = self.value(raw_value, name)
         return {name: recorded[name] for name in sorted(recorded)}
+
+    def query(self, query: str) -> str:
+        """Normalize a query string; a credential-like parameter keeps only its name."""
+
+        pairs = []
+        for name, value in parse_qsl(query, keep_blank_values=True):
+            if _CREDENTIAL_NAME.search(name):
+                self.applied.add("{{CREDENTIAL}}")
+                pairs.append(f"{self.text(name)}={{{{CREDENTIAL}}}}")
+            else:
+                pairs.append(f"{self.text(name)}={self.text(value)}")
+        return "&".join(pairs)
 
 
 @dataclass(frozen=True)
@@ -252,7 +269,7 @@ def build_capture(
     request = {
         "method": method,
         "path": path,
-        "query": normalizer.text(query),
+        "query": normalizer.query(query),
         "headers": normalizer.headers(headers),
         "body": payload,
     }
