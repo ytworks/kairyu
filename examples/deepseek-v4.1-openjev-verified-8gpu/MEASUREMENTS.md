@@ -200,6 +200,35 @@ regenerated, `calibration/judged-coverage-v2.jsonl`, `calibration/tau.json`):
 Held-out answers passing every point: 45 / 125 (7 violated). The threshold 0.9895 is at
 least both calibrated values (0.98941, 0.98887).
 
+## GPU gates on `e0de4631`/`bbd63539` (2026-10-04, 11:51-14:39 JST)
+
+Verified-tool route (VCO-D17), tau_hi 0.999733, acceptance 0.99. All gates
+from `l1` on `e0de4631`; after the route judge moved to the most probable
+label (`bbd63539`, no VERIFIED floor) the routing-dependent gates were run
+again (routing to serving-routed, and the replay).
+
+| Gate | Result | Key numbers |
+|---|---|---|
+| l1 | PASS | — |
+| calibrate | PASS | tau_hi 0.999733 |
+| requirements | PASS (duplicate limit 12.5 %, owner decision) | gold recall 0.978, requests with duplicates 12.5 %, guaranteed 26/40, p50 197 s / p95 411 s |
+| implicit | PASS | recall 0.825, control kept 0, guaranteed 22/30, p50 136 s |
+| repair | PASS | guaranteed constraint violations 0, guaranteed 10/16 |
+| structured | PASS | — |
+| fallback | PASS | both judges down: a tool request still gets tool_calls |
+| serving | PASS | 72/72 answered; p50 110 / 164 / 159 / 204 s at c1 / c4 / c8 / c16; guaranteed 6/8, 9/16, 12/16, 20/32 |
+| routing | PASS | held-out miss 4.2 %, tool-free to VERIFIED_TOOL 0, everyday to THINK 100 % |
+| think-route | PASS | 6/6 THINK, p50 0.76 s, TTFT p50 0.60 s |
+| effort | PASS | — |
+| serving-routed | PASS | 72/72 answered; VERIFIED_TOOL judge p50 0.11-0.15 s; VERIFIED p50 160 / 201 / 226 / 330 s at c1-c16 |
+| verified-tool-routing | FAIL | requiring a call to VERIFIED_TOOL 95 % (>= 90 %); not requiring one 35 % (< 10 %): 6 of 8 conversations the latest tool result already answers, 1 of 8 unrelated questions |
+| verified-tool-route | FAIL | 38/40 pass; 2 routed to VERIFIED_TOOL answered without a tool call |
+| replay (83 recorded DeepSWE turns) | FAIL | VERIFIED_TOOL 65/83 (78 %, >= 90 %), THINK 15, VERIFIED 3; every reply 200 with a bash call, none submits; VERIFIED_TOOL effort max 65/65; p50 19 s, p90 145 s (was 197 s) |
+
+The failures are routing: some DeepSWE turns go to THINK or VERIFIED, and
+conversations the latest tool result already answers go to VERIFIED_TOOL.
+Inside the verified-tool route the behaviour is as designed.
+
 ## tau_hi calibration (2026-10-01)
 
 `./verify.sh calibrate`, full production checklist path (DeepSeek rewrites
