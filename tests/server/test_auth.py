@@ -116,6 +116,37 @@ async def test_route_and_routing_config_require_auth(monkeypatch):
         assert (await client.get("/routing", headers=headers)).status_code == 200
 
 
+@pytest.mark.parametrize("cors", [False, True], ids=["no-cors", "cors"])
+async def test_cors_preflight_skips_auth_only_when_configured(monkeypatch, cors):
+    # M20 WP-41: a browser preflight carries no credentials; an actual
+    # request still needs a key, and its error is readable cross-origin.
+    origin = "https://chat.example"
+    monkeypatch.setenv("KAIRYU_API_KEYS", "secret-1")
+    app = create_legacy_app(
+        engines={"m": MockBackend()},
+        settings=ServerSettings(
+            api_keys_env="KAIRYU_API_KEYS", cors_allowed_origins=(origin,) if cors else ()
+        ),
+    )
+    preflight_headers = {
+        "origin": origin,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "authorization, content-type",
+    }
+    async with _client(app) as client:
+        preflight = await client.options("/v1/chat/completions", headers=preflight_headers)
+        denied = await client.post(
+            "/v1/chat/completions", json=_chat_body("hi"), headers={"origin": origin}
+        )
+    assert denied.status_code == 401
+    assert preflight.status_code == (200 if cors else 401)
+    allowed = origin if cors else None
+    assert preflight.headers.get("access-control-allow-origin") == allowed
+    assert denied.headers.get("access-control-allow-origin") == allowed
+    exposed = denied.headers.get("access-control-expose-headers", "")
+    assert ("x-request-id" in exposed) is cors
+
+
 async def test_health_readyz_metrics_stay_open(app):
     async with _client(app) as client:
         assert (await client.get("/health")).status_code == 200

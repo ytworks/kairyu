@@ -102,12 +102,11 @@ from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
     _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
-    AccessLogMiddleware,
     AuthMiddleware,
     ChatBodyLimitMiddleware,
     ConcurrencyLimitMiddleware,
     MetricsMiddleware,
-    RequestIngressMiddleware,
+    install_outer_ingress,
 )
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
@@ -2013,7 +2012,7 @@ def create_app(
         add_systemone_route(app, served_systemone)
 
     # add_middleware prepends, so add innermost first: body limits -> decoding
-    # -> metrics -> concurrency -> tenant -> auth -> access log (outermost).
+    # -> metrics -> concurrency -> tenant -> auth -> install_outer_ingress.
     if async_request_body_limit is not None:
         app.add_middleware(
             ChatBodyLimitMiddleware,
@@ -2197,17 +2196,7 @@ def create_app(
                     },
                 )
 
-    if settings.tracing:
-        from kairyu.entrypoints.server.middleware import TracingMiddleware
-        from kairyu.telemetry import configure_tracing
-
-        configure_tracing(True)
-        app.add_middleware(TracingMiddleware)
-    if settings.access_log:
-        app.add_middleware(AccessLogMiddleware)
-    # Always outermost: placement p99 is defined from process request receipt,
-    # independent of access-log/metrics feature flags (G5 F1a).
-    app.add_middleware(RequestIngressMiddleware)
+    install_outer_ingress(app, settings)
 
     def _served_max_model_len(name: str) -> int | None:
         # Context length for the Model card (issue #495): engines advertise

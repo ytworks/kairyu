@@ -17,7 +17,9 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import ClientDisconnect
 
 from kairyu.entrypoints.server.error_classifier import (
@@ -38,6 +40,11 @@ from kairyu.entrypoints.server.systemone_service import (
     wants_jev_envelope,
 )
 
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from kairyu.entrypoints.server.settings import ServerSettings
+
 _ASGIApp = Callable[..., Awaitable[None]]
 
 # /backends is an open introspection endpoint (kept out of /v1/ so the
@@ -47,6 +54,9 @@ _ASGIApp = Callable[..., Awaitable[None]]
 # #508): a credential-free empty 200 whose disclosure level matches /health.
 _OPEN_PATHS = ("/health", "/readyz", "/backends", "/api/hello")
 _GUARDED_PREFIX = "/v1/"
+# Response headers a browser client may read cross-origin: the request id and
+# the retry hints the OpenAI SDKs act on (m20 D21).
+_CORS_EXPOSED_HEADERS = ("x-request-id", "retry-after", "retry-after-ms", "x-should-retry")
 _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
 # In-process sentinel (#573): the Anthropic Messages adapter sets this on the
 # request state before an AUTO chat dispatch so tool-bearing requests stream
@@ -648,3 +658,32 @@ class TracingMiddleware:
                     elif status["code"] >= 500:
                         mark_span_error(span, error_type=str(status["code"]))
 
+
+def install_outer_ingress(app: FastAPI, settings: ServerSettings) -> None:
+    """Add the outermost middleware, innermost first (``add_middleware`` prepends).
+
+    Request id (outermost, so every response carries it) -> access log ->
+    tracing -> CORS. CORS wraps auth: with ``cors_allowed_origins`` set, a
+    browser preflight is answered before auth (it carries no credentials) and
+    every answer, errors included, gets the CORS headers a browser needs to
+    read it; without it, OPTIONS meets auth like any request (m7 D5).
+    """
+
+    if settings.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_allowed_origins),
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=list(_CORS_EXPOSED_HEADERS),
+        )
+    if settings.tracing:
+        from kairyu.telemetry import configure_tracing
+
+        configure_tracing(True)
+        app.add_middleware(TracingMiddleware)
+    if settings.access_log:
+        app.add_middleware(AccessLogMiddleware)
+    # Placement p99 is defined from process request receipt, independent of
+    # the access-log/metrics feature flags (G5 F1a).
+    app.add_middleware(RequestIngressMiddleware)

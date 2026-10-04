@@ -8,12 +8,30 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 # The decoded-size cap of a Content-Encoding request body (m20 D21, WP-41).
 DEFAULT_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+# A browser Origin: scheme://host[:port], never a path or a trailing slash.
+_CORS_ORIGIN = re.compile(r"https?://[^/\s]+")
+
+
+def _check_cors_origins(origins: tuple[str, ...]) -> tuple[str, ...]:
+    invalid = [o for o in origins if o != "*" and not _CORS_ORIGIN.fullmatch(o)]
+    if invalid:
+        raise ValueError(
+            "cors_allowed_origins entries are '*' or scheme://host[:port] "
+            f"without a path: {invalid}"
+        )
+    return origins
+
+
+# Shared with the deployment ServerSection, so a typo fails at load time there too.
+CorsOrigins = Annotated[tuple[str, ...], AfterValidator(_check_cors_origins)]
 
 
 class ServerSettings(BaseModel):
@@ -73,6 +91,13 @@ class ServerSettings(BaseModel):
         description=(
             "Maximum decoded size of a gzip or zstd (Content-Encoding) request "
             "body; a larger body is refused with 413 before it is fully inflated."
+        ),
+    )
+    cors_allowed_origins: CorsOrigins = Field(
+        default=(),
+        description=(
+            "Browser origins allowed cross-origin ('*' for any). Empty installs "
+            "no CORS handling; when set, preflights are answered before auth."
         ),
     )
     metrics: bool = Field(default=True, description="Expose /metrics (Prometheus).")
