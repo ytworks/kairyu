@@ -45,6 +45,7 @@ from kairyu.engine.openai_capabilities import (
     OpenAIRequestCapabilities,
     resolve_openai_capabilities,
 )
+from kairyu.engine.openai_errors import raise_for_status
 from kairyu.engine.prompt import (
     MultimodalPrompt,
     TemplatedPrompt,
@@ -61,16 +62,6 @@ from kairyu.sampling_params import (
     resolve_parallel_tool_calls,
 )
 from kairyu.sse import iter_sse_data
-
-
-def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
-    """4xx is a client-request error (not a replica health signal, O1); 5xx and
-    everything else is a transport/server failure the pool should count."""
-    message = f"backend {base_url} returned HTTP {status_code}: {body[:500]}"
-    if 400 <= status_code < 500:
-        raise UpstreamClientError(message, status_code)
-    raise RuntimeError(message)
-
 
 _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DONE = "[DONE]"
@@ -1575,7 +1566,7 @@ class OpenAICompatBackend:
             timeout=self._timeout_s,
         )
         if response.status_code != 200:
-            _raise_for_status(self._base_url, response.status_code, response.text)
+            raise_for_status(self._base_url, response.status_code, response.text)
         data = response.json()
         choices = data.get("choices", [])
         completion_tokens = (data.get("usage") or {}).get("completion_tokens")
@@ -1713,7 +1704,7 @@ class OpenAICompatBackend:
         ) as response:
             if response.status_code != 200:
                 body = (await response.aread()).decode(errors="replace")
-                _raise_for_status(self._base_url, response.status_code, body)
+                raise_for_status(self._base_url, response.status_code, body)
             text_parts: dict[int, list[str]] = {}
             text_lengths: dict[int, int] = {}
             reasoning_parts: dict[int, list[str]] = {}

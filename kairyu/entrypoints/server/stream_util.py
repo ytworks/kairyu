@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
+
+from kairyu.sse import escape_json_line_separators
 
 # Yielded by ``iter_with_idle_markers`` when the wrapped stream stays silent.
 IDLE_MARKER = None
@@ -100,6 +103,15 @@ async def sse_frames(upstream: AsyncIterable[str | bytes]) -> AsyncIterator[str]
                 yield frame
     if buffer:
         yield buffer
+
+
+def sse_event(event_type: str, payload: Mapping) -> str:
+    """One named SSE event whose data is compact JSON on a single line."""
+
+    serialized = escape_json_line_separators(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+    return f"event: {event_type}\ndata: {serialized}\n\n"
 
 
 class DataHeartbeat:

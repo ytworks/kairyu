@@ -33,6 +33,7 @@ from kairyu.engine.prompt import (
     TemplatedPrompt,
     derive_multimodal_prompt,
 )
+from kairyu.engine.request_errors import ContextLengthExceededError
 from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.checklist import DecisionBackend, VerificationReport
@@ -163,6 +164,10 @@ class OrchestratorEvent:
 
 class OrchestratorExecutionError(RuntimeError):
     """Backend failure plus the partial accounting/trace safe to return."""
+
+    # Dispatched stage prompts are orchestration-built: an overflow beneath
+    # this error is a server failure, not the client's context (WP-04).
+    context_overflow_reason = "internal_stage_context_overflow"
 
     def __init__(
         self,
@@ -1641,21 +1646,12 @@ class Orchestrator:
         # Backend state and ReplicaPool membership are event-loop owned.  The
         # request-sized strings are already built, so these bounded fast hooks
         # stay atomic with respect to membership mutation.
-        self._validate_intent_requests(
-            "final",
-            plan.final_requests,
-            before_prepare=True,
-        )
-        self._validate_intent_requests(
-            "internal",
-            plan.internal_requests,
-            before_prepare=True,
-        )
-        self._validate_intent_requests(
-            "initial",
-            plan.initial_requests,
-            before_prepare=True,
-        )
+        for kind, intents in (
+            ("final", plan.final_requests),
+            ("internal", plan.internal_requests),
+            ("initial", plan.initial_requests),
+        ):
+            self._validate_intent_requests(kind, intents, before_prepare=True)
 
         preparable_final_requests = tuple(
             intent for intent in plan.final_requests if not intent.validation_only
@@ -1673,6 +1669,8 @@ class Orchestrator:
                         self._engines[intent.engine_key],
                         intent.request,
                     )
+                except ContextLengthExceededError:
+                    raise  # every preflight prompt derives from the client prompt
                 except ValueError as error:
                     failures.append(f"{intent.engine_key}: {error}")
             if failures:

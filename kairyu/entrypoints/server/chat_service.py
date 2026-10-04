@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import math
 import re
 import time
@@ -39,6 +38,11 @@ from kairyu.entrypoints.chat_template import (
     _iter_validated_content_parts,
     render_chat,
     validate_upstream_chat_template_kwargs,
+)
+from kairyu.entrypoints.server.chat_errors import (
+    ChatRequestError,
+    chat_error_from_upstream_client_error,
+    chat_error_from_value_error,
 )
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
@@ -86,33 +90,6 @@ _DSML_PARAMETER_PATTERN = re.compile(
     re.DOTALL,
 )
 _SINGLE_TOOL_CONSTRAINT = "Call at most one function in this response."
-logger = logging.getLogger(__name__)
-
-
-class ChatRequestError(Exception):
-    """A controlled request-boundary failure safe to return to a tenant."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int = 400,
-        code: str = "invalid_request",
-        error_type: str = "invalid_request_error",
-        execution: ExecutedChat | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.code = code
-        self.error_type = error_type
-        self.execution = execution
-
-    def payload(self) -> dict:
-        return {
-            "message": str(self),
-            "type": self.error_type,
-            "code": self.code,
-        }
 
 
 @dataclass(frozen=True)
@@ -1046,10 +1023,7 @@ def _finish_chat_request_validation(
         else:
             validate_backend_request(engine, generation_request)
     except ValueError as error:
-        raise ChatRequestError(
-            str(error),
-            code=getattr(error, "code", "invalid_request"),
-        ) from error
+        raise chat_error_from_value_error(error) from error
     return ValidatedChatRequest(
         input=validated_input,
         engine=engine,
@@ -1162,29 +1136,6 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
             execution=execution,
         )
     return execution
-
-
-def chat_error_from_upstream_client_error(
-    error: UpstreamClientError,
-) -> ChatRequestError:
-    """Translate a backend 4xx without exposing arbitrary upstream text."""
-
-    if error.public_message is None:
-        logger.warning(
-            "OpenAI-compatible upstream rejected a request",
-            exc_info=error,
-        )
-        return ChatRequestError(
-            "upstream backend rejected the request",
-            status_code=502,
-            code="backend_error",
-            error_type="upstream_error",
-        )
-    return ChatRequestError(
-        error.public_message,
-        status_code=error.status_code,
-        code=getattr(error, "code", "invalid_request"),
-    )
 
 
 def _reject_json_constant(value: str) -> object:

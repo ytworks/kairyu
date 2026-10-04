@@ -70,6 +70,7 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.registry import register_backend
+from kairyu.engine.request_errors import resolve_output_budget
 from kairyu.engine.tokenizer import (
     GrammarVocabulary,
     Tokenizer,
@@ -1916,7 +1917,6 @@ class ZmqEngineBackend:
             )
         if prompt is None:
             prompt = prompt_with_tool_intent(request)
-        max_model_len = self._max_model_len
         tokenize_started_ns = (
             time.perf_counter_ns() if request.trace_requested else None
         )
@@ -1934,18 +1934,13 @@ class ZmqEngineBackend:
             # diagnostics; the caller's public request remains untouched.
             prompt = TokensPrompt(prompt_token_ids, prompt=text)
 
-        if max_model_len is not None:
-            max_new_tokens = (
-                request.sampling_params.max_tokens
-                if request.sampling_params.max_tokens is not None
-                else 16
-            )
-            requested_length = len(prompt_token_ids) + max_new_tokens
-            if requested_length > max_model_len:
-                raise ValueError(
-                    f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
-                    f"({max_new_tokens}) exceed max_model_len ({max_model_len})"
-                )
+        # The child engine resolves the same budget; rejecting here keeps an
+        # overflowing request from ever reaching it.
+        resolve_output_budget(
+            len(prompt_token_ids),
+            request.sampling_params.max_tokens,
+            self._max_model_len,
+        )
         tokenize_duration_ns = (
             max(0, time.perf_counter_ns() - tokenize_started_ns)
             if tokenize_started_ns is not None

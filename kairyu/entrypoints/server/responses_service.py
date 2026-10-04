@@ -44,6 +44,10 @@ from kairyu.entrypoints.server.chat_service import (
     execute_chat,
     validate_chat_request_async,
 )
+from kairyu.entrypoints.server.error_classifier import (
+    classify_error_body,
+    classify_request_error,
+)
 from kairyu.entrypoints.server.errors import upstream_error
 from kairyu.entrypoints.server.metering import (
     record_state_usage,
@@ -56,9 +60,19 @@ from kairyu.entrypoints.server.protocol import (
     StreamOptions,
     normalize_reasoning_effort,
 )
+from kairyu.entrypoints.server.responses_envelope import (
+    response_envelope as _response_envelope,
+)
+from kairyu.entrypoints.server.responses_envelope import (
+    usage_payload_from_wire as _usage_payload_from_wire,
+)
+from kairyu.entrypoints.server.responses_errors import (
+    delegated_failure,
+    request_failure,
+)
+from kairyu.entrypoints.server.responses_errors import responses_sse as _sse
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
-from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +203,9 @@ class _BufferedFailure(Exception):
     """
 
     def __init__(self, payload: dict, status_code: int) -> None:
+        classified = classify_error_body({"error": payload}, "responses")
+        if classified is not None:
+            payload, status_code = classified.openai_payload(), classified.status
         super().__init__(payload.get("message") or "generation failed")
         self.payload = payload
         self.status_code = status_code
@@ -1061,42 +1078,6 @@ def _validate_parallel_tool_calls(
         )
 
 
-def _response_envelope(
-    request: ResponsesRequest,
-    *,
-    response_id: str,
-    created_at: int,
-    status: str,
-    output: list[dict],
-    usage: dict | None,
-    error: dict | None = None,
-    incomplete_details: dict | None = None,
-) -> dict:
-    return {
-        "id": response_id,
-        "object": "response",
-        "created_at": created_at,
-        "status": status,
-        "error": error,
-        "incomplete_details": incomplete_details,
-        "instructions": request.instructions,
-        "model": request.model,
-        "output": output,
-        "parallel_tool_calls": request.parallel_tool_calls,
-        "tool_choice": request.tool_choice or "auto",
-        "tools": request.tools or [],
-        "temperature": request.temperature,
-        "top_p": request.top_p,
-        "previous_response_id": request.previous_response_id,
-        "metadata": request.metadata,
-        "max_output_tokens": request.max_output_tokens,
-        "reasoning": None,
-        "service_tier": "default" if request.service_tier == "auto" else None,
-        "text": request.text,
-        "usage": usage,
-    }
-
-
 def _message_item(message_id: str, status: str, text: str) -> dict:
     return {
         "type": "message",
@@ -1126,17 +1107,6 @@ def _open_message_snapshot(
     )
 
 
-def _sse(event_type: str, sequence_number: int, **payload) -> str:
-    event = {"type": event_type, "sequence_number": sequence_number, **payload}
-    serialized = escape_json_line_separators(
-        json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-    )
-    return (
-        f"event: {event_type}\n"
-        f"data: {serialized}\n\n"
-    )
-
-
 def _terminal_status(execution: ExecutedChat) -> tuple[str, dict | None]:
     return _terminal_status_for(
         completion.finish_reason for completion in execution.result.completions
@@ -1147,21 +1117,6 @@ def _terminal_status_for(finish_reasons) -> tuple[str, dict | None]:
     if any(reason in {"length", "max_tokens"} for reason in finish_reasons):
         return "incomplete", {"reason": "max_output_tokens"}
     return "completed", None
-
-
-def _usage_payload_from_wire(usage: dict | None) -> dict:
-    """Map public Chat Completions usage onto the Responses usage shape."""
-    usage = usage or {}
-    details = usage.get("prompt_tokens_details") or {}
-    input_tokens = int(usage.get("prompt_tokens") or 0)
-    output_tokens = int(usage.get("completion_tokens") or 0)
-    return {
-        "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": int(details.get("cached_tokens") or 0)},
-        "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
-        "total_tokens": input_tokens + output_tokens,
-    }
 
 
 def _apply_terminal_item_status(output: list[dict], status: str) -> None:
@@ -1226,7 +1181,7 @@ async def _buffered_events(
             sequence,
             code=failure.payload.get("code") or "server_error",
             message=message,
-            param=None,
+            param=failure.payload.get("param"),
         )
         sequence += 1
         failed = _response_envelope(
@@ -1466,7 +1421,13 @@ async def _live_text_events(
                     heartbeat.mark()
         except Exception as error:
             logger.exception("Responses API upstream stream failed")
-            safe_message = f"upstream backend error ({type(error).__name__})"
+            classified = classify_request_error(error, "responses")
+            code = classified.code if classified else "server_error"
+            safe_message = (
+                classified.message
+                if classified
+                else f"upstream backend error ({type(error).__name__})"
+            )
             failed_completions = last.completions if last is not None else ()
             failed_completion = min(
                 failed_completions,
@@ -1499,9 +1460,9 @@ async def _live_text_events(
             yield _sse(
                 "error",
                 sequence,
-                code="server_error",
+                code=code,
                 message=safe_message,
-                param=None,
+                param=classified.param if classified else None,
             )
             sequence += 1
             failed = _response_envelope(
@@ -1511,7 +1472,7 @@ async def _live_text_events(
                 status="failed",
                 output=failed_output,
                 usage=failed_usage,
-                error={"code": "server_error", "message": safe_message},
+                error={"code": code, "message": safe_message},
             )
             yield _sse("response.failed", sequence, response=failed)
             return
@@ -1769,7 +1730,7 @@ async def _orchestrated_response(
         )
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
-            return delegated
+            return delegated_failure(request, delegated)
         return sse_response(
             _relay_auto_chat_stream(
                 request,
@@ -1843,7 +1804,7 @@ async def _orchestrated_response(
     if not isinstance(delegated, JSONResponse):
         return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
     if delegated.status_code != 200:
-        return delegated
+        return delegated_failure(request, delegated)
     try:
         output, usage, status, incomplete_details = outcome_from_payload(
             json.loads(bytes(delegated.body))
@@ -1996,7 +1957,7 @@ def add_responses_route(
                     legacy_chat_models=legacy_chat_models,
                 )
         except ChatRequestError as error:
-            return _chat_error(error)
+            return request_failure(request, error) or _chat_error(error)
         finally:
             if metrics is not None:
                 metrics.record_preplacement_phase(
@@ -2027,7 +1988,7 @@ def add_responses_route(
         except UpstreamClientError as error:
             return _chat_error(chat_error_from_upstream_client_error(error))
         except ValueError as error:
-            return _request_error(str(error))
+            return request_failure(request, error) or _request_error(str(error))
         except RuntimeError as error:
             return upstream_error(error)
         finally:

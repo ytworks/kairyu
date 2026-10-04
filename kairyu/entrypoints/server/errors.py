@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi.responses import JSONResponse
+
+from kairyu.entrypoints.server.error_classifier import classify_request_error
+
+if TYPE_CHECKING:
+    from kairyu.entrypoints.server.chat_errors import ChatRequestError
+    from kairyu.orchestration.orchestrator import OrchestratorExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -52,3 +59,20 @@ def upstream_error(error: BaseException) -> JSONResponse:
         status_code=502,
         content={"error": sanitize_backend_error(error)},
     )
+
+
+def chat_error_response(error: ChatRequestError) -> JSONResponse:
+    return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
+
+
+def orchestration_failure(error: OrchestratorExecutionError) -> tuple[int, dict]:
+    """Status and error member of a failed AUTO run.
+
+    An internal stage that overflowed its context window is a server error
+    (WP-04), never reported as the client's context window.
+    """
+
+    classified = classify_request_error(error, "chat")
+    if classified is not None:
+        return classified.status, classified.openai_payload()
+    return 502, sanitize_backend_error(error.cause)

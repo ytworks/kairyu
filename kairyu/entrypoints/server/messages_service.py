@@ -48,6 +48,11 @@ from kairyu.entrypoints.server.chat_service import (
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
 )
+from kairyu.entrypoints.server.error_classifier import (
+    anthropic_stream_failure,
+    classify_error_body,
+    classify_request_error,
+)
 from kairyu.entrypoints.server.messages_protocol import (
     ANTHROPIC_VERSION,
     MessagesCountTokensRequest,
@@ -75,7 +80,7 @@ from kairyu.entrypoints.server.protocol import (
 )
 from kairyu.entrypoints.server.sse_encode import AnthropicTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
-from kairyu.entrypoints.server.stream_util import iter_with_idle_markers, sse_frames
+from kairyu.entrypoints.server.stream_util import iter_with_idle_markers, sse_event, sse_frames
 from kairyu.entrypoints.server.tool_stream import (
     FoldedToolStream,
     StreamInvalid,
@@ -87,7 +92,6 @@ from kairyu.entrypoints.server.tool_stream import (
     fold_tool_stream,
     tool_stream_scanner_for,
 )
-from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +136,25 @@ class _MessagesFailure(Exception):
         self.error_type = error_type or anthropic_error_type_for_status(status_code)
 
     @classmethod
-    def from_chat_error(cls, error: ChatRequestError) -> _MessagesFailure:
-        return cls(str(error), error.status_code)
+    def from_chat_error(cls, error: Exception) -> _MessagesFailure:
+        classified = classify_request_error(error, "messages")
+        if classified is not None:
+            return cls(classified.message, classified.status, classified.type)
+        return cls(str(error), getattr(error, "status_code", 400))
+
+    @classmethod
+    def from_delegated(cls, delegated: JSONResponse) -> _MessagesFailure:
+        """Re-render a delegated Chat error (AUTO) in the Anthropic shape."""
+
+        try:
+            payload = json.loads(bytes(delegated.body))
+        except ValueError:
+            payload = {}
+        classified = classify_error_body(payload, "messages")
+        if classified is not None:
+            return cls(classified.message, classified.status, classified.type)
+        error = payload.get("error") or {}
+        return cls(error.get("message") or "upstream backend error", delegated.status_code)
 
     def json_response(self, request_id: str | None) -> JSONResponse:
         return anthropic_error_response(
@@ -809,11 +830,7 @@ def _record_execution(
 # SSE event emission
 
 
-def _sse(event_type: str, payload: dict) -> str:
-    serialized = escape_json_line_separators(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    )
-    return f"event: {event_type}\ndata: {serialized}\n\n"
+_sse = sse_event
 
 
 def _message_start_event(
@@ -1081,7 +1098,7 @@ async def _live_tool_events(
                     return
         except Exception as error:
             logger.exception("Anthropic Messages upstream tool stream failed")
-            yield _error_event(f"upstream backend error ({type(error).__name__})")
+            yield _error_event(*anthropic_stream_failure(error))
             return
         if not saw_final:
             rendered, fatal = process(scanner.feed("", final=True))
@@ -1344,7 +1361,7 @@ async def _live_text_events(
                 last_activity = time.monotonic()
         except Exception as error:
             logger.exception("Anthropic Messages upstream stream failed")
-            yield _error_event(f"upstream backend error ({type(error).__name__})")
+            yield _error_event(*anthropic_stream_failure(error))
             return
         completions = last.completions if last is not None else ()
         usage_owner.mark_completed()
@@ -1445,23 +1462,6 @@ def _validation_error_message(error: ValidationError) -> str:
     return f"{location}: {message}" if location else message
 
 
-def _rerendered_chat_json_error(
-    delegated: JSONResponse, request_id: str | None
-) -> JSONResponse:
-    """Re-render a chat-handler OpenAI error body in the Anthropic envelope."""
-
-    try:
-        payload = json.loads(bytes(delegated.body))
-    except ValueError:
-        payload = {}
-    error = payload.get("error") or {}
-    return anthropic_error_response(
-        error.get("message") or "upstream backend error",
-        status_code=delegated.status_code,
-        request_id=request_id,
-    )
-
-
 async def _orchestrated_message(
     request: MessagesRequest,
     chat_request: ChatCompletionRequest,
@@ -1504,7 +1504,7 @@ async def _orchestrated_message(
         )
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
-            return _rerendered_chat_json_error(delegated, request_id)
+            return _MessagesFailure.from_delegated(delegated).json_response(request_id)
         if request.stream:
             return sse_response(
                 _relay_auto_tool_stream(
@@ -1553,7 +1553,7 @@ async def _orchestrated_message(
         )
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
-            return _rerendered_chat_json_error(delegated, request_id)
+            return _MessagesFailure.from_delegated(delegated).json_response(request_id)
         return sse_response(
             _relay_auto_stream(
                 request, delegated.body_iterator, message_id=message_id
@@ -1567,11 +1567,7 @@ async def _orchestrated_message(
             raise _MessagesFailure("unexpected non-JSON chat dispatch reply", 502)
         payload = json.loads(bytes(delegated.body))
         if delegated.status_code != 200:
-            error = payload.get("error") or {}
-            raise _MessagesFailure(
-                error.get("message") or "upstream backend error",
-                delegated.status_code,
-            )
+            raise _MessagesFailure.from_delegated(delegated)
         choices = payload.get("choices") or []
         message = (choices[0].get("message") if choices else None) or {}
         blocks = _content_blocks_from_message(message)
@@ -1705,7 +1701,7 @@ def add_messages_route(
                 message, status_code=status_code, request_id=request_id
             )
 
-        def chat_error(error: ChatRequestError) -> JSONResponse:
+        def chat_error(error: Exception) -> JSONResponse:
             return _MessagesFailure.from_chat_error(error).json_response(request_id)
 
         version = http_request.headers.get("anthropic-version")
@@ -1865,7 +1861,7 @@ def add_messages_route(
         except UpstreamClientError as error:
             return chat_error(chat_error_from_upstream_client_error(error))
         except ValueError as error:
-            return request_error(str(error))
+            return chat_error(error)
         except RuntimeError as error:
             logger.exception("Anthropic Messages backend prepare failed")
             return request_error(

@@ -1,7 +1,7 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
 Status: **Implemented** (2026-07-03; D2 amended 2026-08-04; D3 amended
-2026-08-05). Reviewed — APPROVE-WITH-AMENDMENTS
+2026-08-05; D6 amended 2026-10-05). Reviewed — APPROVE-WITH-AMENDMENTS
 (2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
@@ -246,6 +246,52 @@ not overwrite).
 - finish_reason wire domain: only {stop, length, tool_calls} leaves the
   server; internal reasons (abort) map to "stop"; the `or "stop"` terminal
   fallback stays (OpenAI requires non-null on final chunks).
+
+**Amendment 2026-10-05 (M20 WP-04) — prompt overflow is a typed, classified
+error.** Before this, a prompt that did not fit was an untyped `ValueError`
+(400 with `code: null`) on the native engine, a 502 `backend_error` behind a
+vLLM upstream, and an AUTO preflight message naming internal engine keys; the
+`kairyu-proc` parent preflight also assumed 16 output tokens when `max_tokens`
+was omitted, rejecting prompts its child accepts (#496 remaining-context
+semantics). Codex compacts only on an in-band `response.failed` with
+`context_length_exceeded`; a pre-stream 400 is terminal for it.
+
+- L1: `kairyu/engine/request_errors.py` owns `ContextLengthExceededError`
+  (a `ValueError` with `code`, `prompt_tokens`, `max_tokens`,
+  `max_model_len`) and `resolve_output_budget`, the one prompt + output vs
+  `max_model_len` check used by `EngineLoop` and the `kairyu-proc` parent
+  preflight. `kairyu/engine/openai_errors.py` owns the upstream 4xx mapping
+  (`raise_for_status`, moved from `openai_backend.py`): a 400 whose OpenAI,
+  vLLM nested/flat, or Kairyu body reports an overflow (by
+  `code: context_length_exceeded` or the "maximum context length" / "longer
+  than the maximum model length" / legacy Kairyu texts) becomes
+  `UpstreamClientError(code="context_length_exceeded")` with a fixed public
+  message; upstream text never crosses the tenant boundary. Other 4xx keep
+  the sanitized 502.
+- L2: only the client-derived public prompt overflows publicly. Every AUTO
+  preflight prompt is built from the client prompt, so `Orchestrator.
+  prepare_request` re-raises the typed error. A dispatched stage prompt is
+  orchestration-built: `OrchestratorExecutionError.context_overflow_reason`
+  marks an overflow beneath it as a server error, logged with reason
+  `internal_stage_context_overflow`.
+- L3: `error_classifier.py` maps a failure to a frozen `ClassifiedError
+  (status, type, code, message, param, retryable, retry_after_s, placement)`
+  per surface. Chat: 400 `invalid_request_error` / `context_length_exceeded`
+  / `param: "messages"` with OpenAI's wording (counts when Kairyu tokenized),
+  before SSE headers when detected before dispatch, otherwise as the stream's
+  error frame. Messages: Anthropic 400 `invalid_request_error`, "prompt is
+  too long: N tokens > M maximum" or "input length and `max_tokens` exceed
+  context limit: N + M > L, …", plain "prompt is too long" without counts.
+  Responses (`placement: in_band_on_stream`): unary 400 with `param:
+  "input"`; a streaming request — live, buffered tool, compaction, and AUTO
+  paths alike — gets HTTP 200 `response.created` → `response.in_progress` →
+  `error` → `response.failed{code: context_length_exceeded}`, with no
+  dispatch, metering, or storage when the overflow is found before dispatch.
+  The delegated AUTO Chat error is re-rendered this way instead of being
+  returned as an HTTP error before the stream.
+- Known limit: AUTO over workers that cannot tokenize in preflight (an
+  OpenAI-compatible upstream) sees the overflow only after dispatch, where
+  L2 cannot attribute it to the client prompt; it stays a server error.
 
 ## 3. Non-goals
 

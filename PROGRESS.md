@@ -109,6 +109,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [amendment] Prompt overflow is `context_length_exceeded` on every surface (M20 WP-04)
+- What: typed `ContextLengthExceededError` + one `resolve_output_budget` (engine loop, `kairyu-proc` preflight); upstream 400 overflow bodies classified with a fixed public message; L3 `error_classifier` renders Chat 400 `param:"messages"`, Messages "prompt is too long", Responses unary 400 `param:"input"` and in-band `response.failed{context_length_exceeded}` on every stream path incl. AUTO. Internal orchestration-stage overflow stays a server error (`internal_stage_context_overflow`).
+- Why: Codex compacts only on in-band `context_length_exceeded`; overflow was 400 `code:null`, a vLLM 502, or an AUTO pre-stream 400; the proc preflight assumed 16 output tokens.
+- Refs: m9 D6 amendment 2026-10-05; `kairyu/engine/{request_errors,openai_errors}.py`; `kairyu/entrypoints/server/{error_classifier,chat_errors,responses_errors}.py`
+
 ### 2026-10-05 — [design] M20 Responses compatibility proposed; schema gate (WP-01)
 - What: m20 (Proposed) records D1–D22, deviations D-a..D-j, the WP roadmap, the admission table, the gap matrix and the m11 supersession table; g6 P-C2 reopened. WP-01 gates every test: pinned OpenAPI closure, ASGI recorder, `divergences.toml` (`CONTRACT_STRICT=1`), opt-in wire capture, strict SDK.
 - Why: owner decisions 2026-10-05 (full scope, O-1..O-5) after the audit (80 + 31 gaps, six Codex P0).

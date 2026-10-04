@@ -55,6 +55,10 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.prompt import PromptInput, TokensPrompt
 from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.chat_errors import (
+    chat_error_from_value_error,
+    chat_stream_error_payload,
+)
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ReasoningDeltaParser,
@@ -75,9 +79,10 @@ from kairyu.entrypoints.server.chat_service import (
     render_prompt as render_prompt,
 )
 from kairyu.entrypoints.server.errors import (
+    chat_error_response,
     invalid_request,
     model_not_found,
-    sanitize_backend_error,
+    orchestration_failure,
     upstream_error,
 )
 from kairyu.entrypoints.server.health import add_health_routes
@@ -1047,13 +1052,7 @@ async def _stream_engine(
                     started_at=trace_started_at,
                     stage_metrics=stage_metrics(),
                 )
-            payload = {  # M3: only the class name, no raw backend message
-                "error": {
-                    "message": f"upstream backend error ({type(error).__name__})",
-                    "type": "upstream_error",
-                }
-            }
-            yield f"data: {json.dumps(payload)}\n\n"
+            yield f"data: {json.dumps(chat_stream_error_payload(error))}\n\n"
             yield "data: [DONE]\n\n"
             return
         owner.mark_completed()
@@ -2476,7 +2475,7 @@ def create_app(
                         prompt,
                         orchestration_request,
                     )
-                    return invalid_request(str(error))
+                    return chat_error_response(chat_error_from_value_error(error))
                 except RuntimeError as error:
                     _record_profile_judge_preflight_usage(
                         http_request,
@@ -2571,8 +2570,9 @@ def create_app(
                     completions=completions,
                     usage_exact=False,
                 )
+                status, error_payload = orchestration_failure(error)
                 payload = {
-                    "error": sanitize_backend_error(error.cause),
+                    "error": error_payload,
                     "usage": usage.model_dump(
                         mode="json",
                         exclude=_unset_orchestration_usage_fields(usage),
@@ -2583,7 +2583,7 @@ def create_app(
                     if result.structured_trace is not None:
                         payload["kairyu_trace_v2"] = result.structured_trace.as_dict()
                     payload["kairyu_route"] = _route_payload(result.route).model_dump(mode="json")
-                return JSONResponse(status_code=502, content=payload)
+                return JSONResponse(status_code=status, content=payload)
             except Exception as error:
                 return upstream_error(error)
             completions = result.completions or (
@@ -2777,14 +2777,7 @@ def create_app(
                 validated.generation_request,
             )
         except ValueError as error:
-            chat_error = ChatRequestError(
-                str(error),
-                code=getattr(error, "code", "invalid_request"),
-            )
-            return JSONResponse(
-                status_code=chat_error.status_code,
-                content={"error": chat_error.payload()},
-            )
+            return chat_error_response(chat_error_from_value_error(error))
         except UpstreamClientError as error:
             chat_error = chat_error_from_upstream_client_error(error)
             return JSONResponse(

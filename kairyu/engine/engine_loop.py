@@ -37,6 +37,7 @@ from kairyu.engine.prompt import (
     prompt_text,
     supplied_prompt_token_ids,
 )
+from kairyu.engine.request_errors import resolve_output_budget
 from kairyu.engine.tokenizer import (
     GrammarVocabulary,
     IncrementalDetokenizer,
@@ -50,7 +51,6 @@ from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import RESPONSE_FORMAT_EXTRA_ARG, SamplingParams
 
-_DEFAULT_MAX_NEW_TOKENS = 16
 _DEFAULT_PIPELINE_DEPTH = 1
 _OutputT = TypeVar("_OutputT")
 _TRACE_STAGE_ORDER = (
@@ -613,35 +613,13 @@ class EngineLoop:
         params: SamplingParams,
         prompt_token_ids: tuple[int, ...],
     ) -> int:
-        if params.max_tokens is not None:
-            return params.max_tokens
-        if self._max_model_len is not None:
-            # OpenAI chat contract for an omitted limit: generate up to the
-            # model's remaining context (issue #496).
-            remaining = self._max_model_len - len(prompt_token_ids)
-            if remaining < 1:
-                raise ValueError(
-                    f"prompt tokens ({len(prompt_token_ids)}) already fill "
-                    f"max_model_len ({self._max_model_len})"
-                )
-            return remaining
-        return _DEFAULT_MAX_NEW_TOKENS
+        """Resolve the output budget; overflow raises the typed error."""
 
-    def _validate_context_length(
-        self,
-        prompt_token_ids: tuple[int, ...],
-        max_new_tokens: int,
-    ) -> None:
-        requested_length = len(prompt_token_ids) + max_new_tokens
-        if (
-            self._max_model_len is not None
-            and requested_length > self._max_model_len
-        ):
-            raise ValueError(
-                f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
-                f"({max_new_tokens}) exceed max_model_len "
-                f"({self._max_model_len})"
-            )
+        return resolve_output_budget(
+            len(prompt_token_ids),
+            params.max_tokens,
+            self._max_model_len,
+        )
 
     def prepare_prompt(
         self,
@@ -657,7 +635,6 @@ class EngineLoop:
         tokenize_started_ns = perf_counter_ns() if trace_requested else None
         prompt_token_ids = self.resolve_prompt_token_ids(prompt)
         max_new_tokens = self._max_new_tokens(params, prompt_token_ids)
-        self._validate_context_length(prompt_token_ids, max_new_tokens)
         if (
             engine_sampling_from(params).needs_grammar
             and self._grammar_vocab is None
@@ -740,10 +717,6 @@ class EngineLoop:
                     "prepared prompt structured output does not match the "
                     "submitted request"
                 )
-            self._validate_context_length(
-                prepared_prompt.prompt_token_ids,
-                max_new_tokens,
-            )
         prompt_token_ids = prepared_prompt.prompt_token_ids
         max_new_tokens = prepared_prompt.max_new_tokens
         forced_continuation = params.forced_token_ids is not None
