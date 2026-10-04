@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 from dataclasses import replace
 
@@ -177,6 +178,27 @@ def test_every_sse_path_emits_data_heartbeat(tmp_path, monkeypatch, model, paylo
     assert events[0]["type"] == "response.created"
     assert sum(event["type"] == "response.in_progress" for event in events) >= 2
     assert events[-1]["type"] == "response.completed"
+    _assert_lifecycle_snapshots_match_events(events)
+
+
+def _assert_lifecycle_snapshots_match_events(events: list[dict]) -> None:
+    # openai-node's ResponseStream replaces its accumulated snapshot with the
+    # response of every lifecycle event, so a repeated response.in_progress
+    # must carry exactly the output implied by the events sent before it.
+    output: list[dict] = []
+    for event in events:
+        kind = event["type"]
+        if kind == "response.output_item.added":
+            output.append(copy.deepcopy(event["item"]))
+        elif kind == "response.content_part.added":
+            output[event["output_index"]]["content"].append(copy.deepcopy(event["part"]))
+        elif kind == "response.output_text.delta":
+            part = output[event["output_index"]]["content"][event["content_index"]]
+            part["text"] += event["delta"]
+        elif kind == "response.output_item.done":
+            output[event["output_index"]] = copy.deepcopy(event["item"])
+        elif kind == "response.in_progress":
+            assert event["response"]["output"] == output
 
 
 @pytest.mark.parametrize(

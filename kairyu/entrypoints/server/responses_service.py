@@ -1097,6 +1097,35 @@ def _response_envelope(
     }
 
 
+def _message_item(message_id: str, status: str, text: str) -> dict:
+    return {
+        "type": "message",
+        "id": message_id,
+        "role": "assistant",
+        "status": status,
+        "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}],
+    }
+
+
+def _open_message_snapshot(
+    request: ResponsesRequest, *, response_id: str, created_at: int, message_id: str, text: str
+) -> dict:
+    """The in-progress envelope matching every event already sent.
+
+    Clients that rebuild their snapshot from lifecycle events (openai-node's
+    ResponseStream) replace it with a heartbeat's response, so a heartbeat
+    after the message opened must carry it with the text streamed so far.
+    """
+    return _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status="in_progress",
+        output=[_message_item(message_id, "in_progress", text)],
+        usage=None,
+    )
+
+
 def _sse(event_type: str, sequence_number: int, **payload) -> str:
     event = {"type": event_type, "sequence_number": sequence_number, **payload}
     serialized = escape_json_line_separators(
@@ -1358,6 +1387,7 @@ async def _live_text_events(
     )
     sequence = 0
     sent = 0
+    streamed: list[str] = []
     last: GenerationResult | None = None
     usage_owner = stream_usage_owner_from_state(
         http_request.app.state,
@@ -1371,13 +1401,7 @@ async def _live_text_events(
         sequence += 1
         yield _sse("response.in_progress", sequence, response=in_progress)
         sequence += 1
-        added_item = {
-            "type": "message",
-            "id": message_id,
-            "role": "assistant",
-            "status": "in_progress",
-            "content": [],
-        }
+        added_item = {**_message_item(message_id, "in_progress", ""), "content": []}
         yield _sse(
             "response.output_item.added",
             sequence,
@@ -1385,12 +1409,7 @@ async def _live_text_events(
             item=added_item,
         )
         sequence += 1
-        empty_part = {
-            "type": "output_text",
-            "text": "",
-            "annotations": [],
-            "logprobs": [],
-        }
+        empty_part = _message_item(message_id, "in_progress", "")["content"][0]
         yield _sse(
             "response.content_part.added",
             sequence,
@@ -1431,10 +1450,18 @@ async def _live_text_events(
                                 logprobs=[],
                             )
                         sequence += 1
+                        streamed.append(delta)
                         heartbeat.mark()
                         continue
                 if heartbeat.due():
-                    yield _sse("response.in_progress", sequence, response=in_progress)
+                    snapshot = _open_message_snapshot(
+                        request,
+                        response_id=response_id,
+                        created_at=created_at,
+                        message_id=message_id,
+                        text="".join(streamed),
+                    )
+                    yield _sse("response.in_progress", sequence, response=snapshot)
                     sequence += 1
                     heartbeat.mark()
         except Exception as error:
@@ -1501,20 +1528,7 @@ async def _live_text_events(
             and completion.finish_reason in {"length", "max_tokens"}
             else "completed"
         )
-        output_item = {
-            "type": "message",
-            "id": message_id,
-            "role": "assistant",
-            "status": status,
-            "content": [
-                {
-                    "type": "output_text",
-                    "text": text,
-                    "annotations": [],
-                    "logprobs": [],
-                }
-            ],
-        }
+        output_item = _message_item(message_id, status, text)
         yield _sse(
             "response.output_text.done",
             sequence,
@@ -1607,13 +1621,7 @@ async def _relay_auto_chat_stream(
         sequence += 1
         yield _sse("response.in_progress", sequence, response=in_progress)
         sequence += 1
-        added_item = {
-            "type": "message",
-            "id": message_id,
-            "role": "assistant",
-            "status": "in_progress",
-            "content": [],
-        }
+        added_item = {**_message_item(message_id, "in_progress", ""), "content": []}
         yield _sse(
             "response.output_item.added",
             sequence,
@@ -1653,7 +1661,14 @@ async def _relay_auto_chat_stream(
                     heartbeat.mark()
                     text_parts.append(content)
             if heartbeat.due():
-                yield _sse("response.in_progress", sequence, response=in_progress)
+                snapshot = _open_message_snapshot(
+                    request,
+                    response_id=response_id,
+                    created_at=created_at,
+                    message_id=message_id,
+                    text="".join(text_parts),
+                )
+                yield _sse("response.in_progress", sequence, response=snapshot)
                 sequence += 1
                 heartbeat.mark()
     except Exception as error:
@@ -1671,24 +1686,7 @@ async def _relay_auto_chat_stream(
         message = error_payload.get("message") or "upstream backend error"
         yield _sse("error", sequence, code="server_error", message=message, param=None)
         sequence += 1
-        failed_output = []
-        if text:
-            failed_output.append(
-                {
-                    "type": "message",
-                    "id": message_id,
-                    "role": "assistant",
-                    "status": "incomplete",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": [],
-                            "logprobs": [],
-                        }
-                    ],
-                }
-            )
+        failed_output = [_message_item(message_id, "incomplete", text)] if text else []
         failed = _response_envelope(
             request,
             response_id=response_id,
@@ -1702,20 +1700,7 @@ async def _relay_auto_chat_stream(
         return
 
     status, incomplete_details = _terminal_status_for((finish_reason,))
-    output_item = {
-        "type": "message",
-        "id": message_id,
-        "role": "assistant",
-        "status": status,
-        "content": [
-            {
-                "type": "output_text",
-                "text": text,
-                "annotations": [],
-                "logprobs": [],
-            }
-        ],
-    }
+    output_item = _message_item(message_id, status, text)
     yield _sse(
         "response.output_text.done",
         sequence,
