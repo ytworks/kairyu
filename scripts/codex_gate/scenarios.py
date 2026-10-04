@@ -70,6 +70,7 @@ class WireExpectation:
     in_band_required: tuple[str, ...] = ()  # shapes on which they must occur
     compaction: bool = False  # local (tools: []) or remote (compaction_trigger)
     live_web_search: bool = False  # a request declared web_search with live access
+    backpressure: bool = False  # a POST is refused 503 slow_down (O-2), which Codex retries
 
 
 @dataclass(frozen=True)
@@ -201,15 +202,10 @@ SCENARIOS: tuple[MatrixScenario, ...] = (
         # Codex's own tenant (launcher.py; harness traffic is not counted) with
         # a burst of one refilled once per 10 s: Codex's second request is
         # refused -- the tool loop's follow-up, or on the openai_base_url shape
-        # (whose 426 WebSocket probe spends the burst today) the first POST.
+        # (whose 426 WebSocket probe spends the burst today) the first POST --
+        # with 503 slow_down + Retry-After, which Codex waits out (O-2, WP-07).
+        wire=WireExpectation(backpressure=True),
         tenant_limits=(("requests_per_minute", 6), ("request_burst", 1)),
-        xfail=XFail(
-            gap="G-errors-5",
-            wp="WP-07",
-            reason="a transient tenant refusal is a 429, which Codex never retries; "
-            "503 slow_down with Retry-After is (O-2)",
-            signature="HTTP 429 POST /v1/responses (tenant_rate_limited)",
-        ),
     ),
 )
 

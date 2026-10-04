@@ -12,7 +12,7 @@ completes as scripted, the exchange log meets the scenario's wire expectation,
 Codex used the catalog (no fallback-metadata warning; its traced
 auto-compaction limit equals the catalog's) and no HTTP response was >= 400
 except the expected WebSocket-upgrade 426 of the ``openai_base_url`` shape
-(D-e).
+(D-e) and, in a backpressure scenario, the 503 ``slow_down`` it requires (O-2).
 
 ``--live --base-url URL --model ID`` runs ``LIVE_SCENARIOS`` against a real
 deployment instead (it replaces ``scripts/codex_responses_smoke.sh``)::
@@ -203,6 +203,17 @@ def _turn_failures(scenario: MatrixScenario, turn: TurnResult) -> list[str]:
     return failures
 
 
+def _slow_down(exchange: Mapping[str, Any]) -> bool:
+    """A POST /responses refused with the retryable 503 slow_down (O-2)."""
+
+    return (
+        exchange["method"] == "POST"
+        and exchange["path"].endswith("/responses")
+        and exchange["status"] == 503
+        and exchange.get("error_code") == "slow_down"
+    )
+
+
 def _wire_failures(
     scenario: MatrixScenario, shape: str, exchanges: Sequence[Mapping[str, Any]]
 ) -> list[str]:
@@ -210,8 +221,12 @@ def _wire_failures(
     failures = [
         f"unexpected HTTP {e['status']} {e['method']} {e['path']} ({e.get('error_code')})"
         for e in exchanges
-        if e["status"] >= 400 and not _expected_error(e, shape)
+        if e["status"] >= 400
+        and not _expected_error(e, shape)
+        and not (wire.backpressure and _slow_down(e))
     ]
+    if wire.backpressure and not any(_slow_down(e) for e in exchanges):
+        failures.append("no POST /responses was refused with 503 slow_down")
     codes = [e["failed_code"] for e in exchanges if e.get("failed_code")]
     failures += [f"unexpected in-band {code}" for code in codes if code not in wire.in_band_codes]
     if shape in wire.in_band_required:
