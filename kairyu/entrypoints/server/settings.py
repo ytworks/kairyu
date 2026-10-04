@@ -12,6 +12,9 @@ import secrets
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# The decoded-size cap of a Content-Encoding request body (m20 D21, WP-41).
+DEFAULT_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
 
 class ServerSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -62,6 +65,14 @@ class ServerSettings(BaseModel):
         description=(
             "Maximum raw POST body for /v1/chat/completions; None disables "
             "the process-level guard."
+        ),
+    )
+    max_decompressed_bytes: int = Field(
+        default=DEFAULT_MAX_DECOMPRESSED_BYTES,
+        ge=1,
+        description=(
+            "Maximum decoded size of a gzip or zstd (Content-Encoding) request "
+            "body; a larger body is refused with 413 before it is fully inflated."
         ),
     )
     metrics: bool = Field(default=True, description="Expose /metrics (Prometheus).")

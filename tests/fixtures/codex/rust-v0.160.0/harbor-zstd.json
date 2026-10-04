@@ -590,12 +590,10 @@
       "response_status": "completed",
       "output_types": [
         "message"
+      ],
+      "prompt_contains": [
+        "Say hello."
       ]
-    },
-    "xfail": {
-      "gap": "G-transport-3",
-      "wp": "WP-41",
-      "reason": "zstd request bodies are not decoded (optional extra)"
     }
   }
 }

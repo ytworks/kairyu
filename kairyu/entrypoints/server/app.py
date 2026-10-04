@@ -76,6 +76,7 @@ from kairyu.entrypoints.server.chat_service import (
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
 )
+from kairyu.entrypoints.server.decompression import DecompressionMiddleware
 from kairyu.entrypoints.server.engine_admission import (
     AdmissionSurface,
     admit_engine_request,
@@ -2011,8 +2012,8 @@ def create_app(
     if served_systemone:
         add_systemone_route(app, served_systemone)
 
-    # add_middleware prepends, so add innermost first: metrics -> concurrency
-    # guard -> auth -> access log (outermost).
+    # add_middleware prepends, so add innermost first: body limits -> decoding
+    # -> metrics -> concurrency -> tenant -> auth -> access log (outermost).
     if async_request_body_limit is not None:
         app.add_middleware(
             ChatBodyLimitMiddleware,
@@ -2030,6 +2031,10 @@ def create_app(
             limit=max(model.max_body_bytes for model in served_systemone.values()),
             paths=(SYSTEMONE_PATH,),
         )
+    # Outside every body limit, so they bound the decoded JSON (m20 D21).
+    app.add_middleware(
+        DecompressionMiddleware, max_decompressed_bytes=settings.max_decompressed_bytes
+    )
     if metrics is not None:
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
