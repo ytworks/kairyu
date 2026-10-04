@@ -12,6 +12,7 @@ import binascii
 import os
 import uuid
 from collections.abc import Sequence
+from types import MappingProxyType
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,16 +23,18 @@ from kairyu.entrypoints.server.responses.errors import BufferedFailure
 _COMPACTION_TOKEN_PREFIX = "kcp1."
 _COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
 _COMPACTION_NONCE_BYTES = 12
-COMPACTION_INSTRUCTION_ITEM = {
-    "type": "message",
-    "role": "user",
-    "content": (
-        "Summarize the conversation above for a compacted continuation. "
-        "Capture the goals, decisions, constraints, tool results, and any "
-        "unfinished work so the conversation can continue from this summary "
-        "alone."
-    ),
-}
+_COMPACTION_INSTRUCTION_ITEM = MappingProxyType(
+    {
+        "type": "message",
+        "role": "user",
+        "content": (
+            "Summarize the conversation above for a compacted continuation. "
+            "Capture the goals, decisions, constraints, tool results, and any "
+            "unfinished work so the conversation can continue from this summary "
+            "alone."
+        ),
+    }
+)
 
 
 class CompactionCodec:
@@ -88,6 +91,11 @@ def extract_compaction_trigger(items: Sequence[dict]) -> bool:
         if item["type"] == "compaction_trigger" and index != len(items) - 1:
             raise ChatRequestError("compaction_trigger must be the final input item")
     return bool(items) and items[-1]["type"] == "compaction_trigger"
+
+
+def compaction_prompt_items(work_items: Sequence[dict]) -> list[dict]:
+    """Return ``work_items`` followed by a fresh copy of the summary instruction."""
+    return [*work_items, dict(_COMPACTION_INSTRUCTION_ITEM)]
 
 
 def compaction_output_from_message(

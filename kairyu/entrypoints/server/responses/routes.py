@@ -38,8 +38,8 @@ from kairyu.entrypoints.server.responses.canonical import (
     validate_function_outputs,
 )
 from kairyu.entrypoints.server.responses.compaction import (
-    COMPACTION_INSTRUCTION_ITEM,
     CompactionCodec,
+    compaction_prompt_items,
     extract_compaction_trigger,
 )
 from kairyu.entrypoints.server.responses.deps import ChatDispatch, ResponsesDeps
@@ -214,9 +214,7 @@ def _prepare_turn(
     stored_items = [] if compaction_request else work_items
     validate_function_outputs(work_items)
     prompt_items = (
-        work_items + [COMPACTION_INSTRUCTION_ITEM]
-        if compaction_request
-        else work_items
+        compaction_prompt_items(work_items) if compaction_request else work_items
     )
     chat_request = to_chat_request(
         request, prompt_items, compaction_codec=deps.compaction_codec, owner=owner
