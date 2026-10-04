@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from kairyu.models.generation import GENERATION_CONFIG_MODES
 
@@ -159,6 +160,30 @@ def _run_artifact_command(args: argparse.Namespace) -> None:
         raise SystemExit(1) from None
 
 
+def uvicorn_options() -> dict[str, Any]:
+    """Uvicorn settings shared by every server this CLI launches.
+
+    ``ws="none"`` while Responses WebSocket mode is disabled (m20 D-e, D19): an
+    upgrade is plain HTTP, so ``GET /v1/responses`` answers 426 even when a
+    dependency installs a WebSocket library, and no websocket scope, which
+    ``AuthMiddleware`` and tenancy pass through, reaches the app. WP-44/47
+    change this selection.
+    """
+    return {
+        # The production Linux dependency set installs both packages. Select
+        # them explicitly so a missing/broken image fails at startup instead
+        # of silently benchmarking asyncio + h11.
+        "loop": "uvloop" if sys.platform == "linux" else "auto",
+        "http": "httptools" if sys.platform == "linux" else "auto",
+        "ws": "none",
+        "log_config": None,  # keep the JSON root logger
+        # AccessLogMiddleware is the single structured access-log owner.
+        # Leaving Uvicorn's logger enabled duplicates every request and makes
+        # ServerSettings.access_log=False ineffective.
+        "access_log": False,
+    }
+
+
 def _run_cache_agent(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -176,10 +201,7 @@ def _run_cache_agent(args: argparse.Namespace) -> None:
             runtime.app,
             host=config.listen_host,
             port=config.listen_port,
-            loop="uvloop" if sys.platform == "linux" else "auto",
-            http="httptools" if sys.platform == "linux" else "auto",
-            log_config=None,
-            access_log=False,
+            **uvicorn_options(),
         )
     finally:
         runtime.close()
@@ -202,10 +224,7 @@ def _run_placement_admission(args: argparse.Namespace) -> None:
             runtime.app,
             host=config.listen_host,
             port=config.listen_port,
-            loop="uvloop" if sys.platform == "linux" else "auto",
-            http="httptools" if sys.platform == "linux" else "auto",
-            log_config=None,
-            access_log=False,
+            **uvicorn_options(),
             workers=1,
             ssl_certfile=str(config.tls_cert_file),
             ssl_keyfile=str(config.tls_key_file),
@@ -232,10 +251,7 @@ def _run_placement_authority(args: argparse.Namespace) -> None:
             runtime.app,
             host=server.listen_host,
             port=server.listen_port,
-            loop="uvloop" if sys.platform == "linux" else "auto",
-            http="httptools" if sys.platform == "linux" else "auto",
-            log_config=None,
-            access_log=False,
+            **uvicorn_options(),
             workers=1,
             ssl_certfile=str(server.tls_cert_file),
             ssl_keyfile=str(server.tls_key_file),
@@ -264,16 +280,7 @@ def main(argv: list[str] | None = None) -> None:
             app,
             host=args.host or spec.server.host,
             port=args.port or spec.server.port,
-            # The production Linux dependency set installs both packages.
-            # Select them explicitly so a missing/broken image fails at
-            # startup instead of silently benchmarking asyncio + h11.
-            loop="uvloop" if sys.platform == "linux" else "auto",
-            http="httptools" if sys.platform == "linux" else "auto",
-            log_config=None,  # keep the JSON root logger
-            # AccessLogMiddleware is the single structured access-log owner.
-            # Leaving Uvicorn's logger enabled duplicates every request and
-            # makes ServerSettings.access_log=False ineffective.
-            access_log=False,
+            **uvicorn_options(),
         )
     elif args.command == "validate":
         from kairyu.deploy.validation import validate_deployment

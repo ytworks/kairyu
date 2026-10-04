@@ -1,15 +1,26 @@
-"""Responses SSE transport: data heartbeats, headers, wire escaping, failures."""
+"""Responses transport: SSE heartbeats, headers, wire escaping, failures; WebSocket probe."""
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
+from http.client import HTTPConnection
+from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
+import uvicorn.protocols.websockets.auto as uvicorn_ws_auto
 from fastapi.testclient import TestClient
 
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints import cli
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -121,13 +132,75 @@ def test_responses_stream_escapes_unicode_line_separators_on_the_wire(tmp_path):
     assert "".join(deltas) == separators
 
 
-def test_websocket_upgrade_get_returns_426(tmp_path):
+_SERVER_TIMEOUT_S = 10.0
+_WEBSOCKET_UPGRADE = {
+    "Connection": "Upgrade",
+    "Upgrade": "websocket",
+    "Sec-WebSocket-Version": "13",
+    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+}
+
+
+class _TransitiveWebSocketLibrary(asyncio.Protocol):
+    """What uvicorn's ``ws="auto"`` finds once a dependency installs websockets
+    or wsproto: a protocol that takes over every upgrade before the app runs."""
+
+    def __init__(self, **_uvicorn_state: object) -> None:
+        super().__init__()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = transport
+
+    def data_received(self, data: bytes) -> None:
+        self.transport.write(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+        self.transport.close()
+
+
+@contextmanager
+def _kairyu_serve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """Serve what ``kairyu serve`` launches, on an ephemeral port; yield the port."""
+
+    config = tmp_path / "deploy.yaml"
+    config.write_text("engines: {m: {backend: mock}}\n", encoding="utf-8")
+    launch: dict[str, object] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **options: launch.update(app=app, **options))
+    # Keep pytest's logging: serve would replace the root handlers.
+    monkeypatch.setattr("kairyu.entrypoints.server.middleware.configure_json_logging", lambda: None)
+    cli.main(["serve", str(config)])
+    server = uvicorn.Server(uvicorn.Config(**{**launch, "host": "127.0.0.1", "port": 0}))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + _SERVER_TIMEOUT_S
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "kairyu serve did not start"
+        time.sleep(0.02)
+    try:
+        yield server.servers[0].sockets[0].getsockname()[1]
+    finally:
+        server.should_exit = True
+        thread.join(_SERVER_TIMEOUT_S)
+
+
+@pytest.mark.parametrize(
+    "headers", [_WEBSOCKET_UPGRADE, {}], ids=["websocket-upgrade", "plain-get"]
+)
+def test_websocket_upgrade_get_returns_426(tmp_path, monkeypatch, headers):
     # Codex (built-in openai provider, the Harbor shape) tries a WebSocket
-    # upgrade first; 426 triggers its immediate, silent HTTPS fallback.
-    with TestClient(_app(tmp_path)) as http:
-        response = http.get("/v1/responses")
-    assert response.status_code == 426
-    assert response.json()["error"]["code"] == "upgrade_required"
+    # upgrade first; 426 triggers its immediate, silent HTTPS fallback. Until
+    # WebSocket mode exists (m20 D-e) `kairyu serve` must give the upgrade to
+    # the app as plain HTTP even when a dependency installs a WebSocket
+    # library: a websocket scope would skip AuthMiddleware and tenancy.
+    monkeypatch.setattr(uvicorn_ws_auto, "AutoWebSocketsProtocol", _TransitiveWebSocketLibrary)
+    with _kairyu_serve(tmp_path, monkeypatch) as port:
+        connection = HTTPConnection("127.0.0.1", port, timeout=_SERVER_TIMEOUT_S)
+        try:
+            connection.request("GET", "/v1/responses", headers=headers)
+            response = connection.getresponse()
+            status, body = response.status, response.read()
+        finally:
+            connection.close()
+    assert status == 426
+    assert json.loads(body)["error"]["code"] == "upgrade_required"
 
 
 def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):

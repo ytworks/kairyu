@@ -4,10 +4,10 @@
 serves the scenario's ``ScenarioBackend`` script as engine ``kairyu-scenario``
 and, for AUTO scenarios, an orchestration ``kairyu-auto-scenario`` whose rule
 router always takes a direct tier over that engine. The deployment is an
-ordinary ``DeploymentSpec`` built by ``build_app_from_spec`` and served by
-uvicorn with ``ws="none"`` (WebSocket upgrades are plain 426 GETs, D-e), so
-Codex meets the production HTTP stack. The scenario backend is registered here
-only; importing this module registers nothing.
+ordinary ``DeploymentSpec`` built by ``build_app_from_spec`` and served with
+``kairyu serve``'s uvicorn options (``ws="none"``: WebSocket upgrades are plain
+426 GETs, D-e), so Codex meets the production HTTP stack. The scenario backend
+is registered here only; importing this module registers nothing.
 
 A scenario's ``tenant_limits`` apply to Codex alone: the deployment then
 requires API keys, ``CODEX_KEY`` maps to its own limited tenant, and the
@@ -112,10 +112,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     import uvicorn
 
+    from kairyu.entrypoints.cli import uvicorn_options
+
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     args.workdir.mkdir(parents=True, exist_ok=True)
     app = build_app(scenario_named(args.scenario), args.host, args.port, args.workdir)
-    uvicorn.run(app, host=args.host, port=args.port, ws="none", log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", **uvicorn_options())
     return 0
 
 
