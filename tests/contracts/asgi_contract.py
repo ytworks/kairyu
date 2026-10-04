@@ -1,10 +1,12 @@
 """ASGI recording for the schema gate and the opt-in wire capture.
 
 ``install_recorders`` wraps the app of every in-process test transport
-(``starlette.testclient.TestClient`` and ``httpx.ASGITransport``), so every
-app a test builds -- ``create_legacy_app``, a direct ``create_app`` or any
-other builder -- is recorded without editing the test. The wrapper only
-observes ASGI messages and forwards them unchanged.
+(``starlette.testclient.TestClient`` and ``httpx.ASGITransport``) and of every
+in-process live server (``uvicorn.Config``), so every app a test builds --
+``create_legacy_app``, a direct ``create_app`` or any other builder -- is
+recorded without editing the test. The wrapper only observes ASGI messages and
+forwards them unchanged. A live-server test stops its server before it ends, so
+the exchange is recorded before the test's teardown validates it.
 
 ``ContractGate`` owns the recording of the running test:
 
@@ -173,12 +175,14 @@ class RecordingApp:
 
 
 def install_recorders(gate: ContractGate) -> Callable[[], None]:
-    """Wrap the in-process test transports' apps; return the uninstaller."""
+    """Wrap the in-process test transports' and live servers' apps; return the uninstaller."""
 
+    import uvicorn
     from starlette.testclient import TestClient  # import-time deprecation warning
 
     original_client_init = TestClient.__init__
     original_transport_init = httpx.ASGITransport.__init__
+    original_server_init = uvicorn.Config.__init__
 
     def client_init(self: Any, *args: Any, **kwargs: Any) -> None:
         original_client_init(self, *args, **kwargs)
@@ -192,12 +196,19 @@ def install_recorders(gate: ContractGate) -> Callable[[], None]:
         wrapped = app if isinstance(app, RecordingApp) else RecordingApp(app, gate)
         original_transport_init(self, wrapped, *args, **kwargs)
 
+    def server_init(self: uvicorn.Config, app: Any, *args: Any, **kwargs: Any) -> None:
+        # An import string names an app the server loads itself: left as is.
+        wrapped = app if isinstance(app, str | RecordingApp) else RecordingApp(app, gate)
+        original_server_init(self, wrapped, *args, **kwargs)
+
     TestClient.__init__ = client_init  # type: ignore[method-assign]
     httpx.ASGITransport.__init__ = transport_init  # type: ignore[method-assign]
+    uvicorn.Config.__init__ = server_init  # type: ignore[method-assign]
 
     def uninstall() -> None:
         TestClient.__init__ = original_client_init  # type: ignore[method-assign]
         httpx.ASGITransport.__init__ = original_transport_init  # type: ignore[method-assign]
+        uvicorn.Config.__init__ = original_server_init  # type: ignore[method-assign]
 
     return uninstall
 
