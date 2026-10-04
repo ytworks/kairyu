@@ -4,7 +4,7 @@
     "G-request-fields-1",
     "M-SR-1"
   ],
-  "contract": "Codex never sends max_output_tokens: a reply longer than 1024 tokens completes instead of ending incomplete (which Codex retries).",
+  "contract": "Codex never sends max_output_tokens: a streamed reply longer than 1024 tokens completes instead of ending incomplete (which Codex retries). A cap above the scripted length is pinned at the backend boundary by test_omitted_max_output_tokens_uses_remaining_context.",
   "provenance": {
     "source": "recorded",
     "recorder": "scripts/codex_gate/record_proxy.py",

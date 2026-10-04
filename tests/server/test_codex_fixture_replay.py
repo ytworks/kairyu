@@ -28,7 +28,6 @@ from tests.server._legacy_chat import create_legacy_app
 from tests.support.scenario_backend import ScenarioBackend, engine_pieces
 from tests.support.scenario_script import (
     Part,
-    Reasoning,
     Scenario,
     ToolCall,
     Turn,
@@ -47,7 +46,7 @@ _DIRECT_ROUTE = RouteThresholds(
     math_symbols=10**6,
     tier2_min_chars=10**9,
 )
-REPLAY_KEYS = frozenset({"model", "max_model_len", "turns", "content_encoding", "expect", "xfail"})
+REPLAY_KEYS = frozenset({"model", "turns", "content_encoding", "expect", "xfail"})
 EXPECT_KEYS = frozenset(
     {
         "status",
@@ -57,10 +56,8 @@ EXPECT_KEYS = frozenset(
         "output_types",
         "output_contains",
         "output_items",
-        "error_code",
         "min_output_tokens",
         "response_omits",
-        "backend_calls",
         "prompt_contains",
         "backend_tools_include",
         "backend_tools_exclude",
@@ -113,8 +110,6 @@ def _part(spec: Mapping[str, Any]) -> Part:
     if "tool_call" in spec:
         call = spec["tool_call"]
         return ToolCall(call["name"], json.dumps(call.get("arguments", {})))
-    if "reasoning" in spec:
-        return Reasoning(spec["reasoning"], typed=spec.get("typed", False))
     raise ValueError(f"unknown turn part {sorted(spec)}")
 
 
@@ -173,8 +168,6 @@ def _final_response(response, *, stream: bool, expect: Mapping[str, Any]) -> dic
 
 def _assert_backend(backend: ScenarioBackend, expect: Mapping[str, Any]) -> None:
     calls = backend.calls
-    if "backend_calls" in expect:
-        assert len(calls) == expect["backend_calls"]
     prompts = "\n".join(call.prompt for call in calls)
     for text in expect.get("prompt_contains", ()):
         assert text in prompts, text
@@ -190,10 +183,7 @@ def test_codex_fixture_replay(fixture, tmp_path):
     request, replay = fixture["request"], fixture["replay"]
     expect = replay["expect"]
     body = request["body"]
-    backend = ScenarioBackend(
-        Scenario(turns=tuple(_turn(turn) for turn in replay["turns"])),
-        max_model_len=replay.get("max_model_len"),
-    )
+    backend = ScenarioBackend(Scenario(turns=tuple(_turn(turn) for turn in replay["turns"])))
     content = json.dumps(body).encode()
     headers = dict(request["headers"])
     if replay.get("content_encoding") == "zstd":
@@ -226,8 +216,6 @@ def test_codex_fixture_replay(fixture, tmp_path):
     for item in output:
         if item["type"] == "function_call":  # Codex pairs the tool output by call_id.
             assert item["call_id"], item
-    if "error_code" in expect:
-        assert final["error"]["code"] == expect["error_code"]
     usage = final.get("usage")
     if usage is not None:  # Codex sizes its context window from these counts.
         assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
