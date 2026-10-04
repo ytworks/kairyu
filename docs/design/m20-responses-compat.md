@@ -1,8 +1,8 @@
 # M20 Design: OpenAI Responses API Full Compatibility — Proposed
 
-Status: **Proposed** (2026-10-05). WP-00 and WP-03 implemented (D3/D7/D9 interim
-parts); WP-01 (this record and the schema gate, D1) in progress. Each D-ID moves
-to Implemented when its last WP lands; WP-53 closes the milestone.
+Status: **Proposed** (2026-10-05). WP-00, 02, 02b and 03 implemented (parts of
+D1, D3/D7/D9); WP-01 (this record and the schema gate, D1) in progress. Each D-ID
+moves to Implemented when its last WP lands; WP-53 closes the milestone.
 Milestone: M20 (roadmap Track P, P-C2 reopened; goal G6)
 Date: 2026-10-05
 Depends on: m11 D4 (superseded progressively, §10), m7 D5, m9 D1–D6,
@@ -158,10 +158,10 @@ Responses suite and real-client gates.
 Each D-ID is Proposed until its last WP lands; partial implementation is noted.
 
 **D1 — Reference contract and conformance infrastructure** (WP-01, 02, 02b,
-05, 08a, 13, 14, 53; *WP-01 in progress; WP-02 implemented*). The §3 pins
-are the contract. WP-01 vendors the OpenAPI closure and gates every test: an
-ASGI recorder wraps the
-app of every in-process test transport, `ContractValidator` (Draft 2020-12)
+05, 08a, 13, 14, 53; *WP-01 in progress; WP-02 and 02b implemented*). The §3
+pins are the contract. WP-01 vendors the OpenAPI closure and gates every test:
+an ASGI recorder wraps the app of every in-process test transport,
+`ContractValidator` (Draft 2020-12)
 validates each `/v1/responses*` and `/v1/conversations*` body, each SSE event by
 its `type` (unknown types fail) and each error body against `ErrorResponse`,
 and an unmapped route under those prefixes fails. `tests/contracts/divergences.toml`
@@ -178,13 +178,13 @@ nightly matrix with a 7-day fixture refresh procedure (05), the strict v3.24
 SDK harness (13), Open Responses CI (14) and client smokes (53).
 *2026-10-05, WP-02:* `tests/fixtures/codex/rust-v<ver>/` holds one fixture per
 Codex wire contract (request, scripted turns, expected outcome, gap IDs,
-provenance), recorded via `scripts/codex_gate/record_proxy.py` (no credentials;
-volatile values normalized) or derived from codex-rs at the tag, and replayed by
-`test_codex_fixture_replay` on engine or AUTO apps; a later WP's behavior is
-`xfail(strict=True)` naming its gap and WP. `extension_inventory.py` writes each
-tag's `extensions.json` (serde types vs the closure), the list WP-08a accepts;
-0.147/0.153.4 cover only §7 wire differences. **Refresh:** within 7 days of a
-new Codex stable, re-record (`promote` keeps the replay) and regenerate it.
+provenance), recorded via `scripts/codex_gate/record_proxy.py` or derived from a
+recording by data edits cited from codex-rs, and replayed by
+`test_codex_fixture_replay`; a later WP's behavior is `xfail(strict=True)`.
+`extension_inventory.py` writes each tag's `extensions.json`, the list WP-08a
+accepts; 0.147/0.153.4 cover only §7 wire differences. **Refresh** (7 days after
+a Codex stable): re-record, `promote` (keeps the replay, re-applies derived
+edits), regenerate the inventory; multi-turn shapes wait for WP-05's launcher.
 
 **D2 — Package architecture and single pipeline** (WP-06, 12a, 12b, 17a, 18).
 `responses_service.py` becomes `kairyu/entrypoints/server/responses/` (routes,
@@ -384,7 +384,7 @@ Chat, Messages and Responses wire captures identical at base and head.
 | 0 | 00 | S docs | PROGRESS archiving (Current Status ≤80 lines) | – | Done |
 | 0 | 03 | S A | Codex P0 hotfix: no 1024/4096 caps, `stream_util`, data heartbeats on every path, `web_search` accept-and-drop, tenant-budget warning | 00 | Done |
 | 0 | 01 | S/M D | Schema gate (vendored closure, `ContractValidator`, ASGI recorder + wire capture, `divergences.toml`, strict SDK on 2.44); this record | – | In progress |
-| 0 | 02b | M D | `tests/support/scenario_backend.py`, `fake_vllm_upstream.py` | – | Planned |
+| 0 | 02b | M D | `tests/support/scenario_backend.py`, `fake_vllm_upstream.py` | – | Done |
 | 0 | 02 | M D | Codex fixture corpus, extension inventory, one replay test | 01, 02b | Done |
 | 0 | 04 | M B | Overflow classification (L1 typed error, upstream classifier, L3 classifier with placement, AUTO in-band) | – | Planned |
 | 0 | 05 | M D | Codex catalog generator, nightly matrix + `--live`, provider docs | 02, 03, 04 | Planned |

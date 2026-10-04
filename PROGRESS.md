@@ -50,7 +50,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 | M13 Attention backends | Complete; FA3/FA4 added, `auto` stays FlashInfer (measured faster on SM120) |
 | M14 Quant compute | GPU-validated: FP8/INT8/AWQ/GPTQ/NVFP4 production-dispatch, fail-closed |
 | M15–M18 MoE/MLA, distributed, graphs/drafts, KV transport | Complete |
-| M20 Responses compatibility | In progress (WP-00/03 done; WP-01 gate) |
+| M20 Responses compatibility | In progress (WP-00/02/02b/03 done; WP-01 gate) |
 
 ### Formal gates
 
