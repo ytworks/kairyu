@@ -24,6 +24,7 @@ from kairyu.deploy.registry import (
     PoolReconciler,
     openai_replica_factory,
 )
+from kairyu.deploy.responses_validation import log_responses_preflight_warnings
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.dsl.spec import OrchestratorSpec
@@ -44,6 +45,7 @@ from kairyu.engine.tokenizer import (
 )
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.responses.sealing import SealingKeyRing
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.systemone_service import SystemOneModel
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
@@ -482,22 +484,17 @@ def _resolve_kubernetes_namespace(configured: str | None) -> str:
     return namespace
 
 
-def _preflight_server(
-    spec: DeploymentSpec,
-) -> tuple[
-    ServerSettings,
-    TenantConfig | None,
-    frozenset[str],
-    frozenset[str],
-    bytes,
+def _preflight_server(spec: DeploymentSpec) -> tuple[
+    ServerSettings, TenantConfig | None, frozenset[str], frozenset[str], SealingKeyRing
 ]:
     settings = spec.server.to_server_settings()
     api_keys = settings.resolve_api_keys()
     admin_keys = settings.resolve_admin_keys()
-    responses_compaction_key = settings.resolve_responses_compaction_key()
+    log_responses_preflight_warnings(spec)
+    sealing_keys = settings.resolve_responses_sealing_keys()
     section = spec.tenants
     if section is None:
-        return settings, None, api_keys, admin_keys, responses_compaction_key
+        return settings, None, api_keys, admin_keys, sealing_keys
     tenant_config = TenantConfig.from_mapping(
         key_tenants=section.key_tenants,
         limits={
@@ -515,7 +512,7 @@ def _preflight_server(
         default_tenant=section.default_tenant,
         resolved_api_keys=api_keys,
     )
-    return settings, tenant_config, api_keys, admin_keys, responses_compaction_key
+    return settings, tenant_config, api_keys, admin_keys, sealing_keys
 
 
 def build_app_from_spec(
@@ -608,7 +605,7 @@ def build_app_from_spec(
         tenant_config,
         api_keys,
         admin_keys,
-        responses_compaction_key,
+        responses_sealing_keys,
     ) = _preflight_server(spec)
     batch_postgres_dsn: str | None = None
     if spec.batch is not None and spec.batch.store == "postgres":
@@ -967,7 +964,7 @@ def build_app_from_spec(
         systemone_models=served_systemone,
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
-        resolved_responses_compaction_key=responses_compaction_key,
+        resolved_responses_sealing_keys=responses_sealing_keys,
         price_sheet=spec.pricing,
         legacy_chat_models=served_legacy_chat_models,
         orchestration_chat_models=set(served_orchestrators),

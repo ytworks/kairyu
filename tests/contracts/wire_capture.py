@@ -102,7 +102,7 @@ _VOLATILE_VALUES = (
     ),
     (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"), "<time>"),
     (re.compile(r"\[\d{2}:\d{2}:\d{2}\]"), "[<clock>]"),
-    (re.compile(r"\bkcp1\.[A-Za-z0-9_\-=.]+"), "<sealed>"),
+    (re.compile(r"\bk(?:cp1|st2)\.[A-Za-z0-9_\-=.]+"), "<sealed>"),
     (re.compile(r'((?:duration|latency|elapsed)_(?:ns|ms|s)"?\s*[=:]\s*)[0-9.]+'), r"\1<dur>"),
 )
 

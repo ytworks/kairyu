@@ -135,6 +135,7 @@ from kairyu.entrypoints.server.protocol import (
 )
 from kairyu.entrypoints.server.request_body import reuse_prevalidated_model
 from kairyu.entrypoints.server.responses.framework_errors import renders_default_validation
+from kairyu.entrypoints.server.responses.sealing import SealingKeyRing
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.slo import AdmissionController, AdmissionLease
 from kairyu.entrypoints.server.sse_encode import (
@@ -1866,7 +1867,7 @@ def create_app(
     systemone_models: Mapping[str, SystemOneModel] | None = None,
     resolved_api_keys: frozenset[str] | None = None,
     resolved_admin_keys: frozenset[str] | None = None,
-    resolved_responses_compaction_key: bytes | None = None,
+    resolved_responses_sealing_keys: SealingKeyRing | None = None,
     price_sheet: PriceSheet | None = None,
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestration_chat_models: AbstractSet[str] | None = None,
@@ -1975,11 +1976,9 @@ def create_app(
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
     )
-    responses_compaction_key = (
-        settings.resolve_responses_compaction_key()
-        if resolved_responses_compaction_key is None
-        else resolved_responses_compaction_key
-    )
+    responses_sealing_keys = resolved_responses_sealing_keys
+    if responses_sealing_keys is None:
+        responses_sealing_keys = settings.resolve_responses_sealing_keys()
     add_health_routes(
         app,
         health_engines,
@@ -2006,7 +2005,7 @@ def create_app(
         legacy_chat_models=legacy_chat_models,
         orchestrated_models=set(auto_models),
         chat_dispatch=_responses_chat_dispatch,
-        responses_compaction_key=responses_compaction_key,
+        responses_sealing_keys=responses_sealing_keys,
     )
     if served_systemone:
         add_systemone_route(app, served_systemone)

@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import hashlib
 import json
+import os
+import time
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi.testclient import TestClient
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server.responses.compaction import CompactionCodec
+from kairyu.entrypoints.server.responses.sealing import (
+    SealingConfig,
+    SealingKey,
+    SealingKeyRing,
+)
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig
 from kairyu.outputs import CompletionOutput
@@ -67,8 +78,8 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
         assert items[0]["type"] == "compaction"
         token = items[0]["encrypted_content"]
         assert token
-        assert token.startswith("kcp1.")
-        encoded = token.removeprefix("kcp1.")
+        assert token.startswith("kst2.")
+        encoded = token.removeprefix("kst2.")
         sealed = base64.urlsafe_b64decode(
             encoded + "=" * (-len(encoded) % 4)
         )
@@ -113,7 +124,7 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
         )
         tampered_payload = bytearray(sealed)
         tampered_payload[-1] ^= 1
-        tampered = "kcp1." + base64.urlsafe_b64encode(tampered_payload).rstrip(
+        tampered = "kst2." + base64.urlsafe_b64encode(tampered_payload).rstrip(
             b"="
         ).decode()
         tampered_response = http.post(
@@ -126,12 +137,8 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
                 ],
             },
         )
-    assert forged_response.status_code == 400
-    assert tampered_response.status_code == 400
-    assert "not issued by this server" in forged_response.json()["error"]["message"]
-    assert (
-        "not issued by this server" in tampered_response.json()["error"]["message"]
-    )
+    for refused in (forged_response, tampered_response):
+        _assert_refused_seal(refused, "not issued by this server")
 
     mid_position = TestClient(_app(tmp_path))
     with mid_position as http:
@@ -324,8 +331,7 @@ def test_compaction_token_is_tenant_bound(tmp_path, monkeypatch):
         )
     assert compacted.status_code == 200
     assert same_tenant.status_code == 200
-    assert cross_tenant.status_code == 400
-    assert "not issued by this server" in cross_tenant.json()["error"]["message"]
+    _assert_refused_seal(cross_tenant, "not issued by this server")
 
 
 def test_configured_compaction_secret_survives_gateway_boundary(
@@ -393,3 +399,139 @@ def test_configured_compaction_secret_rejects_short_value(tmp_path, monkeypatch)
                 usage_ledger_path=str(tmp_path / "usage.jsonl"),
             ),
         )
+
+
+def _assert_refused_seal(response, reason: str) -> None:
+    # Compaction fails closed (m20 D6): one typed 400 naming the item and
+    # the remedy a Codex user needs, whatever the reason.
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_encrypted_content"
+    assert error["param"] == "input[0].encrypted_content"
+    assert reason in error["message"]
+    assert "start a new session" in error["message"]
+
+
+def _summary_backend(summary: str = "SEALED SUMMARY") -> MockBackend:
+    return MockBackend({"compacted continuation": summary, "continue": "CONTINUED"})
+
+
+def _gateway(stack, tmp_path, backend, *, primary=None, previous=None, **limits):
+    settings = ServerSettings(
+        responses_compaction_secret_env=primary,
+        sealing=SealingConfig(previous_secrets_env=previous, **limits),
+        usage_ledger_path=str(tmp_path / f"usage-{os.urandom(4).hex()}.jsonl"),
+    )
+    app = create_legacy_app({"m": backend}, settings=settings)
+    return stack.enter_context(TestClient(app))
+
+
+def _compact(http) -> str:
+    response = http.post(
+        "/v1/responses",
+        json={
+            "model": "m",
+            "store": False,
+            "input": [
+                {"type": "message", "role": "user", "content": "history"},
+                {"type": "compaction_trigger"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["output"][0]["encrypted_content"]
+
+
+def _continue(http, token: str):
+    return http.post(
+        "/v1/responses",
+        json={
+            "model": "m",
+            "store": False,
+            "input": [
+                {"type": "compaction", "encrypted_content": token},
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+        },
+    )
+
+
+def test_sealing_key_rotation_is_two_phase(tmp_path, monkeypatch):
+    # Promoting a new secret in one step strands every token a promoted
+    # gateway issues on gateways not yet rolled (unknown key id). Phase 1
+    # deploys it accept-only everywhere; phase 2 promotes it and keeps the
+    # old secret accept-only until the old tokens are gone.
+    monkeypatch.setenv("SEAL_OLD", "old-sealing-secret-0123456789abcdef")
+    monkeypatch.setenv("SEAL_NEW", "new-sealing-secret-0123456789abcdef")
+    phase_one_backend = _summary_backend()
+    phase_two_backend = _summary_backend("NEW KEY SUMMARY")
+    with contextlib.ExitStack() as stack:
+        old_backend = _summary_backend("OLD KEY SUMMARY")
+        before = _gateway(stack, tmp_path, old_backend, primary="SEAL_OLD")
+        phase_one = _gateway(
+            stack, tmp_path, phase_one_backend, primary="SEAL_OLD", previous="SEAL_NEW"
+        )
+        phase_two = _gateway(
+            stack, tmp_path, phase_two_backend, primary="SEAL_NEW", previous="SEAL_OLD"
+        )
+        after = _gateway(stack, tmp_path, _summary_backend(), primary="SEAL_NEW")
+        old_token = _compact(before)
+        new_token = _compact(phase_two)
+
+        assert _continue(phase_one, new_token).status_code == 200
+        assert "NEW KEY SUMMARY" in phase_one_backend.prompts_seen[-1]
+        assert _continue(phase_two, old_token).status_code == 200
+        assert "OLD KEY SUMMARY" in phase_two_backend.prompts_seen[-1]
+        assert _continue(after, new_token).status_code == 200
+        _assert_refused_seal(_continue(before, new_token), "no longer accepts")
+        _assert_refused_seal(_continue(after, old_token), "no longer accepts")
+
+
+def test_previous_release_kcp1_token_still_restores(tmp_path, monkeypatch):
+    # Sessions compacted before the kst2 release replay their kcp1 token
+    # after the upgrade; the same secret must still open it.
+    secret = b"legacy-sealing-secret-0123456789abcdef"
+    monkeypatch.setenv("SEAL_LEGACY", secret.decode())
+    key = hashlib.sha256(b"kairyu.responses.compaction.key.v1\0" + secret).digest()
+    nonce = os.urandom(12)
+    sealed = AESGCM(key).encrypt(
+        nonce, b"LEGACY SUMMARY", b"kairyu.responses.compaction.v1\0default"
+    )
+    token = "kcp1." + base64.urlsafe_b64encode(nonce + sealed).rstrip(b"=").decode()
+    tampered = token[:-4] + ("AAAA" if token[-4:] != "AAAA" else "BBBB")
+    backend = _summary_backend()
+    with contextlib.ExitStack() as stack:
+        http = _gateway(stack, tmp_path, backend, primary="SEAL_LEGACY")
+        continued = _continue(http, token)
+        refused = _continue(http, tampered)
+    assert continued.status_code == 200
+    assert "LEGACY SUMMARY" in backend.prompts_seen[-1]
+    _assert_refused_seal(refused, "not issued by this server")
+
+
+def test_oversized_sealed_item_is_refused_before_decoding(tmp_path):
+    # The cap bounds the work a client can force: an oversized token is
+    # refused for its size before base64 or AES-GCM ever runs on it.
+    with contextlib.ExitStack() as stack:
+        http = _gateway(stack, tmp_path, _summary_backend(), sealed_item_max_bytes=65536)
+        oversized = _continue(http, "kst2." + "!" * 65536)
+    _assert_refused_seal(oversized, "exceeds the 65536-byte")
+
+
+def test_sealed_item_max_age_refuses_expired_tokens(tmp_path, monkeypatch):
+    secret = "aging-sealing-secret-0123456789abcdef"
+    monkeypatch.setenv("SEAL_AGING", secret)
+    hour_ago = SealingKeyRing(
+        SealingKey.from_secret(secret.encode()), clock=lambda: time.time() - 3600
+    )
+    stale_token = CompactionCodec(hour_ago).encode("STALE SUMMARY", owner="default")
+    backend = _summary_backend("FRESH SUMMARY")
+    with contextlib.ExitStack() as stack:
+        http = _gateway(
+            stack, tmp_path, backend, primary="SEAL_AGING", sealed_max_age_s=600
+        )
+        fresh = _continue(http, _compact(http))
+        stale = _continue(http, stale_token)
+    assert fresh.status_code == 200
+    assert "FRESH SUMMARY" in backend.prompts_seen[-1]
+    _assert_refused_seal(stale, "expired")

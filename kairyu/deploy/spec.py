@@ -25,6 +25,10 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.resolver import BaseResolver
 
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
+from kairyu.entrypoints.server.responses.sealing import (
+    SealingConfig,
+    check_sealing_sources,
+)
 from kairyu.entrypoints.server.settings import (
     DEFAULT_MAX_DECOMPRESSED_BYTES,
     CorsOrigins,
@@ -169,7 +173,8 @@ class ServerSection(BaseModel):
     The YAML surface deliberately owns its fields instead of inheriting the
     runtime ``ServerSettings`` model. ``to_server_settings`` is the one
     explicit translation boundary, so runtime-only additions cannot silently
-    change accepted deployment artifacts.
+    change accepted deployment artifacts. The exception is ``sealing``: one
+    frozen, ``extra="forbid"`` section shared with the runtime (m20 C23).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -186,9 +191,13 @@ class ServerSection(BaseModel):
     responses_compaction_secret_env: str | None = Field(
         default=None,
         description=(
-            "Env var holding a secret used to encrypt Responses compaction tokens; "
-            "None uses a process-local ephemeral key."
+            "Env var holding the secret that seals every Kairyu-issued Responses "
+            "item (m20 D6); unset warns unless sealing.ephemeral is true."
         ),
+    )
+    sealing: SealingConfig = Field(
+        default_factory=SealingConfig,
+        description="Sealed-item key ring sources and limits (m20 D6).",
     )
     max_concurrency: int | None = Field(
         default=None,
@@ -267,12 +276,18 @@ class ServerSection(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _sealing_sources_agree(self) -> ServerSection:
+        check_sealing_sources(self.responses_compaction_secret_env, self.sealing)
+        return self
+
     def to_server_settings(self) -> ServerSettings:
         """Translate the deployment vocabulary to runtime settings explicitly."""
 
         return ServerSettings(
             api_keys_env=self.api_keys_env,
             responses_compaction_secret_env=self.responses_compaction_secret_env,
+            sealing=self.sealing,
             max_concurrency=self.max_concurrency,
             admission_wait_timeout_s=self.admission_wait_timeout_s,
             ttft_slo_s=self.ttft_slo_s,

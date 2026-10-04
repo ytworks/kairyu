@@ -19,6 +19,7 @@ import yaml
 from pydantic import ValidationError
 
 from kairyu.deploy import builder as deployment_builder
+from kairyu.deploy.responses_validation import responses_preflight_warnings
 from kairyu.deploy.spec import (
     DeploymentSpec,
     _DuplicateKeyError,
@@ -80,6 +81,8 @@ class ValidationReport:
     config: str
     findings: tuple[ValidationFinding, ...]
     checks: Mapping[str, CheckStatus]
+    # Advisory only: a report with warnings and no findings is still valid.
+    warnings: tuple[ValidationFinding, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -90,12 +93,8 @@ class ValidationReport:
 
         state = "VALID" if self.valid else "INVALID"
         lines = [f"{state} {_display_text(self.config)}"]
-        for finding in self.findings:
-            lines.append(
-                f"ERROR [{finding.check}] {_display_text(finding.artifact)} "
-                f"{_display_text(finding.field)} ({finding.code}): "
-                f"{_display_text(finding.message)}"
-            )
+        lines.extend(_render_finding("ERROR", finding) for finding in self.findings)
+        lines.extend(_render_finding("WARNING", warning) for warning in self.warnings)
         lines.append(
             "checks: "
             + " ".join(
@@ -104,6 +103,14 @@ class ValidationReport:
             )
         )
         return "\n".join(lines)
+
+
+def _render_finding(level: str, finding: ValidationFinding) -> str:
+    return (
+        f"{level} [{finding.check}] {_display_text(finding.artifact)} "
+        f"{_display_text(finding.field)} ({finding.code}): "
+        f"{_display_text(finding.message)}"
+    )
 
 
 def _display_text(value: object) -> str:
@@ -1175,12 +1182,7 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 message="deployment config does not exist",
             )
         )
-        return _report(
-            config_path,
-            findings,
-            schema_ran=schema_ran,
-            filesystem_ran=filesystem_ran,
-        )
+        return _report(config_path, findings, schema_ran=schema_ran, filesystem_ran=filesystem_ran)
     except (OSError, UnicodeError, ValueError):
         findings.append(
             _finding(
@@ -1191,23 +1193,13 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 message="deployment config is not readable as UTF-8",
             )
         )
-        return _report(
-            config_path,
-            findings,
-            schema_ran=schema_ran,
-            filesystem_ran=filesystem_ran,
-        )
+        return _report(config_path, findings, schema_ran=schema_ran, filesystem_ran=filesystem_ran)
 
     try:
         raw = yaml.load(text, Loader=_UniqueKeySafeLoader)
     except (ValueError, yaml.YAMLError, RecursionError) as error:
         findings.append(_yaml_finding(error, config_path))
-        return _report(
-            config_path,
-            findings,
-            schema_ran=True,
-            filesystem_ran=filesystem_ran,
-        )
+        return _report(config_path, findings, schema_ran=True, filesystem_ran=filesystem_ran)
     schema_ran = True
     if not isinstance(raw, dict):
         findings.append(
@@ -1219,12 +1211,7 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 message="deployment spec YAML must be a mapping at the top level",
             )
         )
-        return _report(
-            config_path,
-            findings,
-            schema_ran=schema_ran,
-            filesystem_ran=filesystem_ran,
-        )
+        return _report(config_path, findings, schema_ran=schema_ran, filesystem_ran=filesystem_ran)
 
     spec: DeploymentSpec | None = None
     try:
@@ -1281,11 +1268,22 @@ def validate_deployment(config: str | Path) -> ValidationReport:
     findings.extend(template_findings)
     if spec is not None and not template_findings:
         findings.extend(_validate_chat_policy(spec, config_path=config_path))
+    warnings = (
+        _finding(
+            artifact=config_path,
+            field=warning.field,
+            check="schema",
+            code=warning.code,
+            message=warning.message,
+        )
+        for warning in (responses_preflight_warnings(spec) if spec is not None else ())
+    )
     return _report(
         config_path,
         findings,
         schema_ran=schema_ran,
         filesystem_ran=filesystem_ran,
+        warnings=warnings,
     )
 
 
@@ -1295,6 +1293,7 @@ def _report(
     *,
     schema_ran: bool,
     filesystem_ran: bool,
+    warnings: Iterable[ValidationFinding] = (),
 ) -> ValidationReport:
     unique = tuple(sorted(set(findings)))
     schema_failed = any(finding.check == "schema" for finding in unique)
@@ -1315,4 +1314,5 @@ def _report(
         config=_display_path(config_path),
         findings=unique,
         checks=checks,
+        warnings=tuple(sorted(set(warnings))),
     )

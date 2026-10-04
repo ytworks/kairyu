@@ -12,6 +12,7 @@ from kairyu.deploy.spec import (
     _UniqueKeySafeLoader,
     load_deployment_spec,
 )
+from kairyu.entrypoints.server.responses.sealing import SealingConfig
 from kairyu.entrypoints.server.settings import ServerSettings
 
 GATEWAY_YAML = """
@@ -287,32 +288,21 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
         },
         "api_keys_env": nullable_string,
         "responses_compaction_secret_env": nullable_string,
+        "sealing": {"$ref": "#/$defs/SealingConfig"},
         "max_concurrency": {
-            "anyOf": [
-                {"minimum": 1, "type": "integer"},
-                {"type": "null"},
-            ],
+            "anyOf": [{"minimum": 1, "type": "integer"}, {"type": "null"}],
             "default": None,
         },
         "admission_wait_timeout_s": {
-            "anyOf": [
-                {"exclusiveMinimum": 0, "type": "number"},
-                {"type": "null"},
-            ],
+            "anyOf": [{"exclusiveMinimum": 0, "type": "number"}, {"type": "null"}],
             "default": None,
         },
         "ttft_slo_s": {
-            "anyOf": [
-                {"exclusiveMinimum": 0, "type": "number"},
-                {"type": "null"},
-            ],
+            "anyOf": [{"exclusiveMinimum": 0, "type": "number"}, {"type": "null"}],
             "default": None,
         },
         "max_chat_body_bytes": {
-            "anyOf": [
-                {"minimum": 1, "type": "integer"},
-                {"type": "null"},
-            ],
+            "anyOf": [{"minimum": 1, "type": "integer"}, {"type": "null"}],
             "default": None,
         },
         "max_decompressed_bytes": {"default": 64 << 20, "minimum": 1, "type": "integer"},
@@ -334,6 +324,10 @@ server:
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
   responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
+  sealing:
+    previous_secrets_env: KAIRYU_RESPONSES_PREVIOUS_SECRETS
+    sealed_max_age_s: 86400
+    sealed_item_max_bytes: 1048576
   max_concurrency: 64
   admission_wait_timeout_s: 3.5
   ttft_slo_s: 2.0
@@ -356,6 +350,11 @@ engines:
     assert spec.server.to_server_settings() == ServerSettings(
         api_keys_env="KAIRYU_API_KEYS",
         responses_compaction_secret_env="KAIRYU_RESPONSES_COMPACTION_SECRET",
+        sealing=SealingConfig(
+            previous_secrets_env="KAIRYU_RESPONSES_PREVIOUS_SECRETS",
+            sealed_max_age_s=86400,
+            sealed_item_max_bytes=1_048_576,
+        ),
         max_concurrency=64,
         admission_wait_timeout_s=3.5,
         ttft_slo_s=2.0,

@@ -6,13 +6,18 @@ metrics on) so existing callers of ``create_app(engines)`` are unchanged.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
-import secrets
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+from kairyu.entrypoints.server.responses.sealing import (
+    MIN_SECRET_BYTES,
+    SealingConfig,
+    SealingKeyRing,
+    check_sealing_sources,
+)
 
 # The size cap, compressed and decoded, of a Content-Encoding request body (m20 D21, WP-41).
 DEFAULT_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
@@ -49,9 +54,14 @@ class ServerSettings(BaseModel):
     responses_compaction_secret_env: str | None = Field(
         default=None,
         description=(
-            "Env var holding a secret used to encrypt Responses compaction tokens; "
-            "None uses a process-local ephemeral key."
+            "Env var holding the secret that seals every Kairyu-issued Responses "
+            "item (compaction tokens, m20 D6); None uses a process-local "
+            "ephemeral key."
         ),
+    )
+    sealing: SealingConfig = Field(
+        default_factory=SealingConfig,
+        description="Sealed-item key ring sources and limits (m20 D6).",
     )
     max_concurrency: int | None = Field(
         default=None,
@@ -135,21 +145,25 @@ class ServerSettings(BaseModel):
             )
         return self
 
-    def resolve_responses_compaction_key(self) -> bytes:
-        """Resolve a 256-bit AEAD key without exposing the configured secret."""
+    @model_validator(mode="after")
+    def _sealing_sources_agree(self) -> ServerSettings:
+        check_sealing_sources(self.responses_compaction_secret_env, self.sealing)
+        return self
+
+    def resolve_responses_sealing_keys(self) -> SealingKeyRing:
+        """Resolve the sealed-item key ring without exposing configured secrets.
+
+        Secrets are used byte-exact. The previous-secrets variable may be unset
+        or empty (no accept-only keys); its entries are comma-separated.
+        """
         env_var = self.responses_compaction_secret_env
-        if env_var is None:
-            return secrets.token_bytes(32)
-        raw = os.environ.get(env_var, "")
-        secret = raw.encode("utf-8")
-        if len(secret) < 32:
-            raise ValueError(
-                f"Responses compaction secret env var {env_var!r} must contain "
-                "at least 32 UTF-8 bytes"
-            )
-        return hashlib.sha256(
-            b"kairyu.responses.compaction.key.v1\0" + secret
-        ).digest()
+        primary = None if env_var is None else _sealing_secret(env_var, os.environ.get(env_var))
+        previous_env = self.sealing.previous_secrets_env
+        previous_raw = os.environ.get(previous_env, "") if previous_env else ""
+        previous = tuple(
+            _sealing_secret(previous_env, entry) for entry in previous_raw.split(",") if entry
+        )
+        return SealingKeyRing.from_secrets(primary, previous, self.sealing)
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""
@@ -171,3 +185,13 @@ class ServerSettings(BaseModel):
                 "unset it to disable that key set"
             )
         return keys
+
+
+def _sealing_secret(env_var: str, raw: str | None) -> bytes:
+    secret = (raw or "").encode("utf-8")
+    if len(secret) < MIN_SECRET_BYTES:
+        raise ValueError(
+            f"Responses sealing secret env var {env_var!r} must contain at least "
+            f"{MIN_SECRET_BYTES} UTF-8 bytes per secret"
+        )
+    return secret

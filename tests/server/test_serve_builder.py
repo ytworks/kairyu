@@ -1259,7 +1259,7 @@ tenants:
     real_to_server_settings = ServerSection.to_server_settings
     real_resolve_api_keys = ServerSettings.resolve_api_keys
     real_resolve_admin_keys = ServerSettings.resolve_admin_keys
-    real_resolve_compaction_key = ServerSettings.resolve_responses_compaction_key
+    real_resolve_compaction_key = ServerSettings.resolve_responses_sealing_keys
 
     def recording_server_settings(section):
         nonlocal settings_calls
@@ -1298,7 +1298,7 @@ tenants:
     )
     monkeypatch.setattr(
         ServerSettings,
-        "resolve_responses_compaction_key",
+        "resolve_responses_sealing_keys",
         recording_resolve_compaction_key,
     )
 

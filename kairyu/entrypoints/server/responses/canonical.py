@@ -172,7 +172,11 @@ def canonical_input(
                     + ", ".join(sorted(unknown))
                 )
             # Fail-fast on foreign or cross-tenant tokens; render re-decodes it.
-            compaction_codec.decode(item.get("encrypted_content"), owner=owner)
+            compaction_codec.decode(
+                item.get("encrypted_content"),
+                owner=owner,
+                param=f"input[{index}].encrypted_content",
+            )
             items.append(
                 {
                     "type": "compaction",

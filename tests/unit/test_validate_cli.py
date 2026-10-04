@@ -6,6 +6,8 @@ import pytest
 import uvicorn
 
 from kairyu.deploy import builder as builder_module
+from kairyu.deploy.builder import build_app_from_spec
+from kairyu.deploy.spec import load_deployment_spec
 from kairyu.dsl import loader as dsl_loader
 from kairyu.engine import registry as registry_module
 from kairyu.entrypoints import cli
@@ -128,3 +130,40 @@ def test_validate_reports_invalid_root_path_without_traceback(capsys):
     assert "\0" not in captured.out
     assert r"bad\x00path.yaml" in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("server", "warned"),
+    [("{}", True), ("{sealing: {ephemeral: true}}", False)],
+    ids=["no-secret", "ephemeral-opt-in"],
+)
+def test_sealing_secret_preflight_warns_in_validate_and_at_startup(
+    tmp_path, capsys, caplog, server, warned
+):
+    # Without one sealing secret on every gateway, restarts, rolling updates
+    # and gateway hops break compacted Codex sessions (m20 D6, C22). This
+    # release warns (the next one refuses to start); an explicit ephemeral
+    # opt-in is the only way to silence it without a secret.
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"server: {server}\n"
+        "engines:\n  local: { backend: mock }\n"
+        "legacy_chat_models: [local]\n",
+        encoding="utf-8",
+    )
+
+    cli.main(["validate", str(deployment)])
+    validated = capsys.readouterr().out
+    with caplog.at_level("WARNING", logger="kairyu.deploy.responses_validation"):
+        build_app_from_spec(load_deployment_spec(deployment))
+
+    assert validated.startswith("VALID ")
+    assert ("WARNING [schema]" in validated) is warned
+    assert ("(schema.sealing_secret_missing)" in validated) is warned
+    startup = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "kairyu.deploy.responses_validation"
+    ]
+    assert len(startup) == (1 if warned else 0)
+    assert all("server.sealing.ephemeral" in message for message in startup)

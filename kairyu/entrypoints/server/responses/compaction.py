@@ -7,22 +7,18 @@ verbatim on a later turn.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import os
 import uuid
 from collections.abc import Sequence
 from types import MappingProxyType
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from kairyu.entrypoints.server.chat_service import ChatRequestError
 from kairyu.entrypoints.server.responses.errors import BufferedFailure
+from kairyu.entrypoints.server.responses.sealing import (
+    SealedItemError,
+    SealingKeyRing,
+    SealPurpose,
+)
 
-_COMPACTION_TOKEN_PREFIX = "kcp1."
-_COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
-_COMPACTION_NONCE_BYTES = 12
 _COMPACTION_INSTRUCTION_ITEM = MappingProxyType(
     {
         "type": "message",
@@ -38,52 +34,36 @@ _COMPACTION_INSTRUCTION_ITEM = MappingProxyType(
 
 
 class CompactionCodec:
-    """Tenant-bound authenticated encryption for remote compaction state."""
+    """Tenant-bound sealed compaction summaries (``kst2`` purpose compaction).
 
-    def __init__(self, key: bytes) -> None:
-        if not isinstance(key, bytes) or len(key) != 32:
-            raise ValueError("Responses compaction key must be exactly 32 bytes")
-        self._cipher = AESGCM(key)
+    Compaction fails closed (m20 D6): a token the key ring cannot open is a
+    400 ``invalid_encrypted_content``, never a silently dropped summary.
+    """
 
-    @staticmethod
-    def _associated_data(owner: str) -> bytes:
-        return _COMPACTION_AAD_PREFIX + owner.encode("utf-8")
+    def __init__(self, keys: SealingKeyRing) -> None:
+        self._keys = keys
 
     def encode(self, summary: str, *, owner: str) -> str:
-        nonce = os.urandom(_COMPACTION_NONCE_BYTES)
-        sealed = self._cipher.encrypt(
-            nonce,
-            summary.encode("utf-8"),
-            self._associated_data(owner),
-        )
-        encoded = base64.urlsafe_b64encode(nonce + sealed).rstrip(b"=")
-        return _COMPACTION_TOKEN_PREFIX + encoded.decode("ascii")
+        return self._keys.seal(SealPurpose.COMPACTION, {"summary": summary}, owner=owner)
 
-    def decode(self, token: object, *, owner: str) -> str:
-        if not isinstance(token, str) or not token:
-            raise ChatRequestError(
-                "compaction encrypted_content must be a non-empty string"
-            )
-        if not token.startswith(_COMPACTION_TOKEN_PREFIX):
-            raise ChatRequestError(
-                "compaction encrypted_content was not issued by this server"
-            )
-        encoded = token.removeprefix(_COMPACTION_TOKEN_PREFIX)
+    def decode(self, token: object, *, owner: str, param: str | None = None) -> str:
         try:
-            padded = encoded + "=" * (-len(encoded) % 4)
-            payload = base64.b64decode(padded, altchars=b"-_", validate=True)
-            if len(payload) < _COMPACTION_NONCE_BYTES + 16:
-                raise ValueError("compaction token is too short")
-            plaintext = self._cipher.decrypt(
-                payload[:_COMPACTION_NONCE_BYTES],
-                payload[_COMPACTION_NONCE_BYTES:],
-                self._associated_data(owner),
-            )
-            return plaintext.decode("utf-8")
-        except (binascii.Error, InvalidTag, UnicodeDecodeError, ValueError):
-            raise ChatRequestError(
-                "compaction encrypted_content was not issued by this server"
-            ) from None
+            item = self._keys.open(token, purpose=SealPurpose.COMPACTION, owner=owner)
+        except SealedItemError as error:
+            raise _refused(error.reason, param) from None
+        summary = item.payload.get("summary")
+        if not isinstance(summary, str):
+            raise _refused("was not issued by this server", param)
+        return summary
+
+
+def _refused(reason: str, param: str | None) -> ChatRequestError:
+    return ChatRequestError(
+        f"compaction encrypted_content {reason}, so the compacted conversation "
+        "cannot be restored; start a new session (in Codex: /new)",
+        code="invalid_encrypted_content",
+        param=param,
+    )
 
 
 def extract_compaction_trigger(items: Sequence[dict]) -> bool:

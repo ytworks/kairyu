@@ -67,6 +67,7 @@ from kairyu.entrypoints.server.sse_response import sse_response
 
 if TYPE_CHECKING:
     from kairyu.entrypoints.server.metrics import ServerMetrics
+    from kairyu.entrypoints.server.responses.sealing import SealingKeyRing
 
 _SCHEDULING_CLASSES = frozenset({"interactive", "batch"})
 
@@ -88,14 +89,14 @@ def add_responses_route(
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch: ChatDispatch | None = None,
-    compaction_key: bytes,
+    sealing_keys: SealingKeyRing,
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
     deps = ResponsesDeps(
         engines=engines,
         store=store,
-        compaction_codec=CompactionCodec(compaction_key),
+        compaction_codec=CompactionCodec(sealing_keys),
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
         orchestrated_models=orchestrated_models,

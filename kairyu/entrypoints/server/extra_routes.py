@@ -31,6 +31,7 @@ from kairyu.entrypoints.server.messages_service import (
 )
 from kairyu.entrypoints.server.metering import record_state_usage
 from kairyu.entrypoints.server.responses.routes import add_responses_route
+from kairyu.entrypoints.server.responses.sealing import SealingKeyRing
 
 __all__ = [
     "EmbeddingBackend",
@@ -72,7 +73,7 @@ def add_extra_routes(
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch=None,
-    responses_compaction_key: bytes,
+    responses_sealing_keys: SealingKeyRing,
 ) -> None:
     add_responses_route(
         app,
@@ -81,7 +82,7 @@ def add_extra_routes(
         legacy_chat_models=legacy_chat_models,
         orchestrated_models=orchestrated_models,
         chat_dispatch=chat_dispatch,
-        compaction_key=responses_compaction_key,
+        sealing_keys=responses_sealing_keys,
     )
 
     add_messages_route(
