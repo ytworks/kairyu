@@ -385,9 +385,12 @@ profile_judge:
     - profile: verified_tool
       label: VERIFIED_TOOL
       criteria: >-
-        the caller offers tools (tool_calling is true) and the reply is
-        expected to call one of them: an ongoing tool-using task, or a request
-        the assistant must act on with the offered tools
+        the caller offers tools (tool_calling is true) and the next reply
+        must call one of them because the work the user asked for is not done:
+        a first tool action, a retry after a tool error, reading or checking
+        more, or the conversation requires every reply to call a tool. Not
+        when the tool results already in the conversation give everything the
+        user asked and the reply only has to report them
     - profile: primary
       label: VERIFIED
       criteria: >-

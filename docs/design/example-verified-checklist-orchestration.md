@@ -551,6 +551,14 @@ summary covers earlier turns; the repair rewrites the reply without
 tool-call instructions; the extractors' limit returns to 32,768 tokens
 (16,384 low, 65,536 max).
 
+VERIFIED_TOOL's criteria name when a call is needed (a first tool action, a
+retry after a tool error, reading or checking more, or a conversation that
+requires a call every turn) and exclude a reply that only reports tool
+results already in the conversation (owner-approved, 2026-10-04): offline,
+tool-free conversations to VERIFIED_TOOL fell from 35 % to 5 %, requiring
+ones stayed at 95 %, the routing set's held-out miss stayed 8.3 % and 73 of
+the 83 recorded DeepSWE turns (was 65) route to VERIFIED_TOOL.
+
 The route judge picks the most probable label; the VERIFIED floor
 (`prefer`) is removed (owner decision, 2026-10-04).
 
