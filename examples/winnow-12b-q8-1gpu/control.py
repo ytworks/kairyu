@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -86,7 +89,9 @@ def _compose_env() -> dict[str, str]:
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
-            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "127.0.0.1"),
+            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
+            "PLAYGROUND_IMAGE": os.environ.get("PLAYGROUND_IMAGE", SPEC["playground"]["image"]),
+            "PLAYGROUND_PORT": os.environ.get("PLAYGROUND_PORT", str(SPEC["playground"]["port"])),
         }
     )
     if len(REPLICAS) == 1:
@@ -182,19 +187,62 @@ def _ensure_winnow_image(env: dict[str, str]) -> None:
     if image != runtime["image"]:
         raise SystemExit(f"WINNOW_IMAGE does not exist locally: {image}")
     print("winnow-server image is absent; building the pinned source revision", flush=True)
-    _run(
-        [
-            "docker",
-            "build",
-            "--build-arg",
-            f"CUDA_ARCH={runtime['cuda_arch']}",
-            "--tag",
-            image,
-            "--label",
-            f"org.opencontainers.image.revision={runtime['source_revision']}",
-            f"{runtime['source_repository']}#{runtime['source_revision']}",
-        ]
-    )
+    with tempfile.TemporaryDirectory() as scratch:
+        source = Path(scratch) / "winnow-inference"
+        _run(["git", "clone", "--quiet", runtime["source_repository"], str(source)])
+        _run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "checkout",
+                "--quiet",
+                "--detach",
+                runtime["source_revision"],
+            ]
+        )
+        _add_runtime_patches(source)
+        _run(
+            [
+                "docker",
+                "build",
+                "--build-arg",
+                f"CUDA_ARCH={runtime['cuda_arch']}",
+                "--tag",
+                image,
+                "--label",
+                f"org.opencontainers.image.revision={runtime['source_revision']}",
+                "--label",
+                "io.kairyu.winnow.extra-patches="
+                + ",".join(item["upstream_commit"] for item in runtime["extra_patches"]),
+                str(source),
+            ]
+        )
+
+
+def _add_runtime_patches(source: Path) -> None:
+    """Add upstream llama.cpp backports to Winnow's own patch lock.
+
+    Winnow's build applies every patch listed in ``runtime.lock.json`` and
+    rejects any llama.cpp file change missing from its ``source_sha256``.
+    ``f072b10`` (after b11036) makes Gemma 4 ``tool_choice: "required"``
+    force a tool call; without it llama-server ignores ``required``, which
+    the llamacpp profile uses for named tool choices.
+    """
+
+    lock_path = source / "runtime.lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    for item in SPEC["runtime"]["extra_patches"]:
+        patch = (HERE / "winnow-patches" / item["file"]).read_bytes()
+        if hashlib.sha256(patch).hexdigest() != item["sha256"]:
+            raise SystemExit(f"{item['file']} does not match example.json")
+        (source / "patches" / item["file"]).write_bytes(patch)
+        lock["patches"].append({"file": f"patches/{item['file']}", "sha256": item["sha256"]})
+        overlap = set(lock["source_sha256"]) & set(item["source_sha256"])
+        if overlap:
+            raise SystemExit(f"{item['file']} overlaps Winnow's patches: {sorted(overlap)}")
+        lock["source_sha256"].update(item["source_sha256"])
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
 def _ensure_model(env: dict[str, str]) -> None:
@@ -258,8 +306,32 @@ def _ready(url: str) -> bool:
         return False
 
 
+_NO_PUBLIC_HOST = "cannot discover an externally reachable UI host; set PUBLIC_HOST"
+
+
+def _public_ui_host() -> str:
+    configured = os.environ.get("PUBLIC_HOST", "").strip()
+    if configured:
+        if "://" in configured or "/" in configured:
+            raise SystemExit("PUBLIC_HOST must be a hostname or IPv4 address, not a URL")
+        return configured
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+            # UDP connect selects the outward-facing interface without sending data.
+            route.connect(("192.0.2.1", 9))
+            detected = str(route.getsockname()[0])
+    except OSError as error:
+        raise SystemExit(_NO_PUBLIC_HOST) from error
+    if detected == "0.0.0.0" or detected.startswith("127."):
+        raise SystemExit(_NO_PUBLIC_HOST)
+    return detected
+
+
 def up() -> None:
     env = _compose_env()
+    bind = env["CHAT_UI_BIND_ADDRESS"]
+    ui_host = _public_ui_host() if bind == "0.0.0.0" else bind
+    env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     _ensure_winnow_image(env)
     _ensure_model(env)
@@ -270,10 +342,8 @@ def up() -> None:
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1  (model {SPEC['model']['served_name']})")
     print(f"System One: {api_url}/v1/systemone  (model winnow-12b-systemone)")
-    ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])
-    if ui_host == "0.0.0.0":
-        ui_host = "127.0.0.1"
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']}")
+    print(f"Playground: http://{ui_host}:{env['PLAYGROUND_PORT']}  (System One, no authentication)")
 
 
 def main() -> None:

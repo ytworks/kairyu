@@ -35,7 +35,17 @@
     "llama_cpp_commit": "911f6cdc8ab8a530b2bee09ee61471a6f3178eeb",
     "llama_cpp_build": "b11036",
     "cuda_arch": "120",
-    "image": "local/winnow-inference:77d1458-sm120",
+    "image": "local/winnow-inference:77d1458-gemma4req-sm120",
+    "extra_patches": [
+      {
+        "file": "llama-gemma4-required-tool-grammar.patch",
+        "upstream_commit": "f072b103714dfa1eee531f80b24512faf38e3dd2",
+        "sha256": "a7b2ba688a30b5cc401351960f26ba9f33a171ab8cf1bad74a48053e91b940f4",
+        "source_sha256": {
+          "common/parsers/gemma4.cpp": "e6caf03b1291b7315244b164af497e8d93c0dfcb2425adad9ee79186f56e1866"
+        }
+      }
+    ],
     "port": 8091,
     "chat_slots": 8,
     "slot_context_tokens": 65536,
@@ -96,6 +106,10 @@
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
     "port": 3000
+  },
+  "playground": {
+    "image": "nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
+    "port": 3001
   },
   "api_port": 8001,
   "verification": {

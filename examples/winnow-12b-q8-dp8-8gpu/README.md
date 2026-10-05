@@ -1,15 +1,17 @@
 # Winnow-12B Q8_0 (GGUF, llama.cpp) x 8 replicas on 8 x RTX PRO 6000 Blackwell
 
 ```text
-Open WebUI -> Kairyu L3 (:8001) -> ReplicaPool -> winnow-server x 8 (llama.cpp, one per GPU)
-                       \-> /v1/systemone -> least busy of the same 8 servers
+Open WebUI (:3000) -> Kairyu L3 (:8001) -> ReplicaPool -> winnow-server x 8 (llama.cpp, one per GPU)
+Playground (:3001) -^       \-> /v1/systemone -> least busy of the same 8 servers
 ```
 
 Eight identical `winnow-server` replicas serve one public model, `winnow-12b`.
 Each replica has the settings of [`winnow-12b-q8-1gpu`](../winnow-12b-q8-1gpu/README.md):
 
 - the same pinned GGUF files, shared on disk;
-- llama.cpp b11036 with Winnow's patches;
+- llama.cpp b11036 with Winnow's patches, plus llama.cpp's Gemma 4
+  `tool_choice: "required"` fix `f072b10` (`winnow-patches/`, image
+  `local/winnow-inference:77d1458-gemma4req-sm120`);
 - 8 chat slots of 65,536 tokens;
 - Gemma 4's recommended sampling as server defaults.
 
@@ -40,7 +42,12 @@ The command:
 1. validates all eight GPUs and pins each replica to its GPU's NUMA CPUs;
 2. builds the pinned `winnow-server` image if absent;
 3. downloads and verifies the GGUF files once;
-4. waits for all eight replicas, Kairyu and Open WebUI.
+4. waits for all eight replicas, Kairyu, Open WebUI and the playground.
+
+The Chat UI (`:3000`) and the System One playground (`:3001`, no
+authentication) listen on all interfaces. `run.sh` prints their public URLs.
+Set `CHAT_UI_BIND_ADDRESS=127.0.0.1` to keep both host-local. The playground
+is that of the 1-GPU example.
 
 Replica `winnow-N` is published host-locally on port `8091+N`, used only by
 `verify.sh attest` and `contract`.

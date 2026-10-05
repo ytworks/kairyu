@@ -3,8 +3,8 @@
 This example starts the complete local stack with one command:
 
 ```text
-Open WebUI -> Kairyu L3 (:8001) -> winnow-server L1 (llama.cpp, one selected GPU)
-                       \-> /v1/systemone (typed decisions, same loaded model)
+Open WebUI (:3000) -> Kairyu L3 (:8001) -> winnow-server L1 (llama.cpp, one selected GPU)
+Playground (:3001) -^       \-> /v1/systemone (typed decisions, same loaded model)
 ```
 
 L1 serves a GGUF checkpoint through llama.cpp instead of vLLM. Kairyu attaches
@@ -26,10 +26,16 @@ decisions that also chats and reads images.
 - Winnow's patches add `/v1/systemone`, Jev's typed-decision request shape.
 - The chat API stays llama-server's own.
 
-The example builds that image for SM120 (`CUDA_ARCH=120`).
+The example adds one more patch, llama.cpp's own fix
+[`f072b10`](https://github.com/ggml-org/llama.cpp/commit/f072b103714dfa1eee531f80b24512faf38e3dd2)
+(first in b11058, 4 lines, `winnow-patches/`). Without it, Gemma 4 ignores
+`tool_choice: "required"`, so a named tool choice gets text instead of a call.
+`run.sh` registers the patch in Winnow's `runtime.lock.json`, so Winnow's build still checks
+every changed llama.cpp file. It then builds the image for SM120 (`CUDA_ARCH=120`)
+as `local/winnow-inference:77d1458-gemma4req-sm120`.
 
-**L1 settings.** The committed values are provisional until the first GPU run
-records [MEASUREMENTS.md](MEASUREMENTS.md):
+**L1 settings.** These values were verified on the GPU on 2026-10-05
+([MEASUREMENTS.md](MEASUREMENTS.md)). The card peaks at 24.2 GB of 96 GB.
 
 - 8 chat slots of 65,536 tokens each (`--context 524288 --chat-parallel 8`);
   an explicit slot count gives every slot its own KV cache.
@@ -51,7 +57,8 @@ The command:
 
 1. validates the selected GPU (`GPU_ID=0` by default) and pins it to its local
    NUMA CPUs;
-2. builds `winnow-server` at the pinned revision if the image is absent;
+2. builds `winnow-server` at the pinned revision, with the patch above, if the
+   image is absent;
 3. downloads the GGUF files with Winnow's own resumable downloader, which
    checks size and SHA-256, and confirms they match `example.json`;
 4. builds Kairyu and waits for all three services.
@@ -61,8 +68,14 @@ It then prints:
 ```text
 OpenAI API: http://127.0.0.1:8001/v1  (model winnow-12b)
 System One: http://127.0.0.1:8001/v1/systemone  (model winnow-12b-systemone)
-Chat UI:    http://127.0.0.1:3000
+Chat UI:    http://<public host>:3000
+Playground: http://<public host>:3001  (System One, no authentication)
 ```
+
+The Chat UI and the playground listen on all interfaces. The printed host is
+the outward-facing address, or `PUBLIC_HOST` if set. Set
+`CHAT_UI_BIND_ADDRESS=127.0.0.1` to keep both host-local. The API stays
+host-local.
 
 The GGUF files (12.85 GB) live once below
 `/mnt/nvme/kairyu/model-volumes/winnow-12b-q8/models/` and are shared with the
@@ -84,6 +97,20 @@ DP8 example. Open WebUI state is per environment. Lifecycle commands are
 - **System One.** `/v1/systemone` forwards Jev-shaped decision requests to
   Winnow. Kairyu queues bursts and answers 429 before Winnow's own 128-request
   queue fills. Decision reads never touch the chat engine's health.
+
+## Playground
+
+`http://<public host>:3001` is a Jev-style System One playground
+(`playground/index.html`, served by nginx with Kairyu's API on the same origin).
+
+- Enter a state, optional images (up to 4) and yes/no, choice or score questions.
+- The left column shows each answer's probability distribution from
+  `/v1/systemone`.
+- The right column asks `winnow-12b` the same questions as a chat.
+- Images go to Winnow as `winnow.images`. The "Winnow extensions" panel sets
+  `winnow.temperature` and `winnow.diagnostics` (logits, cache and timing).
+
+The playground has no authentication.
 
 ## Verification
 

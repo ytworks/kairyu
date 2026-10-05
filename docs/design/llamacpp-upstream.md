@@ -1,7 +1,8 @@
 # llama.cpp Upstream (GGUF models as Kairyu L1 workers)
 
 Status: **Accepted 2026-10-04 (PR #620)**. CPU contract gate passes against
-stock llama.cpp `b11391` (`46847e6`). Winnow-12B example GPU gates are pending.
+stock llama.cpp `b11391` (`46847e6`). Winnow-12B example GPU gates pass on
+RTX PRO 6000 (1 GPU and DP8, 2026-10-05; `MEASUREMENTS.md` of each example).
 Plan: `docs/superpowers/plans/2026-10-04-llamacpp-gguf-l1-upstream.md`.
 Gate: `l1.correctness.llamacpp_upstream_contract`
 (`verification/l1/correctness/llamacpp_upstream_contract.py`).
@@ -85,7 +86,7 @@ sends `temperature=0.0` with nothing omitted.
 |---|---|---|
 | `repetition_penalty` | `repeat_penalty` (capability `repetition_penalty_wire_name`) plus `repeat_last_n: max_model_len` | Only `repeat_penalty` is parsed. Its window defaults to the last 64 tokens; Kairyu's covers the whole prompt and output. The window is allocated up front, so it is bounded by the per-slot context, which `upstream: llamacpp` therefore requires. |
 | `top_k = -1` | `top_k: 0` | llama.cpp disables top-k with 0. |
-| `tool_choice` naming function X | `tools: [X]`, `tool_choice: "required"` | Only string `tool_choice` values parse; an object silently becomes `"auto"`. |
+| `tool_choice` naming function X | `tools: [X]`, `tool_choice: "required"` | Only string `tool_choice` values parse; an object silently becomes `"auto"`. For Gemma 4, `required` forces a call only from llama.cpp `f072b10` (`b11058`); an older server answers in text and Kairyu returns 502 `tool_choice_not_satisfied` (amended 2026-10-05, GPU run). |
 | `logprobs = 0` | `top_logprobs: 1`; returned alternatives trimmed to 0 | `top_logprobs: 0` sets `n_probs = 0`, which disables probabilities. |
 | `assistant_prefill` | trailing assistant message, `continue_final_message: true`, `add_generation_prompt: false` (capability `assistant_prefill`, shared with `vllm`) | Native llama.cpp continuation. |
 | `/v1/messages/count_tokens` | declined (HTTP 404, unsupported) | The route passes a rendered string. llama.cpp `/tokenize` counts it without the chat template generation applies, and tools change the generated prompt. The count would understate `usage.prompt_tokens` (amended 2026-10-04, PR #620 review). |
@@ -227,8 +228,18 @@ reason `strict_tools` stays off for this profile.
 EldanRing/Winnow-12B Q8_0, a merged Gemma 4 12B fine-tune for typed decisions.
 
 **Runtime.** `winnow-server` from EldanRing/winnow-inference: llama.cpp
-`911f6cd` (`b11036`) plus four patches. Every LCP-D2/D3/D4 behavior was
-re-read at that commit and is unchanged. The patched runtime is example-owned.
+`911f6cd` (`b11036`) plus Winnow's four patches. The patched runtime is
+example-owned.
+
+**Amendment (2026-10-05, GPU run).** The source re-read missed one gap.
+At `b11036`, the Gemma 4 grammar ignores `tool_choice: "required"`, so the
+named-tool adaptation (LCP-D3) got text instead of a call. The examples therefore add
+llama.cpp's own fix, `f072b10` ("chat : fix gemma4 required tool grammar",
+first in `b11058`, 4 lines), as a fifth patch. They register it in Winnow's
+`runtime.lock.json`, so Winnow's build still verifies every changed source file.
+The image tag `77d1458-gemma4req-sm120` names the difference. Kairyu code is
+unchanged: on an unpatched server it already fails closed with 502
+`tool_choice_not_satisfied`.
 
 **System One.** Its `/v1/systemone` speaks Jev's typed-decision wire shape.
 The examples publish it through Kairyu's existing `systemone:` forwarder

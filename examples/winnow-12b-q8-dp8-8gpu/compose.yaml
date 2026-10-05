@@ -5,7 +5,7 @@ name: kairyu-winnow-12b-q8-dp8-8gpu
 # passes --jinja, --reasoning off, --fit off, --no-context-shift, full GPU
 # residency and an explicit --parallel (so the KV cache is split per slot).
 x-winnow: &winnow
-  image: ${WINNOW_IMAGE:-local/winnow-inference:77d1458-sm120}
+  image: ${WINNOW_IMAGE:-local/winnow-inference:77d1458-gemma4req-sm120}
   volumes:
     - type: bind
       source: ${MODEL_STORAGE_PATH}
@@ -179,5 +179,23 @@ services:
     depends_on:
       kairyu: {condition: service_healthy}
     ports:
-      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3000}:8080
+    restart: unless-stopped
+
+  # Jev-style System One playground: a static page, with Kairyu's API proxied
+  # on the same origin (playground/nginx.conf). No authentication.
+  playground:
+    image: ${PLAYGROUND_IMAGE}
+    volumes:
+      - ./playground/index.html:/usr/share/nginx/html/index.html:ro
+      - ./playground/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${PLAYGROUND_PORT:-3001}:8080
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      interval: 5s
+      timeout: 3s
+      retries: 60
     restart: unless-stopped
