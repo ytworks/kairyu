@@ -144,9 +144,9 @@ def test_buffered_stream_opens_before_generation_and_keeps_alive(
     # generation on orchestrated models can run for minutes: the opening
     # events must be emitted before generation finishes and keep-alive
     # comments must cover the generation window.
-    from kairyu.entrypoints.server import responses_service
+    from kairyu.entrypoints.server import responses_events
 
-    monkeypatch.setattr(responses_service, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(responses_events, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
 
     class SlowBackend(MockBackend):
         async def generate(self, request):

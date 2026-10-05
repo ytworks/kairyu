@@ -17,7 +17,7 @@ from kairyu.entrypoints.server.protocol import (
     CompletionChoice,
     CompletionChunk,
 )
-from kairyu.entrypoints.server.responses_service import _sse
+from kairyu.entrypoints.server.responses_events import _sse
 from kairyu.entrypoints.server.sse_encode import (
     ChatContentSSEEncoder,
     CompletionTextSSEEncoder,
