@@ -25,6 +25,7 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
                 VERIFIED_TOOL, and no other
   verified-tool-route    a VERIFIED_TOOL request is drafted at the caller's
                 effort, read by Jev from four angles and returned as tool_calls
+  calibrate-tool  the four tool angles' thresholds on recorded DeepSWE turns
   serving-routed  kairyu-verified under load: route mix, latency, tokens per route
 """
 
@@ -342,6 +343,10 @@ def gate_l1(env: dict[str, str]) -> None:
 
 def gate_calibrate(_env: dict[str, str]) -> None:
     subprocess.run([sys.executable, str(HERE / "calibrate.py")], check=True)
+
+
+def gate_calibrate_tool(_env: dict[str, str]) -> None:
+    subprocess.run([sys.executable, str(HERE / "calibrate_tool.py"), "gate"], check=True)
 
 
 _COVERAGE_PROMPT = """For each GOLD question below, decide whether the CHECKLIST contains a \
@@ -1296,6 +1301,7 @@ GATES = {
     "implicit": gate_implicit,
     "verified-tool-routing": gate_verified_tool_routing,
     "verified-tool-route": gate_verified_tool_route,
+    "calibrate-tool": gate_calibrate_tool,
     "serving-routed": gate_serving_routed,
 }
 

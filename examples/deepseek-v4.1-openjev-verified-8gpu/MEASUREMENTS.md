@@ -6,6 +6,39 @@ overlay), OpenJev 0.5.1 (`sha256:65f88680…`, unmodified) on GPU 6 and GPU 7.
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-openjev-verified-8gpu/`
 (`calibration/`, `results/`).
 
+## Verified-tool angle calibration on DeepSWE turns (VCO-D18, 2026-10-05)
+
+`calibrate_tool.py` (`datasets/deepswe-tool-turns.json`): 200 recorded DeepSWE
+replies from 1,582 with a recorded execution result (four runs; 35 tasks), every
+reply whose call failed (nonzero returncode) or repeated an earlier command
+(65) plus 135 drawn round-robin over conversation x position strata; split by
+task into calibration (103 turns, 19 tasks) and held-out (97, 16). Hindsight
+labels per angle from two independent Claude labellers blind to Jev (agreement
+first_call 97.5 %, order 99 %, progress 96.5 %, runs 95 %), a third on the 22
+disagreeing turns. Jev read each recorded reply through the production
+`verified_tool_check` (four denoise passes, OpenJev only).
+
+| Angle | NG labels (cal / held-out) | AUROC (cal / held-out) | Threshold | Held-out miss | Sound replies sent to repair |
+|---|---:|---:|---:|---:|---:|
+| first_call | 21 / 16 | 0.547 / 0.666 | 0.017 (no alpha) | 16.5 % | 0 % |
+| order | 1 / 0 | 0.980 / — | 0.886 | 0 % | 4.1 % |
+| progress | 39 / 26 | 0.534 / 0.578 | 0.609 (no alpha) | 24.5 % | 0 % |
+| runs | 30 / 23 | 0.579 / 0.513 | 0.156 (no alpha) | 24.0 % | 1.4 % |
+| all four | | | | 39.3 % (upper bound 48.6 %) | 8.5 % |
+
+No threshold meets alpha 0.10 for first_call, progress or runs; the fallback
+(fewest calibration errors) accepts nearly every reply. Jev reads p >= 0.99
+for most replies whatever their label (median 0.995-0.999 for NG and OK
+alike), including foreseeable failures (`sed: unknown command` 0.95,
+`Bad substitution` 0.999, `ls: No such file` 0.99). Order has one NG label
+and is not measurable. 13 of 40 runs NG labels are `git commit` with no
+author identity, which no read before execution can foresee.
+
+Diagnostic (not served): the same reads with the call as plain text
+(`BASH COMMAND TO RUN NEXT:`) instead of `<tool_call>` markup raise AUROC
+only slightly (first_call 0.650 vs 0.597, progress 0.616 vs 0.542, runs
+0.558 vs 0.546 over all 200 labels): the markup is not the main cause.
+
 ## Readiness (2026-10-01)
 
 `run.sh up` probes: every DeepSeek DP rank answers the `{"answer": 323}`

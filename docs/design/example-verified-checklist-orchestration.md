@@ -2,8 +2,9 @@
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), whose tool
-calls Jev reads from four angles 2026-10-05 (VCO-D18; calibration on recorded
-DeepSWE turns and GPU gates pending)** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
+calls Jev reads from four angles 2026-10-05 (VCO-D18; angle calibration on
+recorded DeepSWE turns failed: AUROC 0.51-0.67, wording decision and GPU gates
+pending)** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
 
@@ -621,6 +622,13 @@ calibration half; the held-out miss rate, the rate of sound replies sent to
 repair, and AUROC are reported. The owner decides the thresholds. Jev reads
 the tool calls as `<tool_call>` markup in the reply text; if that hurts the
 calibration, passing them structured is a separate framework decision.
+
+Calibration result (2026-10-05, `MEASUREMENTS.md`): Jev does not separate
+sound from unsound replies on first_call, progress or runs (AUROC 0.51-0.67;
+p >= 0.99 for most replies of either label); no threshold meets alpha; order
+has one NG label. Plain-text calls instead of markup raise AUROC only
+slightly. The thresholds stay 0.5 placeholders pending an owner decision on
+the question wording.
 
 ## Limitations
 
