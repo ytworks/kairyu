@@ -3,19 +3,18 @@
 Status: **GPU verified 2026-10-05.** `./verify.sh all` passes all six gates
 on 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition (one replica per GPU).
 
-- Run: `20261005-gpu8-patched`, 01:48:53–01:51:16 UTC.
+- Run: `20261005-gpu8-1a38f7f`, 02:44:33–02:46:53 UTC.
 - Served config SHA-256: `95e223ce…0854`.
-- Kairyu at PR #620 head `d084bce`, plus this example's changes.
-- Not yet re-run after the second PR #620 review: `tool-calling/stream` now
-  assembles the streamed tool call, `n > 1` is rejected before dispatch, and
-  the `contract` gate has 11 rows (the `n`-above-slots row is gone).
+- Kairyu at PR #620 head `1a38f7f` (after the second review: `n > 1`
+  rejected before dispatch, the 11-row contract gate, and the stream gate
+  that assembles the streamed tool call).
 
 ## Images
 
 | Image | Digest |
 |---|---|
 | `local/winnow-inference:77d1458-gemma4req-sm120` | `sha256:c87eedcbfef9dceeeeaa8ece3345cb05d74c3bdd9c58b6d14903a354aa385c2f` |
-| `local/kairyu:winnow-llamacpp-example` | `sha256:e3ff75e5dcd9f3fc436b3281c5060c8cb13ace2abf17aeeb0de3250fc946ba99` |
+| `local/kairyu:winnow-llamacpp-example` | `sha256:65bbf8821a7052fb38832493c5b02e30b961bdd24d6c69c367495c88515725b5` |
 
 The `winnow-server` image is the 1-GPU example's: winnow-inference `77d1458`
 plus llama.cpp's Gemma 4 `required` tool-grammar fix `f072b10`.
@@ -25,8 +24,8 @@ plus llama.cpp's Gemma 4 `required` tool-grammar fix `f072b10`.
 | Gate | Result |
 |---|---|
 | `attest` | PASS on all 8 replicas. Each reports `/props` `build_info` `b11036-911f6cdc8`, 8 slots, 65,536-token slots, the Gemma 4 sampling defaults, a tool-capable template and vision. |
-| `contract` | PASS on all 8 replicas, all 12 rows. |
-| `tool-calling` | PASS: auto, named, tool-result turn, streaming, and a 16-request burst that the placement log shows on all 8 replicas. |
+| `contract` | PASS on all 8 replicas, all 11 rows. |
+| `tool-calling` | PASS: auto, named, tool-result turn, streaming (assembled `get_weather` call), and a 16-request burst that the placement log shows on all 8 replicas. |
 | `vision` | PASS: PNG and WebP. |
 | `systemone` | PASS. The answers through Kairyu match a direct read. |
 | `serving` | PASS, 3 complete rows (below). |
@@ -47,9 +46,9 @@ about 1K tokens and exactly 256 output tokens (`ignore_eos`). Every row has
 
 | Concurrency | TTFT p50 | TTFT p99 | TPOT mean | Per-request tok/s | Aggregate output tok/s |
 |---|---|---|---|---|---|
-| 8 (1 per replica) | 224 ms | 268 ms | 12.1 ms | 82.3 | 614.6 |
-| 32 (4 per replica) | 892 ms | 1,239 ms | 24.4 ms | 44.2 | 979.8 |
-| 64 (8 per replica) | 1,812 ms | 2,506 ms | 24.1 ms | 41.9 | 2,055.9 |
+| 8 (1 per replica) | 219 ms | 264 ms | 12.1 ms | 82.3 | 615.1 |
+| 32 (4 per replica) | 908 ms | 1,266 ms | 24.3 ms | 44.4 | 988.1 |
+| 64 (8 per replica) | 1,764 ms | 2,476 ms | 23.9 ms | 42.1 | 2,101.0 |
 
 Each row matches the 1-GPU row at the same per-replica concurrency. The pool
 spreads load evenly. The relatively slow 4-per-replica row is the runtime's

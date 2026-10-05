@@ -3,19 +3,18 @@
 Status: **GPU verified 2026-10-05.** `./verify.sh all` passes all six gates
 on 1 x NVIDIA RTX PRO 6000 Blackwell Server Edition (GPU 0).
 
-- Run: `20261005-gpu1-patched`, 01:52:47–01:56:16 UTC.
+- Run: `20261005-gpu1-1a38f7f`, 02:39:55–02:43:26 UTC.
 - Served config SHA-256: `04ce07a0…ba64`.
-- Kairyu at PR #620 head `d084bce`, plus this example's changes.
-- Not yet re-run after the second PR #620 review: `tool-calling/stream` now
-  assembles the streamed tool call, `n > 1` is rejected before dispatch, and
-  the `contract` gate has 11 rows (the `n`-above-slots row is gone).
+- Kairyu at PR #620 head `1a38f7f` (after the second review: `n > 1`
+  rejected before dispatch, the 11-row contract gate, and the stream gate
+  that assembles the streamed tool call).
 
 ## Images
 
 | Image | Digest |
 |---|---|
 | `local/winnow-inference:77d1458-gemma4req-sm120` | `sha256:c87eedcbfef9dceeeeaa8ece3345cb05d74c3bdd9c58b6d14903a354aa385c2f` |
-| `local/kairyu:winnow-llamacpp-example` | `sha256:e3ff75e5dcd9f3fc436b3281c5060c8cb13ace2abf17aeeb0de3250fc946ba99` |
+| `local/kairyu:winnow-llamacpp-example` | `sha256:65bbf8821a7052fb38832493c5b02e30b961bdd24d6c69c367495c88515725b5` |
 
 The `winnow-server` image is winnow-inference `77d1458` (llama.cpp `911f6cd`,
 b11036, plus Winnow's four patches) with one more patch: llama.cpp's
@@ -26,8 +25,8 @@ b11036, plus Winnow's four patches) with one more patch: llama.cpp's
 | Gate | Result |
 |---|---|
 | `attest` | PASS. `/props`: `build_info` `b11036-911f6cdc8`, 8 slots, 65,536-token slots, defaults temperature 1.0 / top_k 64 / top_p 0.95 / min_p 0 / repeat_penalty 1.0, tool-capable template, vision projector. |
-| `contract` | PASS, all 12 rows of `l1.correctness.llamacpp_upstream_contract`. |
-| `tool-calling` | PASS: auto, named, tool-result turn, streaming. |
+| `contract` | PASS, all 11 rows of `l1.correctness.llamacpp_upstream_contract`. |
+| `tool-calling` | PASS: auto, named, tool-result turn, and streaming (the streamed `get_weather` call is assembled and checked, with `finish_reason: tool_calls`). |
 | `vision` | PASS: PNG answered "red", WebP (re-encoded as PNG by Kairyu) answered "blue". |
 | `systemone` | PASS. The answers through Kairyu match a direct read. |
 | `serving` | PASS, 3 complete rows (below). |
@@ -52,12 +51,12 @@ has 8,192 completion tokens.
 
 | Concurrency | TTFT p50 | TTFT p99 | TPOT mean | Per-request tok/s | Aggregate output tok/s |
 |---|---|---|---|---|---|
-| 1 | 213 ms | 246 ms | 12.1 ms | 82.5 | 77.4 |
-| 4 | 858 ms | 1,121 ms | 29.2 ms | 34.2 | 124.6 |
-| 8 | 1,481 ms | 2,133 ms | 23.5 ms | 42.9 | 274.1 |
+| 1 | 212 ms | 242 ms | 12.1 ms | 82.4 | 77.3 |
+| 4 | 856 ms | 1,118 ms | 29.2 ms | 34.3 | 124.7 |
+| 8 | 1,561 ms | 2,125 ms | 24.3 ms | 41.5 | 265.7 |
 
 At concurrency 4, per-request decode (34 tok/s) is slower than at 8
-(43 tok/s). This reproduced in both runs and on the DP8 example at 4 requests
+(43 tok/s). This reproduced in all three runs and on the DP8 example at 4 requests
 per replica. It is the runtime's batch-4 decode speed, not interference.
 
 ## GPU memory (GPU 0, sampled every 2 s)
