@@ -30,10 +30,10 @@ included, whether or not access logging is on. The access log, tracing
 the same value. A client-sent `X-Request-ID` is never adopted: the id keys
 `GenerationRequest.request_id`, which must be unique in flight, so a chosen id
 could collide with another tenant's request. Clients correlate with their own
-header (Codex sends `x-client-request-id`). Known limit: an unhandled exception
-answered by Starlette's `ServerErrorMiddleware`, which sits outside all
-application middleware, carries no `X-Request-ID`; the access log still
-records the id with code 500.
+header (Codex sends `x-client-request-id`). An exception no handler classified
+is answered by this middleware, before the response starts, with a 500
+`server_error` in the route's dialect and the id, then re-raised so Starlette's
+`ServerErrorMiddleware` (outside all app middleware) still logs it.
 
 **I2 — Request bodies are decoded under their own cap.**
 `kairyu/entrypoints/server/decompression.py` decodes gzip (`x-gzip` alias,
@@ -107,7 +107,8 @@ tenant limits → concurrency → metrics → decompression → body limits → 
   zstd without the extra (415, import failure monkeypatched).
 - `tests/server/test_codex_fixture_replay.py`: `harbor-zstd` passes (strict
   xfail removed); zstd acceptance is covered there.
-- `tests/server/test_health_metrics.py`: every response, a 401 included,
-  echoes a server-generated id with the access log off.
+- `tests/server/test_health_metrics.py`: every response, a 401 and an
+  unhandled exception's 500 included, echoes a server-generated id with the
+  access log off.
 - `tests/server/test_auth.py`: a preflight skips auth only when CORS is
   configured; the 401 is readable cross-origin.

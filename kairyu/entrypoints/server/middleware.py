@@ -58,6 +58,11 @@ _GUARDED_PREFIX = "/v1/"
 # the retry hints the OpenAI SDKs act on (m20 D21).
 _CORS_EXPOSED_HEADERS = ("x-request-id", "retry-after", "retry-after-ms", "x-should-retry")
 _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
+# An exception no handler classified, answered by the ingress so it carries
+# X-Request-ID; Starlette's own 500 sits outside every app middleware (WP-41).
+_UNHANDLED_ERROR = pre_stream_error(
+    500, "server_error", "server_error", "The server had an error while processing your request."
+)
 # In-process sentinel (#573): the Anthropic Messages adapter sets this on the
 # request state before an AUTO chat dispatch so tool-bearing requests stream
 # raw; it is unreachable from the wire, so the public /v1/chat/completions
@@ -468,7 +473,10 @@ class RequestIngressMiddleware:
     Every HTTP response, errors included, echoes ``X-Request-ID`` whether or
     not access logging is on (M20 WP-41; the OpenAI SDKs' ``_request_id``).
     The id is always generated here: it keys the engine request, which must be
-    unique in flight, so a client-sent ``X-Request-ID`` is never adopted.
+    unique in flight, so a client-sent ``X-Request-ID`` is never adopted. An
+    unhandled exception before the response starts is answered here with a
+    500 in the route's dialect and re-raised: Starlette's
+    ``ServerErrorMiddleware`` still logs it and sends nothing more.
     """
 
     def __init__(self, app: _ASGIApp) -> None:
@@ -483,15 +491,21 @@ class RequestIngressMiddleware:
         request_id = _new_request_id()
         state["request_id"] = request_id
         request_id_header = (b"x-request-id", request_id.encode())
+        response = {"started": False}
 
         async def send_with_request_id(message: dict) -> None:
             if message["type"] == "http.response.start":
+                response["started"] = True
                 headers = [*(message.get("headers") or ()), request_id_header]
                 message = {**message, "headers": headers}
             await send(message)
 
         try:
             await self.app(scope, receive, send_with_request_id)
+        except Exception:
+            if not response["started"]:
+                await send_error(send_with_request_id, scope, _UNHANDLED_ERROR)
+            raise
         finally:
             lease = state.pop(_SLO_ADMISSION_LEASE_STATE_KEY, None)
             if lease is not None and lease.active:

@@ -415,8 +415,8 @@ async def test_metrics_disabled_by_settings():
 
 async def test_every_response_echoes_a_server_request_id():
     # M20 WP-41: the SDKs' ``_request_id`` reads x-request-id on errors too,
-    # access log or not. The id keys the engine request, so a client's own
-    # X-Request-ID is never adopted.
+    # an unhandled exception's 500 included, access log or not. The id keys
+    # the engine request, so a client's own X-Request-ID is never adopted.
     from kairyu.entrypoints.server.settings import ServerSettings
 
     app = create_legacy_app(
@@ -424,12 +424,20 @@ async def test_every_response_echoes_a_server_request_id():
         settings=ServerSettings(access_log=False),
         resolved_api_keys=frozenset({"key"}),
     )
-    async with _client(app) as client:
+
+    async def unhandled() -> None:
+        raise RuntimeError("unclassified failure")
+
+    app.add_api_route("/v1/unhandled", unhandled)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         health = await client.get("/health", headers={"x-request-id": "client-chosen"})
         denied = await client.post("/v1/responses", json={"model": "m", "input": "hi"})
-    assert denied.status_code == 401
-    ids = {health.headers.get("x-request-id"), denied.headers.get("x-request-id")}
-    assert None not in ids and "client-chosen" not in ids and len(ids) == 2
+        failed = await client.get("/v1/unhandled", headers={"authorization": "Bearer key"})
+    assert (denied.status_code, failed.status_code) == (401, 500)
+    assert failed.json()["error"]["type"] == "server_error"
+    ids = {response.headers.get("x-request-id") for response in (health, denied, failed)}
+    assert None not in ids and "client-chosen" not in ids and len(ids) == 3
 
 
 def test_admin_drain_requires_auth_and_flips_readyz(monkeypatch):
