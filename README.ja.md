@@ -714,7 +714,7 @@ server:                        # ServerSection = バインドアドレス + Serv
   ttft_slo_s: null             # 直接チャットの admit/defer/shed TTFT 目標; null で無効
   metrics: true                # /metrics (Prometheus) を公開
   protect_metrics: false       # /metrics にも API キーを要求
-  access_log: true             # リクエストごとに JSON 1 行 (X-Request-ID をエコー)
+  access_log: true             # リクエストごとに JSON 1 行 (X-Request-ID は常にエコー)
   tracing: false               # OTel スパン (otel extra が必要; なければ no-op)
   usage_ledger_path: null      # JSONL 使用量台帳; GET /admin/usage を有効化
   admin_keys_env: null         # /admin/* 変更操作キーの環境変数名

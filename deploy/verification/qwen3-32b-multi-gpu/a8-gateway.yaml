@@ -4,9 +4,10 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
-  # AccessLogMiddleware assigns the response X-Request-ID that exactly joins
-  # each measured response to its placement JSONL row.  The log itself retains
-  # only method/path/status/duration and never prompt text.
+  # The ingress middleware assigns the response X-Request-ID and the access log
+  # records the same id, which exactly joins each measured response to its
+  # placement JSONL row.  The log retains only method/path/status/duration
+  # and never prompt text.
   access_log: true
   # Leaves headroom for the predeclared open-loop saturation sweep while still
   # bounding queued gateway work.  Each replica independently caps at 128.
