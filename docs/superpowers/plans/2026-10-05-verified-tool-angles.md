@@ -109,3 +109,32 @@ VCO-D18 in `docs/design/example-verified-checklist-orchestration.md`
   outcomes, not human labels.
 - Calibration uses recorded max-effort replies; serving drafts use the
   caller's effort. The replay checks the repair rate on serving drafts.
+
+## Revision 2026-10-05 (owner-approved): new DeepSWE data, two points, generic wording
+
+The first calibration failed: Jev did not separate sound from unsound replies
+(AUROC 0.51-0.67 over seven generic wordings; `MEASUREMENTS.md`). The owner's
+target is two points: a tool call behaves as intended, and its intent leads to
+the final outcome; wording stays generic (no tool-, language- or domain-specific
+terms).
+
+0. Storage: everything on `/mnt/nvme/kairyu/bench-runs/<run>/` (a copy of
+   `~/kairyu-bench` without `results/` and `.cache/`, run from there; relay
+   telemetry; labels and packets); task cache and Docker data under
+   `/mnt/nvme/kairyu/bench-cache|docker/<run>`.
+1. Data: stop this example, start `deepseek-v4.1-flash-8gpu` (TP8/EP8), run
+   all 113 DeepSWE tasks once, 8 workers, effort max, behind the recording
+   relay (about a day); then restore this example.
+2. Labels: about 400 turns (failure-signal turns oversampled, the rest
+   stratified by task x position), split by task 50 % wording development /
+   25 % calibration / 25 % held-out; per turn "behaves as intended" (from the
+   execution result, plus whether the failure was foreseeable before running;
+   scored against foreseeable failures) and "leads to the final outcome"
+   (from the later trajectory and the reward); two blind Claude labellers, a
+   third on disagreements.
+3. Wording (YAML only): questions organised around the two points (works /
+   goal), generic sub-questions allowed; developed on the development split by
+   AUROC (target >= 0.7 for both); none reaching it: stop and report. Then
+   thresholds on the calibration split (Clopper-Pearson, alpha 0.10) and one
+   held-out measurement; the owner decides adoption.
+4. Commit the adopted wording, all GPU gates and the route replay, records.
