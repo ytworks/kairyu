@@ -688,15 +688,15 @@ Additional Codex-derived behavior:
   whose `encrypted_content` is a tenant-bound `kst2.` token (AES-256-GCM,
   per-token key; m20 D6). Forged, modified, cross-tenant, expired or
   unknown-key tokens get 400 `invalid_encrypted_content` (Codex: start a new
-  session); older `kcp1.` tokens still decode. Give every gateway the same
-  32+ byte secret in `server.responses_compaction_secret_env` (Helm generates
-  one) or restarts, rolling updates and gateway hops break compacted sessions:
-  `kairyu validate` and startup warn unless `server.sealing.ephemeral: true`
-  (the next release fails). `server.sealing` sets `sealed_max_age_s` and
-  `sealed_item_max_bytes` (4 MiB, checked before decoding). Rotate in two
-  phases: add the new secret to `server.sealing.previous_secrets_env`
-  (comma-separated, accept-only) everywhere, then promote it and keep the old
-  one there for the longest session lifetime.
+  session); `kcp1.` tokens still decode, but pods not yet upgraded cannot open
+  `kst2.` (upgrade with session affinity or `Recreate`). Give every gateway
+  the same 32+ byte `server.responses_compaction_secret_env` secret (Helm
+  generates one) or restarts, rolling updates and gateway hops break compacted
+  sessions; `kairyu validate` and startup warn without it unless
+  `server.sealing.ephemeral: true` (next release: fail). `server.sealing` also
+  sets `sealed_max_age_s`, `sealed_item_max_bytes` (4 MiB) and the accept-only
+  `previous_secrets_env` for two-phase rotation: add the new secret there
+  everywhere, then promote it and keep the old one until old sessions end.
 - **Model ids.** Never serve an id starting with a Codex bundled slug (`gpt-5.5`,
   `gpt-5.6-*`, `gpt-6-*`, `gpt-daybreak-*`, `codex-auto-review`): without a
   catalog Codex applies that slug's wire profile (responses-lite, no `tools`).

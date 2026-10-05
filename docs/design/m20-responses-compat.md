@@ -220,12 +220,12 @@ summaries are mirrored only on request. Replay precedence: stored item → kst2
 (same tenant and model) → plaintext content only without a Kairyu seal or with a
 same-model seal → dropped. `x-reasoning-included: true`.
 
-**D6 — Sealed items v2** (WP-20, 21, 36). `kst2.` tokens: header
-`ver ‖ purpose ‖ kid ‖ issued_at ‖ salt`, per-token HKDF subkey, AAD binds owner
-and header, plaintext binds the served model, 4 MiB cap and optional max age;
-`kcp1.` stays decode-only. A secret is required at any replica count (release N
-warns, N+1 fails) unless `sealing.ephemeral: true`; Helm generates and persists
-one; rotation is two-phase. Compaction fails closed (400
+**D6 — Sealed items v2** (WP-20, 21, 36; *compaction implemented in WP-20*,
+record `m20-sealing.md`). `kst2.` tokens: authenticated header (kid, purpose,
+issue time), per-token HKDF subkey, owner-bound AAD, served-model binding, size
+cap and optional max age; `kcp1.` stays decode-only. A secret is required at any
+replica count (N warns, N+1 fails) unless `sealing.ephemeral: true`; Helm
+generates and persists one; rotation is two-phase. Compaction fails closed (400
 `invalid_encrypted_content`); foreign reasoning blobs are ignored.
 
 **D7 — Request surface and defaults** (WP-03, 08a–c, 11; *output-cap default
@@ -503,7 +503,7 @@ decision 4; O-1 = approved by the owner on 2026-10-05.
 | 42 | Disconnect cancellation | Generation stops when the client leaves | – | Chat unary keeps generating after disconnect | `disconnect.py` (documented behavior change) | O-1 |
 | 43 | Affinity + routing-text fingerprint | Chat `prompt_cache_key`, prefix placement | Session-hinted traffic skips prefix tracking | Lost system-prompt KV reuse | `affinity.py`; `prefix_index` example-owned | O-1 |
 | 15, 44 | uvicorn `ws` selection; WebSocket auth, tenancy, `ConcurrencyGate`; `websockets` extra; uvicorn pin | Shared ingress | `AuthMiddleware` and tenancy skip non-http scopes | Any WebSocket route would be unauthenticated as owner `"default"` | Branch + gate extraction | O-1 |
-| 20/34b/44/48 | `deploy/responses_{spec,wiring,validation}.py`, Helm guard and generated secret | Deployment schema for sealing, store, WebSocket, hosted | Only the existing compaction-secret field exists | Rolling restarts break compacted sessions | Sections + preflight; values operator-owned | sealing O-1; store c |
+| 20/34b/44/48 | `deploy/responses_{spec,wiring,validation}.py` (WP-20: `responses_validation.py`, `ValidationReport.warnings`, `SealingConfig` from `responses/sealing.py` in `ServerSection`), Helm guard and generated secret | Deployment schema for sealing, store, WebSocket, hosted | Only the existing compaction-secret field exists | Rolling restarts break compacted sessions | Sections + preflight; values operator-owned | sealing O-1; store c |
 | 48 | Hosted mechanism, `EgressPolicy`, budgets, `hosted_tool` ledger record, spec builders | Server-executed tools bound to the spec wire | Nothing exists | – (Responses-only consumer, under `responses/hosted/`) | Mechanism only; services, sidecars, allowlists, descriptions example-owned | O-1 |
 | 49 | `web_search` reference executor over a minimal search-service contract | Codex live/indexed `web_search` | ECO-D1-style `base_url` is the precedent | – | One executor; SearXNG sidecar example-owned | O-1 |
 | 50 | MCP reference executor (`mcp` extra) | Public MCP protocol | – | – | One executor; allowlists deployment-owned | O-1 |
@@ -708,7 +708,7 @@ to `docs/design/m11-product.md` D4 and its amendments.
 | #201: unsupported fields fail before dispatch — `truncation:"auto"` | WP-35 | Planned |
 | #201: unsupported fields fail before dispatch — `context_management` | WP-36 | Planned |
 | #201: unknown or unsupported fields rejected (shape of the rejection) | WP-08a (400 `unknown_parameter` with `param`, extension inventory) | Planned |
-| #530: without a configured secret, a process-local key limits tokens to one gateway lifetime | WP-20 (secret required at any replica count, Helm-generated, kst2) | Planned |
+| #530: without a configured secret, a process-local key limits tokens to one gateway lifetime | WP-20 (secret required at any replica count, Helm-generated, kst2) | In progress (WP-20 2026-10-05: kst2, Helm secret, warning; N+1 fails) |
 | #530: `GET /v1/responses` answers 426 because no WebSocket library is installed | WP-15 (explicit `ws="none"`) → WP-47 (WebSocket mode; 426 only when disabled or at capacity) | In progress (WP-15 2026-10-05) |
 | #530: "tenant 429s are not retried by Codex (bench deployments should size admission accordingly)" | WP-07 (503 `slow_down` + `Retry-After`, O-2) | Done (2026-10-05) |
 | D4 behavior pinned by `test_unknown_previous_id_404`: unknown `previous_response_id` → 404 | WP-07 (400 `previous_response_not_found`, D-d) | Done (2026-10-05) |

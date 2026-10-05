@@ -43,10 +43,11 @@ nonce:
   served model so that replay to another model drops it.
 - **Key id.** The first 8 bytes of HMAC-SHA256(secret, domain + `kid`); it
   reveals nothing about the secret.
-- **Limits.** `sealed_item_max_bytes` (default 4 MiB, floor 64 KiB so the cap
-  never refuses a summary this server issued) is checked on the encoded token
-  before base64 or AES runs. `sealed_max_age_s` (default none) is checked
-  after authentication.
+- **Limits.** `sealed_item_max_bytes` (default 4 MiB, floor 64 KiB) is checked
+  on the encoded token before base64 or AES runs, and on every token sealed: a
+  summary too large to reopen fails its compaction (502 `compaction_failed`)
+  instead of stranding the session. `sealed_max_age_s` (default none) is
+  checked after authentication.
 - **Legacy.** `kcp1.` tokens stay decode-only (compaction purpose, every
   configured secret tried). They carry no issue time and are refused once
   `sealed_max_age_s` is set.
@@ -105,8 +106,9 @@ so the requirement does not depend on the replica count.
   chart generates `<release>-responses-sealing` (64 random characters),
   reuses it on upgrade via `lookup`, and keeps it on uninstall
   (`helm.sh/resource-policy: keep`). GitOps renders cannot `lookup`, so they
-  use `existingSecret`. The kind f1c fixture shares one secret across its
-  three gateways.
+  use `existingSecret`. `enabled: false` refuses to render while `config`
+  still names the secret env var. The kind f1c fixture shares one secret
+  across its three gateways.
 
 ## Two-phase rotation
 
@@ -122,16 +124,23 @@ A one-step swap fails during the rolling update: a gateway that is already
 promoted issues tokens that a gateway not yet rolled cannot open (unknown key
 id → 400).
 
+The upgrade to this release is such a swap even with an unchanged secret:
+previous-release pods open only `kcp1.`, so a session compacted on an upgraded
+pod is refused when its next turn lands on a pod not yet rolled. Upgrade with
+session affinity or the `Recreate` strategy, or accept that those sessions
+restart (`/new`).
+
 ## Tests
 
 `tests/server/responses/test_compaction.py` covers the following:
 
 - two-phase rotation, including the unknown-key refusal on both sides;
 - `kcp1.` decode after the upgrade;
-- refusal of an oversized token before decoding;
-- the maximum age;
+- the size cap when sealing and before decoding;
+- the maximum age, including a re-stamped (authenticated) issue time;
 - tamper, forgery and cross-tenant refusal with the typed error.
 
 `tests/unit/test_validate_cli.py` covers the staged warning in
 `kairyu validate` and at startup, and the ephemeral opt-in. The Helm render
-test asserts the kept, generated Secret and its env reference.
+tests assert the kept, generated Secret, its env reference and the refused
+`enabled: false` render.
