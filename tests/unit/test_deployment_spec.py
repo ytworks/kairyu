@@ -339,7 +339,7 @@ server:
   ttft_slo_s: 2.0
   max_chat_body_bytes: 16777216
   max_decompressed_bytes: 1048576
-  cors_allowed_origins: [https://chat.example]
+  cors_allowed_origins: [https://chat.example, tauri://localhost]
   metrics: false
   protect_metrics: true
   access_log: false
@@ -361,7 +361,7 @@ engines:
         ttft_slo_s=2.0,
         max_chat_body_bytes=16_777_216,
         max_decompressed_bytes=1_048_576,
-        cors_allowed_origins=("https://chat.example",),
+        cors_allowed_origins=("https://chat.example", "tauri://localhost"),
         metrics=False,
         protect_metrics=True,
         access_log=False,

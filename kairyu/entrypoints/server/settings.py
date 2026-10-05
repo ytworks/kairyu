@@ -14,10 +14,12 @@ from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-# The decoded-size cap of a Content-Encoding request body (m20 D21, WP-41).
+# The size cap, compressed and decoded, of a Content-Encoding request body (m20 D21, WP-41).
 DEFAULT_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
-# A browser Origin: scheme://host[:port], never a path or a trailing slash.
-_CORS_ORIGIN = re.compile(r"https?://[^/\s]+")
+# A browser Origin: scheme://host[:port], never a path or a trailing slash. Any
+# RFC 3986 scheme, so desktop and extension webviews (tauri://localhost,
+# vscode-webview://<id>, chrome-extension://<id>) can be listed too.
+_CORS_ORIGIN = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s]+")
 
 
 def _check_cors_origins(origins: tuple[str, ...]) -> tuple[str, ...]:

@@ -63,7 +63,8 @@ optional `kairyu[zstd]` extra (`zstandard`, also in the dev group so CI replays
 
 **I3 — CORS is optional and off by default.** `cors_allowed_origins`
 (`ServerSettings` and deployment `server`; each entry `*` or
-`scheme://host[:port]`, checked at load) installs Starlette's
+`scheme://host[:port]` with any scheme, so desktop webviews such as
+`tauri://localhost` can be listed; checked at load) installs Starlette's
 `CORSMiddleware` just outside auth. A preflight is then answered without
 credentials; actual requests still authenticate, and every answer, errors
 included, carries the CORS headers and exposes `x-request-id`, `retry-after`,
