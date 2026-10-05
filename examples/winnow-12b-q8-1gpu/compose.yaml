@@ -48,8 +48,8 @@ services:
       - --metrics
       - --no-webui
     ports:
-      # Host-local L1 access for verify.sh attest/contract only.
-      - 127.0.0.1:${WINNOW_PORT:-8091}:8091
+      # Host-local L1 access for verify.sh only; must equal example.json host_port.
+      - 127.0.0.1:8091:8091
     healthcheck:
       test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8091/health", timeout=3)']
       interval: 5s
