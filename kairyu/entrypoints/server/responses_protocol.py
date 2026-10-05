@@ -479,3 +479,47 @@ def _usage_payload_from_wire(usage: dict | None) -> dict:
         int(usage.get("completion_tokens") or 0),
         int(completion_details.get("reasoning_tokens") or 0),
     )
+
+
+# Context-window overflow as L3 can see it: L1 raises no typed overflow error,
+# so these are the stable messages of the native engine (#496 contract), vLLM
+# replicas, and llama.cpp. Failures sanitized before L3 sees them (AUTO
+# delegations behind a 502, L2 stage failures) stay generic (documented).
+_OVERFLOW_MARKERS = (
+    "already fill max_model_len",
+    "exceed max_model_len",
+    "maximum context length",
+    "longer than the maximum model length",
+    "exceed_context_size_error",
+    "exceeds the available context size",
+    "context_length_exceeded",
+)
+
+
+def overflow_text(message: str | None) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _OVERFLOW_MARKERS)
+
+
+def is_context_overflow(error: BaseException | None) -> bool:
+    """Whether a failure (or what it wraps) reports a context-window overflow."""
+
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if overflow_text(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def context_overflow_error(*, exhausted: bool = False) -> ResponsesError:
+    """``context_length_exceeded``: Codex auto-compacts on this code in-band."""
+
+    message = (
+        "The response filled the model's context window before it finished."
+        if exhausted
+        else "Your input exceeds the context window of this model. "
+        "Please adjust your input and try again."
+    )
+    return ResponsesError(message, param="input", code="context_length_exceeded")

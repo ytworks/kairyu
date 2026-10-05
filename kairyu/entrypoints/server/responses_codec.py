@@ -20,6 +20,8 @@ from kairyu.entrypoints.server.responses_protocol import ResponsesError, _Buffer
 _COMPACTION_TOKEN_PREFIX = "kcp1."
 _COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
 _COMPACTION_NONCE_BYTES = 12
+_REASONING_TOKEN_PREFIX = "krs1."
+_REASONING_AAD_PREFIX = b"kairyu.responses.reasoning.v1\0"
 _COMPACTION_INSTRUCTION_ITEM = {
     "type": "message",
     "role": "user",
@@ -33,16 +35,34 @@ _COMPACTION_INSTRUCTION_ITEM = {
 
 
 class _CompactionCodec:
-    """Tenant-bound authenticated encryption for remote compaction state."""
+    """Tenant-bound authenticated encryption for opaque Responses state.
 
-    def __init__(self, key: bytes) -> None:
+    One deployment key seals two token kinds whose prefixes and associated
+    data differ, so neither can be opened as the other: remote-compaction
+    summaries (``kcp1.``) and reasoning carried by stateless clients through
+    ``include: ["reasoning.encrypted_content"]`` (``krs1.``).
+    """
+
+    def __init__(
+        self,
+        key: bytes,
+        *,
+        kind: str = "compaction",
+        token_prefix: str = _COMPACTION_TOKEN_PREFIX,
+        aad_prefix: bytes = _COMPACTION_AAD_PREFIX,
+    ) -> None:
         if not isinstance(key, bytes) or len(key) != 32:
             raise ValueError("Responses compaction key must be exactly 32 bytes")
         self._cipher = AESGCM(key)
+        self._kind = kind
+        self._token_prefix = token_prefix
+        self._aad_prefix = aad_prefix
 
-    @staticmethod
-    def _associated_data(owner: str) -> bytes:
-        return _COMPACTION_AAD_PREFIX + owner.encode("utf-8")
+    def _associated_data(self, owner: str) -> bytes:
+        return self._aad_prefix + owner.encode("utf-8")
+
+    def issued(self, token: object) -> bool:
+        return isinstance(token, str) and token.startswith(self._token_prefix)
 
     def encode(self, summary: str, *, owner: str) -> str:
         nonce = os.urandom(_COMPACTION_NONCE_BYTES)
@@ -52,23 +72,23 @@ class _CompactionCodec:
             self._associated_data(owner),
         )
         encoded = base64.urlsafe_b64encode(nonce + sealed).rstrip(b"=")
-        return _COMPACTION_TOKEN_PREFIX + encoded.decode("ascii")
+        return self._token_prefix + encoded.decode("ascii")
 
     def decode(self, token: object, *, owner: str) -> str:
         if not isinstance(token, str) or not token:
             raise ChatRequestError(
-                "compaction encrypted_content must be a non-empty string"
+                f"{self._kind} encrypted_content must be a non-empty string"
             )
-        if not token.startswith(_COMPACTION_TOKEN_PREFIX):
+        if not token.startswith(self._token_prefix):
             raise ChatRequestError(
-                "compaction encrypted_content was not issued by this server"
+                f"{self._kind} encrypted_content was not issued by this server"
             )
-        encoded = token.removeprefix(_COMPACTION_TOKEN_PREFIX)
+        encoded = token.removeprefix(self._token_prefix)
         try:
             padded = encoded + "=" * (-len(encoded) % 4)
             payload = base64.b64decode(padded, altchars=b"-_", validate=True)
             if len(payload) < _COMPACTION_NONCE_BYTES + 16:
-                raise ValueError("compaction token is too short")
+                raise ValueError("sealed token is too short")
             plaintext = self._cipher.decrypt(
                 payload[:_COMPACTION_NONCE_BYTES],
                 payload[_COMPACTION_NONCE_BYTES:],
@@ -77,8 +97,17 @@ class _CompactionCodec:
             return plaintext.decode("utf-8")
         except (binascii.Error, InvalidTag, UnicodeDecodeError, ValueError):
             raise ChatRequestError(
-                "compaction encrypted_content was not issued by this server"
+                f"{self._kind} encrypted_content was not issued by this server"
             ) from None
+
+
+def reasoning_codec(key: bytes) -> _CompactionCodec:
+    return _CompactionCodec(
+        key,
+        kind="reasoning",
+        token_prefix=_REASONING_TOKEN_PREFIX,
+        aad_prefix=_REASONING_AAD_PREFIX,
+    )
 
 
 def _extract_compaction_trigger(items: Sequence[dict]) -> bool:

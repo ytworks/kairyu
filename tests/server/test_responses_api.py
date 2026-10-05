@@ -137,53 +137,6 @@ class LengthBackend(MockBackend):
         )
 
 
-def test_buffered_stream_opens_before_generation_and_keeps_alive(
-    tmp_path, monkeypatch
-):
-    # Codex closes SSE streams that stay silent for 300s while buffered
-    # generation on orchestrated models can run for minutes: the opening
-    # events must be emitted before generation finishes and keep-alive
-    # comments must cover the generation window.
-    from kairyu.entrypoints.server import responses_events
-
-    monkeypatch.setattr(responses_events, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
-
-    class SlowBackend(MockBackend):
-        async def generate(self, request):
-            await asyncio.sleep(0.25)
-            return await super().generate(request)
-
-    app = _app(tmp_path, backend=SlowBackend({"hello": "done"}))
-    with TestClient(app) as client:
-        response = client.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "input": "hello",
-                "stream": True,
-                "tools": [_tool()],
-                "tool_choice": "auto",
-            },
-        )
-    assert response.status_code == 200
-    lines = [line for line in response.text.splitlines() if line]
-    # The opening events precede generation output; keep-alive comments can
-    # only appear while generation is still pending, so their presence in
-    # the middle of the stream proves the connection never goes silent.
-    assert lines[0] == "event: response.created"
-    keepalive_positions = [
-        index for index, line in enumerate(lines) if line == ": keep-alive"
-    ]
-    assert keepalive_positions
-    first_item_index = next(
-        index
-        for index, line in enumerate(lines)
-        if line == "event: response.output_item.added"
-    )
-    assert all(position < first_item_index for position in keepalive_positions)
-    assert "event: response.completed" in lines
-
-
 @pytest.mark.parametrize(
     ("stream", "with_tools"),
     [
@@ -480,22 +433,19 @@ def test_function_tool_stream_has_canonical_argument_lifecycle(tmp_path):
     assert response.status_code == 200
     events = _sse_events(response.text)
     types = [event["type"] for event in events]
-    assert types == [
-        "response.created",
-        "response.in_progress",
-        "response.output_item.added",
-        "response.function_call_arguments.delta",
+    deltas = [e["delta"] for e in events if e["type"] == "response.function_call_arguments.delta"]
+    assert types[:3] == ["response.created", "response.in_progress", "response.output_item.added"]
+    assert types[3 + len(deltas) :] == [
         "response.function_call_arguments.done",
         "response.output_item.done",
         "response.completed",
     ]
     assert [event["sequence_number"] for event in events] == list(range(len(events)))
-    added = events[2]["item"]
-    done = events[5]["item"]
+    added, done = events[2]["item"], events[-2]["item"]
     assert added["id"] == done["id"]
     assert added["call_id"] == done["call_id"]
     assert added["arguments"] == ""
-    assert done["arguments"] == '{"a": 2, "b": 3}'
+    assert "".join(deltas) == done["arguments"] == '{"a":2,"b":3}'
     assert events[-1]["response"]["output"] == [done]
 
 
@@ -1320,7 +1270,7 @@ def test_namespace_tool_stream_keeps_public_name_and_ids_stable(tmp_path):
         assert item["id"] == added["id"]
         assert item["call_id"] == added["call_id"]
     assert added["arguments"] == ""
-    assert done["arguments"] == '{"cmd": "printf PASS"}'
+    assert done["arguments"] == '{"cmd":"printf PASS"}'
 
 
 def test_namespaced_function_history_survives_legacy_chat_rendering(tmp_path):

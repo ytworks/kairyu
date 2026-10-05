@@ -133,10 +133,17 @@ class PendingSave:
     def commit(self, response: dict) -> None:
         if self.store is None:
             return
+        # Reasoning tokens are minted per read (``include``), never stored.
+        output = [
+            {key: value for key, value in item.items() if key != "encrypted_content"}
+            if item.get("type") == "reasoning"
+            else item
+            for item in response["output"]
+        ]
         self.store.save(
             response["id"],
-            self.context + response["output"],
+            self.context + output,
             self.owner,
-            response=response,
+            response={**response, "output": output},
             input_items=self.input_items,
         )

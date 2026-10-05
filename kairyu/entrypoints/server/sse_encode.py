@@ -145,7 +145,8 @@ class ResponsesTextDeltaSSEEncoder:
 
     __slots__ = ("_after_sequence", "_prefix", "_suffix")
 
-    def __init__(self, message_id: str) -> None:
+    def __init__(self, message_id: str, *, output_index: int = 0) -> None:
+        _require_integer(output_index)
         self._prefix = (
             b"event: response.output_text.delta\n"
             b'data: {"type":"response.output_text.delta","sequence_number":'
@@ -154,7 +155,9 @@ class ResponsesTextDeltaSSEEncoder:
             (
                 b',"item_id":',
                 _json_string_bytes(message_id),
-                b',"output_index":0,"content_index":0,"delta":',
+                b',"output_index":',
+                _integer_bytes(output_index),
+                b',"content_index":0,"delta":',
             )
         )
         self._suffix = b',"logprobs":[]}\n\n'

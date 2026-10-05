@@ -31,7 +31,6 @@ from kairyu.engine.prompt import prompt_text
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     chat_error_from_upstream_client_error,
-    execute_chat,
     validate_chat_input_async,
     validate_chat_request_async,
 )
@@ -40,26 +39,25 @@ from kairyu.entrypoints.server.errors import (
     sanitize_backend_error,
     wants_responses_envelope,
 )
-from kairyu.entrypoints.server.responses_auto import _orchestrated_response
+from kairyu.entrypoints.server.responses_auto import auto_response
 from kairyu.entrypoints.server.responses_codec import (
     _COMPACTION_INSTRUCTION_ITEM,
-    _compaction_output_from_message,
     _CompactionCodec,
     _extract_compaction_trigger,
+    reasoning_codec,
 )
 from kairyu.entrypoints.server.responses_engine import (
-    _live_text_events,
-    _record_execution,
-    _validate_parallel_tool_calls,
+    engine_compaction,
+    engine_stream,
+    engine_unary,
 )
 from kairyu.entrypoints.server.responses_events import (
-    _apply_terminal_item_status,
-    _buffered_events,
-    _terminal_status,
+    ResponseEmitter,
+    buffered_stream,
+    failed_stream,
 )
 from kairyu.entrypoints.server.responses_items import (
     _canonical_input,
-    _output_items,
     _to_chat_request,
     _validate_function_outputs,
     input_listing,
@@ -69,9 +67,9 @@ from kairyu.entrypoints.server.responses_protocol import (
     ResponsesInputTokensRequest,
     ResponsesRequest,
     _BufferedFailure,
-    _response_envelope,
-    _usage_payload,
     _validate_request_surface,
+    context_overflow_error,
+    is_context_overflow,
     not_found,
     parse_json_object,
     responses_error_response,
@@ -99,9 +97,11 @@ def _upstream_failure(error: BaseException) -> JSONResponse:
     return _BufferedFailure(sanitize_backend_error(error), 502).json_response()
 
 
-def _query_include(http_request: Request) -> None:
+def _query_include(http_request: Request) -> list[str]:
     query = http_request.query_params
-    validate_include([*query.getlist("include[]"), *query.getlist("include")])
+    include = [*query.getlist("include[]"), *query.getlist("include")]
+    validate_include(include)
+    return include
 
 
 def _query_flag(http_request: Request, name: str) -> bool:
@@ -126,6 +126,12 @@ def add_responses_route(
     store = ResponseStore()
     app.state.response_store = store
     compaction_codec = _CompactionCodec(compaction_key)
+    reasoning_tokens = reasoning_codec(compaction_key)
+
+    def reasoning_sealer(request: ResponsesRequest, owner: str):
+        if "reasoning.encrypted_content" not in (request.include or ()):
+            return None
+        return lambda text: reasoning_tokens.encode(text, owner=owner)
 
     def continuation(previous_response_id: str | None, owner: str) -> list[dict]:
         if not previous_response_id:
@@ -192,7 +198,10 @@ def add_responses_route(
         validation_started_ns = time.perf_counter_ns()
         try:
             current_items = _canonical_input(
-                request.input, compaction_codec=compaction_codec, owner=owner
+                request.input,
+                compaction_codec=compaction_codec,
+                owner=owner,
+                reasoning_codec=reasoning_tokens,
             )
             all_items = context + current_items
             compaction_request = _extract_compaction_trigger(all_items)
@@ -218,7 +227,13 @@ def add_responses_route(
                 else work_items
             )
             chat_request = _to_chat_request(
-                request, prompt_items, compaction_codec=compaction_codec, owner=owner
+                request,
+                prompt_items,
+                compaction_codec=compaction_codec,
+                owner=owner,
+                # AUTO reasoning is intermediate stage output; replaying it into
+                # the L2 conversation would grow every later prompt.
+                replay_reasoning=not orchestrated,
             )
             if compaction_request:
                 # The summary is a plain text turn: tools cannot help it and a
@@ -268,19 +283,32 @@ def add_responses_route(
                     "request_validation",
                     max(0, time.perf_counter_ns() - validation_started_ns),
                 )
+        emitter = ResponseEmitter(
+            request,
+            response_id=f"resp_{uuid.uuid4().hex}",
+            created_at=int(time.time()),
+            seal_reasoning=reasoning_sealer(request, owner),
+        )
         if orchestrated:
-            return await _orchestrated_response(
+            return await auto_response(
                 request,
                 chat_request,
                 http_request,
                 chat_dispatch,
-                response_id=f"resp_{uuid.uuid4().hex}",
-                created_at=int(time.time()),
+                emitter=emitter,
                 saver=saver,
                 owner=owner,
                 compaction_codec=compaction_codec,
                 compaction_request=compaction_request,
             )
+
+        def overflowed() -> object:
+            # Codex compacts only on an in-band context_length_exceeded; a
+            # stream therefore opens even when dispatch never happened.
+            if request.stream:
+                return sse_response(failed_stream(emitter, context_overflow_error().payload()))
+            return responses_error_response(context_overflow_error())
+
         prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
@@ -288,8 +316,12 @@ def add_responses_route(
                 validated.generation_request,
             )
         except UpstreamClientError as error:
+            if is_context_overflow(error):
+                return overflowed()
             return responses_error_response(chat_error_from_upstream_client_error(error))
         except ValueError as error:
+            if is_context_overflow(error):
+                return overflowed()
             return responses_error_response(ResponsesError(str(error)))
         except RuntimeError as error:
             return _upstream_failure(error)
@@ -307,6 +339,8 @@ def add_responses_route(
                 validated.generation_request,
             )
         except ValueError as error:
+            if is_context_overflow(error):
+                return overflowed()
             return responses_error_response(ResponsesError(str(error)))
         except RuntimeError as error:
             return _upstream_failure(error)
@@ -349,94 +383,47 @@ def add_responses_route(
                 source="http",
             )
 
-        response_id = f"resp_{uuid.uuid4().hex}"
-        created_at = int(time.time())
-        if request.stream and not request.tools and not compaction_request:
-            return sse_response(
-                _live_text_events(
+        if compaction_request:
+
+            async def produce() -> tuple[list[dict], dict, str, dict | None]:
+                return await engine_compaction(
                     request,
                     validated,
-                    response_id=response_id,
-                    created_at=created_at,
+                    http_request=http_request,
+                    compaction_codec=compaction_codec,
+                    owner=owner,
+                )
+
+            if request.stream:
+                return sse_response(buffered_stream(emitter, produce, saver))
+            try:
+                output, usage, status, incomplete_details = await produce()
+            except _BufferedFailure as failure:
+                return failure.json_response()
+            for item in output:
+                emitter.add_item(item)
+            response, _frames = emitter.complete(status, usage, incomplete_details)
+            if output:
+                saver.commit(response)
+            return JSONResponse(content=response)
+        if request.stream:
+            return sse_response(
+                engine_stream(
+                    request,
+                    validated,
+                    emitter=emitter,
                     saver=saver,
                     owner=owner,
                     http_request=http_request,
                 )
             )
-
-        async def produce() -> tuple[list[dict], dict, str, dict | None]:
-            try:
-                if admission is not None:
-                    admission.mark_dispatched()
-                execution = await execute_chat(validated)
-            except ChatRequestError as error:
-                if error.execution is not None:
-                    _record_execution(http_request, request, error.execution)
-                raise _BufferedFailure.from_chat_error(error) from error
-            except Exception as error:
-                logger.exception("Responses API upstream generation failed")
-                raise _BufferedFailure(
-                    {
-                        "message": f"upstream backend error ({type(error).__name__})",
-                        "type": "upstream_error",
-                        "code": "backend_error",
-                    },
-                    502,
-                ) from error
-            try:
-                _validate_parallel_tool_calls(request, execution)
-            except ChatRequestError as error:
-                _record_execution(http_request, request, execution)
-                raise _BufferedFailure.from_chat_error(error) from error
-            _record_execution(http_request, request, execution)
-            usage = _usage_payload(
-                execution.result.prompt,
-                execution.result.completions,
-                execution.result.usage,
-            )
-            status, incomplete_details = _terminal_status(execution)
-            if compaction_request:
-                if status != "completed":
-                    return [], usage, status, incomplete_details
-                message = (
-                    execution.response.choices[0].message.model_dump(mode="json")
-                    if execution.response.choices
-                    else {}
-                )
-                output = _compaction_output_from_message(
-                    message, compaction_codec=compaction_codec, owner=owner
-                )
-                return output, usage, status, None
-            output = _output_items(request, execution)
-            _apply_terminal_item_status(output, status)
-            return output, usage, status, incomplete_details
-
-        if request.stream:
-            return sse_response(
-                _buffered_events(
-                    request,
-                    produce,
-                    response_id=response_id,
-                    created_at=created_at,
-                    saver=saver,
-                    compaction_request=compaction_request,
-                )
-            )
         try:
-            output, usage, status, incomplete_details = await produce()
+            response = await engine_unary(
+                request, validated, emitter=emitter, http_request=http_request
+            )
         except _BufferedFailure as failure:
             return failure.json_response()
-        response = _response_envelope(
-            request,
-            response_id=response_id,
-            created_at=created_at,
-            status=status,
-            output=output,
-            usage=usage,
-            incomplete_details=incomplete_details,
-        )
-        if not (compaction_request and not output):
-            saver.commit(response)
+        saver.commit(response)
         return JSONResponse(content=response)
 
     @app.post("/v1/responses/input_tokens")
@@ -462,7 +449,10 @@ def add_responses_route(
                     status_code=404,
                 )
             items = continuation(request.previous_response_id, owner) + _canonical_input(
-                request.input, compaction_codec=compaction_codec, owner=owner
+                request.input,
+                compaction_codec=compaction_codec,
+                owner=owner,
+                reasoning_codec=reasoning_tokens,
             )
             _validate_function_outputs(items)
             chat_request = _to_chat_request(
@@ -505,19 +495,25 @@ def add_responses_route(
 
     @app.get("/v1/responses/{response_id}")
     async def retrieve_response(response_id: str, http_request: Request) -> JSONResponse:
+        owner = _owner(http_request)
         try:
-            _query_include(http_request)
+            include = _query_include(http_request)
             if _query_flag(http_request, "stream"):
                 raise ResponsesError(
                     "streaming retrieval needs background responses, which are not supported",
                     param="stream",
                     code="unsupported_value",
                 )
-            response = store.response(response_id, owner=_owner(http_request))
+            response = store.response(response_id, owner=owner)
             if response is None:
                 raise not_found(response_id)
         except ResponsesError as error:
             return responses_error_response(error)
+        if "reasoning.encrypted_content" in include:
+            for item in response["output"]:
+                if item.get("type") == "reasoning":
+                    text = "".join(part.get("text", "") for part in item.get("content") or ())
+                    item["encrypted_content"] = reasoning_tokens.encode(text, owner=owner)
         return JSONResponse(content=response)
 
     @app.delete("/v1/responses/{response_id}")

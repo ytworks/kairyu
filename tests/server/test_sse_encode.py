@@ -279,14 +279,14 @@ def test_responses_text_delta_encoder_matches_generic_golden_wire(
     delta: str,
 ) -> None:
     message_id = 'msg_"\\-日本\u0085\u2028\u2029'
-    encoder = ResponsesTextDeltaSSEEncoder(message_id)
+    encoder = ResponsesTextDeltaSSEEncoder(message_id, output_index=2)
 
     encoded = encoder.encode(sequence_number, delta)
     generic = _sse(
         "response.output_text.delta",
         sequence_number,
         item_id=message_id,
-        output_index=0,
+        output_index=2,
         content_index=0,
         delta=delta,
         logprobs=[],

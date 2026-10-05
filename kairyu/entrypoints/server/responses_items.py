@@ -6,14 +6,13 @@ import copy
 import uuid
 from collections.abc import Sequence
 
-from kairyu.entrypoints.server.chat_service import ChatRequestError, ExecutedChat
+from kairyu.entrypoints.server.chat_service import ChatRequestError
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 from kairyu.entrypoints.server.responses_codec import _CompactionCodec
 from kairyu.entrypoints.server.responses_protocol import ResponsesError, ResponsesRequest
 from kairyu.entrypoints.server.responses_tools import (
     _chat_tool_choice,
     _chat_tools,
-    _namespace_names,
     _namespaced_name,
     _reasoning_effort,
     _response_format,
@@ -48,11 +47,42 @@ def _item_id(item: dict, prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
 
 
+def _reasoning_text(
+    item: dict, *, path: str, codec: _CompactionCodec | None, owner: str
+) -> str:
+    """Recover replayed reasoning: a token this server sealed, else visible text.
+
+    Decoding is best-effort on purpose: a token sealed under another key (a
+    gateway without the shared secret, another provider) must not fail a
+    stateless client's turn, so it falls back to the item's reasoning_text.
+    """
+
+    token = item.get("encrypted_content")
+    if codec is not None and codec.issued(token):
+        try:
+            return codec.decode(token, owner=owner)
+        except ChatRequestError:
+            pass
+    content = item.get("content")
+    if content is None:
+        return ""
+    if not isinstance(content, list):
+        raise _invalid(f"{path}.content", f"{path}.content must be an array")
+    return "".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") in ("reasoning_text", "text")
+        and isinstance(part.get("text"), str)
+    )
+
+
 def _canonical_input(
     payload: str | list[dict],
     *,
     compaction_codec: _CompactionCodec,
     owner: str,
+    reasoning_codec: _CompactionCodec | None = None,
 ) -> list[dict]:
     if isinstance(payload, str):
         return [
@@ -164,15 +194,22 @@ def _canonical_input(
             )
             continue
         if kind == "reasoning":
-            # Codex echoes prior reasoning items back with the history
-            # (encrypted_content may be null or foreign). Kairyu emits no
-            # reasoning output item and renders none into the prompt, so the
-            # echo is accepted for wire compatibility and dropped.
             _reject_unknown(
                 path,
                 item,
                 {"type", "id", "summary", "content", "encrypted_content", "status"},
             )
+            text = _reasoning_text(item, path=path, codec=reasoning_codec, owner=owner)
+            if text:
+                items.append(
+                    {
+                        "type": "reasoning",
+                        "id": _item_id(item, "rs"),
+                        "summary": [],
+                        "content": [{"type": "reasoning_text", "text": text}],
+                        "status": "completed",
+                    }
+                )
             continue
         if kind in {"compaction", "compaction_summary"}:
             _reject_unknown(path, item, {"type", "id", "encrypted_content", "status"})
@@ -320,19 +357,49 @@ def _items_to_messages(
     *,
     compaction_codec: _CompactionCodec,
     owner: str,
+    replay_reasoning: bool = True,
 ) -> list[dict]:
+    """Render canonical items as chat messages.
+
+    An assistant message and the function calls right after it (prose before
+    calls, one Responses turn) become one chat assistant turn, and reasoning
+    items ride the next assistant turn as ``reasoning_content`` (the chat
+    templates decide what to render). Reasoning not followed by an assistant
+    turn is dropped.
+    """
+
     messages: list[dict] = []
     buffered_calls: list[dict] = []
+    reasoning: list[str] = []
+    assistant_open = False
+
+    def attach_reasoning(message: dict) -> None:
+        if reasoning:
+            message["reasoning_content"] = "\n\n".join(reasoning)
+            reasoning.clear()
 
     def flush_calls() -> None:
-        if buffered_calls:
-            messages.append(
-                {"role": "assistant", "content": None, "tool_calls": list(buffered_calls)}
-            )
-            buffered_calls.clear()
+        nonlocal assistant_open
+        if not buffered_calls:
+            return
+        if assistant_open:
+            messages[-1]["tool_calls"] = list(buffered_calls)
+            attach_reasoning(messages[-1])
+        else:
+            message = {"role": "assistant", "content": None, "tool_calls": list(buffered_calls)}
+            attach_reasoning(message)
+            messages.append(message)
+        buffered_calls.clear()
+        assistant_open = False
 
     for item in items:
         kind = item["type"]
+        if kind == "reasoning":
+            if replay_reasoning:
+                reasoning.append(
+                    "".join(part.get("text", "") for part in item.get("content") or ())
+                )
+            continue
         if kind == "function_call":
             name = item["name"]
             if item.get("namespace"):
@@ -349,6 +416,21 @@ def _items_to_messages(
             )
             continue
         flush_calls()
+        if kind == "compaction_trigger":
+            # Request-level control item; the handler consumes it and it is
+            # never rendered into the prompt.
+            continue
+        if kind == "message" and item["role"] == "assistant":
+            message = {
+                "role": "assistant",
+                "content": _content_text(item.get("content", ""), path="message.content"),
+            }
+            attach_reasoning(message)
+            messages.append(message)
+            assistant_open = True
+            continue
+        reasoning.clear()
+        assistant_open = False
         if kind == "function_call_output":
             messages.append(
                 {
@@ -371,10 +453,6 @@ def _items_to_messages(
                     ),
                 }
             )
-        elif kind == "compaction_trigger":
-            # Request-level control item; the handler consumes it and it is
-            # never rendered into the prompt.
-            pass
         else:
             messages.append(
                 {
@@ -392,9 +470,13 @@ def _to_chat_request(
     *,
     compaction_codec: _CompactionCodec,
     owner: str,
+    replay_reasoning: bool = True,
 ) -> ChatCompletionRequest:
     messages = _items_to_messages(
-        items, compaction_codec=compaction_codec, owner=owner
+        items,
+        compaction_codec=compaction_codec,
+        owner=owner,
+        replay_reasoning=replay_reasoning,
     )
     if request.instructions:
         messages.insert(0, {"role": "system", "content": request.instructions})
@@ -431,61 +513,3 @@ def _to_chat_request(
         priority=request.priority,
         **values,
     )
-
-
-def _output_items(
-    request: ResponsesRequest,
-    execution: ExecutedChat,
-) -> list[dict]:
-    if not execution.response.choices:
-        return []
-    message = execution.response.choices[0].message.model_dump(mode="json")
-    return _output_items_from_message(request, message)
-
-
-def _output_items_from_message(request: ResponsesRequest, message: dict) -> list[dict]:
-    calls = message.get("tool_calls") or []
-    if calls:
-        namespaces = _namespace_names(request.tools)
-        items = []
-        for call in calls:
-            function = call.get("function") or {}
-            call_name = function.get("name") or ""
-            namespace_name = namespaces.get(call_name)
-            item = {
-                "id": f"fc_{uuid.uuid4().hex[:24]}",
-                "call_id": call.get("id") or "",
-                "type": "function_call",
-                "name": (
-                    namespace_name[1] if namespace_name is not None else call_name
-                ),
-                "arguments": function.get("arguments") or "",
-                "status": "completed",
-            }
-            if namespace_name is not None:
-                item["namespace"] = namespace_name[0]
-            items.append(item)
-        return items
-    content = message.get("content") or ""
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-    return [
-        {
-            "type": "message",
-            "id": f"msg_{uuid.uuid4().hex[:24]}",
-            "role": "assistant",
-            "status": "completed",
-            "content": [
-                {
-                    "type": "output_text",
-                    "text": content,
-                    "annotations": [],
-                    "logprobs": [],
-                }
-            ],
-        }
-    ]
