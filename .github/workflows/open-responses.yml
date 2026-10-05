@@ -4,9 +4,10 @@ name: open-responses
 # compliance suite pinned in tests/contracts/openresponses/expected-failures.toml,
 # run with bun against Kairyu on ScenarioBackend (scripts/open_responses_gate/).
 # - pull requests touching Kairyu or the gate: blocking; every scenario must
-#   pass, or fail as listed with its signature (an expected failure that
+#   pass, or fail with exactly its listed errors (an expected failure that
 #   passes fails the job, so the list stays truthful);
-# - weekly: upstream main against the same server; drift opens an issue.
+# - weekly: upstream main against the same server; drift opens an issue
+#   (drift-issue, the only job with issues: write, runs no upstream code).
 
 on:
   pull_request:
@@ -73,6 +74,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # The drift run executes upstream main's unpinned suite and dependencies, so
+  # it holds a read-only token; only drift-issue, which runs no upstream code,
+  # may write issues, and it accepts nothing but the title drift.py writes.
   drift:
     name: Weekly upstream drift
     if: github.event_name == 'schedule'
@@ -80,7 +84,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      issues: write
+    outputs:
+      drifted: ${{ steps.drift.outputs.drifted }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -94,26 +99,63 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Run upstream main against the pinned expected failures
+        id: drift
         env:
           OUT: ${{ runner.temp }}/open-responses-drift
           CACHE: ${{ runner.temp }}/open-responses-suite
-          TITLE: ${{ runner.temp }}/drift-title.txt
-          REPORT: ${{ runner.temp }}/drift.md
-        run: >-
-          uv run --frozen python -m scripts.open_responses_gate.drift
-          --out "$OUT" --cache-dir "$CACHE" --title "$TITLE" --report "$REPORT"
+          ISSUE: ${{ runner.temp }}/drift-issue
+        run: |
+          set -euo pipefail
+          mkdir -p "$ISSUE"
+          uv run --frozen python -m scripts.open_responses_gate.drift \
+            --out "$OUT" --cache-dir "$CACHE" \
+            --title "$ISSUE/title.txt" --report "$ISSUE/report.md"
+          if [[ -s "$ISSUE/title.txt" ]]; then
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Hand the drift issue to drift-issue
+        if: steps.drift.outputs.drifted == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: open-responses-drift-issue-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/drift-issue
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain drift artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: open-responses-drift-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/open-responses-drift
+          if-no-files-found: warn
+          retention-days: 14
+
+  drift-issue:
+    name: Report upstream drift
+    needs: drift
+    if: needs.drift.outputs.drifted == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: open-responses-drift-issue-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/drift-issue
       - name: Open a drift issue
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: ${{ runner.temp }}/drift-title.txt
-          REPORT: ${{ runner.temp }}/drift.md
+          TITLE: ${{ runner.temp }}/drift-issue/title.txt
+          REPORT: ${{ runner.temp }}/drift-issue/report.md
         run: |
           set -euo pipefail
-          if [[ ! -s "$TITLE" ]]; then
-            echo "no drift"
-            exit 0
-          fi
           title="$(cat "$TITLE")"
+          if [[ ! "$title" =~ ^M20\ Open\ Responses\ drift:\ main\ [0-9a-f]{10}$ ]]; then
+            echo "unexpected drift title: $title" >&2
+            exit 1
+          fi
           # One issue per upstream commit, open or closed: an acknowledged
           # state is not reported again.
           if gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 200 \
@@ -123,11 +165,3 @@ jobs:
             exit 0
           fi
           gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$REPORT"
-      - name: Retain drift artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: open-responses-drift-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/open-responses-drift
-          if-no-files-found: warn
-          retention-days: 14
