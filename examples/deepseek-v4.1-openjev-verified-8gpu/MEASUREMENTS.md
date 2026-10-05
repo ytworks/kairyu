@@ -32,8 +32,9 @@ to work. Every gate except the two calibration gates (`calibrate`,
 The three failures are outside the verified-tool route this PR changes: the
 route judge (unchanged) sends t11 and t16 to THINK, and requirements and
 structured are verified-DAG variance (an extractor run-away and one
-acceptance read). With thresholds 0.5 the angles fail almost no reply
-(failed angles 0 of 144 reads), consistent with the calibration above.
+acceptance read). With thresholds 0.5 the angles fail almost no reply: no
+angle failed in any final verdict (36 x 4) and one request was repaired
+once, consistent with the calibration above.
 
 ## Verified-tool angle calibration on DeepSWE turns (VCO-D18, 2026-10-05)
 
