@@ -312,16 +312,6 @@ class Gate:
             "rendered_tail": prompt[-40:],
         }
 
-    async def n_above_slots_is_400(self) -> dict:
-        slots = int(self.props["total_slots"])
-        try:
-            await self.backend.generate(
-                _request(SamplingParams(temperature=0.5, n=slots + 1, max_tokens=2))
-            )
-        except UpstreamClientError as error:
-            return {"passed": error.status_code == 400, "n": slots + 1}
-        return {"passed": False, "n": slots + 1}
-
     async def context_overflow_is_400(self) -> dict:
         n_ctx = int(self.props["default_generation_settings"]["n_ctx"])
         try:
@@ -452,7 +442,6 @@ class Gate:
                 ("named_tool_choice", self.named_tool_choice),
                 ("logprobs_zero", self.logprobs_zero),
                 ("assistant_prefill", self.assistant_prefill),
-                ("n_above_slots_is_400", self.n_above_slots_is_400),
                 ("context_overflow_is_400", self.context_overflow_is_400),
                 ("cached_tokens_reported", self.cached_tokens_reported),
                 ("stream_usage_and_done", self.stream_usage_and_done),

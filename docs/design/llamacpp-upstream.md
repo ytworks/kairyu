@@ -49,8 +49,8 @@ The profile therefore forwards only fields llama-server executes; everything
 else fails closed before dispatch.
 
 **Accepted (`sampling_fields`)**
-- From the OpenAI core: `logprobs`, `max_tokens`, `n`, `response_format`,
-  `seed`, `stop`, `temperature`, `top_p`.
+- From the OpenAI core: `logprobs`, `max_tokens`, `n` (1 only),
+  `response_format`, `seed`, `stop`, `temperature`, `top_p`.
 - `top_k`, `min_p`, `repetition_penalty`, `ignore_eos`.
 
 All five generation-config fields are included because the L2 profile judge
@@ -66,11 +66,15 @@ sends `temperature=0.0` with nothing omitted.
   prompt words from the first token. No request field restricts the window
   to output tokens.
 - `strict: true` tools: llama.cpp never reads `strict`.
+- `n > 1` (`max_n=1`; amended 2026-10-05, PR #620 review). llama-server
+  reports usage per candidate. A unary reply merges the choices but keeps
+  the first candidate's usage (`server-context.cpp`, OAI multi-result
+  merge); a stream sends one usage chunk per candidate (`server-task.cpp`).
+  The summed completion usage, which Kairyu reports and bills, cannot be
+  recovered from either.
 
 **Other settings**
-- `n`: llama-server hard-limits it to `1..n_parallel` and answers HTTP 400
-  above that (a client error).
-- Upstream 400s (`n` above the slot count, prompt overflow) do not count
+- Upstream 400s (prompt overflow) do not count
   against replica health. Kairyu's L3 reports them as 502 `backend_error`
   without upstream text; that is the existing policy for every upstream,
   vLLM included.

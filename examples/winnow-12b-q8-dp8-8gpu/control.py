@@ -41,7 +41,7 @@ def _run(
     )
 
 
-def _storage_paths() -> tuple[Path, Path, Path]:
+def _storage_root() -> Path:
     configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
     if not configured.is_absolute():
         raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
@@ -49,6 +49,11 @@ def _storage_paths() -> tuple[Path, Path, Path]:
     nvme = Path("/mnt/nvme")
     if root != nvme and nvme not in root.parents:
         raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
+    return root
+
+
+def _storage_paths() -> tuple[Path, Path, Path]:
+    root = _storage_root()
     # All Winnow examples share one verified download of the pinned GGUF files.
     model = root / "model-volumes" / "winnow-12b-q8" / "models"
     webui = root / "model-volumes" / SPEC["environment"] / "webui-data"
@@ -58,11 +63,16 @@ def _storage_paths() -> tuple[Path, Path, Path]:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise SystemExit(f"cannot prepare NVMe storage {path}: {error}") from error
-    free_gib = shutil.disk_usage(root).free // (1024**3)
+    return model, webui, placement
+
+
+def _require_free_space() -> None:
+    # Only `up` writes (image build, model download); `down`, `status` and
+    # `logs` must keep working on a nearly full disk.
+    free_gib = shutil.disk_usage(_storage_root()).free // (1024**3)
     minimum = int(SPEC["storage"]["minimum_free_gib"])
     if free_gib < minimum:
         raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
-    return model, webui, placement
 
 
 def placement_log() -> Path:
@@ -329,6 +339,7 @@ def _public_ui_host() -> str:
 
 def up() -> None:
     env = _compose_env()
+    _require_free_space()
     bind = env["CHAT_UI_BIND_ADDRESS"]
     ui_host = _public_ui_host() if bind == "0.0.0.0" else bind
     env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")

@@ -900,7 +900,7 @@ adaptation is executed upstream:
 - a named `tool_choice` calls that function;
 - `logprobs: 0` returns sampled-token logprobs;
 - an assistant prefill is continued;
-- `n` above the slot count and prompt overflow are HTTP 400;
+- prompt overflow is HTTP 400;
 - repeated prefixes report `cached_tokens`;
 - a stream ends with usage and `[DONE]`;
 - a client disconnect frees the slot;

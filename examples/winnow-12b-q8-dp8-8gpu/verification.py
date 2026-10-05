@@ -280,6 +280,40 @@ def _tool_call_error(status: int, body: object, name: str) -> str | None:
     return None if isinstance(arguments.get("city"), str) else f"arguments {arguments}"
 
 
+def _stream_tool_call_error(status: int, sse: str, name: str) -> str | None:
+    """Assemble the streamed tool-call deltas like an OpenAI client does.
+
+    Plain text chunks also carry ``"tool_calls": null``, so the key alone
+    proves nothing.
+    """
+
+    if status != 200:
+        return f"HTTP {status}: {sse[-300:]}"
+    events = [line[5:].strip() for line in sse.splitlines() if line.startswith("data:")]
+    if not events or events[-1] != "[DONE]":
+        return f"stream did not end with [DONE]: {sse[-300:]}"
+    calls: dict[int, dict[str, str]] = {}
+    finish_reason = None
+    for event in events[:-1]:
+        try:
+            chunk = json.loads(event)
+            if "error" in chunk:
+                return f"stream error: {event[:300]}"
+            for choice in chunk.get("choices") or []:
+                finish_reason = choice.get("finish_reason") or finish_reason
+                for delta in (choice.get("delta") or {}).get("tool_calls") or []:
+                    call = calls.setdefault(delta["index"], {"name": "", "arguments": ""})
+                    function = delta.get("function") or {}
+                    call["name"] += function.get("name") or ""
+                    call["arguments"] += function.get("arguments") or ""
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return f"malformed stream chunk: {event[:300]}"
+    if finish_reason != "tool_calls":
+        return f"finish_reason {finish_reason!r}, tool calls {calls}"
+    message = {"tool_calls": [{"function": calls[index]} for index in sorted(calls)]}
+    return _tool_call_error(200, {"choices": [{"message": message}]}, name)
+
+
 def _placement_rows() -> list[dict]:
     sys.path.insert(0, str(HERE))
     import control
@@ -343,11 +377,7 @@ def tool_calling(run_dir: Path) -> int:
             "max_tokens": 512,
         },
     )
-    cases["stream"] = (
-        None
-        if status == 200 and '"tool_calls"' in sse and sse.rstrip().endswith("data: [DONE]")
-        else f"HTTP {status}: {sse[-300:]}"
-    )
+    cases["stream"] = _stream_tool_call_error(status, sse, "get_weather")
     if len(REPLICAS) > 1:
         before = len(_placement_rows())
         burst = 2 * len(REPLICAS)

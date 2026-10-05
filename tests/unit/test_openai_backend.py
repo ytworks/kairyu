@@ -1404,6 +1404,8 @@ async def test_upstream_profiles_forward_exact_supported_body(upstream, params, 
         # llama.cpp also penalizes prompt tokens; Kairyu's are output-only.
         ("llamacpp", "presence_penalty", SamplingParams(presence_penalty=0.5)),
         ("llamacpp", "frequency_penalty", SamplingParams(frequency_penalty=0.5)),
+        # llama.cpp reports usage per candidate, never the sum.
+        ("llamacpp", "n", SamplingParams(n=2)),
         (
             "openai",
             "forced_token_ids",

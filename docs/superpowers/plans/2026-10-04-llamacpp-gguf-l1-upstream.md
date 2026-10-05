@@ -3,8 +3,9 @@
 Status: owner-approved 2026-10-04 (decisions under "Owner decisions");
 amended by the PR #620 review: frequency/presence penalties are rejected,
 `repetition_penalty` gets `repeat_last_n` = `max_model_len` (now required),
-and `/v1/messages/count_tokens` is declined. `docs/design/llamacpp-upstream.md`
-is authoritative where this plan differs. Base:
+`/v1/messages/count_tokens` is declined, and `n` is limited to 1 (llama.cpp
+reports usage per candidate). `docs/design/llamacpp-upstream.md` is
+authoritative where this plan differs. Base:
 `main` at `a8d242b`. llama.cpp reference: `ggml-org/llama.cpp` master
 `46847e6` (tag `b11391`, 2026-10-04); every llama.cpp claim below was read in
 that source (paths are relative to its repo root). The example runtime's base
@@ -423,18 +424,19 @@ Each item below needs its own admission case:
 ## Tests (CLAUDE.md test policy)
 
 Base collection: `uv run pytest --collect-only -q` → **6317 collected
-(369 deselected)** at `a8d242b`. This is additive work, so the count rises.
-Each new test protects a concrete llama.cpp-specific regression that an
-existing test cannot see.
+(369 deselected)** at `a8d242b`; **6337** at the PR #620 head after the
+second review round, with the same command. This is additive work, so the
+count rises. Each new test protects a concrete llama.cpp-specific regression
+that an existing test cannot see.
 
 | Test area (file) | Kind | Regression it protects |
 |---|---|---|
 | Wire body for `upstream="llamacpp"` (`tests/unit/test_openai_backend.py`, one parametrized test) | new | `repeat_penalty` rename, `top_k` 0, named `tool_choice` → restricted tools + `required`, `top_logprobs` floor and trim. Each case is a silent-ignore in llama.cpp. |
 | Recorded llama-server stream/unary fixture → `GenerationResult` | new | Wire drift in `reasoning_content`, `tool_calls`, `usage.cached_tokens` and `[DONE]` from the pinned build (fixture from Phase 0) |
-| `count_prompt_tokens_async` via `/tokenize` | new | Wrong endpoint or shape returns 404 on `/v1/messages/count_tokens` |
 | WebP → PNG before dispatch | new | Client-caused 500 ejects a replica (LCP-D4) |
 | Existing assistant-prefill test parametrized over `vllm` and `llamacpp` | extended (not duplicated) | The prefill gate moved to a capability; it must stay on for vLLM |
-| Existing pre-dispatch rejection parametrization gains `llamacpp` rows | extended | `priority`, `min_tokens`, `stop_token_ids`, `skip_special_tokens`, `prompt_logprobs` and `strict` must never reach llama-server |
+| Existing pre-dispatch rejection parametrization gains `llamacpp` rows | extended | `min_tokens`, `stop_token_ids` and `skip_special_tokens` (ignored upstream), frequency/presence penalties (applied to prompt tokens upstream) and `n > 1` (usage reported per candidate) must never reach llama-server |
+| Winnow examples (`tests/unit/test_winnow_llamacpp_examples.py`, each over both examples) | new | Slot geometry, admission and health URL drift from what winnow-server runs; `attest` passing without sampling defaults; a full disk blocking `run.sh down`; the streaming tool-call gate passing a text-only reply |
 | `known_openai_upstreams()` exact tuple, deployment-spec upstream parametrization | updated in place | Existing tests; no new static-list tests are added |
 
 No tests are added for profile constants beyond these behavior tests.

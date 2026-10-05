@@ -6,6 +6,9 @@ on 1 x NVIDIA RTX PRO 6000 Blackwell Server Edition (GPU 0).
 - Run: `20261005-gpu1-patched`, 01:52:47–01:56:16 UTC.
 - Served config SHA-256: `04ce07a0…ba64`.
 - Kairyu at PR #620 head `d084bce`, plus this example's changes.
+- Not yet re-run after the second PR #620 review: `tool-calling/stream` now
+  assembles the streamed tool call, `n > 1` is rejected before dispatch, and
+  the `contract` gate has 11 rows (the `n`-above-slots row is gone).
 
 ## Images
 

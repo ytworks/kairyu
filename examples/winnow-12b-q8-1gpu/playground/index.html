@@ -403,6 +403,31 @@ async function run() {
   }
 }
 
+function dataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function isWebp(file) {
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const text = (from, to) => String.fromCharCode(...head.slice(from, to));
+  return text(0, 4) === "RIFF" && text(8, 12) === "WEBP";
+}
+
+// System One forwards images untouched and Winnow's llama.cpp build cannot
+// decode WebP, so WebP is re-encoded as PNG before either column sends it.
+async function pngDataUrl(file) {
+  const bitmap = await createImageBitmap(file);
+  const canvas = el("canvas", {width: bitmap.width, height: bitmap.height});
+  canvas.getContext("2d").drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return canvas.toDataURL("image/png");
+}
+
 async function init() {
   for (const name of Object.keys(PRESETS)) $("preset").append(el("option", {value: name, text: name}));
   $("preset").onchange = () => loadPreset($("preset").value);
@@ -413,12 +438,7 @@ async function init() {
   }
   $("images").onchange = async () => {
     const files = [...$("images").files].slice(0, MAX_IMAGES);
-    images = await Promise.all(files.map((file) => new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    })));
+    images = await Promise.all(files.map(async (file) => (await isWebp(file)) ? pngDataUrl(file) : dataUrl(file)));
     $("thumbs").replaceChildren(...images.map((src) => el("img", {src, alt: ""})));
   };
   $("run").onclick = run;

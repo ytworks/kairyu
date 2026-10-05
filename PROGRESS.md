@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [amendment] llama.cpp `n` limited to 1; Winnow example fixes (PR #620 review)
+- What: `upstream: llamacpp` rejects `n > 1` before dispatch (`max_n=1`), and the contract gate's `n`-above-slots row is removed. In the Winnow examples, `down`/`status`/`logs` no longer need 30 GiB free; the playground sends WebP as PNG; the streaming tool-call gate assembles the deltas instead of searching for the `tool_calls` key.
+- Why: owner review. llama-server reports usage per candidate (the first candidate's when unary, one usage chunk per candidate when streaming), so Kairyu under-reported and under-billed completion tokens. System One forwards images untouched, and Winnow's build cannot decode WebP. Plain text chunks also carry `"tool_calls": null`.
+- Refs: LCP-D2 in `docs/design/llamacpp-upstream.md`; PR #620 review 5409395128
+
 ### 2026-10-05 — [amendment] Winnow examples GPU-verified; Gemma 4 `required` backport (PR #620)
 - What: both Winnow-12B examples pass all six `verify.sh` gates on RTX PRO 6000 (1 GPU; DP8 on 8 GPUs). The examples add llama.cpp `f072b10` as a fifth winnow-server patch, registered in Winnow's own `runtime.lock.json`. They also add a Jev-style System One playground on `:3001`, and the UIs now listen on all interfaces. Kairyu code is unchanged.
 - Why: at b11036 the Gemma 4 grammar ignores `tool_choice: "required"`. The named-tool adaptation (LCP-D3) then got text, and Kairyu failed closed with 502. The source re-read had missed this. Owner approved the backport (example-owned runtime), the playground and the public binds.
