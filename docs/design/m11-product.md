@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D4 amended 2026-10-05; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -373,6 +373,102 @@ custom-provider text/tool smokes and a Harbor-shaped (`openai_base_url`
 override) tool smoke — against a mock deployment mirroring the issue
 topology (all engines hidden behind `public_models`, one orchestrated
 model).
+
+**OpenAI Responses compatibility amendment (2026-10-05).** `/v1/responses`
+follows the OpenAI wire contract pinned by openai-openapi@13fa6e7ab9 and the
+openai-python 3.24 types, so Codex CLI 0.160 and the OpenAI SDKs work
+unmodified. Everything maps existing L1/L2 capabilities in L3: no new store,
+worker, hosted-tool executor, or L1/L2 contract change. This supersedes the
+#530 limit "1024-token default output cap" and the #201/#530 stances "tool
+streams buffer", "no reasoning output", and "comment keep-alives".
+- Errors: every `/v1/responses*` error is the full OpenAI object (`message`,
+  `type`, `param`, `code`). Schema errors are 400 (`unknown_parameter`,
+  `missing_required_parameter`, `invalid_*`); unrouted paths and methods get
+  404/405 (+`Allow`); an unknown, foreign, or unstored `previous_response_id`
+  is 400 `previous_response_not_found`. Transient overload (server
+  concurrency, tenant `in_flight`) is 503 `slow_down` + `Retry-After`, which
+  Codex retries (it treats 429 as terminal); rate quotas stay 429.
+- Output length: an omitted `max_output_tokens` means the remaining context
+  (the chat #496 contract), compaction summaries included. A length stop with
+  no requested cap on a backend with a known window is
+  `context_length_exceeded`, not `incomplete(max_output_tokens)`: that would
+  name a cap the client never set, and Codex retries it five times.
+- Streaming: one emitter builds every event (created first, gapless sequence,
+  contiguous `output_index`, unique ids, part before delta). Direct engines
+  stream reasoning, prose, and tool calls live through the protocol's
+  `tool_stream` scanner. Prose beside calls is kept, and the
+  parallel/tool_choice gates fail in-band (`error` + `response.failed`).
+  Unary turns keep `execute_chat` and rebuild the same items from the raw
+  completion. AUTO tool streams reuse the #573 raw-stream sentinel and gate in
+  the adapter; AUTO unary maps the chat JSON (prose beside calls since #619).
+- Heartbeats: after 15 s without a data event, `response.in_progress` repeats
+  the full snapshot. Codex's idle timer ignores SSE comments, and openai-node
+  replaces its snapshot on every lifecycle event, so the snapshot holds exactly
+  what was streamed.
+- Reasoning: split whether or not `reasoning.effort` is set (a leading or
+  template-opened `<think>`, or backend-separated reasoning), so it never
+  reaches text or tool parsing. It is emitted as reasoning items (raw
+  `reasoning_text`, `summary: []`), with tenant-bound `krs1.`
+  `encrypted_content` when included (sealed with the compaction key, minted per
+  read, never stored). For direct engines, replayed reasoning returns as the
+  next assistant turn's `reasoning_content`: the item's own token, else its
+  visible text; a bad token never fails the turn. Assistant prose and the
+  calls after it form one chat turn. AUTO drops replayed reasoning: stage
+  output would grow every L2 prompt.
+- Overflow: context overflows visible to L3 (native `max_model_len` messages,
+  vLLM and llama.cpp 400 bodies) become in-band
+  `response.failed{context_length_exceeded}` on streams, even before dispatch,
+  and 400 for unary. The `error` event keeps specific codes, while
+  `response.error.code` stays in the spec enum (plus `context_length_exceeded`,
+  which Codex needs).
+- Endpoints: `ResponseStore` keeps the whole response (per-process memory, as
+  before):
+  - `GET`/`DELETE /v1/responses/{id}`: `include` honored; `stream=true` is 400.
+  - `GET .../input_items`: cursor pages.
+  - `POST .../cancel`: 400, since nothing runs in the background.
+  - `POST /v1/responses/input_tokens`: the backend tokenizer; AUTO,
+    multimodal, or a declining backend is 400.
+  - `POST /v1/responses/compact`: the kept user messages plus one compaction
+    item, via the existing summarization turn.
+- Inputs: `input_image` parts reach vision backends as chat `image_url` parts.
+  Web search declarations (any `external_web_access`) are accepted and echoed,
+  but never exposed or executed; Codex declares them in full-access runs.
+- Typed 400s (L3 cannot honor these):
+  - request features: `background`, `conversation`, `prompt`, `moderation`,
+    `context_management`, `access_programs`,
+    `prompt_cache_options.prewarm`/`comparison_response_id`,
+    `truncation=auto`, stream obfuscation
+  - logprobs: `top_logprobs>0` and `message.output_text.logprobs`
+  - tools: `tool_choice` `allowed_tools` or hosted tools; custom, built-in,
+    and hosted tool types
+  - input items: `item_reference` and other unsupported item types
+  - reasoning: `reasoning.effort=none`, non-default `reasoning.context`/`mode`
+  - media: `file_id` images, `input_file`/`input_audio`, and images in tool
+    output or beside tool-call history (L1's multimodal prompt carries no tool
+    transcript)
+- Accepted as vacuous: `service_tier` (reported as `default`), `max_tool_calls`,
+  hosted-tool `include` values, prompt-cache retention, options, and
+  breakpoints.
+- Known limits:
+  - `cache_write_tokens` is 0 (not measured); `reasoning_tokens` appears only
+    when reported.
+  - AUTO and L2-stage overflows behind a sanitized 502 stay server errors.
+  - AUTO length stops stay incomplete.
+  - Multimodal prompts carry no replayed reasoning.
+  - Streamed arguments are the model's raw bytes, while a call that arrives
+    whole is re-serialized (JSON-equivalent).
+  - openai-python types compact output as assistant items, though it holds
+    user messages; lenient parsing works.
+Acceptance:
+- pytest contract tests: SDK typed errors, store endpoints, live streams, the
+  reasoning round trip, overflow, images, and compact. Payloads were also
+  strict-validated against the openai-python 3.24 types.
+- Unmodified codex-cli 0.160.0 runs against a scripted mock deployment:
+  - text, and a tool loop with reasoning replay
+  - a 12 s silent backend under a 5 s idle timeout (the negative control fails)
+  - in-band overflow, then auto-compaction on the next turn
+  - a live web search declaration
+  - an image turn whose tool follow-up gets the typed 400
 
 ### D5 — Vision wire format
 

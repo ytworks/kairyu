@@ -694,14 +694,24 @@ upstreams. Before relying on a new llama.cpp build, run
 
 ### Responses API and Codex
 
-`POST /v1/responses` supports unary and canonical typed SSE responses for text
-and function calls. Flat OpenAI function definitions and Codex namespace
-definitions are accepted; `function_call_output` and tenant-scoped
-`previous_response_id` continue the tool loop without resending earlier items.
-Only successful responses are stored. `store: false` disables continuation.
-The in-process store is bounded and intentionally not shared across gateways,
-so route a continued response to the same gateway or omit
-`previous_response_id` and send the full input history in an HA deployment.
+`/v1/responses` follows the OpenAI Responses wire contract (pinned spec
+openai-openapi@13fa6e7ab9, openai-python 3.24 types), so Codex CLI and the
+OpenAI SDKs work without changes:
+
+- Unary and typed SSE responses. Text, reasoning, and function calls stream
+  live as the model decodes, and the prose beside a call is kept as a message
+  item.
+- Flat and Codex namespace function tools.
+- `function_call_output`, and tenant-scoped `previous_response_id`
+  continuation.
+- `GET`/`DELETE /v1/responses/{id}`, `GET /v1/responses/{id}/input_items`,
+  `POST /v1/responses/input_tokens`, and `POST /v1/responses/compact`.
+
+Continuation and retrieval use a bounded per-gateway memory store. Route a
+continued response to the same gateway, or omit `previous_response_id` and send
+the full input history (Codex does this with `store: false`). Errors use the
+OpenAI envelope with `param`: schema errors are 400, unknown paths 404, wrong
+methods 405.
 
 Codex can use Kairyu as a custom Responses provider without source changes:
 
@@ -715,51 +725,84 @@ scripts/codex_responses_smoke.sh
 The script creates an ephemeral Codex run with `wire_api="responses"` and a
 read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
 command event, its tool result, and a final message containing `PASS`;
-`KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke. Kairyu accepts Codex
-function namespaces and its disabled web-search declaration (including its
-search configuration fields); enabled hosted web search remains unsupported.
-`background`, Conversations API objects, hosted prompt templates, moderation,
-automatic truncation, context management, `max_tool_calls`, and response
-top-logprobs fail before model dispatch. This explicit rejection boundary keeps
-the accepted compatibility surface truthful. `service_tier` supports only the
-neutral `auto` selection; explicit paid/priority tiers fail rather than being
-echoed as executed. Codex reasoning/include metadata is accepted for wire
-compatibility but Kairyu emits no reasoning or encrypted-reasoning output item;
-echoed `reasoning` history items and Codex-internal passthrough item fields are
-accepted and dropped. `text.verbosity` is applied as a model instruction, not
-claimed as a provider quality-of-service tier.
+`KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke.
+
+Codex-relevant behavior (codex-cli 0.160):
+
+- **No artificial output cap.** An omitted `max_output_tokens` means the
+  model's remaining context, as in Chat Completions; Codex never sends one. When
+  the context itself runs out, the response fails with
+  `context_length_exceeded` instead of an incomplete response that Codex would
+  retry.
+- **Context overflow is in-band.** A prompt that does not fit (native engines,
+  vLLM and llama.cpp replicas) answers a stream with
+  `response.failed{code: context_length_exceeded}`, even when the overflow is
+  detected before dispatch. Codex then compacts the conversation, at the start
+  of its next turn. Unary requests get a 400 with the same code.
+- **Heartbeats are data events.** After 15 s without output, the stream
+  repeats `response.in_progress` with the current snapshot. Codex's 300 s idle
+  timer ignores SSE comments, and openai-node replaces its snapshot on these
+  events, so the snapshot is exactly what was streamed.
+- **Reasoning round-trips.** `<think>` output, or reasoning a backend
+  separates, becomes a reasoning item whether or not `reasoning.effort` is set,
+  so it never leaks into text or tool parsing. With
+  `include: ["reasoning.encrypted_content"]` the item carries a tenant-bound
+  token. Replayed reasoning (that token, else the item's visible text) returns
+  to the template as the next assistant turn's `reasoning_content` for engine
+  models. AUTO models drop it, because their reasoning is intermediate stage
+  output. Summaries are not generated (`summary: []`).
+- **Overload is retryable.** A full server concurrency queue or a tenant's
+  `max_in_flight` answers 503 `slow_down` with `Retry-After`, which Codex
+  retries. Tenant rate and token quotas stay 429, which Codex does not retry.
+  An omitted output cap reserves the model's `max_model_len` tokens at
+  admission, so size `tokens_per_minute`/`token_burst` at least that large for
+  Codex tenants.
+- **Images.** `input_image` parts (data or http(s) URLs) reach vision models.
+  Two cases are rejected with a 400 that names the image: images in a tool
+  result (Codex `view_image`), and images beside tool-call history in the same
+  request. The engine's multimodal prompt has no tool transcript, so an image
+  session in Codex fails at its first tool follow-up.
+- **Web search is declared, not run.** Codex declares `web_search` (live or
+  indexed) in full-access runs. The declaration is accepted and echoed but
+  never shown to the model or executed.
+- **WebSocket upgrades get 426**, so Codex's built-in `openai` provider (the
+  Harbor/Terminal-Bench `openai_base_url` shape) falls back to HTTPS
+  immediately.
+- **Remote compaction** is served for that shape: a terminal
+  `compaction_trigger` item, or `POST /v1/responses/compact`, returns an opaque
+  AES-256-GCM tenant-bound compaction token that later turns resume from.
+  Custom providers compact locally through ordinary turns.
+- **Tokens and gateways.** Set `server.responses_compaction_secret_env` to the
+  name of an environment variable holding at least 32 random bytes. The key
+  seals compaction and reasoning tokens. Without it, each process uses an
+  ephemeral key, so tokens do not survive a restart or a gateway hop (reasoning
+  then falls back to the replayed text).
+
+Fields Kairyu cannot honor fail before dispatch with a 400 whose `param` names
+them:
+
+- request features: `background`, `conversation`, stored `prompt` templates,
+  `moderation`, `context_management`, `access_programs`, prompt-cache prewarm
+  and diagnostics, `truncation: "auto"`, stream obfuscation
+- logprobs: `top_logprobs` above 0, `message.output_text.logprobs`
+- tools: `allowed_tools` and hosted-tool `tool_choice`; custom, built-in shell
+  and apply_patch, and hosted tool types other than the web search declaration
+- input items: `item_reference` and other unsupported item types
+- reasoning: `reasoning.effort: "none"`
+- media: `file_id` images, `input_file`, `input_audio`
+
+`service_tier` is accepted and reported as `default`. `max_tool_calls`, hosted
+tool `include` values, and prompt-cache retention and breakpoints are accepted
+as no-ops. `usage.input_tokens_details.cache_write_tokens` is always 0
+(backends report cache reads only).
 
 Since issue #530, `/v1/responses` serves every chat model `/v1/models`
-advertises: orchestrated (`kairyu-auto*`) models delegate to the Chat
+advertises. Orchestrated (`kairyu-auto*`) models delegate to the Chat
 Completions orchestration contract, so `public_models` topologies that hide
 every L1 pool behind a single AUTO model work end to end (this includes the
-Terminal-Bench gateway shape). Additional Codex-derived behavior:
-
-- **Buffered streams never go silent.** Any streamed request with tools
-  replies `response.created`/`response.in_progress` immediately and emits
-  `: keep-alive` comments while generation runs; Codex aborts SSE streams
-  that stay silent for 300 s. Failures after the stream opens surface as
-  `error` + `response.failed` events.
-- **WebSocket upgrades get 426.** Harbor/Terminal-Bench repoints Codex's
-  built-in `openai` provider (`openai_base_url` in `config.toml`), which
-  tries WebSocket first; 426 makes Codex fall back to HTTPS immediately and
-  silently. A custom `model_providers` entry defaults to HTTPS-only and
-  skips the attempt entirely.
-- **Remote compaction v2 is served.** Against an OpenAI-shaped base URL,
-  Codex auto-compacts near its assumed context budget by sending a terminal
-  `compaction_trigger` input item; Kairyu answers with one `compaction`
-  output item whose `encrypted_content` is an opaque self-issued token, and
-  echoed compaction items decode back into the summarized context. Tokens are
-  AES-256-GCM sealed and bound to the authenticated tenant; forged, modified,
-  or cross-tenant tokens fail closed. Set
-  `server.responses_compaction_secret_env` to the name of an environment
-  variable containing at least 32 random bytes. When unset, each process uses an
-  ephemeral key and tokens do not survive a restart or gateway hop.
-- **`function_call_output.output` arrays** are accepted (text parts
-  concatenated); image/audio tool-output parts are rejected explicitly.
-- **Codex never retries 429.** A tenant admission 429 fails the Codex turn
-  outright, so size tenant admission generously (or leave it unset) on
-  deployments that serve Codex/Terminal-Bench traffic.
+Terminal-Bench gateway shape). Overflows inside AUTO stages that the
+orchestrator reports as sanitized upstream errors stay `server_error`. Length
+stops of AUTO turns stay incomplete, because a stage cap is not the context.
 
 Operational notes:
 
@@ -771,9 +814,9 @@ Operational notes:
 - **Gateway HA**: run gateways behind an L7 load balancer that consistently
   hashes `X-Session-ID`. Use `batch.store: postgres` for cross-gateway files and
   jobs. The filesystem store remains single-gateway only and must not be shared
-  over NFS. Gateways serving remote compaction must also share the same secret
-  environment value so an authenticated token issued by one gateway can be
-  opened by another.
+  over NFS. Gateways serving Responses must share the same
+  `responses_compaction_secret_env` value so a compaction or reasoning token
+  issued by one gateway opens on another.
 - **Two GPU nodes acting as one model** (TP/PP/P-D across nodes) is an
   engine-layer concern configured by `ClusterSpec` per `docs/gpu-runbook.md`
   §7; the gateway still sees one OpenAI endpoint per coherence domain.

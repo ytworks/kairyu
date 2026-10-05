@@ -28,9 +28,9 @@ Model ID:     <an ID returned by /v1/models>
 ```
 
 For a local or self-hosted model, open Cline's advanced model configuration
-and set `Max Output Tokens` explicitly. Kairyu's omitted-request default is 16,
-which is intentionally conservative but too small for most Cline XML tool
-calls; the gpu02 compatibility check uses 4096.
+and set `Max Output Tokens` explicitly. When it is omitted, Kairyu generates up
+to the model's remaining context (#496), which bounds a runaway reply only at
+the window; the gpu02 compatibility check uses 4096.
 
 Cline's VS Code extension follows VS Code's proxy handling. Its CLI and
 JetBrains plugin document HTTP proxy support only, so a SOCKS-only validation

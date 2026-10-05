@@ -881,9 +881,11 @@ before `/readyz` can report the process as serving.
 
 `/v1/chat/completions` (SSE, tools, logprobs, n>1, `response_format: json_schema`,
 vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
-(float + base64), `/v1/responses` (`input`, `instructions`, canonical typed SSE,
-flat and namespaced function tools, `function_call_output`, tenant-scoped
-`previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
+(float + base64), `/v1/responses` (`input`, `instructions`, canonical typed SSE with
+live reasoning and tool-call streaming, flat and namespaced function tools,
+`function_call_output`, input images, tenant-scoped `previous_response_id`, plus
+retrieve/delete, `input_items`, `input_tokens`, and `compact`), `/v1/models`,
+`/v1/files` + `/v1/batches`, `/health`,
 `/v1/route`, `/routing`,
 `/readyz`, `/backends`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
 drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
@@ -907,14 +909,18 @@ orchestration stages under the advertised private max-token policy, while the
 exact public max-token limit, `n`, logprobs, tools, and response grammar apply
 to the selected final worker or synthesis boundary.
 
-The Responses stream uses OpenAI event names and gapless sequence numbers from
-`response.created` through `response.completed` or `response.incomplete`; failures
-terminate with typed error/failed events. Successful stored responses can be continued
-with `previous_response_id`, but IDs never cross tenant boundaries. Function-call
-arguments and outputs round-trip through the normal model chat template and request
-capability checks. Run `scripts/codex_responses_smoke.sh` against a serving model to
-exercise an unmodified Codex CLI over `wire_api="responses"`; deployment details and
-unsupported Responses features are listed in `docs/deployment.md`.
+The Responses API follows the OpenAI wire contract (openai-openapi@13fa6e7ab9,
+openai-python 3.24 types). Streams use OpenAI event names and gapless sequence
+numbers from `response.created` through `response.completed` or
+`response.incomplete`, and data heartbeats repeat the current snapshot during
+long waits. Failures terminate with typed error/failed events, including an in-band
+`context_length_exceeded` that lets Codex compact. Reasoning becomes reasoning items
+(optionally with tenant-bound `encrypted_content`) and is replayed on the next turn.
+Errors use the OpenAI envelope with `param`. Stored responses can be retrieved
+or continued with `previous_response_id`, but IDs never cross tenant boundaries.
+Run `scripts/codex_responses_smoke.sh` against a serving model to exercise an
+unmodified Codex CLI over `wire_api="responses"`; deployment details, Codex behavior,
+and the fields Kairyu rejects are listed in `docs/deployment.md`.
 
 `POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
 template as actual chat before calling the Router's non-mutating `preview()`. It never
