@@ -463,10 +463,6 @@ class MetricsMiddleware:
                 ).inc()
 
 
-def _new_request_id() -> str:
-    return uuid.uuid4().hex[:16]
-
-
 class RequestIngressMiddleware:
     """Own the request boundary: timing, the request id, SLO lease cleanup.
 
@@ -488,7 +484,7 @@ class RequestIngressMiddleware:
             return
         state = _state(scope)
         state["placement_started_ns"] = time.perf_counter_ns()
-        request_id = _new_request_id()
+        request_id = uuid.uuid4().hex[:16]
         state["request_id"] = request_id
         request_id_header = (b"x-request-id", request_id.encode())
         response = {"started": False}
@@ -522,10 +518,7 @@ class AccessLogMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        state = _state(scope)
-        request_id = state.get("request_id")
-        if request_id is None:  # mounted without RequestIngressMiddleware
-            request_id = state["request_id"] = _new_request_id()
+        request_id = _state(scope)["request_id"]  # set by RequestIngressMiddleware
         started = time.perf_counter()
         status = {"code": 500}
 
