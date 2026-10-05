@@ -2158,7 +2158,7 @@ async def test_chat_max_tokens_precedes_modern_alias_when_both_are_present():
     assert engine.requests[0].sampling_params.max_tokens == 5
 
 
-async def test_responses_default_output_token_limit_is_1024():
+async def test_responses_omitted_output_limit_uses_the_remaining_context():
     engine = StubBackend(text="done", finish_reason="stop")
     app = create_legacy_app(engines={"stub": engine})
 
@@ -2168,7 +2168,7 @@ async def test_responses_default_output_token_limit_is_1024():
         )
 
     assert response.status_code == 200
-    assert engine.requests[0].sampling_params.max_tokens == 1024
+    assert engine.requests[0].sampling_params.max_tokens is None
 
 
 @pytest.mark.parametrize(

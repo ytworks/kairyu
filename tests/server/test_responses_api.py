@@ -303,6 +303,7 @@ def test_responses_prepare_failure_precedes_stream_headers_and_dispatch(
     assert response.json()["error"] == {
         "message": expected_message,
         "type": expected_type,
+        "param": None,
         "code": expected_code,
     }
     if not isinstance(failure, ValueError):
@@ -877,8 +878,8 @@ def test_truncated_compaction_is_incomplete(tmp_path, stream):
                 "input": "continue",
             },
         )
-    assert continued.status_code == 404
-    assert "previous response not found" in continued.json()["error"]["message"]
+    assert continued.status_code == 400
+    assert continued.json()["error"]["code"] == "previous_response_not_found"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
@@ -1072,21 +1073,18 @@ def test_disabled_web_search_tolerates_search_configuration(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("payload", "param"),
     [
-        ({"mystery": True}, "unsupported request fields"),
-        ({"tools": [{"type": "web_search"}]}, "expected 'function'"),
+        ({"mystery": True}, "mystery"),
+        ({"tools": [{"type": "file_search"}]}, "tools[0].type"),
         ({"context_management": [{"type": "compaction"}]}, "context_management"),
-        ({"include": ["message.output_text.logprobs"]}, "unsupported include values"),
-        ({"service_tier": "priority"}, "service_tier is not supported"),
-        (
-            {"stream_options": {"include_obfuscation": True}},
-            "stream obfuscation is not supported",
-        ),
+        ({"include": ["message.output_text.logprobs"]}, "include[0]"),
+        ({"background": True}, "background"),
+        ({"stream_options": {"include_obfuscation": True}}, "stream_options.include_obfuscation"),
         ({"text": {"verbosity": "maximum"}}, "text.verbosity"),
     ],
 )
-def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, message):
+def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, param):
     backend = MockBackend()
     with TestClient(_app(tmp_path, backend)) as http:
         response = http.post(
@@ -1094,7 +1092,7 @@ def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, me
             json={"model": "m", "input": "hello", **payload},
         )
     assert response.status_code == 400
-    assert message in response.json()["error"]["message"]
+    assert response.json()["error"]["param"] == param
     assert backend.prompts_seen == ()
 
 
@@ -1501,8 +1499,10 @@ def test_store_false_and_cross_tenant_stream_ids_are_not_readable(
             },
         )
     assert first.status_code == 200
-    assert cross_tenant.status_code == 404
-    assert not_found.status_code == 404
+    assert cross_tenant.status_code == not_found.status_code == 400
+    assert {cross_tenant.json()["error"]["param"], not_found.json()["error"]["param"]} == {
+        "previous_response_id"
+    }
 
 
 def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):
@@ -1540,4 +1540,4 @@ def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):
     assert failed["usage"]["input_tokens"] == totals["prompt_tokens"]
     assert failed["usage"]["output_tokens"] == totals["completion_tokens"]
     assert "secret upstream endpoint" not in response.text
-    assert lookup.status_code == 404
+    assert lookup.status_code == 400

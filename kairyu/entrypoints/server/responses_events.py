@@ -14,7 +14,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     _response_envelope,
     _usage_payload_from_wire,
 )
-from kairyu.entrypoints.server.responses_store import ResponseStore
+from kairyu.entrypoints.server.responses_store import PendingSave
 from kairyu.sse import escape_json_line_separators
 
 # Buffered generation can run for minutes on orchestrated models while the
@@ -59,9 +59,7 @@ async def _buffered_events(
     *,
     response_id: str,
     created_at: int,
-    stored_items: list[dict],
-    store: ResponseStore,
-    owner: str,
+    saver: PendingSave,
     compaction_request: bool = False,
 ) -> AsyncIterator[str]:
     """Stream buffered generation as Responses SSE without going silent.
@@ -107,7 +105,7 @@ async def _buffered_events(
             sequence,
             code=failure.payload.get("code") or "server_error",
             message=message,
-            param=None,
+            param=failure.payload.get("param"),
         )
         sequence += 1
         failed = _response_envelope(
@@ -237,9 +235,9 @@ async def _buffered_events(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    if request.store and not (compaction_request and not output):
+    if not (compaction_request and not output):
         # An incomplete compaction produced no replacement context; storing an
         # empty continuation entry would silently blank a thread.
-        store.save(response_id, stored_items + output, owner=owner)
+        saver.commit(final_response)
     terminal_type = "response.completed" if status == "completed" else "response.incomplete"
     yield _sse(terminal_type, sequence, response=final_response)

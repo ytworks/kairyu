@@ -12,7 +12,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from kairyu.entrypoints.server.chat_service import ChatRequestError
-from kairyu.entrypoints.server.responses_protocol import _BufferedFailure
+from kairyu.entrypoints.server.responses_protocol import ResponsesError, _BufferedFailure
 
 # Remote compaction v2 (Codex against an OpenAI-shaped provider): a terminal
 # compaction_trigger input item requests exactly one compaction output item
@@ -20,7 +20,6 @@ from kairyu.entrypoints.server.responses_protocol import _BufferedFailure
 _COMPACTION_TOKEN_PREFIX = "kcp1."
 _COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
 _COMPACTION_NONCE_BYTES = 12
-_COMPACTION_MAX_OUTPUT_TOKENS = 4096
 _COMPACTION_INSTRUCTION_ITEM = {
     "type": "message",
     "role": "user",
@@ -85,7 +84,11 @@ class _CompactionCodec:
 def _extract_compaction_trigger(items: Sequence[dict]) -> bool:
     for index, item in enumerate(items):
         if item["type"] == "compaction_trigger" and index != len(items) - 1:
-            raise ChatRequestError("compaction_trigger must be the final input item")
+            raise ResponsesError(
+                "compaction_trigger must be the final input item",
+                param=f"input[{index}]",
+                code="invalid_value",
+            )
     return bool(items) and items[-1]["type"] == "compaction_trigger"
 
 

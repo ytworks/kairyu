@@ -16,24 +16,33 @@ from collections.abc import Set as AbstractSet
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
+from starlette.routing import Match
 
 from kairyu.engine.backend import (
     CacheHint,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_count_prompt_tokens_async,
     prepare_backend_request,
+    render_tool_intent,
 )
+from kairyu.engine.prompt import prompt_text
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     chat_error_from_upstream_client_error,
     execute_chat,
+    validate_chat_input_async,
     validate_chat_request_async,
 )
-from kairyu.entrypoints.server.errors import upstream_error
+from kairyu.entrypoints.server.errors import (
+    openai_error_payload,
+    sanitize_backend_error,
+    wants_responses_envelope,
+)
 from kairyu.entrypoints.server.responses_auto import _orchestrated_response
 from kairyu.entrypoints.server.responses_codec import (
     _COMPACTION_INSTRUCTION_ITEM,
-    _COMPACTION_MAX_OUTPUT_TOKENS,
     _compaction_output_from_message,
     _CompactionCodec,
     _extract_compaction_trigger,
@@ -53,20 +62,55 @@ from kairyu.entrypoints.server.responses_items import (
     _output_items,
     _to_chat_request,
     _validate_function_outputs,
+    input_listing,
 )
 from kairyu.entrypoints.server.responses_protocol import (
+    ResponsesError,
+    ResponsesInputTokensRequest,
     ResponsesRequest,
     _BufferedFailure,
-    _chat_error,
-    _request_error,
     _response_envelope,
     _usage_payload,
     _validate_request_surface,
+    not_found,
+    parse_json_object,
+    responses_error_response,
+    validate_include,
+    validate_model,
 )
-from kairyu.entrypoints.server.responses_store import ResponseStore
+from kairyu.entrypoints.server.responses_store import (
+    PendingSave,
+    ResponseStore,
+    list_page,
+)
 from kairyu.entrypoints.server.sse_response import sse_response
 
 logger = logging.getLogger(__name__)
+_FALLBACK_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+
+def _owner(http_request: Request) -> str:
+    return getattr(http_request.state, "tenant", None) or "default"
+
+
+def _upstream_failure(error: BaseException) -> JSONResponse:
+    # The full traceback stays server-side; the wire gets the sanitized class.
+    logger.exception("Responses API upstream backend error")
+    return _BufferedFailure(sanitize_backend_error(error), 502).json_response()
+
+
+def _query_include(http_request: Request) -> None:
+    query = http_request.query_params
+    validate_include([*query.getlist("include[]"), *query.getlist("include")])
+
+
+def _query_flag(http_request: Request, name: str) -> bool:
+    value = http_request.query_params.get(name)
+    if value in (None, "false", "0"):
+        return False
+    if value in ("true", "1"):
+        return True
+    raise ResponsesError(f"{name} must be true or false", param=name, code="invalid_value")
 
 
 def add_responses_route(
@@ -83,6 +127,18 @@ def add_responses_route(
     app.state.response_store = store
     compaction_codec = _CompactionCodec(compaction_key)
 
+    def continuation(previous_response_id: str | None, owner: str) -> list[dict]:
+        if not previous_response_id:
+            return []
+        previous = store.get(previous_response_id, owner=owner)
+        if previous is None:
+            raise ResponsesError(
+                f"Previous response with id '{previous_response_id}' not found.",
+                param="previous_response_id",
+                code="previous_response_not_found",
+            )
+        return previous
+
     @app.get("/v1/responses")
     async def responses_upgrade_required() -> JSONResponse:
         # Codex tries a WebSocket upgrade first when it targets the built-in
@@ -92,19 +148,19 @@ def add_responses_route(
         return JSONResponse(
             status_code=426,
             content={
-                "error": {
-                    "message": (
-                        "WebSocket transport is not supported; "
-                        "retry over HTTPS"
-                    ),
-                    "type": "invalid_request_error",
-                    "code": "upgrade_required",
-                }
+                "error": openai_error_payload(
+                    "WebSocket transport is not supported; retry over HTTPS",
+                    code="upgrade_required",
+                )
             },
         )
 
     @app.post("/v1/responses")
-    async def responses(request: ResponsesRequest, http_request: Request):
+    async def responses(http_request: Request):
+        try:
+            request = validate_model(ResponsesRequest, await parse_json_object(http_request))
+        except ResponsesError as error:
+            return responses_error_response(error)
         http_request.state.model = request.model
         metrics = getattr(http_request.app.state, "metrics", None)
         ingress_ns = getattr(http_request.state, "placement_started_ns", None)
@@ -114,29 +170,25 @@ def add_responses_route(
                 "ingress_to_handler",
                 max(0, time.perf_counter_ns() - ingress_ns),
             )
+        owner = _owner(http_request)
         try:
             _validate_request_surface(request)
-        except ChatRequestError as error:
-            return _chat_error(error)
-        engine = engines.get(request.model)
-        orchestrated = (
-            engine is None
-            and chat_dispatch is not None
-            and request.model in (orchestrated_models or ())
-        )
-        if engine is None and not orchestrated:
-            return _request_error(
-                f"model {request.model!r} not found",
-                status_code=404,
-                code="model_not_found",
+            engine = engines.get(request.model)
+            orchestrated = (
+                engine is None
+                and chat_dispatch is not None
+                and request.model in (orchestrated_models or ())
             )
-        owner = getattr(http_request.state, "tenant", None) or "default"
-        context: list[dict] = []
-        if request.previous_response_id:
-            previous = store.get(request.previous_response_id, owner=owner)
-            if previous is None:
-                return _request_error("previous response not found", status_code=404)
-            context.extend(previous)
+            if engine is None and not orchestrated:
+                raise ResponsesError(
+                    f"model {request.model!r} not found",
+                    param="model",
+                    code="model_not_found",
+                    status_code=404,
+                )
+            context = continuation(request.previous_response_id, owner)
+        except ChatRequestError as error:
+            return responses_error_response(error)
         validation_started_ns = time.perf_counter_ns()
         try:
             current_items = _canonical_input(
@@ -153,7 +205,12 @@ def add_responses_route(
             # ``work_items`` here would store the full pre-compaction history next
             # to its summary, so a later previous_response_id request would grow
             # the prompt instead of compacting it.
-            stored_items = [] if compaction_request else work_items
+            saver = PendingSave(
+                store if request.store else None,
+                owner,
+                [] if compaction_request else work_items,
+                input_listing(current_items),
+            )
             _validate_function_outputs(work_items)
             prompt_items = (
                 work_items + [_COMPACTION_INSTRUCTION_ITEM]
@@ -166,17 +223,11 @@ def add_responses_route(
             if compaction_request:
                 # The summary is a plain text turn: tools cannot help it and a
                 # tool call in its place would break the client's compaction
-                # collection, so the summarization call runs tool-free with
-                # enough room for a useful summary.
+                # collection, so the summarization call runs tool-free. Its
+                # length follows max_output_tokens like any turn (omitted means
+                # the remaining context).
                 chat_request = chat_request.model_copy(
-                    update={
-                        "tools": None,
-                        "tool_choice": None,
-                        "max_completion_tokens": (
-                            request.max_output_tokens
-                            or _COMPACTION_MAX_OUTPUT_TOKENS
-                        ),
-                    }
+                    update={"tools": None, "tool_choice": None}
                 )
             if not orchestrated:
                 cache_key = request.prompt_cache_key or request.previous_response_id
@@ -209,7 +260,7 @@ def add_responses_route(
                     legacy_chat_models=legacy_chat_models,
                 )
         except ChatRequestError as error:
-            return _chat_error(error)
+            return responses_error_response(error)
         finally:
             if metrics is not None:
                 metrics.record_preplacement_phase(
@@ -225,8 +276,7 @@ def add_responses_route(
                 chat_dispatch,
                 response_id=f"resp_{uuid.uuid4().hex}",
                 created_at=int(time.time()),
-                stored_items=stored_items,
-                store=store,
+                saver=saver,
                 owner=owner,
                 compaction_codec=compaction_codec,
                 compaction_request=compaction_request,
@@ -238,11 +288,11 @@ def add_responses_route(
                 validated.generation_request,
             )
         except UpstreamClientError as error:
-            return _chat_error(chat_error_from_upstream_client_error(error))
+            return responses_error_response(chat_error_from_upstream_client_error(error))
         except ValueError as error:
-            return _request_error(str(error))
+            return responses_error_response(ResponsesError(str(error)))
         except RuntimeError as error:
-            return upstream_error(error)
+            return _upstream_failure(error)
         finally:
             if metrics is not None:
                 metrics.record_preplacement_phase(
@@ -257,9 +307,9 @@ def add_responses_route(
                 validated.generation_request,
             )
         except ValueError as error:
-            return _request_error(str(error))
+            return responses_error_response(ResponsesError(str(error)))
         except RuntimeError as error:
-            return upstream_error(error)
+            return _upstream_failure(error)
         admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
         reserve_started_ns = time.perf_counter_ns()
         admission = getattr(http_request.state, "tenant_admission", None)
@@ -278,19 +328,14 @@ def add_responses_route(
             if admitted:
                 http_request.state.tenant_metric_admitted = True
             if not admitted:
-                return JSONResponse(
-                    status_code=429,
-                    headers={"Retry-After": "1"},
-                    content={
-                        "error": {
-                            "message": (
-                                f"tenant {owner!r} admission limit exceeded "
-                                f"({admission.reason})"
-                            ),
-                            "type": "rate_limit_error",
-                            "code": "tenant_rate_limited",
-                        }
-                    },
+                return responses_error_response(
+                    ResponsesError(
+                        f"tenant {owner!r} admission limit exceeded ({admission.reason})",
+                        status_code=429,
+                        error_type="rate_limit_error",
+                        code="tenant_rate_limited",
+                        headers={"Retry-After": "1"},
+                    )
                 )
         admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
         if metrics is not None:
@@ -313,8 +358,7 @@ def add_responses_route(
                     validated,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=stored_items,
-                    store=store,
+                    saver=saver,
                     owner=owner,
                     http_request=http_request,
                 )
@@ -374,9 +418,7 @@ def add_responses_route(
                     produce,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=stored_items,
-                    store=store,
-                    owner=owner,
+                    saver=saver,
                     compaction_request=compaction_request,
                 )
             )
@@ -393,8 +435,177 @@ def add_responses_route(
             usage=usage,
             incomplete_details=incomplete_details,
         )
-        if request.store and not (compaction_request and not output):
-            store.save(response_id, stored_items + output, owner=owner)
+        if not (compaction_request and not output):
+            saver.commit(response)
         return JSONResponse(content=response)
 
+    @app.post("/v1/responses/input_tokens")
+    async def responses_input_tokens(http_request: Request) -> JSONResponse:
+        owner = _owner(http_request)
+        try:
+            body = validate_model(
+                ResponsesInputTokensRequest, await parse_json_object(http_request)
+            )
+            request = body.as_responses_request()
+            engine = engines.get(request.model)
+            if engine is None:
+                if chat_dispatch is not None and request.model in (orchestrated_models or ()):
+                    raise ResponsesError(
+                        "input token counting is not available for orchestrated models",
+                        param="model",
+                        code="unsupported_value",
+                    )
+                raise ResponsesError(
+                    f"model {request.model!r} not found",
+                    param="model",
+                    code="model_not_found",
+                    status_code=404,
+                )
+            items = continuation(request.previous_response_id, owner) + _canonical_input(
+                request.input, compaction_codec=compaction_codec, owner=owner
+            )
+            _validate_function_outputs(items)
+            chat_request = _to_chat_request(
+                request, items, compaction_codec=compaction_codec, owner=owner
+            )
+            validated_input = await validate_chat_input_async(
+                chat_request,
+                chat_templates,
+                allow_multimodal=True,
+                legacy_chat_models=legacy_chat_models,
+            )
+            text = prompt_text(
+                render_tool_intent(
+                    validated_input.prompt,
+                    tools=tuple(chat_request.tools or ()),
+                    tool_choice=chat_request.tool_choice,
+                    tools_in_prompt=validated_input.tools_in_prompt,
+                )
+            )
+            if text is None:
+                raise ResponsesError(
+                    "input token counting is not available for image input",
+                    param="input",
+                    code="unsupported_value",
+                )
+            input_tokens = await backend_count_prompt_tokens_async(engine, text)
+            if input_tokens is None:
+                raise ResponsesError(
+                    f"model {request.model!r} does not support token counting",
+                    param="model",
+                    code="unsupported_value",
+                )
+        except ChatRequestError as error:
+            return responses_error_response(error)
+        except ValueError as error:
+            return responses_error_response(ResponsesError(str(error)))
+        return JSONResponse(
+            content={"object": "response.input_tokens", "input_tokens": input_tokens}
+        )
+
+    @app.get("/v1/responses/{response_id}")
+    async def retrieve_response(response_id: str, http_request: Request) -> JSONResponse:
+        try:
+            _query_include(http_request)
+            if _query_flag(http_request, "stream"):
+                raise ResponsesError(
+                    "streaming retrieval needs background responses, which are not supported",
+                    param="stream",
+                    code="unsupported_value",
+                )
+            response = store.response(response_id, owner=_owner(http_request))
+            if response is None:
+                raise not_found(response_id)
+        except ResponsesError as error:
+            return responses_error_response(error)
+        return JSONResponse(content=response)
+
+    @app.delete("/v1/responses/{response_id}")
+    async def delete_response(response_id: str, http_request: Request) -> JSONResponse:
+        if not store.delete(response_id, owner=_owner(http_request)):
+            return responses_error_response(not_found(response_id))
+        return JSONResponse(
+            content={"id": response_id, "object": "response.deleted", "deleted": True}
+        )
+
+    @app.get("/v1/responses/{response_id}/input_items")
+    async def list_input_items(response_id: str, http_request: Request) -> JSONResponse:
+        try:
+            _query_include(http_request)
+            items = store.input_items(response_id, owner=_owner(http_request))
+            if items is None:
+                raise not_found(response_id)
+            page = list_page(items, http_request.query_params)
+        except ResponsesError as error:
+            return responses_error_response(error)
+        return JSONResponse(content=page)
+
+    @app.post("/v1/responses/{response_id}/cancel")
+    async def cancel_response(response_id: str, http_request: Request) -> JSONResponse:
+        if not store.has(response_id, owner=_owner(http_request)):
+            return responses_error_response(not_found(response_id))
+        return responses_error_response(
+            ResponsesError(
+                "Only background responses can be cancelled, and this server does "
+                "not run background responses.",
+                code="unsupported_value",
+            )
+        )
+
+    _add_unrouted_fallbacks(app)
     return store
+
+
+def _add_unrouted_fallbacks(app: FastAPI) -> None:
+    """OpenAI-shaped 404/405 for unrouted ``/v1/responses`` paths and methods.
+
+    Registered after every Responses route: Starlette tries routes in order,
+    so these catch-alls only see requests no Responses route fully matched.
+    """
+
+    routed = [
+        route
+        for route in app.router.routes
+        if isinstance(route, APIRoute) and wants_responses_envelope(route.path)
+    ]
+
+    async def unrouted(http_request: Request) -> JSONResponse:
+        method = http_request.method
+        allowed = sorted(
+            {
+                allowed_method
+                for route in routed
+                if route.matches(http_request.scope)[0] is Match.PARTIAL
+                for allowed_method in route.methods or ()
+            }
+        )
+        if allowed:
+            return JSONResponse(
+                status_code=405,
+                headers={"Allow": ", ".join(allowed)},
+                content={
+                    "error": openai_error_payload(
+                        f"Method {method} is not allowed for {http_request.url.path}.",
+                        code="method_not_allowed",
+                    )
+                },
+            )
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": openai_error_payload(f"Invalid URL ({method} {http_request.url.path})")
+            },
+        )
+
+    app.add_api_route(
+        "/v1/responses",
+        unrouted,
+        methods=["PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/v1/responses/{unrouted_path:path}",
+        unrouted,
+        methods=_FALLBACK_METHODS,
+        include_in_schema=False,
+    )

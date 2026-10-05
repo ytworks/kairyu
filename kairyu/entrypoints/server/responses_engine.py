@@ -21,7 +21,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     _response_envelope,
     _usage_payload,
 )
-from kairyu.entrypoints.server.responses_store import ResponseStore
+from kairyu.entrypoints.server.responses_store import PendingSave
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,7 @@ async def _live_text_events(
     *,
     response_id: str,
     created_at: int,
-    stored_items: list[dict],
-    store: ResponseStore,
+    saver: PendingSave,
     owner: str,
     http_request: Request,
 ) -> AsyncIterator[str | bytes]:
@@ -277,8 +276,7 @@ async def _live_text_events(
                 {"reason": "max_output_tokens"} if status == "incomplete" else None
             ),
         )
-        if request.store:
-            store.save(response_id, stored_items + [output_item], owner=owner)
+        saver.commit(final_response)
         terminal_type = "response.completed" if status == "completed" else "response.incomplete"
         yield _sse(terminal_type, sequence, response=final_response)
     finally:

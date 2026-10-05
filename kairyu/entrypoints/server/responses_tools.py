@@ -2,10 +2,46 @@
 
 from __future__ import annotations
 
-from kairyu.entrypoints.server.chat_service import ChatRequestError
 from kairyu.entrypoints.server.protocol import normalize_reasoning_effort
+from kairyu.entrypoints.server.responses_protocol import ResponsesError
 
 _NAMESPACE_SEPARATOR = "__"
+# Hosted web search is declared, never executed: Codex auto-declares it (live
+# or indexed) in full-access runs, so the declaration and its search settings
+# are accepted, echoed in ``response.tools``, and kept out of the callable
+# functions the model sees — no ``web_search_call`` item can ever be emitted.
+_WEB_SEARCH_TYPES = frozenset(
+    {
+        "web_search",
+        "web_search_2025_08_26",
+        "web_search_preview",
+        "web_search_preview_2025_03_11",
+    }
+)
+_WEB_SEARCH_FIELDS = frozenset(
+    {
+        "type",
+        "external_web_access",
+        "filters",
+        "user_location",
+        "search_context_size",
+        "search_content_types",
+    }
+)
+
+
+def _unknown_fields(path: str, item: dict, allowed: set[str] | frozenset[str]) -> None:
+    unknown = sorted(set(item) - allowed)
+    if unknown:
+        raise ResponsesError(
+            f"{path} has unsupported fields: " + ", ".join(unknown),
+            param=f"{path}.{unknown[0]}",
+            code="unknown_parameter",
+        )
+
+
+def _invalid(param: str, message: str) -> ResponsesError:
+    return ResponsesError(message, param=param, code="invalid_value")
 
 
 def _namespaced_name(namespace: str, name: str) -> str:
@@ -20,25 +56,18 @@ def _function_tool(
     description_prefix: str | None = None,
 ) -> dict:
     if tool.get("type") != "function":
-        raise ChatRequestError(f"{path}.type must be 'function'")
+        raise _invalid(f"{path}.type", f"{path}.type must be 'function'")
     name = tool.get("name")
     parameters = tool.get("parameters", {})
     if not isinstance(name, str) or not name:
-        raise ChatRequestError(f"{path}.name must be a non-empty string")
+        raise _invalid(f"{path}.name", f"{path}.name must be a non-empty string")
     if not isinstance(parameters, dict):
-        raise ChatRequestError(f"{path}.parameters must be an object")
-    unknown = set(tool) - {
-        "type",
-        "name",
-        "description",
-        "parameters",
-        "strict",
-        "defer_loading",
-    }
-    if unknown:
-        raise ChatRequestError(
-            f"{path} has unsupported fields: " + ", ".join(sorted(unknown))
-        )
+        raise _invalid(f"{path}.parameters", f"{path}.parameters must be an object")
+    _unknown_fields(
+        path,
+        tool,
+        {"type", "name", "description", "parameters", "strict", "defer_loading"},
+    )
     function = {"name": name_override or name, "parameters": parameters}
     description = tool.get("description")
     if description_prefix:
@@ -47,16 +76,16 @@ def _function_tool(
         )
     if description is not None:
         if not isinstance(description, str):
-            raise ChatRequestError(f"{path}.description must be a string")
+            raise _invalid(f"{path}.description", f"{path}.description must be a string")
         function["description"] = description
     if tool.get("strict") is not None:
         if not isinstance(tool["strict"], bool):
-            raise ChatRequestError(f"{path}.strict must be a boolean")
+            raise _invalid(f"{path}.strict", f"{path}.strict must be a boolean")
         function["strict"] = tool["strict"]
     if tool.get("defer_loading") is not None and not isinstance(
         tool["defer_loading"], bool
     ):
-        raise ChatRequestError(f"{path}.defer_loading must be a boolean")
+        raise _invalid(f"{path}.defer_loading", f"{path}.defer_loading must be a boolean")
     return {"type": "function", "function": function}
 
 
@@ -66,55 +95,43 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
     converted: list[dict] = []
     names: set[str] = set()
     for index, tool in enumerate(tools):
+        path = f"tools[{index}]"
         if not isinstance(tool, dict):
-            raise ChatRequestError(f"tools[{index}] must be an object")
+            raise _invalid(path, f"{path} must be an object")
         kind = tool.get("type")
         if kind == "namespace":
-            unknown = set(tool) - {"type", "name", "description", "tools"}
-            if unknown:
-                raise ChatRequestError(
-                    f"tools[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _unknown_fields(path, tool, {"type", "name", "description", "tools"})
             namespace = tool.get("name")
             nested = tool.get("tools")
             if not isinstance(namespace, str) or not namespace:
-                raise ChatRequestError(
-                    f"tools[{index}].name must be a non-empty string"
-                )
+                raise _invalid(f"{path}.name", f"{path}.name must be a non-empty string")
             if not isinstance(nested, list) or not nested:
-                raise ChatRequestError(
-                    f"tools[{index}].tools must be a non-empty array"
-                )
+                raise _invalid(f"{path}.tools", f"{path}.tools must be a non-empty array")
             namespace_description = tool.get("description")
             if namespace_description is not None and not isinstance(
                 namespace_description, str
             ):
-                raise ChatRequestError(
-                    f"tools[{index}].description must be a string"
-                )
+                raise _invalid(f"{path}.description", f"{path}.description must be a string")
             for nested_index, nested_tool in enumerate(nested):
+                nested_path = f"{path}.tools[{nested_index}]"
                 if not isinstance(nested_tool, dict):
-                    raise ChatRequestError(
-                        f"tools[{index}].tools[{nested_index}] must be an object"
-                    )
+                    raise _invalid(nested_path, f"{nested_path} must be an object")
                 nested_name = nested_tool.get("name")
                 if not isinstance(nested_name, str) or not nested_name:
-                    raise ChatRequestError(
-                        f"tools[{index}].tools[{nested_index}].name "
-                        "must be a non-empty string"
+                    raise _invalid(
+                        f"{nested_path}.name", f"{nested_path}.name must be a non-empty string"
                     )
                 encoded = _namespaced_name(namespace, nested_name)
                 if encoded in names:
-                    raise ChatRequestError(
-                        f"tools[{index}].tools[{nested_index}] resolves to duplicate "
-                        f"function name {encoded!r}"
+                    raise _invalid(
+                        f"{nested_path}.name",
+                        f"{nested_path} resolves to duplicate function name {encoded!r}",
                     )
                 names.add(encoded)
                 converted.append(
                     _function_tool(
                         nested_tool,
-                        path=f"tools[{index}].tools[{nested_index}]",
+                        path=nested_path,
                         name_override=encoded,
                         description_prefix=(
                             f"Namespace {namespace!r}."
@@ -127,41 +144,24 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
                     )
                 )
             continue
-        if kind == "web_search" and tool.get("external_web_access") is False:
-            # Codex attaches search configuration (filters, location, context
-            # size) even when external access is disabled; the settings of a
-            # tool that can never run are accepted and ignored.
-            unknown = set(tool) - {
-                "type",
-                "external_web_access",
-                "filters",
-                "user_location",
-                "search_context_size",
-                "search_content_types",
-            }
-            if unknown:
-                raise ChatRequestError(
-                    f"tools[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
-            # Codex declares its built-in web tool even when the current run
-            # explicitly disables external access.  Keeping it in the response
-            # envelope but omitting it from model-visible callable functions is
-            # truthful: the disabled tool cannot be selected or executed.
+        if kind in _WEB_SEARCH_TYPES:
+            _unknown_fields(path, tool, _WEB_SEARCH_FIELDS)
             continue
         if kind != "function":
-            keys = sorted(tool)
-            raise ChatRequestError(
-                f"tools[{index}].type {kind!r} is not supported; expected 'function' "
-                f"(fields: {', '.join(keys)})"
+            raise ResponsesError(
+                f"{path}.type {kind!r} is not supported; Kairyu executes no hosted "
+                "or built-in tools and accepts 'function', 'namespace', and web "
+                "search declarations",
+                param=f"{path}.type",
+                code="unsupported_value",
             )
         name = tool.get("name")
         if not isinstance(name, str) or not name:
-            raise ChatRequestError(f"tools[{index}].name must be a non-empty string")
+            raise _invalid(f"{path}.name", f"{path}.name must be a non-empty string")
         if name in names:
-            raise ChatRequestError(f"tools[{index}].name {name!r} is duplicated")
+            raise _invalid(f"{path}.name", f"{path}.name {name!r} is duplicated")
         names.add(name)
-        converted.append(_function_tool(tool, path=f"tools[{index}]"))
+        converted.append(_function_tool(tool, path=path))
     return converted
 
 
@@ -171,24 +171,34 @@ def _chat_tool_choice(
 ) -> str | dict | None:
     if not isinstance(choice, dict):
         return choice
-    if choice.get("type") != "function":
-        raise ChatRequestError("named tool_choice.type must be 'function'")
+    kind = choice.get("type")
+    if kind != "function":
+        if isinstance(kind, str):
+            raise ResponsesError(
+                f"tool_choice.type {kind!r} is not supported; use none, auto, "
+                "required, or a named function",
+                param="tool_choice.type",
+                code="unsupported_value",
+            )
+        raise _invalid("tool_choice.type", "named tool_choice.type must be 'function'")
     name = choice.get("name")
     if not isinstance(name, str) or not name:
-        raise ChatRequestError("named tool_choice.name must be a non-empty string")
+        raise _invalid("tool_choice.name", "named tool_choice.name must be a non-empty string")
     namespace = choice.get("namespace")
     if namespace is not None and (
         not isinstance(namespace, str) or not namespace
     ):
-        raise ChatRequestError("named tool_choice.namespace must be a non-empty string")
-    if set(choice) - {"type", "name", "namespace"}:
-        raise ChatRequestError("named tool_choice has unsupported fields")
+        raise _invalid(
+            "tool_choice.namespace", "named tool_choice.namespace must be a non-empty string"
+        )
+    _unknown_fields("tool_choice", choice, {"type", "name", "namespace"})
     if namespace is not None:
         selected = _namespaced_name(namespace, name)
         namespace_names = _namespace_names(tools)
         if selected not in namespace_names:
-            raise ChatRequestError(
-                f"named tool_choice references unknown namespace function {namespace!r}.{name!r}"
+            raise _invalid(
+                "tool_choice.name",
+                f"named tool_choice references unknown namespace function {namespace!r}.{name!r}",
             )
         name = selected
     return {"type": "function", "function": {"name": name}}
@@ -197,16 +207,15 @@ def _chat_tool_choice(
 def _response_format(text: dict | None) -> dict | None:
     if text is None:
         return None
-    if set(text) - {"format", "verbosity"}:
-        raise ChatRequestError("text has unsupported fields")
+    _unknown_fields("text", text, {"format", "verbosity"})
     verbosity = text.get("verbosity")
     if verbosity not in (None, "low", "medium", "high"):
-        raise ChatRequestError("text.verbosity must be low, medium, or high")
+        raise _invalid("text.verbosity", "text.verbosity must be low, medium, or high")
     fmt = text.get("format")
     if fmt is None:
         return None
     if not isinstance(fmt, dict):
-        raise ChatRequestError("text.format must be an object")
+        raise _invalid("text.format", "text.format must be an object")
     kind = fmt.get("type")
     if kind == "text":
         return {"type": "text"}
@@ -215,7 +224,7 @@ def _response_format(text: dict | None) -> dict | None:
     if kind == "json_schema":
         schema = fmt.get("schema")
         if not isinstance(schema, dict):
-            raise ChatRequestError("text.format.schema must be a JSON schema object")
+            raise _invalid("text.format.schema", "text.format.schema must be a JSON schema object")
         return {
             "type": "json_schema",
             "json_schema": {
@@ -224,7 +233,7 @@ def _response_format(text: dict | None) -> dict | None:
                 "strict": bool(fmt.get("strict", False)),
             },
         }
-    raise ChatRequestError(f"text.format.type {kind!r} is not supported")
+    raise _invalid("text.format.type", f"text.format.type {kind!r} is not supported")
 
 
 def _reasoning_effort(reasoning: dict | None) -> str | None:
@@ -234,8 +243,8 @@ def _reasoning_effort(reasoning: dict | None) -> str | None:
     try:
         return normalize_reasoning_effort(effort)
     except ValueError:
-        raise ChatRequestError(
-            f"reasoning.effort {effort!r} is not supported"
+        raise _invalid(
+            "reasoning.effort", f"reasoning.effort {effort!r} is not supported"
         ) from None
 
 

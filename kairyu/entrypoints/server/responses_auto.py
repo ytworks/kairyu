@@ -10,7 +10,10 @@ from collections.abc import AsyncIterator
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from kairyu.entrypoints.server.errors import upstream_error
+from kairyu.entrypoints.server.errors import (
+    openai_error_payload,
+    responses_slow_down_payload,
+)
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
 from kairyu.entrypoints.server.responses_codec import (
     _compaction_output_from_message,
@@ -29,7 +32,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     _response_envelope,
     _usage_payload_from_wire,
 )
-from kairyu.entrypoints.server.responses_store import ResponseStore
+from kairyu.entrypoints.server.responses_store import PendingSave
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 
@@ -42,9 +45,7 @@ async def _relay_auto_chat_stream(
     *,
     response_id: str,
     created_at: int,
-    stored_items: list[dict],
-    store: ResponseStore,
-    owner: str,
+    saver: PendingSave,
 ) -> AsyncIterator[str | bytes]:
     """Re-encode the orchestrated Chat Completions SSE stream as Responses SSE.
 
@@ -233,8 +234,7 @@ async def _relay_auto_chat_stream(
         usage=_usage_payload_from_wire(wire_usage),
         incomplete_details=incomplete_details,
     )
-    if request.store:
-        store.save(response_id, stored_items + [output_item], owner=owner)
+    saver.commit(final_response)
     terminal_type = "response.completed" if status == "completed" else "response.incomplete"
     yield _sse(terminal_type, sequence, response=final_response)
 
@@ -247,8 +247,7 @@ async def _orchestrated_response(
     *,
     response_id: str,
     created_at: int,
-    stored_items: list[dict],
-    store: ResponseStore,
+    saver: PendingSave,
     owner: str,
     compaction_codec: _CompactionCodec,
     compaction_request: bool = False,
@@ -266,16 +265,14 @@ async def _orchestrated_response(
         )
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
-            return delegated
+            return _rerendered_chat_error(delegated)
         return sse_response(
             _relay_auto_chat_stream(
                 request,
                 delegated.body_iterator,
                 response_id=response_id,
                 created_at=created_at,
-                stored_items=stored_items,
-                store=store,
-                owner=owner,
+                saver=saver,
             )
         )
     buffered_request = chat_request.model_copy(update={"stream": False})
@@ -330,17 +327,23 @@ async def _orchestrated_response(
                 produce,
                 response_id=response_id,
                 created_at=created_at,
-                stored_items=stored_items,
-                store=store,
-                owner=owner,
+                saver=saver,
                 compaction_request=compaction_request,
             )
         )
     delegated = await chat_dispatch(buffered_request, http_request)
     if not isinstance(delegated, JSONResponse):
-        return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
+        logger.error("unexpected non-JSON chat dispatch reply for a unary request")
+        return _BufferedFailure(
+            {
+                "message": "unexpected non-JSON chat dispatch reply",
+                "type": "upstream_error",
+                "code": "backend_error",
+            },
+            502,
+        ).json_response()
     if delegated.status_code != 200:
-        return delegated
+        return _rerendered_chat_error(delegated)
     try:
         output, usage, status, incomplete_details = outcome_from_payload(
             json.loads(bytes(delegated.body))
@@ -356,6 +359,40 @@ async def _orchestrated_response(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    if request.store and not (compaction_request and not output):
-        store.save(response_id, stored_items + output, owner=owner)
+    if not (compaction_request and not output):
+        saver.commit(response)
     return JSONResponse(content=response)
+
+
+def _rerendered_chat_error(response: JSONResponse) -> JSONResponse:
+    """Re-render a delegated chat error in the Responses envelope.
+
+    A per-tenant concurrency rejection (``in_flight``) is transient, so it
+    becomes the 503 ``slow_down`` that Codex retries; other errors keep their
+    status and gain ``param``.
+    """
+
+    try:
+        error = json.loads(bytes(response.body)).get("error") or {}
+    except (AttributeError, ValueError):
+        error = {}
+    message = error.get("message") or "upstream backend error"
+    retry_after = response.headers.get("retry-after")
+    if response.status_code == 429 and message.endswith("(in_flight)"):
+        return JSONResponse(
+            status_code=503,
+            content=responses_slow_down_payload(message),
+            headers={"Retry-After": retry_after or "1"},
+        )
+    code = error.get("code")
+    payload = openai_error_payload(
+        message,
+        error_type=error.get("type") or "invalid_request_error",
+        code=code,
+        param="model" if code == "model_not_found" else None,
+    )
+    return JSONResponse(
+        status_code=response.status_code,
+        content={"error": payload},
+        headers={"Retry-After": retry_after} if retry_after else None,
+    )

@@ -20,6 +20,11 @@ from functools import lru_cache
 
 from starlette.requests import ClientDisconnect
 
+from kairyu.entrypoints.server.errors import (
+    openai_error_payload,
+    responses_slow_down_payload,
+    wants_responses_envelope,
+)
 from kairyu.entrypoints.server.messages_protocol import (
     anthropic_error_payload,
     anthropic_error_type_for_status,
@@ -41,10 +46,11 @@ _ASGIApp = Callable[..., Awaitable[None]]
 _OPEN_PATHS = ("/health", "/readyz", "/backends", "/api/hello")
 _GUARDED_PREFIX = "/v1/"
 _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
-# In-process sentinel (#573): the Anthropic Messages adapter sets this on the
-# request state before an AUTO chat dispatch so tool-bearing requests stream
-# raw; it is unreachable from the wire, so the public /v1/chat/completions
-# contract (including its pre-SSE tool gates) is unchanged.
+# In-process sentinel (#573): the Anthropic Messages and OpenAI Responses
+# adapters set this on the request state before an AUTO chat dispatch so
+# tool-bearing requests stream raw (each adapter enforces the tool gates on the
+# raw stream); it is unreachable from the wire, so the public
+# /v1/chat/completions contract (including its pre-SSE tool gates) is unchanged.
 _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY = "kairyu_internal_anthropic_tool_stream"
 
 # collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)
@@ -94,7 +100,9 @@ async def _send_error(
 
     ``/v1/messages`` (Anthropic Messages, issue #508) must never receive the
     OpenAI ``{"error": ...}`` envelope, and ``/v1/systemone`` answers in Jev's
-    ``{"detail": ...}`` shape; every other route keeps the OpenAI envelope.
+    ``{"detail": ...}`` shape; ``/v1/responses`` adds ``param`` and maps
+    concurrency overflow to 503 ``slow_down``; every other route keeps the
+    OpenAI envelope.
     """
 
     if wants_anthropic_envelope(scope.get("path", "")):
@@ -105,6 +113,13 @@ async def _send_error(
         )
     elif wants_jev_envelope(scope.get("path", "")):
         payload = jev_error_payload(jev_error_type_for_status(status), message)
+    elif wants_responses_envelope(scope.get("path", "")):
+        if status == 429 and code == "concurrency_exceeded":
+            # Server-wide overload is transient: Codex retries 503 slow_down
+            # after Retry-After but treats 429 as terminal.
+            status, payload = 503, responses_slow_down_payload(message)
+        else:
+            payload = {"error": openai_error_payload(message, error_type=openai_type, code=code)}
     else:
         payload = {"error": {"message": message, "type": openai_type, "code": code}}
     await _send_json(send, status, payload, headers or {})

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from kairyu.entrypoints.server.chat_service import ChatRequestError, ExecutedChat
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 from kairyu.entrypoints.server.responses_codec import _CompactionCodec
-from kairyu.entrypoints.server.responses_protocol import ResponsesRequest
+from kairyu.entrypoints.server.responses_protocol import ResponsesError, ResponsesRequest
 from kairyu.entrypoints.server.responses_tools import (
     _chat_tool_choice,
     _chat_tools,
@@ -24,6 +24,28 @@ _CODEX_INTERNAL_ITEM_FIELDS = {
     "internal_chat_message_metadata_passthrough",
     "encrypted_function_args",
 }
+_TEXT_PART_TYPES = {"input_text", "output_text", "text"}
+
+
+def _invalid(param: str, message: str, *, code: str = "invalid_value") -> ResponsesError:
+    return ResponsesError(message, param=param, code=code)
+
+
+def _reject_unknown(path: str, item: dict, allowed: set[str]) -> None:
+    unknown = sorted(set(item) - allowed)
+    if unknown:
+        raise ResponsesError(
+            f"{path} has unsupported fields: " + ", ".join(unknown),
+            param=f"{path}.{unknown[0]}",
+            code="unknown_parameter",
+        )
+
+
+def _item_id(item: dict, prefix: str) -> str:
+    supplied = item.get("id")
+    if isinstance(supplied, str) and supplied:
+        return supplied
+    return f"{prefix}_{uuid.uuid4().hex[:24]}"
 
 
 def _canonical_input(
@@ -33,13 +55,21 @@ def _canonical_input(
     owner: str,
 ) -> list[dict]:
     if isinstance(payload, str):
-        return [{"type": "message", "role": "user", "content": payload}]
+        return [
+            {
+                "type": "message",
+                "id": f"msg_{uuid.uuid4().hex[:24]}",
+                "role": "user",
+                "content": payload,
+            }
+        ]
     if not isinstance(payload, list):
-        raise ChatRequestError("input must be a string or an array of input items")
+        raise _invalid("input", "input must be a string or an array of input items")
     items: list[dict] = []
     for index, item in enumerate(payload):
+        path = f"input[{index}]"
         if not isinstance(item, dict):
-            raise ChatRequestError(f"input[{index}] must be an object")
+            raise _invalid(path, f"{path} must be an object")
         kind = item.get("type")
         if kind is None and "role" in item:
             kind = "message"
@@ -53,33 +83,21 @@ def _canonical_input(
             if key not in _CODEX_INTERNAL_ITEM_FIELDS
         }
         if kind == "message":
-            unknown = set(item) - {
-                "type",
-                "role",
-                "content",
-                "status",
-                "id",
-                "phase",
-            }
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _reject_unknown(path, item, {"type", "role", "content", "status", "id", "phase"})
             role = item.get("role")
             if role not in _SUPPORTED_ROLES:
-                raise ChatRequestError(
-                    f"input[{index}].role must be user, assistant, system, or developer"
+                raise _invalid(
+                    f"{path}.role",
+                    f"{path}.role must be user, assistant, system, or developer",
                 )
             content = item.get("content", "")
-            _content_text(content, path=f"input[{index}].content")
+            _content_text(content, path=f"{path}.content")
             phase = item.get("phase")
             if phase not in (None, "commentary", "final_answer"):
-                raise ChatRequestError(
-                    f"input[{index}].phase must be commentary or final_answer"
-                )
+                raise _invalid(f"{path}.phase", f"{path}.phase must be commentary or final_answer")
             canonical = {
                 "type": "message",
+                "id": _item_id(item, "msg"),
                 "role": role,
                 "content": copy.deepcopy(content),
             }
@@ -88,40 +106,31 @@ def _canonical_input(
             items.append(canonical)
             continue
         if kind == "function_call":
-            unknown = set(item) - {
-                "type",
-                "id",
-                "call_id",
-                "name",
-                "namespace",
-                "arguments",
-                "status",
-            }
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _reject_unknown(
+                path,
+                item,
+                {"type", "id", "call_id", "name", "namespace", "arguments", "status"},
+            )
             name = item.get("name")
             call_id = item.get("call_id")
             arguments = item.get("arguments")
             namespace = item.get("namespace")
             if not isinstance(name, str) or not name:
-                raise ChatRequestError(f"input[{index}].name must be a non-empty string")
+                raise _invalid(f"{path}.name", f"{path}.name must be a non-empty string")
             if not isinstance(call_id, str) or not call_id:
-                raise ChatRequestError(f"input[{index}].call_id must be a non-empty string")
+                raise _invalid(f"{path}.call_id", f"{path}.call_id must be a non-empty string")
             if not isinstance(arguments, str):
-                raise ChatRequestError(f"input[{index}].arguments must be a JSON string")
+                raise _invalid(f"{path}.arguments", f"{path}.arguments must be a JSON string")
             if namespace is not None and (
                 not isinstance(namespace, str) or not namespace
             ):
-                raise ChatRequestError(
-                    f"input[{index}].namespace must be a non-empty string"
+                raise _invalid(
+                    f"{path}.namespace", f"{path}.namespace must be a non-empty string"
                 )
             items.append(
                 {
                     "type": "function_call",
-                    "id": item.get("id") or f"fc_{uuid.uuid4().hex[:24]}",
+                    "id": _item_id(item, "fc"),
                     "call_id": call_id,
                     "name": name,
                     "namespace": namespace,
@@ -131,28 +140,27 @@ def _canonical_input(
             )
             continue
         if kind == "function_call_output":
-            unknown = set(item) - {"type", "id", "call_id", "output", "status"}
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _reject_unknown(path, item, {"type", "id", "call_id", "output", "status"})
             call_id = item.get("call_id")
             output = item.get("output")
             if not isinstance(call_id, str) or not call_id:
-                raise ChatRequestError(f"input[{index}].call_id must be a non-empty string")
+                raise _invalid(f"{path}.call_id", f"{path}.call_id must be a non-empty string")
             if isinstance(output, list):
                 # Codex sends structured tool output (e.g. view_image) as an
                 # array of content items instead of a plain string.
-                output = _function_output_text(
-                    output, path=f"input[{index}].output"
-                )
+                output = _function_output_text(output, path=f"{path}.output")
             elif not isinstance(output, str):
-                raise ChatRequestError(
-                    f"input[{index}].output must be a string or an array of output parts"
+                raise _invalid(
+                    f"{path}.output",
+                    f"{path}.output must be a string or an array of output parts",
                 )
             items.append(
-                {"type": "function_call_output", "call_id": call_id, "output": output}
+                {
+                    "type": "function_call_output",
+                    "id": _item_id(item, "fco"),
+                    "call_id": call_id,
+                    "output": output,
+                }
             )
             continue
         if kind == "reasoning":
@@ -160,48 +168,36 @@ def _canonical_input(
             # (encrypted_content may be null or foreign). Kairyu emits no
             # reasoning output item and renders none into the prompt, so the
             # echo is accepted for wire compatibility and dropped.
-            unknown = set(item) - {
-                "type",
-                "id",
-                "summary",
-                "content",
-                "encrypted_content",
-                "status",
-            }
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _reject_unknown(
+                path,
+                item,
+                {"type", "id", "summary", "content", "encrypted_content", "status"},
+            )
             continue
         if kind in {"compaction", "compaction_summary"}:
-            unknown = set(item) - {"type", "id", "encrypted_content", "status"}
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
+            _reject_unknown(path, item, {"type", "id", "encrypted_content", "status"})
             # Fail-fast on foreign or cross-tenant tokens; render re-decodes it.
-            compaction_codec.decode(item.get("encrypted_content"), owner=owner)
+            try:
+                compaction_codec.decode(item.get("encrypted_content"), owner=owner)
+            except ChatRequestError as error:
+                raise _invalid(f"{path}.encrypted_content", str(error)) from None
             items.append(
                 {
                     "type": "compaction",
+                    "id": _item_id(item, "cmp"),
                     "encrypted_content": item["encrypted_content"],
                 }
             )
             continue
         if kind == "compaction_trigger":
-            unknown = set(item) - {"type", "id", "status"}
-            if unknown:
-                raise ChatRequestError(
-                    f"input[{index}] has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
-            items.append({"type": "compaction_trigger"})
+            _reject_unknown(path, item, {"type", "id", "status"})
+            items.append({"type": "compaction_trigger", "id": _item_id(item, "cmpt")})
             continue
-        raise ChatRequestError(
-            f"input[{index}].type {kind!r} is not supported; "
-            "use message, function_call, or function_call_output"
+        raise ResponsesError(
+            f"{path}.type {kind!r} is not supported; "
+            "use message, function_call, or function_call_output",
+            param=f"{path}.type",
+            code="unsupported_value",
         )
     return items
 
@@ -209,18 +205,21 @@ def _canonical_input(
 def _function_output_text(parts: list, *, path: str) -> str:
     texts: list[str] = []
     for index, part in enumerate(parts):
+        part_path = f"{path}[{index}]"
         if not isinstance(part, dict):
-            raise ChatRequestError(f"{path}[{index}] must be an object")
+            raise _invalid(part_path, f"{part_path} must be an object")
         kind = part.get("type")
-        if kind in {"input_text", "output_text", "text"}:
+        if kind in _TEXT_PART_TYPES:
             text = part.get("text")
             if not isinstance(text, str):
-                raise ChatRequestError(f"{path}[{index}].text must be a string")
+                raise _invalid(f"{part_path}.text", f"{part_path}.text must be a string")
             texts.append(text)
             continue
-        raise ChatRequestError(
-            f"{path}[{index}].type {kind!r} is not supported; "
-            "this model accepts text tool output only"
+        raise ResponsesError(
+            f"{part_path}.type {kind!r} is not supported; "
+            "this model accepts text tool output only",
+            param=f"{part_path}.type",
+            code="unsupported_value",
         )
     return "".join(texts)
 
@@ -229,28 +228,30 @@ def _content_text(content: object, *, path: str) -> str:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
-        raise ChatRequestError(f"{path} must be a string or an array of text parts")
+        raise _invalid(path, f"{path} must be a string or an array of text parts")
     parts: list[str] = []
     for index, part in enumerate(content):
+        part_path = f"{path}[{index}]"
         if not isinstance(part, dict):
-            raise ChatRequestError(f"{path}[{index}] must be an object")
+            raise _invalid(part_path, f"{part_path} must be an object")
         kind = part.get("type")
-        if kind not in {"input_text", "output_text", "text"}:
-            raise ChatRequestError(f"{path}[{index}].type {kind!r} is not supported")
+        if kind not in _TEXT_PART_TYPES:
+            raise ResponsesError(
+                f"{part_path}.type {kind!r} is not supported",
+                param=f"{part_path}.type",
+                code="unsupported_value",
+            )
+        # prompt_cache_breakpoint marks an explicit OpenAI cache breakpoint;
+        # Kairyu's prefix cache is automatic, so the marker is vacuous here.
         allowed = (
             {"type", "text", "annotations", "logprobs"}
             if kind == "output_text"
-            else {"type", "text"}
+            else {"type", "text", "prompt_cache_breakpoint"}
         )
-        unknown = set(part) - allowed
-        if unknown:
-            raise ChatRequestError(
-                f"{path}[{index}] has unsupported fields: "
-                + ", ".join(sorted(unknown))
-            )
+        _reject_unknown(part_path, part, allowed)
         text = part.get("text")
         if not isinstance(text, str):
-            raise ChatRequestError(f"{path}[{index}].text must be a string")
+            raise _invalid(f"{part_path}.text", f"{part_path}.text must be a string")
         parts.append(text)
     return "".join(parts)
 
@@ -262,19 +263,56 @@ def _validate_function_outputs(items: Sequence[dict]) -> None:
         if item["type"] == "function_call":
             call_id = item["call_id"]
             if call_id in pending:
-                raise ChatRequestError(f"duplicate function call_id {call_id!r}")
+                raise _invalid("input", f"duplicate function call_id {call_id!r}")
             pending.add(call_id)
         elif item["type"] == "function_call_output":
             call_id = item["call_id"]
             if call_id not in pending:
-                raise ChatRequestError(
-                    f"input function_call_output references unknown call_id {call_id!r}"
+                raise _invalid(
+                    "input",
+                    f"input function_call_output references unknown call_id {call_id!r}",
                 )
             if call_id in consumed:
-                raise ChatRequestError(
-                    f"input function_call_output repeats call_id {call_id!r}"
+                raise _invalid(
+                    "input", f"input function_call_output repeats call_id {call_id!r}"
                 )
             consumed.add(call_id)
+
+
+def input_listing(items: Sequence[dict]) -> list[dict]:
+    """Wire view of canonical input items for ``GET .../input_items``."""
+
+    listed: list[dict] = []
+    for item in items:
+        kind = item["type"]
+        if kind == "message":
+            content = copy.deepcopy(item["content"])
+            if isinstance(content, str):
+                if item["role"] == "assistant":
+                    content = [{"type": "output_text", "text": content, "annotations": []}]
+                else:
+                    content = [{"type": "input_text", "text": content}]
+            entry = {
+                "type": "message",
+                "id": item["id"],
+                "role": item["role"],
+                "status": "completed",
+                "content": content,
+            }
+            if "phase" in item:
+                entry["phase"] = item["phase"]
+        elif kind == "function_call_output":
+            entry = {
+                "type": kind,
+                "id": item["id"],
+                "call_id": item["call_id"],
+                "output": item["output"],
+                "status": "completed",
+            }
+        else:
+            entry = {key: value for key, value in item.items() if value is not None}
+        listed.append(copy.deepcopy(entry))
+    return listed
 
 
 def _items_to_messages(
@@ -381,9 +419,9 @@ def _to_chat_request(
     return ChatCompletionRequest(
         model=request.model,
         messages=messages,
-        max_completion_tokens=(
-            request.max_output_tokens if request.max_output_tokens is not None else 1024
-        ),
+        # Omitted means the remaining context, exactly like Chat Completions
+        # (#496): Codex never sends a cap and retries every incomplete turn.
+        max_completion_tokens=request.max_output_tokens,
         stream=request.stream,
         tools=_chat_tools(request.tools),
         tool_choice=_chat_tool_choice(request.tool_choice, request.tools),
