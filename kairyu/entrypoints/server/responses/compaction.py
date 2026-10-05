@@ -15,6 +15,7 @@ from kairyu.entrypoints.server.chat_service import ChatRequestError
 from kairyu.entrypoints.server.responses.errors import BufferedFailure
 from kairyu.entrypoints.server.responses.sealing import (
     SealedItemError,
+    SealedItemTooLargeError,
     SealingKeyRing,
     SealPurpose,
 )
@@ -44,7 +45,22 @@ class CompactionCodec:
         self._keys = keys
 
     def encode(self, summary: str, *, owner: str) -> str:
-        return self._keys.seal(SealPurpose.COMPACTION, {"summary": summary}, owner=owner)
+        try:
+            return self._keys.seal(SealPurpose.COMPACTION, {"summary": summary}, owner=owner)
+        except SealedItemTooLargeError as error:
+            # Fail the compaction now rather than emit a token the next turn
+            # cannot reopen (same failure as an empty summary).
+            raise BufferedFailure.from_payload(
+                {
+                    "message": (
+                        "upstream model returned a compaction summary too large "
+                        f"to seal ({error})"
+                    ),
+                    "type": "upstream_error",
+                    "code": "compaction_failed",
+                },
+                502,
+            ) from None
 
     def decode(self, token: object, *, owner: str, param: str | None = None) -> str:
         try:

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import struct
 import time
 
 import pytest
@@ -334,60 +335,6 @@ def test_compaction_token_is_tenant_bound(tmp_path, monkeypatch):
     _assert_refused_seal(cross_tenant, "not issued by this server")
 
 
-def test_configured_compaction_secret_survives_gateway_boundary(
-    tmp_path, monkeypatch
-):
-    secret_env = "KAIRYU_TEST_RESPONSES_COMPACTION_SECRET"
-    monkeypatch.setenv(secret_env, "shared-secret-material-0123456789abcdef")
-    first_backend = MockBackend(
-        {"compacted continuation": "PORTABLE ENCRYPTED SUMMARY"}
-    )
-    first_app = create_legacy_app(
-        {"m": first_backend},
-        settings=ServerSettings(
-            responses_compaction_secret_env=secret_env,
-            usage_ledger_path=str(tmp_path / "first-usage.jsonl"),
-        ),
-    )
-    with TestClient(first_app) as http:
-        compacted = http.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "store": False,
-                "input": [
-                    {"type": "message", "role": "user", "content": "history"},
-                    {"type": "compaction_trigger"},
-                ],
-            },
-        )
-    assert compacted.status_code == 200
-    token = compacted.json()["output"][0]["encrypted_content"]
-
-    second_backend = MockBackend({"continue": "CONTINUED"})
-    second_app = create_legacy_app(
-        {"m": second_backend},
-        settings=ServerSettings(
-            responses_compaction_secret_env=secret_env,
-            usage_ledger_path=str(tmp_path / "second-usage.jsonl"),
-        ),
-    )
-    with TestClient(second_app) as http:
-        continued = http.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "store": False,
-                "input": [
-                    {"type": "compaction", "encrypted_content": token},
-                    {"type": "message", "role": "user", "content": "continue"},
-                ],
-            },
-        )
-    assert continued.status_code == 200
-    assert "PORTABLE ENCRYPTED SUMMARY" in second_backend.prompts_seen[-1]
-
-
 def test_configured_compaction_secret_rejects_short_value(tmp_path, monkeypatch):
     secret_env = "KAIRYU_TEST_SHORT_COMPACTION_SECRET"
     monkeypatch.setenv(secret_env, "too-short")
@@ -426,8 +373,8 @@ def _gateway(stack, tmp_path, backend, *, primary=None, previous=None, **limits)
     return stack.enter_context(TestClient(app))
 
 
-def _compact(http) -> str:
-    response = http.post(
+def _compaction(http):
+    return http.post(
         "/v1/responses",
         json={
             "model": "m",
@@ -438,6 +385,10 @@ def _compact(http) -> str:
             ],
         },
     )
+
+
+def _compact(http) -> str:
+    response = _compaction(http)
     assert response.status_code == 200
     return response.json()["output"][0]["encrypted_content"]
 
@@ -465,6 +416,7 @@ def test_sealing_key_rotation_is_two_phase(tmp_path, monkeypatch):
     monkeypatch.setenv("SEAL_NEW", "new-sealing-secret-0123456789abcdef")
     phase_one_backend = _summary_backend()
     phase_two_backend = _summary_backend("NEW KEY SUMMARY")
+    after_backend = _summary_backend()
     with contextlib.ExitStack() as stack:
         old_backend = _summary_backend("OLD KEY SUMMARY")
         before = _gateway(stack, tmp_path, old_backend, primary="SEAL_OLD")
@@ -474,7 +426,7 @@ def test_sealing_key_rotation_is_two_phase(tmp_path, monkeypatch):
         phase_two = _gateway(
             stack, tmp_path, phase_two_backend, primary="SEAL_NEW", previous="SEAL_OLD"
         )
-        after = _gateway(stack, tmp_path, _summary_backend(), primary="SEAL_NEW")
+        after = _gateway(stack, tmp_path, after_backend, primary="SEAL_NEW")
         old_token = _compact(before)
         new_token = _compact(phase_two)
 
@@ -482,7 +434,9 @@ def test_sealing_key_rotation_is_two_phase(tmp_path, monkeypatch):
         assert "NEW KEY SUMMARY" in phase_one_backend.prompts_seen[-1]
         assert _continue(phase_two, old_token).status_code == 200
         assert "OLD KEY SUMMARY" in phase_two_backend.prompts_seen[-1]
+        # A shared primary secret survives the gateway hop (and a restart).
         assert _continue(after, new_token).status_code == 200
+        assert "NEW KEY SUMMARY" in after_backend.prompts_seen[-1]
         _assert_refused_seal(_continue(before, new_token), "no longer accepts")
         _assert_refused_seal(_continue(after, old_token), "no longer accepts")
 
@@ -509,13 +463,19 @@ def test_previous_release_kcp1_token_still_restores(tmp_path, monkeypatch):
     _assert_refused_seal(refused, "not issued by this server")
 
 
-def test_oversized_sealed_item_is_refused_before_decoding(tmp_path):
+def test_sealed_item_size_cap_holds_when_issuing_and_opening(tmp_path):
     # The cap bounds the work a client can force: an oversized token is
-    # refused for its size before base64 or AES-GCM ever runs on it.
+    # refused for its size before base64 or AES-GCM ever runs on it. A summary
+    # too large to reopen fails the compaction instead of handing the client
+    # a token that strands its session on the next turn.
+    backend = _summary_backend("x" * 65536)
     with contextlib.ExitStack() as stack:
-        http = _gateway(stack, tmp_path, _summary_backend(), sealed_item_max_bytes=65536)
+        http = _gateway(stack, tmp_path, backend, sealed_item_max_bytes=65536)
         oversized = _continue(http, "kst2." + "!" * 65536)
+        unsealable = _compaction(http)
     _assert_refused_seal(oversized, "exceeds the 65536-byte")
+    assert unsealable.status_code == 502
+    assert unsealable.json()["error"]["code"] == "compaction_failed"
 
 
 def test_sealed_item_max_age_refuses_expired_tokens(tmp_path, monkeypatch):
@@ -525,6 +485,9 @@ def test_sealed_item_max_age_refuses_expired_tokens(tmp_path, monkeypatch):
         SealingKey.from_secret(secret.encode()), clock=lambda: time.time() - 3600
     )
     stale_token = CompactionCodec(hour_ago).encode("STALE SUMMARY", owner="default")
+    raw = bytearray(_unpadded_b64decode(stale_token.removeprefix("kst2.")))
+    raw[10:18] = struct.pack(">Q", int(time.time()))  # header issued_at
+    restamped = "kst2." + base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
     backend = _summary_backend("FRESH SUMMARY")
     with contextlib.ExitStack() as stack:
         http = _gateway(
@@ -532,6 +495,12 @@ def test_sealed_item_max_age_refuses_expired_tokens(tmp_path, monkeypatch):
         )
         fresh = _continue(http, _compact(http))
         stale = _continue(http, stale_token)
+        forged_fresh = _continue(http, restamped)
     assert fresh.status_code == 200
     assert "FRESH SUMMARY" in backend.prompts_seen[-1]
     _assert_refused_seal(stale, "expired")
+    _assert_refused_seal(forged_fresh, "not issued by this server")
+
+
+def _unpadded_b64decode(encoded: str) -> bytes:
+    return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))

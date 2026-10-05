@@ -11,7 +11,8 @@ unpadded base64url of ``header ‖ AES-256-GCM ciphertext ‖ tag`` where::
   no AES-GCM key is ever reused across tokens.
 - The associated data binds the whole header and the owning tenant.
 - The plaintext is JSON ``{"v": 2, "m": <served model or null>, **payload}``.
-- The size cap is checked on the encoded token before any decoding, and the
+- The size cap is checked on the encoded token before any decoding (and on
+  every token sealed, so a self-issued token always reopens), and the
   optional maximum age after authentication.
 
 The primary secret seals; it and every previous (accept-only) secret open,
@@ -50,8 +51,8 @@ KST2_PREFIX = "kst2."
 KCP1_PREFIX = "kcp1."
 MIN_SECRET_BYTES = 32
 DEFAULT_SEALED_ITEM_MAX_BYTES = 4 * 1024 * 1024
-# A floor far above any compaction summary, so the cap never refuses a token
-# this server issued itself.
+# A floor far above a typical compaction summary; seal() refuses anything
+# larger, so the cap never refuses a token this server issued itself.
 MIN_SEALED_ITEM_MAX_BYTES = 64 * 1024
 
 _VERSION = 2
@@ -143,6 +144,10 @@ class SealedItemError(Exception):
         self.ignorable = ignorable
 
 
+class SealedItemTooLargeError(ValueError):
+    """``seal`` refused a payload whose token would exceed the ring's cap."""
+
+
 @dataclass(frozen=True)
 class SealingKey:
     """One secret: its public key id, HKDF input and legacy kcp1 AES key."""
@@ -227,7 +232,13 @@ class SealingKeyRing:
             separators=(",", ":"),
         ).encode("utf-8")
         sealed = AESGCM(key).encrypt(nonce, plaintext, _associated_data(header, owner))
-        return KST2_PREFIX + _b64encode(header + sealed)
+        token = KST2_PREFIX + _b64encode(header + sealed)
+        if len(token) > self.max_bytes:
+            # Issuing it would strand the client: open() refuses it unread.
+            raise SealedItemTooLargeError(
+                f"sealed item exceeds the {self.max_bytes}-byte sealed item limit"
+            )
+        return token
 
     def open(self, token: object, *, purpose: SealPurpose, owner: str) -> UnsealedItem:
         if not isinstance(token, str) or not token:
