@@ -5,7 +5,9 @@ group, so the Codex ``harbor-zstd`` fixture replays a zstd body end to end).
 Without the extra a zstd body is 415 ``unsupported_content_encoding``. A
 decompression bomb stops at the default 64 MiB output cap with 413: each codec
 bounds every decoding step its own way (zlib output steps, zstd input slices),
-so each has its own bomb.
+so each has its own bomb. The same cap bounds the compressed bytes: padding
+that decodes to nothing (empty gzip members) must not stream past every body
+limit.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _ZSTD_FRAME_HEADER = b"\x00\x38"
 _ZSTD_RLE_BLOCK_BYTES = 128 << 10
 _ZSTD_RLE = 1
+_PADDING_CAP = 64 << 10
 
 
 def _gzip_bomb() -> bytes:
@@ -38,6 +41,13 @@ def _gzip_bomb() -> bytes:
 
     member = gzip.compress(bytes(_GZIP_MEMBER_BYTES), compresslevel=9)
     return member * (_CAP // _GZIP_MEMBER_BYTES + 1)
+
+
+def _gzip_padding() -> bytes:
+    """Empty gzip members past a small cap, then a valid turn: decodes to the turn."""
+
+    empty_member = gzip.compress(b"")
+    return empty_member * (2 * _PADDING_CAP // len(empty_member)) + gzip.compress(_TURN)
 
 
 def _zstd_zeros(size: int) -> bytes:
@@ -60,12 +70,20 @@ class _Case:
     code: str | None = None
     zstd_installed: bool = True
     accept_encoding: str | None = None
+    max_decompressed_bytes: int = _CAP
 
 
 _CASES = {
     "gzip": _Case("gzip", lambda: gzip.compress(_TURN), 200),
     "gzip-bomb": _Case("gzip", _gzip_bomb, 413, "request_too_large"),
     "zstd-bomb": _Case("zstd", lambda: _zstd_zeros(16 * _CAP), 413, "request_too_large"),
+    "gzip-padding": _Case(
+        "gzip",
+        _gzip_padding,
+        413,
+        "request_too_large",
+        max_decompressed_bytes=_PADDING_CAP,
+    ),
     "zstd-without-extra": _Case(
         "zstd",
         lambda: _zstd_zeros(_ZSTD_RLE_BLOCK_BYTES),
@@ -81,7 +99,8 @@ _CASES = {
 async def test_compressed_request_bodies(case: _Case, monkeypatch) -> None:
     if not case.zstd_installed:
         monkeypatch.setitem(sys.modules, "zstandard", None)  # import fails
-    app = create_legacy_app({"m": MockBackend()})
+    settings = ServerSettings(max_decompressed_bytes=case.max_decompressed_bytes)
+    app = create_legacy_app({"m": MockBackend()}, settings=settings)
     headers = {"content-type": "application/json", "content-encoding": case.encoding}
 
     async with httpx.AsyncClient(

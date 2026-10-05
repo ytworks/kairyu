@@ -89,8 +89,9 @@ class ServerSettings(BaseModel):
         default=DEFAULT_MAX_DECOMPRESSED_BYTES,
         ge=1,
         description=(
-            "Maximum decoded size of a gzip or zstd (Content-Encoding) request "
-            "body; a larger body is refused with 413 before it is fully inflated."
+            "Maximum size of a gzip or zstd (Content-Encoding) request body, both "
+            "compressed and decoded; a larger body is refused with 413 before it "
+            "is fully inflated."
         ),
     )
     cors_allowed_origins: CorsOrigins = Field(

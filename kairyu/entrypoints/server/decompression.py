@@ -12,8 +12,11 @@ worker (``run_request_body_work``) so a large body never stalls the event
 loop. Every decoding step is bounded -- zlib by its output step, zstd by
 feeding at most ``_ZSTD_SLICE_BYTES`` of input per call -- so a decompression
 bomb is refused with 413 once its output passes ``max_decompressed_bytes``,
-never inflated in full. zstd frames may need at most an 8 MiB window, the
-HTTP limit of RFC 9659. Corrupt or truncated data is a 400.
+never inflated in full. The compressed bytes are capped by the same limit:
+input that decodes to nothing (empty gzip members, zstd skippable frames)
+would otherwise stream past every body limit, which counts decoded bytes. zstd
+frames may need at most an 8 MiB window, the HTTP limit of RFC 9659. Corrupt or
+truncated data is a 400.
 
 The app sees the decoded body without ``content-encoding`` and
 ``content-length``, so the body limits inside this middleware bound the
@@ -124,17 +127,24 @@ class _ZstdStream:
 
 
 class _CappedDecoder:
-    """Single-owner decoding state of one request body, one chunk at a time."""
+    """Single-owner decoding state of one request body, one chunk at a time.
+
+    ``limit`` caps both the compressed bytes received and the bytes decoded.
+    """
 
     def __init__(self, stream: _CodecStream, limit: int) -> None:
         self._stream = stream
         self._limit = limit
+        self._received = 0
         self._produced = 0
         self._saw_input = False
 
     def decode(self, data: bytes) -> bytes:
         """Decode one received chunk; runs on the request-body worker."""
 
+        self._received += len(data)
+        if self._received > self._limit:
+            raise _OverCap
         decoded: list[bytes] = []
         for piece in self._stream.pieces(data):
             self._produced += len(piece)
@@ -180,7 +190,7 @@ def _too_large(limit: int) -> ClassifiedError:
         413,
         _INVALID,
         "request_too_large",
-        f"decompressed request body exceeds the configured {limit}-byte limit",
+        f"compressed or decompressed request body exceeds the configured {limit}-byte limit",
     )
 
 

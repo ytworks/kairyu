@@ -49,7 +49,10 @@ optional `kairyu[zstd]` extra (`zstandard`, also in the dev group so CI replays
   `ingress.max_decompressed_bytes`), 64 MiB by default: 413
   `request_too_large`. Every decoding step is bounded (zlib by a 1 MiB output
   step, zstd by 64-byte input slices, at most 2 MiB each), so a bomb is refused
-  after at most one step past the cap, never inflated in full.
+  after at most one step past the cap, never inflated in full. The same cap
+  bounds the compressed bytes received: padding that decodes to nothing (empty
+  gzip members, zstd skippable frames) cannot stream past the body limits,
+  which count decoded bytes.
 - zstd frames may need at most an 8 MiB window (RFC 9659); a larger window,
   corrupt data or a truncated member or frame is 400
   `invalid_content_encoding`.
@@ -100,8 +103,8 @@ tenant limits → concurrency → metrics → decompression → body limits → 
 ## 5. Verification
 
 - `tests/server/test_decompression.py`: gzip accepted; gzip and zstd bombs
-  capped at the default 64 MiB (413); zstd without the extra (415, import
-  failure monkeypatched).
+  capped at the default 64 MiB (413); empty-member padding past the cap (413);
+  zstd without the extra (415, import failure monkeypatched).
 - `tests/server/test_codex_fixture_replay.py`: `harbor-zstd` passes (strict
   xfail removed); zstd acceptance is covered there.
 - `tests/server/test_health_metrics.py`: every response, a 401 included,

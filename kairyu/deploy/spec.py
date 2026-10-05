@@ -227,7 +227,7 @@ class ServerSection(BaseModel):
     max_decompressed_bytes: int = Field(
         default=DEFAULT_MAX_DECOMPRESSED_BYTES,
         ge=1,
-        description="Decoded-size cap of a gzip/zstd request body (413 above it).",
+        description="Compressed- and decoded-size cap of a gzip/zstd request body (413).",
     )
     cors_allowed_origins: CorsOrigins = Field(
         default=(),
