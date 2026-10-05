@@ -9,9 +9,12 @@ Resolves upstream ``main`` of the pinned repository. When it is not the pin,
 runs that suite against the same Kairyu gate server (``run.run_gate``) with
 the pinned expected failures and writes an issue title to ``--title`` and a
 Markdown body to ``--report``: the compare link, the spec and suite files that
-changed, and the verdict at ``main``. Both files are empty when ``main`` is the
-pin. The exit status is 0 either way: the job reports drift, it gates nothing.
-The title names upstream's commit, so the workflow opens one issue per state.
+changed, and the verdict at ``main``. When the suite cannot run at ``main``
+(its lockfile, CLI, report or result statuses changed beyond what the runner
+handles), the body reports that failure instead. Both files are empty when
+``main`` is the pin. Once ``main`` is resolved the exit status is 0 either
+way: the job reports drift, it gates nothing. The title names upstream's
+commit, so the workflow opens one issue per state.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import traceback
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -36,6 +40,7 @@ TRACKED_PATHS = (
     "src/lib/sse-parser.ts",
 )
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+_ERROR_CHARS = 6000
 PROCEDURE = (
     "Procedure (m20 D1, docs/design/m20-open-responses-ci.md): review the upstream "
     "changes; to move the pin, set `[suite].commit` (and `spec` on a new spec release) in "
@@ -73,7 +78,7 @@ def _changes_section(numstat: Sequence[str]) -> list[str]:
     return ["Changed spec and suite files:", *rows, ""]
 
 
-def report(gate: verdict.GateFile, head: str, numstat: Sequence[str], summary: str) -> str:
+def _issue_body(gate: verdict.GateFile, head: str, sections: Sequence[str]) -> str:
     pin = gate.suite.commit
     compare = f"https://github.com/{gate.suite.repository}/compare/{pin}...{head}"
     return "\n".join(
@@ -83,12 +88,47 @@ def report(gate: verdict.GateFile, head: str, numstat: Sequence[str], summary: s
             f"### `{pin[:10]}` (pin) → `{head[:10]}` ({UPSTREAM_BRANCH})",
             f"Compare: {compare}",
             "",
-            *_changes_section(numstat),
-            summary,
+            *sections,
             PROCEDURE,
             "",
         ]
     )
+
+
+def report(gate: verdict.GateFile, head: str, numstat: Sequence[str], summary: str) -> str:
+    return _issue_body(gate, head, [*_changes_section(numstat), summary])
+
+
+def failure_report(gate: verdict.GateFile, head: str, error: BaseException) -> str:
+    """The issue body when the suite at ``head`` could not run to a verdict."""
+
+    detail = "".join(traceback.format_exception_only(error)).strip()[-_ERROR_CHARS:]
+    return _issue_body(
+        gate,
+        head,
+        [
+            f"**The suite could not run at `{head[:10]}`.** The runner failed before a "
+            "verdict, for example on a changed lockfile, CLI, report format or result "
+            "status; the scheduled run's log has the traceback.",
+            "",
+            "```",
+            detail,
+            "```",
+            "",
+        ],
+    )
+
+
+def _verdict_report(gate: verdict.GateFile, head: str, bun: str, cache: Path, out: Path) -> str:
+    """Run the suite at upstream ``head``; the issue body with its verdict."""
+
+    checkout = cache / "openresponses"
+    commit = run.prepare_suite(gate.suite.repository, head, checkout, bun)
+    if commit != head:
+        raise RuntimeError(f"fetched {commit}, expected {UPSTREAM_BRANCH} {head}")
+    numstat = changed_files(checkout, gate.suite.repository, gate.suite.commit, commit)
+    verdicts = run.run_gate(gate, checkout, commit, bun, out)
+    return report(gate, commit, numstat, verdict.render(verdicts, gate.suite.repository, commit))
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -113,14 +153,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"no drift: {UPSTREAM_BRANCH} is the pin {head[:10]}")
         return 0
     bun = run.resolve_bun(args.bun)
-    checkout = (args.cache_dir or out) / "openresponses"
-    commit = run.prepare_suite(gate.suite.repository, head, checkout, bun)
-    numstat = changed_files(checkout, gate.suite.repository, gate.suite.commit, commit)
-    verdicts = run.run_gate(gate, checkout, commit, bun, out)
-    summary = verdict.render(verdicts, gate.suite.repository, commit)
-    args.title.write_text(f"{TITLE_PREFIX}: {UPSTREAM_BRANCH} {commit[:10]}", encoding="utf-8")
-    args.report.write_text(report(gate, commit, numstat, summary), encoding="utf-8")
-    print(f"drift: {UPSTREAM_BRANCH} {commit[:10]} differs from the pin")
+    try:
+        body = _verdict_report(gate, head, bun, args.cache_dir or out, out)
+    except Exception as error:  # an upstream change the runner cannot handle is drift too
+        traceback.print_exc()
+        body = failure_report(gate, head, error)
+        print(f"drift: the suite could not run at {UPSTREAM_BRANCH} {head[:10]}")
+    else:
+        print(f"drift: {UPSTREAM_BRANCH} {head[:10]} differs from the pin")
+    args.report.write_text(body, encoding="utf-8")
+    args.title.write_text(f"{TITLE_PREFIX}: {UPSTREAM_BRANCH} {head[:10]}", encoding="utf-8")
     return 0
 
 
