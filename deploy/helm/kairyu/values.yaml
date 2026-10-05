@@ -65,7 +65,8 @@ batchPostgres:
 # (helm lookup; never deleted by the chart). GitOps tools that render without
 # cluster access must name a Secret they manage in existingSecret. The
 # optional previousSecretsKey holds comma-separated accept-only secrets for
-# two-phase rotation. config must reference both env names (as below).
+# two-phase rotation. config must reference both env names (as below);
+# enabled: false renders only once config no longer names them.
 responsesSealing:
   enabled: true
   existingSecret: ""

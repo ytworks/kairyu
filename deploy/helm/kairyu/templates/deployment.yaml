@@ -1,6 +1,9 @@
 {{- if and .Values.gracefulDrain.enabled (lt (int .Values.terminationGracePeriodSeconds) (add (int .Values.gracefulDrain.propagationSeconds) 10)) }}
 {{- fail "terminationGracePeriodSeconds must be at least gracefulDrain.propagationSeconds + 10 when graceful drain is enabled" }}
 {{- end }}
+{{- if and (not .Values.responsesSealing.enabled) (contains .Values.responsesSealing.envName .Values.config) }}
+{{- fail (printf "responsesSealing.enabled=false stops injecting %s, which config still names; remove server.responses_compaction_secret_env and server.sealing.previous_secrets_env from config" .Values.responsesSealing.envName) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

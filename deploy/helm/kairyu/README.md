@@ -65,7 +65,8 @@ those sessions. With `responsesSealing.enabled` (the default) the chart injects
 `KAIRYU_RESPONSES_COMPACTION_SECRET` and, when present, the optional
 comma-separated accept-only `KAIRYU_RESPONSES_PREVIOUS_SECRETS`; the default
 `config` references both (`server.responses_compaction_secret_env`,
-`server.sealing.previous_secrets_env`), and a custom `config` must too.
+`server.sealing.previous_secrets_env`), and a custom `config` must too. With
+`enabled: false` the chart refuses to render while `config` still names them.
 
 Without `existingSecret` the chart generates a 64-character secret in
 `<release>-responses-sealing` on install, reuses it on every upgrade (`lookup`)

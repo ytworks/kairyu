@@ -2,6 +2,7 @@
 reconciler, tracing spans, helm render."""
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ from kairyu.engine.backend import (
     SamplingParams,
 )
 from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.entrypoints.server.responses.sealing import MIN_SECRET_BYTES
 from kairyu.orchestration.replica import ReplicaPool
 
 
@@ -1376,7 +1378,7 @@ def test_helm_chart_renders():
     assert all(volume["name"] != "model-storage" for volume in pod_spec["volumes"])
     # m20 D6: every Pod reads one chart-generated sealing secret the chart keeps.
     assert secret["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-    assert len(secret["data"]["secret"]) == 88  # base64 of 64 random characters
+    assert len(base64.b64decode(secret["data"]["secret"])) >= MIN_SECRET_BYTES
     sealing_ref = {"secretKeyRef": {"name": secret["metadata"]["name"], "key": "secret"}}
     assert {"name": "KAIRYU_RESPONSES_COMPACTION_SECRET", "valueFrom": sealing_ref} in (
         container["env"]
@@ -1756,34 +1758,32 @@ def test_helm_chart_renders_authenticated_graceful_drain(tmp_path):
 
 
 @pytest.mark.helm
-def test_helm_chart_rejects_insufficient_drain_grace(tmp_path):
-    invalid_values = tmp_path / "insufficient-drain-grace.yaml"
-    invalid_values.write_text(
-        yaml.safe_dump(
+@pytest.mark.parametrize(
+    ("values", "reason"),
+    [
+        (
             {
                 "terminationGracePeriodSeconds": 19,
-                "gracefulDrain": {
-                    "enabled": True,
-                    "propagationSeconds": 10,
-                },
-            }
+                "gracefulDrain": {"enabled": True, "propagationSeconds": 10},
+            },
+            "gracefulDrain.propagationSeconds + 10",
         ),
-        encoding="utf-8",
-    )
+        # m20 D6: the default config still names the secret env var the
+        # toggle stops injecting, so every Pod would fail at startup.
+        ({"responsesSealing": {"enabled": False}}, "responsesSealing.enabled=false"),
+    ],
+    ids=["insufficient-drain-grace", "sealing-disabled-but-configured"],
+)
+def test_helm_chart_rejects_values_pods_cannot_start_with(tmp_path, values, reason):
+    invalid_values = tmp_path / "invalid.yaml"
+    invalid_values.write_text(yaml.safe_dump(values), encoding="utf-8")
     result = subprocess.run(
-        [
-            "helm",
-            "template",
-            "kairyu",
-            "deploy/helm/kairyu",
-            "-f",
-            str(invalid_values),
-        ],
+        ["helm", "template", "kairyu", "deploy/helm/kairyu", "-f", str(invalid_values)],
         capture_output=True,
         text=True,
     )
     assert result.returncode != 0
-    assert "gracefulDrain.propagationSeconds + 10" in result.stderr
+    assert reason in result.stderr
 
 
 @pytest.mark.helm
