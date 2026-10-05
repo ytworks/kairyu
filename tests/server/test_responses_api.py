@@ -505,7 +505,7 @@ def test_function_call_output_accepts_codex_content_item_arrays(tmp_path):
             },
         )
     assert image_output.status_code == 400
-    assert "text tool output only" in image_output.json()["error"]["message"]
+    assert image_output.json()["error"]["param"] == "input[0].output[0].type"
 
 
 def test_codex_internal_passthrough_fields_are_accepted_and_dropped(tmp_path):

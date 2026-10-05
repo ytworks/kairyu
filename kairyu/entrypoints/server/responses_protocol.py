@@ -213,6 +213,44 @@ class ResponsesInputTokensRequest(BaseModel):
         return request
 
 
+class ResponsesCompactRequest(BaseModel):
+    """``POST /v1/responses/compact`` body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    input: str | list[dict] | None = None
+    instructions: str | None = None
+    previous_response_id: str | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_options: dict | None = None
+    prompt_cache_retention: str | None = None
+    service_tier: str | None = None
+
+    def as_responses_request(self) -> ResponsesRequest:
+        """The equivalent unstored turn ending in a compaction_trigger item."""
+
+        if self.input is None:
+            items: list = []
+        elif isinstance(self.input, str):
+            items = [{"type": "message", "role": "user", "content": self.input}]
+        else:
+            items = list(self.input)
+        request = ResponsesRequest(
+            model=self.model,
+            input=[*items, {"type": "compaction_trigger"}],
+            instructions=self.instructions,
+            previous_response_id=self.previous_response_id,
+            prompt_cache_key=self.prompt_cache_key,
+            prompt_cache_options=self.prompt_cache_options,
+            prompt_cache_retention=self.prompt_cache_retention,
+            service_tier=self.service_tier,
+            store=False,
+        )
+        _validate_request_surface(request)
+        return request
+
+
 async def parse_json_object(http_request: Request) -> dict:
     try:
         body = json.loads(await http_request.body())

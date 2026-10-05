@@ -121,7 +121,7 @@ def _canonical_input(
                     f"{path}.role must be user, assistant, system, or developer",
                 )
             content = item.get("content", "")
-            _content_text(content, path=f"{path}.content")
+            _content_text(content, path=f"{path}.content", images=role != "assistant")
             phase = item.get("phase")
             if phase not in (None, "commentary", "final_answer"):
                 raise _invalid(f"{path}.phase", f"{path}.phase must be commentary or final_answer")
@@ -253,15 +253,17 @@ def _function_output_text(parts: list, *, path: str) -> str:
             texts.append(text)
             continue
         raise ResponsesError(
-            f"{part_path}.type {kind!r} is not supported; "
-            "this model accepts text tool output only",
+            f"{part_path}.type {kind!r} is not supported; tool output must be text "
+            "(the engine's multimodal prompt carries no tool transcript)",
             param=f"{part_path}.type",
             code="unsupported_value",
         )
     return "".join(texts)
 
 
-def _content_text(content: object, *, path: str) -> str:
+def _content_text(content: object, *, path: str, images: bool = False) -> str:
+    """Validate message content and return its text (image parts excluded)."""
+
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -272,6 +274,9 @@ def _content_text(content: object, *, path: str) -> str:
         if not isinstance(part, dict):
             raise _invalid(part_path, f"{part_path} must be an object")
         kind = part.get("type")
+        if kind == "input_image" and images:
+            _validate_image(part, path=part_path)
+            continue
         if kind not in _TEXT_PART_TYPES:
             raise ResponsesError(
                 f"{part_path}.type {kind!r} is not supported",
@@ -291,6 +296,91 @@ def _content_text(content: object, *, path: str) -> str:
             raise _invalid(f"{part_path}.text", f"{part_path}.text must be a string")
         parts.append(text)
     return "".join(parts)
+
+
+def _validate_image(part: dict, *, path: str) -> None:
+    _reject_unknown(
+        path, part, {"type", "image_url", "file_id", "detail", "prompt_cache_breakpoint"}
+    )
+    if part.get("file_id") is not None:
+        raise ResponsesError(
+            "file_id images are not supported; send image_url as a data or http(s) URL",
+            param=f"{path}.file_id",
+            code="unsupported_value",
+        )
+    if not isinstance(part.get("image_url"), str) or not part["image_url"]:
+        raise _invalid(f"{path}.image_url", f"{path}.image_url must be a non-empty URL")
+    if part.get("detail") not in (None, "auto", "low", "high", "original"):
+        raise _invalid(f"{path}.detail", f"{path}.detail must be auto, low, high, or original")
+
+
+def _chat_content(content: str | list) -> str | list[dict]:
+    """Chat content: plain text, or ordered text/image_url parts with images."""
+
+    if isinstance(content, str):
+        return content
+    if not any(part.get("type") == "input_image" for part in content):
+        return _content_text(content, path="message.content")
+    parts: list[dict] = []
+    for part in content:
+        if part.get("type") != "input_image":
+            parts.append({"type": "text", "text": part["text"]})
+            continue
+        image = {"url": part["image_url"]}
+        # "original" (no downscaling) has no chat equivalent: the backend
+        # default applies.
+        if part.get("detail") in ("auto", "low", "high"):
+            image["detail"] = part["detail"]
+        parts.append({"type": "image_url", "image_url": image})
+    return parts
+
+
+def _image_paths(payload: object) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+    return [
+        f"input[{index}].content[{part_index}]"
+        for index, item in enumerate(payload)
+        if isinstance(item, dict) and isinstance(item.get("content"), list)
+        for part_index, part in enumerate(item["content"])
+        if isinstance(part, dict) and part.get("type") == "input_image"
+    ]
+
+
+def reject_images_beside_tools(context: Sequence[dict], payload: object) -> None:
+    """Images and tool history cannot share one request (an L1 limit).
+
+    The engine's multimodal prompt carries role and content parts only, with
+    no tool calls, tool results, or reasoning, so a request mixing them would
+    silently lose the transcript.
+    """
+
+    tool_kinds = ("function_call", "function_call_output")
+    raw = payload if isinstance(payload, list) else []
+    has_tools = any(item["type"] in tool_kinds for item in context) or any(
+        isinstance(item, dict) and item.get("type") in tool_kinds for item in raw
+    )
+    if not has_tools:
+        return
+    paths = _image_paths(payload)
+    context_images = any(
+        item["type"] == "message"
+        and isinstance(item["content"], list)
+        and any(part.get("type") == "input_image" for part in item["content"])
+        for item in context
+    )
+    if paths or context_images:
+        raise ResponsesError(
+            "images cannot be combined with tool-call history in one request: the "
+            "engine's multimodal prompt carries no tool transcript",
+            param=paths[0] if paths else "previous_response_id",
+            code="unsupported_value",
+        )
+
+
+def first_image_path(payload: object) -> str | None:
+    paths = _image_paths(payload)
+    return paths[0] if paths else None
 
 
 def _validate_function_outputs(items: Sequence[dict]) -> None:
@@ -455,10 +545,7 @@ def _items_to_messages(
             )
         else:
             messages.append(
-                {
-                    "role": item["role"],
-                    "content": _content_text(item.get("content", ""), path="message.content"),
-                }
+                {"role": item["role"], "content": _chat_content(item.get("content", ""))}
             )
     flush_calls()
     return messages

@@ -8,6 +8,7 @@ source of truth.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -60,9 +61,12 @@ from kairyu.entrypoints.server.responses_items import (
     _canonical_input,
     _to_chat_request,
     _validate_function_outputs,
+    first_image_path,
     input_listing,
+    reject_images_beside_tools,
 )
 from kairyu.entrypoints.server.responses_protocol import (
+    ResponsesCompactRequest,
     ResponsesError,
     ResponsesInputTokensRequest,
     ResponsesRequest,
@@ -167,6 +171,53 @@ def add_responses_route(
             request = validate_model(ResponsesRequest, await parse_json_object(http_request))
         except ResponsesError as error:
             return responses_error_response(error)
+        return await create_response(request, http_request)
+
+    @app.post("/v1/responses/compact")
+    async def compact_responses(http_request: Request) -> JSONResponse:
+        """Remote compaction v1: the kept user messages plus one compaction item."""
+
+        owner = _owner(http_request)
+        try:
+            body = validate_model(ResponsesCompactRequest, await parse_json_object(http_request))
+            request = body.as_responses_request()
+            items = continuation(request.previous_response_id, owner) + _canonical_input(
+                request.input[:-1],
+                compaction_codec=compaction_codec,
+                owner=owner,
+                reasoning_codec=reasoning_tokens,
+            )
+        except ChatRequestError as error:
+            return responses_error_response(error)
+        result = await create_response(request, http_request)
+        if result.status_code != 200:
+            return result
+        response = json.loads(bytes(result.body))
+        if response["status"] != "completed" or not response["output"]:
+            return responses_error_response(
+                ResponsesError(
+                    "the compaction summary did not finish",
+                    status_code=502,
+                    error_type="upstream_error",
+                    code="compaction_failed",
+                )
+            )
+        kept = [
+            item
+            for item in input_listing(items)
+            if item["type"] == "message" and item["role"] == "user"
+        ]
+        return JSONResponse(
+            content={
+                "id": response["id"],
+                "object": "response.compaction",
+                "created_at": response["created_at"],
+                "output": kept + response["output"],
+                "usage": response["usage"],
+            }
+        )
+
+    async def create_response(request: ResponsesRequest, http_request: Request):
         http_request.state.model = request.model
         metrics = getattr(http_request.app.state, "metrics", None)
         ingress_ns = getattr(http_request.state, "placement_started_ns", None)
@@ -193,6 +244,7 @@ def add_responses_route(
                     status_code=404,
                 )
             context = continuation(request.previous_response_id, owner)
+            reject_images_beside_tools(context, request.input)
         except ChatRequestError as error:
             return responses_error_response(error)
         validation_started_ns = time.perf_counter_ns()
@@ -275,6 +327,11 @@ def add_responses_route(
                     legacy_chat_models=legacy_chat_models,
                 )
         except ChatRequestError as error:
+            image = first_image_path(request.input)
+            if image is not None and not isinstance(error, ResponsesError) and (
+                "multimodal" in str(error) or "image" in str(error)
+            ):
+                error = ResponsesError(str(error), param=image, code="unsupported_value")
             return responses_error_response(error)
         finally:
             if metrics is not None:
