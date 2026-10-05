@@ -6,6 +6,35 @@ overlay), OpenJev 0.5.1 (`sha256:65f88680…`, unmodified) on GPU 6 and GPU 7.
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-openjev-verified-8gpu/`
 (`calibration/`, `results/`).
 
+## GPU gates on `95205656` (VCO-D18, thresholds 0.5; 2026-10-05 22:08 - 2026-10-06 00:16 JST)
+
+Owner decision: calibration stopped (the DeepSWE data run was stopped after
+14 of 113 tasks), the four angle thresholds stay 0.5, and the route only has
+to work. Every gate except the two calibration gates (`calibrate`,
+`calibrate-tool`) ran on the PR head.
+
+| Gate | Result | Key numbers |
+|---|---|---|
+| l1 | PASS | — |
+| requirements | FAIL | gold recall 0.994, requests with duplicates 0 %; judged 39 of 40: one request ended `checklist_unavailable` (the explicit extractor wrote 40,569 tokens); guaranteed 30/40, p50 189 s / p95 364 s |
+| repair | PASS | guaranteed 10/16, p50 98 s |
+| structured | FAIL | the second request was repaired once and then not accepted (`not_accepted`, no missed point) |
+| fallback | PASS | both judges down: tool request answered by deepseek_think |
+| serving | PASS | c8 guaranteed 11/16 p50 190 s; c16 20/32 p50 238 s |
+| routing | PASS | held-out miss 4.2 %, tool-free to VERIFIED_TOOL 0 |
+| think-route | PASS | p50 0.83 s, TTFT p50 0.63 s |
+| effort | PASS | — |
+| implicit | PASS | recall 0.800, guaranteed 24/30 |
+| verified-tool-routing | PASS | requiring a call to VERIFIED_TOOL 95 %, not requiring one 5 % |
+| verified-tool-route | FAIL (routing) | 36 of 40 routed to VERIFIED_TOOL and all 36 pass: structured tool_calls, every DeepSeek generation at the caller's effort (none -> high), `kairyu_verification` with the four angles, guaranteed 36, one repaired, p50 0.93 s / p90 2.1 s; t11 and t16 (unary and stream) routed to THINK, as on 2026-10-04 |
+| serving-routed | PASS | VERIFIED_TOOL 3/3 guaranteed, p50 1.68 s, judge p50 0.16 s |
+
+The three failures are outside the verified-tool route this PR changes: the
+route judge (unchanged) sends t11 and t16 to THINK, and requirements and
+structured are verified-DAG variance (an extractor run-away and one
+acceptance read). With thresholds 0.5 the angles fail almost no reply
+(failed angles 0 of 144 reads), consistent with the calibration above.
+
 ## Verified-tool angle calibration on DeepSWE turns (VCO-D18, 2026-10-05)
 
 `calibrate_tool.py` (`datasets/deepswe-tool-turns.json`): 200 recorded DeepSWE

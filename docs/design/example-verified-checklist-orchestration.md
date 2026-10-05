@@ -2,9 +2,8 @@
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), whose tool
-calls Jev reads from four angles 2026-10-05 (VCO-D18; angle calibration on
-recorded DeepSWE turns failed: AUROC 0.51-0.67, wording decision and GPU gates
-pending)** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
+calls Jev reads from four angles 2026-10-05 (VCO-D18; angle calibration failed,
+AUROC 0.51-0.67, stopped by the owner with thresholds 0.5; GPU gates run)** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
 
@@ -629,6 +628,13 @@ p >= 0.99 for most replies of either label); no threshold meets alpha; order
 has one NG label. Plain-text calls instead of markup raise AUROC only
 slightly. The thresholds stay 0.5 placeholders pending an owner decision on
 the question wording.
+
+Owner decision (2026-10-05): calibration is stopped and the thresholds stay
+0.5; the route only has to work. GPU gates on `95205656`: the verified-tool
+route passes for every request routed to it (36/36: caller's effort, four
+angles, structured tool_calls); `verified-tool-route` fails only because the
+unchanged route judge sends two conversations to THINK, and requirements and
+structured fail on verified-DAG variance (`MEASUREMENTS.md`).
 
 ## Limitations
 
