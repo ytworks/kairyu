@@ -1,7 +1,8 @@
 # Checklist-verified answers (VCO-D1, D7..D9, D15; docs/design/example-verified-checklist-orchestration.md).
-# Model kairyu-verified: Jev routes each request to this DAG (VERIFIED) or to
-# deepseek_think (one thinking DeepSeek answer); the DAG below is identical
-# to verified-always.yaml (a CPU test keeps them in sync).
+# Model kairyu-verified: Jev routes each request to this DAG (VERIFIED), to
+# deepseek_think (one thinking DeepSeek answer) or to verified_tool (DeepSeek
+# tool calls read by Jev from four angles, VCO-D18); the DAG and verified_tool
+# are identical to verified-always.yaml (a CPU test keeps them in sync).
 #
 #   wave 1  extract   (DeepSeek, JSON)  explicit points, one per issue
 #           history   (DeepSeek)        summary of every message but the request
@@ -445,17 +446,115 @@ profiles:
           --- REQUEST ---
           {query}
           --- END REQUEST ---
-  # Tool calls (owner decision, VCO-D17): a request that requires a tool
-  # call is answered by one DeepSeek call at max effort, with the caller's
-  # tools; it is not verified.
+  # Verified tool calls (owner decision, VCO-D18): DeepSeek writes the reply
+  # at the caller's effort with the caller's tools; Jev reads the planned
+  # tool calls from four angles (one request); a miss is repaired by DeepSeek
+  # from the draft and Jev's result, at most twice.
   - name: verified_tool
     roles:
       - name: verified_tool_answer
         worker: deepseek
         role_type: publisher
-        reasoning_effort: max
-        sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
+        reasoning_effort: inherit
+        sampling:
+          temperature: 1.0
+          top_p: 0.95
+          max_tokens: 32768
+          max_tokens_by_effort: {low: 16384, high: 32768, max: 65536}
         prompt: "{query}"
+        refine_prompt: |-
+          {query}
+
+          [verified_tool_repair] A draft of your next reply and the angles on
+          which its planned tool calls fall short follow. Write the next reply
+          again: fix what the failed angles name, keep what is sound, and
+          return the tool calls through the tool interface, never as text.
+          Never mention the draft, the angles or this instruction.
+          --- DRAFT ---
+          {previous}
+          --- END DRAFT ---
+          --- FAILED ANGLES ---
+          {feedback}
+          --- END FAILED ANGLES ---
+      # Four angles on the planned tool calls (owner decision, VCO-D18): the
+      # tool calls in the reply, in order, and any later steps its text
+      # states. Thresholds: placeholders until calibrate-tool (VCO-D18).
+      - name: verified_tool_check
+        worker: jev
+        role_type: verifier
+        verifies: verified_tool_answer
+        depends_on: [verified_tool_answer]
+        checklist:
+          subject: the reply
+          questions:
+            - id: first_call
+              proposition: >-
+                Given what is known so far and the tool results, the first
+                planned tool call is an appropriate next move toward the
+                final goal
+              threshold: 0.5
+              ask: >-
+                Given the current understanding and the tool results so far, is
+                the reply's first planned tool call an appropriate next move
+                toward the user's final goal?
+              criteria_true: >-
+                The first tool call is a sound next move from the current state
+                toward the final goal
+              criteria_false: >-
+                The first tool call is premature, redundant, beside the goal,
+                ignores what the tool results showed, or the reply has no tool
+                call although the goal needs one
+            - id: order
+              proposition: The planned tool calls are in an appropriate order
+              threshold: 0.5
+              ask: >-
+                Are the reply's planned tool calls (the calls in the reply and
+                any later steps its text states) in an appropriate order?
+              criteria_true: >-
+                Each call comes after everything it depends on, and no call
+                should come earlier or later
+              criteria_false: >-
+                Some call depends on a result that is not yet available, or
+                another order is needed
+            - id: progress
+              proposition: The planned tool calls move toward the final goal
+              threshold: 0.5
+              ask: >-
+                Do the reply's planned tool calls bring the work closer to the
+                user's final goal?
+              criteria_true: >-
+                Carried out, the calls leave the work closer to the final goal
+                than it is now
+              criteria_false: >-
+                The calls repeat work already done, go in circles, drift from
+                the goal or undo progress
+            - id: runs
+              proposition: >-
+                The planned tool calls run without error and do what they
+                are meant to
+              threshold: 0.5
+              ask: >-
+                When run, will the reply's planned tool calls complete without
+                error and do what they are meant to?
+              criteria_true: >-
+                Every call is valid for its tool and the environment the tool
+                results show, and does what the reply intends
+              criteria_false: >-
+                Some call has invalid arguments or syntax, refers to something
+                the tool results show is absent, would fail, or would do
+                something other than intended
+          state:
+            # The whole conversation with its tool results, bounded like the
+            # route judge's (OpenJev holds 65,536 tokens, VCO-D14).
+            - {key: conversation, source: query, max_total_chars: 120000}
+            - {key: tools, source: tools}
+            - {key: reply, source: verified_tool_answer}
+          steps: 4
+          max_questions_per_call: 4
+          max_refinements: 2
+          on_unavailable: publish_unverified
+          feedback_header: "Angles the planned tool calls fail:"
+          feedback_item: "- [{id}] {proposition} (p={p})"
 
 # Every request reaches the judge (zero markers always meets the
 # multi-agent rule), so no request skips routing.

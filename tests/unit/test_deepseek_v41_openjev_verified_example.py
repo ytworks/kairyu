@@ -62,22 +62,27 @@ def _deepseek(
             answer = json.dumps({"points": IMPLICIT if implicit is None else implicit})
         elif text.startswith("[history]"):
             answer = "none"
-        elif "--- MISSED POINTS ---" in text:
+        elif "--- MISSED POINTS ---" in text or "[verified_tool_repair]" in text:
             answer = repair
         else:
             answer = draft
         finish = draft_finish if answer == draft else "stop"
+        message = {"role": "assistant", "content": answer}
+        if body.get("tools"):
+            # A tool-calling reply: the answer is the bash command.
+            arguments = json.dumps({"command": answer})
+            call = {
+                "id": "c",
+                "type": "function",
+                "function": {"name": "bash", "arguments": arguments},
+            }
+            message = {"role": "assistant", "content": None, "tool_calls": [call]}
+            finish = "tool_calls"
         return httpx.Response(
             200,
             json={
                 "id": "chatcmpl-fake",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": answer},
-                        "finish_reason": finish,
-                    }
-                ],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
                 "usage": {"prompt_tokens": 16, "completion_tokens": 4, "total_tokens": 20},
             },
         )
@@ -92,9 +97,11 @@ def _openjev(
     down: bool = False,
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
+    sound_call: str | None = None,
 ):
     """Necessity is low only for ``unneeded``; a point in ``covered_by`` is
-    contained only in an answer holding the mapped text."""
+    contained only in an answer holding the mapped text; the tool angles
+    pass only for a reply holding ``sound_call``."""
 
     def answer(question: dict, state: dict) -> dict:
         text = json.dumps(question)
@@ -109,6 +116,8 @@ def _openjev(
             return {"noul": 0.9999 if all(i["passed"] for i in state["checklist"]) else 0.0}
         if "Is this point necessary to answer the request" in text:
             return {"noul": 0.1 if unneeded is not None and unneeded in text else 0.9999}
+        if "reply" in state:
+            return {"noul": 0.9999 if sound_call is None or sound_call in state["reply"] else 0.1}
         for point, needed in (covered_by or {}).items():
             if point in text:
                 return {"noul": 0.9999 if needed in state["answer"] else 0.0}
@@ -143,6 +152,7 @@ def _orchestrator(
     unneeded: str | None = None,
     covered_by: dict[str, str] | None = None,
     draft_finish: str = "stop",
+    sound_call: str | None = None,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
@@ -174,6 +184,7 @@ def _orchestrator(
                     down=jev_down,
                     unneeded=unneeded,
                     covered_by=covered_by,
+                    sound_call=sound_call,
                 )
             ),
         )
@@ -391,14 +402,21 @@ async def test_the_longest_path_fits_the_step_budget() -> None:
     assert result.verification.reason == "refinement_limit"
 
 
-async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() -> None:
-    # VCO-D17 (owner decision): Jev routes a tool-using turn to the tool
-    # route, one DeepSeek call at max effort with the caller's tools, without
-    # verification.
+async def test_a_tool_call_is_drafted_at_the_callers_effort_and_repaired_from_jevs_angles() -> None:
+    # VCO-D18 (owner decision): Jev routes a tool-using turn to the tool
+    # route; DeepSeek drafts at the caller's effort with the caller's tools,
+    # Jev reads the planned calls from four angles, and a failed angle is
+    # repaired from the draft and Jev's result, tools still offered.
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(
-        seen, reads, draft="Reading setup.py next.", spec="verified.yaml", route="VERIFIED_TOOL"
+        seen,
+        reads,
+        draft="cat README.md",
+        repair="python -m pytest -x",
+        spec="verified.yaml",
+        route="VERIFIED_TOOL",
+        sound_call="pytest",
     )
     chat = ChatCompletionRequest(
         model="kairyu-verified",
@@ -413,16 +431,25 @@ async def test_a_request_that_requires_a_tool_call_gets_one_max_effort_answer() 
         sampling_params=SamplingParams(max_tokens=4096),
         tools=(BASH,),
         tool_choice="auto",
-        # The caller's effort does not lower the verified-tool route's max.
         reasoning_effort="low",
     )
 
     call = await orchestrator.judge_role_profile(call)
     result = await orchestrator.run(call)
 
-    assert result.text == "Reading setup.py next."
-    assert result.verification is None
-    (route,) = reads
+    route, first, second = reads
     assert route["state"]["tool_calling"] is True
-    (body,) = seen
-    assert body["reasoning_effort"] == "max" and body["tools"] == [BASH]
+    assert first["state"]["conversation"][-1]["content"] == "ImportError in setup.py"
+    assert "cat README.md" in first["state"]["reply"]
+    draft, fixed = seen
+    assert {draft["reasoning_effort"], fixed["reasoning_effort"]} == {"low"}
+    assert draft["tools"] == fixed["tools"] == [BASH]
+    assert "cat README.md" in _text(fixed) and "[first_call]" in _text(fixed)
+    assert "python -m pytest -x" in result.text
+    assert result.verification.guaranteed and result.verification.attempts == 2
+    assert {item.id for item in result.verification.items} == {
+        "first_call",
+        "order",
+        "progress",
+        "runs",
+    }

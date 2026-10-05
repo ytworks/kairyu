@@ -1,8 +1,9 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
-verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
-recorded DeepSWE turns pending** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
+verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), whose tool
+calls Jev reads from four angles 2026-10-05 (VCO-D18; calibration on recorded
+DeepSWE turns and GPU gates pending)** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
 Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
 mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
 
@@ -522,6 +523,8 @@ where verified scores at least as think with no early submission.
 
 ### VCO-D17 — A verified-tool route instead of step verification (2026-10-04, PR #619)
 
+*Amended by VCO-D18: the route drafts at the caller's effort and Jev reads its tool calls from four angles.*
+
 Owner decision. The route judge offers a third route, VERIFIED_TOOL, for a request
 that requires a tool call (the caller offers tools and the reply is expected
 to call one: an agent loop's turn, or a request to act with the tools). It
@@ -577,6 +580,48 @@ the same (median |dp| 0.0002). Held-out responses passing every point fell
 from 39 to 23 of 125; acceptance 0.99 guaranteed 39 with 4 violating (10.3 %,
 was 46 and 7, 15.2 %).
 
+### VCO-D18 — Verified tool calls: four angles, repaired by DeepSeek (2026-10-05)
+
+Owner decision. The verified-tool route becomes a loop in L2 DSL only (no
+framework change):
+
+1. `verified_tool_answer` (DeepSeek, final unit) writes the reply at the
+   caller's effort (`inherit`, default high; 16,384 / 32,768 / 65,536 tokens
+   by effort) with the caller's tools. Only DeepSeek follows the effort.
+2. `verified_tool_check` (Jev, one System One request, four denoise passes)
+   reads the planned tool calls (the calls in the reply, in order, and any
+   later steps its text states) over the whole conversation (bounded to
+   120,000 characters like the route judge), the tools and the reply, from
+   four angles: `first_call` (given what is known and the tool results, the
+   first call is an appropriate next move toward the final goal), `order`,
+   `progress` (the calls move toward the final goal) and `runs` (they run
+   without error and do what they are meant to).
+3. All four pass: the reply is published, guaranteed. A failed angle: DeepSeek
+   gets the draft and Jev's result (`refine_prompt`, tools still offered) and
+   writes the reply again; Jev reads it again, at most two repairs; the last
+   attempt is published on exhaustion (`refinement_limit`). An unavailable
+   Jev publishes the draft unverified. No acceptance read.
+
+Why: VCO-D16 failed correct intermediate steps because it judged a step
+against the request's complete-answer requirements; these angles ask whether
+the next move and its plan are sound, which a correct intermediate step
+meets. The unverified max-effort baseline (VCO-D17) is replaced.
+
+Thresholds are 0.5 placeholders until calibration on recorded DeepSWE turns
+(`deepswe-verified-tool-e-full-max-4w-20261004-r1`: 1,537 turns over 31 tasks,
+13 solved; plus the 83 turns of VCO-D16): about 200 turns, stratified by task
+and position with turns showing a failure signal oversampled (reweighted in
+the report), split by task into calibration and held-out halves. Each recorded
+reply is labelled per angle in hindsight from its actual execution result
+(returncode and output), the later trajectory and the task outcome, by two
+independent Claude labellers blind to Jev (a third settles disagreements).
+Per angle, the threshold is the smallest whose accepted replies have a
+one-sided 95 % Clopper-Pearson upper bound on the bad rate <= 0.10 on the
+calibration half; the held-out miss rate, the rate of sound replies sent to
+repair, and AUROC are reported. The owner decides the thresholds. Jev reads
+the tool calls as `<tool_call>` markup in the reply text; if that hurts the
+calibration, passing them structured is a separate framework decision.
+
 ## Limitations
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
@@ -588,5 +633,5 @@ was 46 and 7, 15.2 %).
   the answer.
 - An extractor cut off before its JSON closes leaves its list unreadable and
   the answer unverified (`checklist_unavailable`); there is no rewrite.
-- With tools, each assistant message is judged as one step; whether the
-  whole agent run solves the task is not part of the flag.
+- On the verified-tool route, each reply's planned tool calls are judged;
+  whether the whole agent run solves the task is not part of the flag.

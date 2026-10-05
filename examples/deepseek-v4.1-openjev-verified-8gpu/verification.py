@@ -23,8 +23,8 @@ model-volumes/<environment>/results/<gate>-<UTC>.json.
   implicit      situational requirements are extracted and kept only when expected
   verified-tool-routing  Jev routes a request that requires a tool call to
                 VERIFIED_TOOL, and no other
-  verified-tool-route    a VERIFIED_TOOL request gets one DeepSeek call at max
-                effort, returned as tool_calls
+  verified-tool-route    a VERIFIED_TOOL request is drafted at the caller's
+                effort, read by Jev from four angles and returned as tool_calls
   serving-routed  kairyu-verified under load: route mix, latency, tokens per route
 """
 
@@ -220,8 +220,7 @@ def chat(
     output_tokens = usage.get("orchestration_output_tokens") or usage.get("completion_tokens") or 0
     trace_body = body.get("kairyu_trace_v2")
     route, p_verified = _route(trace_body, model)
-    # The verified-tool route answers without verification.
-    verified_route = route.startswith("verified") and route != "verified_tool"
+    verified_route = route.startswith("verified")
     return {
         "status": status,
         "seconds": round(elapsed, 2),
@@ -957,14 +956,19 @@ def gate_verified_tool_routing(env: dict[str, str], *, budget_s: float = 1800) -
         raise SystemExit(1)
 
 
+# The verified-tool route's four angles (verified.yaml, VCO-D18).
+TOOL_ANGLES = ("first_call", "order", "progress", "runs")
+
+
 def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> None:
-    """A VERIFIED_TOOL request gets one DeepSeek call at max effort, returned as tool_calls.
+    """A VERIFIED_TOOL request is drafted at the caller's effort and read from four angles.
 
     Every tool-requiring conversation of the tool-routing set is sent unary
     and streamed, with the caller's effort cycling through none, low, high
-    and max: each must route to VERIFIED_TOOL, return 200 with structured tool_calls
-    (finish_reason tool_calls) and no kairyu_verification, and run exactly
-    one DeepSeek generation at max effort.
+    and max: each must route to VERIFIED_TOOL, return 200 with structured
+    tool_calls (finish_reason tool_calls), run every DeepSeek generation (the
+    draft and at most two repairs) at the caller's effort (none: high), and
+    carry kairyu_verification over the four angles (VCO-D18).
     """
 
     deadline = Deadline("verified-tool-route", budget_s)
@@ -1003,10 +1007,13 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> 
                 problems.append(
                     f"tool_calls={len(row['tool_calls'])} finish={row['finish_reason']}"
                 )
-            if row["efforts"] != ["max"]:
+            if not 1 <= len(row["efforts"]) <= 3 or set(row["efforts"]) != {effort or "high"}:
                 problems.append(f"efforts {row['efforts']}")
-            if row["has_verification"]:
-                problems.append("carries kairyu_verification")
+            if row["verification_error"]:
+                problems.append(row["verification_error"])
+            angles = {item["id"] for item in row["requirements"]}
+            if angles != set(TOOL_ANGLES):
+                problems.append(f"angles {sorted(angles)}")
             if problems:
                 findings.append(f"{item['id']} stream={stream} effort={effort}: {problems}")
         deadline.check()
@@ -1015,6 +1022,8 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> 
             f"  {row['id']} stream={row['stream']} effort={row['caller_effort']} "
             f"status={row['status']} {row['seconds']:.1f}s ttft={row['ttft_s']} "
             f"route={row['route']} efforts={row['efforts']} "
+            f"guaranteed={row['guaranteed']} reason={row['reason']} attempts={row['attempts']} "
+            f"failed={[i['id'] for i in row['requirements'] if not i['passed']]} "
             f"calls={[call['name'] for call in row['tool_calls']]} finish={row['finish_reason']} "
             f"text={bool(row['content'].strip())} in={row['orchestration_input_tokens']} "
             f"out={row['orchestration_output_tokens']} "
@@ -1027,6 +1036,15 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 2700) -> 
         **_summary(rows),
         "latency_p90_s": seconds[max(0, int(len(seconds) * 0.9) - 1)] if seconds else None,
         "with_text": sum(1 for row in ok if row["content"].strip()),
+        "failed_angles": {
+            angle: sum(
+                1
+                for row in ok
+                for item in row["requirements"]
+                if item["id"] == angle and not item["passed"]
+            )
+            for angle in TOOL_ANGLES
+        },
         "unary_vs_stream_same_tools": sum(
             1
             for a, b in zip(rows[0::2], rows[1::2], strict=True)

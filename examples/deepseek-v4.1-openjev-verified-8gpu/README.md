@@ -36,7 +36,8 @@ request
   ▼
 profile_judge ── Jev, 1 request: THINK, VERIFIED_TOOL or VERIFIED? (kairyu-verified-always: VERIFIED_TOOL or VERIFIED)
   │   THINK ──► deepseek_think (DeepSeek) ─► answer, no flag
-  │   VERIFIED_TOOL  ──► verified_tool (DeepSeek, max effort, caller's tools) ─► reply, no flag
+  │   VERIFIED_TOOL  ──► verified_tool (DeepSeek, caller's effort and tools) ─► Jev, 1 request:
+  │                      four angles on the planned tool calls ─► miss → repair, at most twice
   │ VERIFIED
   ▼
 ┌─ wave 1 (DeepSeek, in parallel) ───────────────────────────────────────────────────┐
@@ -70,9 +71,20 @@ profile_judge ── Jev, 1 request: THINK, VERIFIED_TOOL or VERIFIED? (kairyu-v
 ```
 
 A request that requires a tool call (an agent loop's turn, or a request to
-act with the offered tools) goes to the verified-tool route: one DeepSeek call at max
-effort with the caller's tools, returned without verification (owner
-decision, VCO-D17).
+act with the offered tools) goes to the verified-tool route (owner decision,
+VCO-D18). DeepSeek writes the reply at the caller's effort with the caller's
+tools. Jev then reads its planned tool calls (the calls in the reply and any
+later steps its text states) in one request, from four angles:
+
+1. `first_call`: given what is known and the tool results, is the first call
+   an appropriate next move toward the final goal?
+2. `order`: are the planned calls in an appropriate order?
+3. `progress`: do they bring the work closer to the final goal?
+4. `runs`: will they run without error and do what they are meant to?
+
+When an angle fails, DeepSeek gets the draft and Jev's result and writes the
+reply again. Jev reads the new reply, at most two repairs. The reply carries
+`kairyu_verification` with the four angles.
 
 A repair is the same reply written again in the draft's frame: the
 conversation and every adopted point, then the draft and its missed points,
@@ -186,6 +198,7 @@ point table; internal stages are folded below the answer.
   truth of every claim in the answer.
 - An extractor cut off before its JSON closes leaves its list unreadable;
   the answer is then returned unverified (`checklist_unavailable`).
-- A request that requires a tool call takes the verified-tool route and is
-  not verified.
+- The four tool angles' thresholds are placeholders (0.5) until they are
+  calibrated on recorded DeepSWE turns (VCO-D18). Jev reads the tool calls
+  as `<tool_call>` markup in the reply text.
 - Latency: measured in `MEASUREMENTS.md`.
