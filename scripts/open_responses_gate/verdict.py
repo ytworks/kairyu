@@ -3,18 +3,23 @@
 ``tests/contracts/openresponses/expected-failures.toml`` pins the suite
 (``[suite]``: repository, full commit, spec version) and lists every scenario
 expected to fail at that pin, each with the gap it tracks, the work package
-that makes it pass, the reason, and a ``signature``: text that the scenario's
-errors or error body contain while it fails for that reason.
+that makes it pass, the reason, the exact set of errors the scenario reports
+while it fails for that reason (its own ``errors`` plus the named
+``[error_sets]`` it shares with other entries), and optionally
+``body_contains``: text its response body contains (an HTTP status error
+reports only ``HTTP 400: [object Object]``; the reason is in the body).
 
 Per scenario of a ``bin/compliance-test.ts --json`` report:
 
 - ``PASS``: passed and not listed;
-- ``XFAIL``: failed, listed, and its failure contains the signature;
-- ``FAIL``: failed unlisted, failed listed for another reason, or skipped;
+- ``XFAIL``: failed, listed, with exactly its listed errors (and body text);
+- ``FAIL``: failed unlisted, failed listed with an unlisted error, a listed
+  error no longer seen or another body, or skipped;
 - ``XPASS``: passed although listed, so the owning WP must delete the entry;
 - ``MISSING``: listed but absent from the report (the pin moved).
 
-Only ``PASS`` and ``XFAIL`` keep the gate green, so the list stays truthful.
+Only ``PASS`` and ``XFAIL`` keep the gate green, so the list stays truthful
+and a new error in a listed scenario is not masked by its listed ones.
 The file is validated when loaded; a malformed list fails the gate.
 """
 
@@ -38,7 +43,9 @@ EXPECTED_FILE = (
     / "expected-failures.toml"
 )
 GREEN = frozenset({"PASS", "XFAIL"})
-_ENTRY_FIELDS = ("id", "gap_id", "owner_wp", "signature", "reason")
+_ENTRY_TEXTS = ("id", "gap_id", "owner_wp", "reason")
+_ENTRY_OPTIONAL = ("errors", "error_sets", "body_contains")
+_TOP_LEVEL = frozenset({"suite", "error_sets", "expected_failure"})
 _SUITE_FIELDS = ("repository", "commit", "spec")
 _SCENARIO_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -63,8 +70,9 @@ class ExpectedFailure:
     id: str
     gap_id: str
     owner_wp: str
-    signature: str
+    errors: tuple[str, ...]
     reason: str
+    body_contains: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,15 +88,55 @@ class Verdict:
     detail: str
 
 
+def _check_keys(
+    raw: Mapping[str, Any], required: Sequence[str], optional: Sequence[str], where: str
+) -> None:
+    missing = [name for name in required if name not in raw]
+    unknown = sorted(set(raw) - {*required, *optional})
+    if missing or unknown:
+        raise GateFileError(f"{where}: missing {missing}, unknown {unknown}")
+
+
+def _text(value: Any, name: str, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise GateFileError(f"{where}: {name} must be a non-empty string")
+    return value
+
+
 def _fields(raw: Mapping[str, Any], names: Sequence[str], where: str) -> dict[str, str]:
-    missing = [name for name in names if name not in raw]
-    unknown = sorted(set(raw) - set(names))
-    blank = [name for name in names if not str(raw.get(name, "")).strip()]
-    if missing or unknown or blank:
-        raise GateFileError(f"{where}: missing {missing}, unknown {unknown}, empty {blank}")
-    if not all(isinstance(raw[name], str) for name in names):
-        raise GateFileError(f"{where}: every field must be a string")
-    return {name: raw[name] for name in names}
+    _check_keys(raw, names, (), where)
+    return {name: _text(raw[name], name, where) for name in names}
+
+
+def _texts(raw: Any, name: str, where: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise GateFileError(f"{where}: {name} must be a non-empty list")
+    texts = tuple(_text(item, name, where) for item in raw)
+    if len(set(texts)) != len(texts):
+        raise GateFileError(f"{where}: {name} repeats an item")
+    return texts
+
+
+def _error_sets(raw: Any) -> dict[str, tuple[str, ...]]:
+    if not isinstance(raw, Mapping):
+        raise GateFileError("[error_sets] must be a table of lists")
+    return {name: _texts(errors, "errors", f"[error_sets].{name}") for name, errors in raw.items()}
+
+
+def _expected_errors(
+    raw: Mapping[str, Any], error_sets: Mapping[str, tuple[str, ...]], where: str
+) -> tuple[str, ...]:
+    """The entry's own ``errors`` and those of its ``error_sets``, without repeats."""
+
+    names = _texts(raw["error_sets"], "error_sets", where) if "error_sets" in raw else ()
+    unknown = sorted(set(names) - set(error_sets))
+    if unknown:
+        raise GateFileError(f"{where}: unknown error_sets {unknown}")
+    own = _texts(raw["errors"], "errors", where) if "errors" in raw else ()
+    errors = tuple(dict.fromkeys([*(e for name in names for e in error_sets[name]), *own]))
+    if not errors:
+        raise GateFileError(f"{where}: lists no errors or error_sets")
+    return errors
 
 
 def _suite(raw: Any) -> Suite:
@@ -106,11 +154,12 @@ def _suite(raw: Any) -> Suite:
     return Suite(**fields)
 
 
-def _entry(raw: Any, index: int) -> ExpectedFailure:
+def _entry(raw: Any, index: int, error_sets: Mapping[str, tuple[str, ...]]) -> ExpectedFailure:
     if not isinstance(raw, Mapping):
         raise GateFileError(f"expected_failure #{index} must be a table")
     where = f"expected_failure #{index} ({raw.get('id', '?')})"
-    fields = _fields(raw, _ENTRY_FIELDS, where)
+    _check_keys(raw, _ENTRY_TEXTS, _ENTRY_OPTIONAL, where)
+    fields = {name: _text(raw[name], name, where) for name in _ENTRY_TEXTS}
     checks = {
         "id": _SCENARIO_ID.match(fields["id"]),
         "gap_id": GAP_ID_PATTERN.match(fields["gap_id"]),
@@ -119,20 +168,29 @@ def _entry(raw: Any, index: int) -> ExpectedFailure:
     invalid = [name for name, ok in checks.items() if not ok]
     if invalid:
         raise GateFileError(f"{where}: invalid {invalid}")
-    return ExpectedFailure(**fields)
+    body = raw.get("body_contains")
+    return ExpectedFailure(
+        **fields,
+        errors=_expected_errors(raw, error_sets, where),
+        body_contains=None if body is None else _text(body, "body_contains", where),
+    )
 
 
 def load_gate_file(path: Path = EXPECTED_FILE) -> GateFile:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"suite", "expected_failure"})
+    unknown = sorted(set(raw) - _TOP_LEVEL)
     if unknown:
         raise GateFileError(f"{path.name}: unknown top-level keys {unknown}")
+    error_sets = _error_sets(raw.get("error_sets", {}))
     listed = raw.get("expected_failure", [])
-    entries = tuple(_entry(item, index) for index, item in enumerate(listed))
+    entries = tuple(_entry(item, index, error_sets) for index, item in enumerate(listed))
     ids = [entry.id for entry in entries]
     duplicates = sorted({entry_id for entry_id in ids if ids.count(entry_id) > 1})
     if duplicates:
         raise GateFileError(f"duplicate expected_failure ids: {duplicates}")
+    used = {name for item in listed for name in item.get("error_sets", ())}
+    if unused := sorted(set(error_sets) - used):
+        raise GateFileError(f"[error_sets] no entry uses: {unused}")
     return GateFile(suite=_suite(raw.get("suite")), expected=entries)
 
 
@@ -158,15 +216,29 @@ def _results(report: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     return tuple(results)
 
 
-def failure_text(result: Mapping[str, Any]) -> str:
-    """A failed scenario's errors and response body, the text signatures match."""
+def _reported_errors(result: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(str(error) for error in result.get("errors") or ())
 
-    errors = [str(error) for error in result.get("errors") or ()]
+
+def _body(result: Mapping[str, Any]) -> str:
     response = result.get("response")
     if response is None:
-        return "\n".join(errors)
-    body = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
-    return "\n".join([*errors, body])
+        return ""
+    return response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
+
+
+def _mismatches(result: Mapping[str, Any], expected: ExpectedFailure) -> list[str]:
+    """How a listed scenario's failure differs from its entry; empty when it matches."""
+
+    observed, listed = set(_reported_errors(result)), set(expected.errors)
+    problems = []
+    if unlisted := sorted(observed - listed):
+        problems.append(f"unlisted errors {unlisted}")
+    if unseen := sorted(listed - observed):
+        problems.append(f"listed errors no longer seen {unseen}, update the entry")
+    if expected.body_contains is not None and expected.body_contains not in _body(result):
+        problems.append(f"body lacks {expected.body_contains!r}")
+    return problems
 
 
 def _verdict(result: Mapping[str, Any], expected: ExpectedFailure | None) -> Verdict:
@@ -175,15 +247,15 @@ def _verdict(result: Mapping[str, Any], expected: ExpectedFailure | None) -> Ver
         if expected is None:
             return Verdict(scenario, "PASS", "")
         return Verdict(scenario, "XPASS", f"passes; delete its entry ({expected.owner_wp})")
-    text = failure_text(result)
+    text = "\n".join([*_reported_errors(result), _body(result)])
     detail = " ".join(text.split())[:_DETAIL_CHARS]
     if status != "failed":
         return Verdict(scenario, "FAIL", f"status {status!r}: {detail}")
-    if expected is not None and expected.signature in text:
-        return Verdict(scenario, "XFAIL", f"{expected.gap_id} → {expected.owner_wp}")
-    if expected is not None:
-        return Verdict(scenario, "FAIL", f"lacks signature {expected.signature!r}: {detail}")
-    return Verdict(scenario, "FAIL", detail)
+    if expected is None:
+        return Verdict(scenario, "FAIL", detail)
+    if problems := _mismatches(result, expected):
+        return Verdict(scenario, "FAIL", "; ".join(problems)[:_DETAIL_CHARS])
+    return Verdict(scenario, "XFAIL", f"{expected.gap_id} → {expected.owner_wp}")
 
 
 def evaluate(report: Mapping[str, Any], expected: Sequence[ExpectedFailure]) -> tuple[Verdict, ...]:
