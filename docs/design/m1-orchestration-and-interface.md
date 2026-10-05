@@ -46,6 +46,14 @@ it must not construct an HTTP worker that loops through the deployment's own
 L3 surface. Standalone factory-backed DSL workers retain their existing owned
 lifecycle. See `example-layered-orchestration.md`.
 
+**llama.cpp upstream amendment (2026-10-04, PR #620).** `OpenAICompatBackend`
+gains the `upstream: llamacpp` profile for `llama-server` (GGUF models). It adds
+two capability fields: `repetition_penalty_wire_name`, and `assistant_prefill`
+(now also the vLLM gate). It also adds llama.cpp-specific wire adaptations for
+named `tool_choice`, `top_logprobs`, `top_k`, the repetition-penalty window
+and WebP images.
+L2/L3 are unchanged. See `llamacpp-upstream.md` (LCP-D1..D6).
+
 **Typed-prompt amendment (2026-07-30, issue #227):** the public backend seam now
 accepts a nominal `PromptInput`: legacy `str`, `TextPrompt`, `TokensPrompt`, or
 `MultimodalPrompt`. Legacy strings retain their exact behavior. A

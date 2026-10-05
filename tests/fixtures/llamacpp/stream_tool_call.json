@@ -1,0 +1,41 @@
+{
+  "build_info": "b6594-46847e615",
+  "path": "/v1/chat/completions",
+  "request": {
+    "model": "tiny",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write one short sentence about rivers."
+      }
+    ],
+    "temperature": 0.0,
+    "max_tokens": 24,
+    "logit_bias": [
+      [
+        48,
+        40.0
+      ]
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "weather",
+          "description": "Get the weather.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      }
+    ],
+    "tool_choice": "required",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "status": 200,
+  "response": "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null}}],\"created\":1791126415,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"2WlXFwAUHQY5aHrQmWcBUQXOBk00AK31\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"{\\\\\\\\\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"<|tool_call>\"}}]}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"finish_reason\":\"length\",\"index\":0,\"delta\":{}}],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[],\"created\":1791126416,\"id\":\"chatcmpl-jjQSar2m1wbRSLRfFgco6MObgsjSWrVr\",\"model\":\"tiny\",\"system_fingerprint\":\"b6594-46847e615\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":24,\"prompt_tokens\":45,\"total_tokens\":69,\"prompt_tokens_details\":{\"cached_tokens\":44}},\"timings\":{\"cache_n\":44,\"prompt_n\":1,\"prompt_ms\":5.592,\"prompt_per_token_ms\":5.592,\"prompt_per_second\":178.826895565093,\"predicted_n\":24,\"predicted_ms\":568.282,\"predicted_per_token_ms\":24.707913043478264,\"predicted_per_second\":40.47286382465044}}\n\ndata: [DONE]\n\n"
+}

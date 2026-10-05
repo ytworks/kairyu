@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import httpx
 import pytest
@@ -929,9 +931,10 @@ async def test_generate_forwards_representable_sampling_payload():
     await backend.shutdown()
 
 
-async def test_generate_continues_assistant_prefill_on_vllm_chat():
+@pytest.mark.parametrize("upstream", ["vllm", "llamacpp"])
+async def test_generate_continues_assistant_prefill_on_chat(upstream):
     """DTO-D15: an assistant prefill rides as the final chat message that
-    vLLM continues instead of opening a new generation prompt."""
+    vLLM and llama.cpp continue instead of opening a new generation prompt."""
 
     import dataclasses
 
@@ -941,7 +944,8 @@ async def test_generate_continues_assistant_prefill_on_vllm_chat():
         model="m",
         api_key_env=None,
         transport=_ok_transport(captured),
-        upstream="vllm",
+        upstream=upstream,
+        max_model_len=4096,
     )
     prefill = "<think>\nplan\n</think>\n\n"
 
@@ -1393,6 +1397,15 @@ async def test_upstream_profiles_forward_exact_supported_body(upstream, params, 
         ("gemini", "logprobs", SamplingParams(logprobs=1)),
         ("vllm", "prompt_logprobs", SamplingParams(prompt_logprobs=1)),
         ("kairyu", "prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        # llama-server silently ignores unknown keys; these must fail closed.
+        ("llamacpp", "min_tokens", SamplingParams(min_tokens=2)),
+        ("llamacpp", "stop_token_ids", SamplingParams(stop_token_ids=(7,))),
+        ("llamacpp", "skip_special_tokens", SamplingParams(skip_special_tokens=False)),
+        # llama.cpp also penalizes prompt tokens; Kairyu's are output-only.
+        ("llamacpp", "presence_penalty", SamplingParams(presence_penalty=0.5)),
+        ("llamacpp", "frequency_penalty", SamplingParams(frequency_penalty=0.5)),
+        # llama.cpp reports usage per candidate, never the sum.
+        ("llamacpp", "n", SamplingParams(n=2)),
         (
             "openai",
             "forced_token_ids",
@@ -1433,6 +1446,7 @@ async def test_upstream_profile_mismatch_is_400_before_transport(upstream, field
         api_key_env=None,
         transport=httpx.MockTransport(handler),
         upstream=upstream,
+        max_model_len=4096,
     )
 
     with pytest.raises(UpstreamClientError, match=field) as exc_info:
@@ -1650,6 +1664,7 @@ def test_upstream_profile_names_are_explicit_and_unknown_fails_at_construction()
         "gemini",
         "generic",
         "kairyu",
+        "llamacpp",
         "openai",
         "vllm",
     )
@@ -3230,3 +3245,196 @@ async def test_count_prompt_tokens_transport_error_is_none():
         upstream="vllm",
     )
     assert await backend.count_prompt_tokens_async("x") is None
+
+
+_LLAMACPP_FIXTURES = Path(__file__).parents[1] / "fixtures" / "llamacpp"
+_LLAMACPP_TOOLS = tuple(
+    {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    for name, description in (("lookup", "Look up a word."), ("weather", "Get the weather."))
+)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "stream", "tools", "tool_choice"),
+    [
+        pytest.param(
+            "named_tool_choice",
+            False,
+            _LLAMACPP_TOOLS,
+            {"type": "function", "function": {"name": "weather"}},
+            id="named-tool-choice",
+        ),
+        pytest.param(
+            "stream_tool_call", True, _LLAMACPP_TOOLS[1:], "required", id="stream-usage"
+        ),
+    ],
+)
+async def test_llamacpp_wire_matches_recorded_server_exchange(
+    fixture, stream, tools, tool_choice
+):
+    """Requests stay byte-for-byte what a real llama-server accepted, and its
+    raw replies (recorded by l1.correctness.llamacpp_upstream_contract) parse.
+
+    A named tool_choice object is silently treated as "auto" by llama-server,
+    so it must reach the wire as the single named tool plus "required".
+    """
+
+    recorded = json.loads((_LLAMACPP_FIXTURES / f"{fixture}.json").read_text())
+    usage = None
+    for line in recorded["response"].splitlines():
+        data = line.removeprefix("data: ")
+        if data.startswith("{") and '"usage"' in data:
+            usage = json.loads(data)["usage"]
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        assert http_request.url.path == recorded["path"]
+        assert json.loads(http_request.content) == recorded["request"]
+        return httpx.Response(recorded["status"], content=recorded["response"].encode())
+
+    backend = OpenAICompatBackend(
+        base_url="http://llama:8080/v1",
+        model="tiny",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="llamacpp",
+        capabilities={"allow_extra_args": ["logit_bias"]},
+        max_model_len=4096,
+    )
+    request = GenerationRequest(
+        request_id="r1",
+        prompt="Write one short sentence about rivers.",
+        sampling_params=SamplingParams(
+            temperature=0.0,
+            max_tokens=24,
+            extra_args={"logit_bias": [[48, 40.0]]},
+        ).with_generation_config_omitted(GENERATION_CONFIG_SAMPLING_FIELDS - {"temperature"}),
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+    if stream:
+        result = [partial async for partial in backend.stream(request)][-1]
+    else:
+        result = await backend.generate(request)
+
+    assert result.text.startswith('<tool_call>{"name":"weather"')
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == usage["prompt_tokens"]
+    assert result.usage.cached_tokens == usage["prompt_tokens_details"]["cached_tokens"]
+    await backend.shutdown()
+
+
+async def test_llamacpp_sampling_uses_executed_wire_values():
+    """llama-server reads only ``repeat_penalty`` and applies it to the last
+    ``repeat_last_n`` tokens (default 64), disables top-k with 0, and returns
+    no logprobs at all for ``top_logprobs: 0``."""
+
+    captured: dict = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(http_request.content)
+        token = {"id": 5, "token": "a", "bytes": [97], "logprob": -0.5}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "a"},
+                        "finish_reason": "length",
+                        "logprobs": {"content": [{**token, "top_logprobs": [token]}]},
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://llama:8080/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="llamacpp",
+        max_model_len=4096,
+    )
+    result = await backend.generate(
+        _request(
+            sampling_params=SamplingParams(
+                temperature=0.0, top_k=-1, repetition_penalty=1.1, logprobs=0, max_tokens=1
+            ),
+            explicit_generation_neutrals=True,
+        )
+    )
+
+    body = captured["body"]
+    assert body["repeat_penalty"] == 1.1 and "repetition_penalty" not in body
+    # The whole sequence, as Kairyu's native sampler penalizes it.
+    assert body["repeat_last_n"] == 4096
+    assert body["top_k"] == 0
+    assert (body["logprobs"], body["top_logprobs"]) == (True, 1)
+    content = result.completions[0].logprob_content
+    assert content is not None and content[0].logprob == -0.5 and content[0].top == ()
+    await backend.shutdown()
+
+
+async def test_llamacpp_webp_image_is_sent_as_png():
+    """llama.cpp cannot decode WebP without ffmpeg and reports the failed
+    decode as HTTP 500, which would count as a replica failure."""
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    pixels = Image.new("RGB", (8, 8), (10, 200, 30))
+    webp = BytesIO()
+    pixels.save(webp, format="WEBP", lossless=True)
+    webp_url = "data:image/webp;base64," + base64.b64encode(webp.getvalue()).decode()
+    captured: dict = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(http_request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "green"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 70, "completion_tokens": 1},
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://llama:8080/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="llamacpp",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_processed_prompt_tokens": 1024},
+        max_model_len=4096,
+    )
+    await backend.generate(_request(prompt=_multimodal_prompt(webp_url)))
+
+    sent = next(
+        part["image_url"]["url"]
+        for message in captured["body"]["messages"]
+        if isinstance(message["content"], list)
+        for part in message["content"]
+        if part["type"] == "image_url"
+    )
+    prefix = "data:image/png;base64,"
+    assert sent.startswith(prefix)
+    with Image.open(BytesIO(base64.b64decode(sent[len(prefix) :]))) as image:
+        assert image.convert("RGB").tobytes() == pixels.tobytes()
+    await backend.shutdown()

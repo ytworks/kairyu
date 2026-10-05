@@ -570,6 +570,7 @@ built-in contract.
 | `anthropic` | temperature (0–1), top-p, one completion, max tokens, stop, non-strict tools | Rejects penalties, seed, logprobs, `response_format`, and strict tool schemas because the [Anthropic compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) documents them as ignored. Anthropic recommends its native API for production features. |
 | `gemini` | max tokens, structured output, and non-strict tools | Allows `reasoning_effort` and the documented `extra_body.google` extension object. Sampling controls vary across Gemini model families, so fields not guaranteed by the [Gemini OpenAI compatibility contract](https://ai.google.dev/gemini-api/docs/openai) fail closed unless a pinned deployment declares a verified custom contract. |
 | `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, `ignore_eos`, `skip_special_tokens`, and signed-int64 `priority` | Use for gateway-to-Kairyu replica traffic. These extensions and the bounded interactive/batch class hint are typed and preserved through the receiving HTTP boundary into native scheduler admission. `skip_special_tokens` defaults to `true` and is isolated per request; `false` exposes otherwise-visible registered specials, but an ID that actually terminates on EOS or a stop token remains hidden under both values. |
+| `llamacpp` | OpenAI controls without frequency/presence penalties, plus `top_k`, `min_p`, `repetition_penalty` and `ignore_eos`; `n` = 1 | For `llama-server` (GGUF); requires `max_model_len`. Sent as llama.cpp executes them: `repeat_penalty` over the whole sequence (`repeat_last_n` = `max_model_len`), `top_k: 0` for disabled, a named `tool_choice` as that single tool plus `required`, at least one top logprob (trimmed back), WebP images as PNG. Frequency/presence penalties fail closed because llama.cpp also applies them to prompt tokens. `n > 1` fails closed because llama.cpp reports usage per candidate, not the sum. `min_tokens`, `stop_token_ids`, `skip_special_tokens`, `priority`, prompt logprobs and strict tool schemas fail closed because llama-server ignores them. `/v1/messages/count_tokens` is declined: llama.cpp cannot count the chat-templated prompt from the string it receives. `response_format` is forwarded; llama.cpp relaxes a regex `pattern` it cannot express to any string. See [GGUF models through llama.cpp](#gguf-models-through-llamacpp). |
 | `vllm` | OpenAI controls plus result-preserving [vLLM Chat extensions](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/) and `priority` | Shares the Kairyu profile's `skip_special_tokens` control. Smaller priority values run first. Kairyu's local vLLM adapter requires `scheduling_policy=priority` so the field cannot be silently ignored; a separately operated remote vLLM server must enable the same policy. `prompt_logprobs` fails closed until Kairyu's result/API types can return the upstream prompt distribution. |
 
 Example provider configurations:
@@ -627,6 +628,69 @@ pre-dispatch HTTP 400.
 Additive sampling overrides are limited to the `generic` custom-provider
 profile. Named provider presets may be narrowed but not broadened, preventing
 configuration from re-enabling fields that the provider documents as ignored.
+
+### GGUF models through llama.cpp
+
+`llama-server` (llama.cpp) is attached like a vLLM server, as an `openai`
+engine with `upstream: llamacpp` (design: `docs/design/llamacpp-upstream.md`).
+The same `kairyu.yaml` works for a Docker CUDA container, Apple Silicon Metal
+or a CPU build; only the server process differs.
+
+```yaml
+engines:
+  local-gguf:
+    backend: openai
+    health_url: http://llama:8080/health   # llama-server has no /readyz
+    options:
+      base_url: http://llama:8080/v1
+      model: local-gguf                    # equals llama-server --alias
+      api_key_env: null
+      upstream: llamacpp
+      max_model_len: 32768                 # required: per-slot context (see below)
+      quantization_format: gguf:Q4_K_M
+legacy_chat_models: [local-gguf]
+```
+
+```sh
+llama-server -m model-00001-of-00002.gguf --alias local-gguf \
+  --jinja --reasoning-format deepseek \
+  -np 4 -c 131072 -fit off -ngl all \
+  --temp 0.7 --top-k 20 --top-p 0.8 --min-p 0 --repeat-penalty 1.0 \
+  --host 0.0.0.0 --port 8080 --no-webui --metrics
+```
+
+These server settings are the contract Kairyu relies on. Attest them from
+`GET /props` at startup:
+
+- **Build.** Pin the image by digest and compare the commit suffix of
+  `build_info`. The build number changes with clone depth.
+- **Slots and context.** Use an explicit `-np N`; auto means four slots
+  sharing one KV pool. With an explicit `-np`, each slot gets `-c / N` tokens.
+  - Set `max_model_len` (required) to that per-slot value
+    (`default_generation_settings.n_ctx`). It also bounds the
+    repetition-penalty window Kairyu requests (`repeat_last_n`).
+  - Never oversubscribe KV: a full shared pool fails every running request
+    with HTTP 500.
+  - `-fit off` stops llama.cpp from silently lowering context or offload.
+- **Sampling defaults.** A field a request omits takes the server default: CLI
+  flag, then the GGUF's `general.sampling.*`, then llama.cpp's built-ins
+  (temperature 0.8, top_k 40, top_p 0.95, min_p 0.05). Set the model card's
+  values explicitly, as above.
+- **Templates and reasoning.** `--jinja` (tool calls) and
+  `--reasoning-format deepseek`, or reasoning off. With these, thinking
+  arrives as `reasoning_content` and tool calls as `tool_calls`.
+- **Images.** `--mmproj` with `capabilities.allow_prompt_kinds: [multimodal]`
+  and an `image_input_policy`.
+- **Concurrency.** Size `server.max_concurrency` to the slots: llama-server
+  queues excess requests without a limit.
+- **Replicas.** Several llama-servers behind one public model use a static
+  `replicas:` pool, each replica with its own `health_url`.
+
+Batch and async requests carry a scheduling priority that llama-server cannot
+execute, so they fail closed on these engines, as on other non-priority
+upstreams. Before relying on a new llama.cpp build, run
+`l1.correctness.llamacpp_upstream_contract` against it
+(`verification/README.md`).
 
 ### Responses API and Codex
 

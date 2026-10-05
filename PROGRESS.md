@@ -84,6 +84,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DeepSeek V4.1 Flash six-GPU example (FN-D9 six-GPU amendment, 2026-09-30): one DP6/EP6 replica on GPUs 0–5 with the 8-GPU example's L2/L3 structure and its own scripts; official-first L1 (pinned vLLM nightly + SM120 overlay, Engram offload, 4K batch / 0.92 from the recipe's memory-bound arm, DSpark 5 with full verification). Serving 102 / 591 / 718 tok/s at c1/c32/c64; gate evidence in its `MEASUREMENTS.md`.
 - Qwen3.8 + DeepSeek-V4.1 ensemble example (DTO-D16/D17, 2026-10-01): V4.1 DP6/EP6 (GPU 0–5, the six-GPU example's L1) + Qwen TP1 × 2 (GPU 6, 7). A Qwen judge picks one of two routes: thinking DeepSeek, or the dual-track ensemble with two policies and a three-candidate synthesis. Every role takes images natively; DeepSeek uses the official V4.1 encoder with per-request effort, and the example's overlay continues the floor's assistant prefill. ENSEMBLE criteria loosened and judge fallback moved to `deepseek_think` (DTO-D17 amendments). GPU-verified 2026-10-01: all gates pass, including the ensemble TTFT gate at c1–c32 (c32 at 95.8 % of the limit); 4 of 128 coding requests exceed the 900 s turn envelope after two audit refinements.
 - Checklist-verified answers example (m1 D8 / VCO-D1..D6, 2026-10-01): DeepSeek-V4.1 DP6/EP6 (GPU 0-5) writes, OpenJev x 2 (GPU 6, 7) judges through System One, Kairyu L2 checklist verifiers (Jev-shaped questions, tau_hi, an acceptance read; no rule-based checks since PR #619) publish `kairyu_verification` with every answer; tau_hi 0.9966 at alpha 0.10 on InFoBench expert labels (held-out upper bound 8.7 %). Per-claim G1 (OpenJev claim support) failed calibration on RAGTruth/PRM800K/FEVER and is advisory (VCO-D11); the guarantee covers tau_hi requirements plus deterministic grounding checks. Two-stage extraction, a source/action-only state builder and format-scoped units (VCO-D12/D13). All GPU gates pass on `e81db571` (2026-10-02): implicit recall 0.875, InFoBench gold recall 0.972, serving guaranteed 44-53 % (was 25-38 %), routed verified 65 %; owner latency target (p50 <= 180 s) not met (InFoBench p50 154-342 s). Evidence in its `MEASUREMENTS.md`.
+- GGUF via llama.cpp (LCP-D1..D6, 2026-10-04): `upstream: llamacpp` on the `openai` backend; CPU contract gate green on stock b11391; Winnow-12B Q8_0 examples (1 GPU, DP8 ReplicaPool + System One, System One playground) pass all GPU gates (2026-10-05) with llama.cpp's Gemma 4 `required` fix `f072b10` backported
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -111,6 +112,26 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-05 — [amendment] llama.cpp `n` limited to 1; Winnow example fixes (PR #620 review)
+- What: `upstream: llamacpp` rejects `n > 1` before dispatch (`max_n=1`), and the contract gate's `n`-above-slots row is removed. In the Winnow examples, `down`/`status`/`logs` no longer need 30 GiB free; the playground sends WebP as PNG; the streaming tool-call gate assembles the deltas instead of searching for the `tool_calls` key.
+- Why: owner review. llama-server reports usage per candidate (the first candidate's when unary, one usage chunk per candidate when streaming), so Kairyu under-reported and under-billed completion tokens. System One forwards images untouched, and Winnow's build cannot decode WebP. Plain text chunks also carry `"tool_calls": null`.
+- Refs: LCP-D2 in `docs/design/llamacpp-upstream.md`; PR #620 review 5409395128
+
+### 2026-10-05 — [amendment] Winnow examples GPU-verified; Gemma 4 `required` backport (PR #620)
+- What: both Winnow-12B examples pass all six `verify.sh` gates on RTX PRO 6000 (1 GPU; DP8 on 8 GPUs). The examples add llama.cpp `f072b10` as a fifth winnow-server patch, registered in Winnow's own `runtime.lock.json`. They also add a Jev-style System One playground on `:3001`, and the UIs now listen on all interfaces. Kairyu code is unchanged.
+- Why: at b11036 the Gemma 4 grammar ignores `tool_choice: "required"`. The named-tool adaptation (LCP-D3) then got text, and Kairyu failed closed with 502. The source re-read had missed this. Owner approved the backport (example-owned runtime), the playground and the public binds.
+- Refs: LCP-D3 and the Winnow amendment in `docs/design/llamacpp-upstream.md`; `examples/winnow-12b-q8-*/MEASUREMENTS.md`
+
+### 2026-10-04 — [amendment] llama.cpp penalties, token counts and attest (PR #620 review)
+- What: `upstream: llamacpp` rejects frequency/presence penalties, sends `repeat_last_n` = `max_model_len` with `repetition_penalty`, requires `max_model_len`, and declines `/v1/messages/count_tokens`; the Winnow examples' `attest` fails on missing or non-numeric sampling defaults.
+- Why: owner review. llama.cpp penalizes prompt tokens with frequency/presence and only the last 64 tokens with repeat. `/tokenize` counts the string without the chat template generation applies. A missing default compared as NaN and passed.
+- Refs: LCP-D2/D3/D5 in `docs/design/llamacpp-upstream.md`; PR #620 review 5406980804
+
+### 2026-10-04 — [design] GGUF models through llama.cpp as an L1 worker (PR #620)
+- What: `backend: openai` + `upstream: llamacpp` attaches `llama-server` with no L2/L3 change: executed-field profile, `repeat_penalty`, `top_k` 0, named tool_choice → that tool + `required`, `top_logprobs` floor, assistant prefill, `/tokenize`, WebP→PNG; passthrough rejected. CPU contract gate `l1.correctness.llamacpp_upstream_contract` passes on stock b11391.
+- Why: llama-server silently ignores unknown keys and object tool_choice, drops logprobs at `top_logprobs: 0`, and reports undecodable images as HTTP 500 (would eject replicas); `generic` cannot express these.
+- Refs: LCP-D1..D6 in `docs/design/llamacpp-upstream.md`; plan `docs/superpowers/plans/2026-10-04-llamacpp-gguf-l1-upstream.md`
+
 ### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
 - What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.
 - Why: owner decision: tool requests take the verified-tool route, so the guarantee route assumes a complete answer.
@@ -125,28 +146,3 @@ in `.claude/rules/progress-log.md`).
 - What: new profile `verified_step` and Jev route label STEP (kairyu-verified: THINK/STEP/VERIFIED; kairyu-verified-always: STEP/VERIFIED, no think route). Step points come from the task and the latest tool results; coverage and acceptance ask whether the reply is a sound next step (A0) over request, recent conversation (bounded `query`), summary and reply. Repairs in both profiles rewrite the same message in the draft's frame (B1); a step repair gets only points read below 0.5 (B2). Extractors may use 65,536 tokens (C2). STEP thresholds are placeholders until labelled DeepSWE turns (V3).
 - Why: complete-answer criteria failed sound mid-task turns and their repairs drifted to submission (closed PR #618: 73/83 turns hit the refinement limit).
 - Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (A0, B1, B2, C2); example `verified.yaml`, `verified-always.yaml`
-
-### 2026-10-03 — [design] Checklist verifier minimised to what Jev verification needs (PR #619 S2)
-- What: removed from L2 rule-based checks (`checks.py`, inline claim roles, `on_exhausted`), `seed_from` (the answer role writes the draft itself), multi-list curation (one list: the verifier's target) and guarantee groups; kept Jev questions over JSON state (`request`/`tools` sources, conversation bounds), main's `max_questions_per_call`, the acceptance read with per-read accounting, and no guarantee for an empty answer. New: an acceptance FAIL with every point met is not repaired; it publishes unverified (`reason: not_accepted`).
-- Why: owner decision: the framework keeps only shared contracts; the removed parts served one example's workflow. A repair with no unmet point rewrote sound DeepSWE turns.
-- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (R1-R5, J2/B3); m1 D8 text follows in S4
-
-### 2026-10-03 — [progress] Chat API returns the reply's text with its tool calls (PR #619)
-- What: `/v1/chat/completions` publishes the model's prose as `content` beside `tool_calls` (well-formed call envelopes removed; malformed markup stays text; whole-text protocols unchanged). Stream and unary share the choice.
-- Why: `content` was nulled whenever calls existed, so agent frameworks never received the reasoning text they ask for every turn; a Jev judge of the reply then saw no text (DeepSWE, closed PR #618).
-- Refs: PR #619 S1; `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md`
-
-### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
-- What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
-- Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
-- Refs: "Node execution and pins" in `docs/design/node-model-cache-prestage-v1.md`; PR #615
-
-### 2026-10-02 — [amendment] Cache hits keep the residency generation (PR #615 re-review)
-- What: an identical `record_verified()` cache hit now advances only last access and the index revision, like `touch()`; the row generation moves only with verified state or verification source.
-- Why: owner re-review: a duplicate in-flight ensure of one command/claim reached the cache after its twin completed and invalidated that READY pre-stage's live evidence, although its own completion was rejected as stale.
-- Refs: `docs/design/node-model-cache-index-v1.md`; D3.1 in `docs/design/node-model-cache-prestage-v1.md`; PR #615
-
-### 2026-10-02 — [amendment] Runner and model-cache authority review fixes (PR #615)
-- What: cache `touch()` keeps the residency generation; the live cache reader joins node evidence to the published inventory at the latest observation (hints live, inventory within the observation age); pre-stage pin owners name the ensure generation and an ensure drops lower-generation owners; actuation reauthorizes the leader after its last callback and rechecks evidence age before PATCH; Deployment claims accept the one-step generation advance.
-- Why: owner review reproduced five defects with CPU/HTTP mocks: a successful Runner-start verification invalidated its own binding, every current inventory was denied, a delayed release removed a successor's pin, an expired lease could still PATCH, and every first Deployment claim failed.
-- Refs: D3.1, D3.14 in `docs/design/node-model-cache-prestage-v1.md`; `docs/design/node-model-cache-index-v1.md`; `docs/design/runner-state-v1.md`; PR #615

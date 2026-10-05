@@ -548,6 +548,20 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "verification/l1/correctness/llamacpp_upstream_contract.py"
+module = "verification.l1.correctness.llamacpp_upstream_contract"
+id = "l1.correctness.llamacpp_upstream_contract"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["llamacpp", "service"]
+documentation = ["verification/README.md", "docs/design/llamacpp-upstream.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "verification/fleet/performance/multiturn_prefix.py"
 module = "verification.fleet.performance.multiturn_prefix"
 id = "fleet.performance.multiturn_prefix"

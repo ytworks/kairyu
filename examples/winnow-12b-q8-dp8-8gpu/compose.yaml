@@ -1,0 +1,201 @@
+name: kairyu-winnow-12b-q8-dp8-8gpu
+
+# L1: eight winnow-server replicas (llama.cpp b11036 + Winnow's patches), one
+# per RTX PRO 6000, each with the 1-GPU example's settings. Its launcher always
+# passes --jinja, --reasoning off, --fit off, --no-context-shift, full GPU
+# residency and an explicit --parallel (so the KV cache is split per slot).
+x-winnow: &winnow
+  image: ${WINNOW_IMAGE:-local/winnow-inference:77d1458-gemma4req-sm120}
+  volumes:
+    - type: bind
+      source: ${MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+  command:
+    - --alias
+    - winnow-12b
+    - --port
+    - "8091"
+    # 8 chat slots x 65,536 tokens per replica.
+    - --context
+    - "524288"
+    - --chat-parallel
+    - "8"
+    - --decision-context
+    - "65536"
+    - --decision-parallel
+    - "8"
+    - --cache
+    - q8_0
+    - --memory
+    - auto
+    # Gemma 4's recommended sampling as server defaults (LCP-D5).
+    - --temp
+    - "1.0"
+    - --top-k
+    - "64"
+    - --top-p
+    - "0.95"
+    - --min-p
+    - "0.0"
+    - --repeat-penalty
+    - "1.0"
+    - --metrics
+    - --no-webui
+  healthcheck:
+    test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8091/health", timeout=3)']
+    interval: 5s
+    timeout: 4s
+    retries: 360
+    start_period: 30s
+  restart: unless-stopped
+
+services:
+  winnow-0:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_0}
+    ports: ["127.0.0.1:8091:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]
+
+  winnow-1:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_1}
+    ports: ["127.0.0.1:8092:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["1"], capabilities: [gpu]}]
+
+  winnow-2:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_2}
+    ports: ["127.0.0.1:8093:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["2"], capabilities: [gpu]}]
+
+  winnow-3:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_3}
+    ports: ["127.0.0.1:8094:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["3"], capabilities: [gpu]}]
+
+  winnow-4:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_4}
+    ports: ["127.0.0.1:8095:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["4"], capabilities: [gpu]}]
+
+  winnow-5:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_5}
+    ports: ["127.0.0.1:8096:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["5"], capabilities: [gpu]}]
+
+  winnow-6:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_6}
+    ports: ["127.0.0.1:8097:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["6"], capabilities: [gpu]}]
+
+  winnow-7:
+    <<: *winnow
+    cpuset: ${GPU_CPUSET_7}
+    ports: ["127.0.0.1:8098:8091"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["7"], capabilities: [gpu]}]
+
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: "1"
+    image: ${KAIRYU_IMAGE:-local/kairyu:winnow-llamacpp-example}
+    command: [/etc/kairyu/kairyu.yaml]
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+    volumes:
+      - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+      - type: bind
+        source: ${PLACEMENT_LOG_PATH}
+        target: /var/lib/kairyu/placement
+    depends_on:
+      winnow-0: {condition: service_healthy}
+      winnow-1: {condition: service_healthy}
+      winnow-2: {condition: service_healthy}
+      winnow-3: {condition: service_healthy}
+      winnow-4: {condition: service_healthy}
+      winnow-5: {condition: service_healthy}
+      winnow-6: {condition: service_healthy}
+      winnow-7: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:${API_PORT:-8001}:8000
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      DEFAULT_MODELS: winnow-12b
+      # Sampling is left to the server defaults (Gemma 4's recommendation).
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":8192}'
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
+      WEBUI_AUTH: "true"
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: "false"
+      RAG_EMBEDDING_ENGINE: ""
+    volumes:
+      - type: bind
+        source: ${WEBUI_STORAGE_PATH}
+        target: /app/backend/data
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3000}:8080
+    restart: unless-stopped
+
+  # Jev-style System One playground: a static page, with Kairyu's API proxied
+  # on the same origin (playground/nginx.conf). No authentication.
+  playground:
+    image: ${PLAYGROUND_IMAGE}
+    volumes:
+      - ./playground/index.html:/usr/share/nginx/html/index.html:ro
+      - ./playground/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${PLAYGROUND_PORT:-3001}:8080
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped

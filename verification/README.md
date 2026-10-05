@@ -261,6 +261,7 @@ verification/fleet/performance/kv_aware_ttft_f2c_bench.py
 verification/fleet/correctness/kv_event_f2b_bench.py
 verification/fleet/correctness/kv_event_hash_bench.py
 verification/l1/performance/kv_transfer_bench.py
+verification/l1/correctness/llamacpp_upstream_contract.py
 verification/fleet/performance/multiturn_prefix.py
 verification/fleet/resilience/noisy_neighbor_bench.py
 verification/fleet/resilience/noisy_neighbor_gpu_bench.py
@@ -884,6 +885,38 @@ ordinary DeepSeek/MLA batch fallback only; they do not claim a real Qwen3-32B
 or GPU result. The complete contract is in
 `docs/design/issue-360-batch-invariance.md`; the exact capture commands are in
 `docs/gpu-runbook.md` §9.8d.
+
+### llama.cpp upstream contract
+
+`verification/l1/correctness/llamacpp_upstream_contract.py` checks a running
+`llama-server` against Kairyu's `upstream: llamacpp` profile before an example
+or deployment relies on a pinned build (llama.cpp's server HTTP API has no
+stability guarantee). Through `OpenAICompatBackend` it proves that each wire
+adaptation is executed upstream:
+
+- `repeat_penalty` changes greedy output over the whole sequence
+  (`repeat_last_n` = the per-slot context);
+- explicit `top_k: -1` is accepted;
+- a named `tool_choice` calls that function;
+- `logprobs: 0` returns sampled-token logprobs;
+- an assistant prefill is continued;
+- prompt overflow is HTTP 400;
+- repeated prefixes report `cached_tokens`;
+- a stream ends with usage and `[DONE]`;
+- a client disconnect frees the slot;
+- WebP images are accepted when the server has a vision projector.
+
+Raw negative controls record what the adapter avoids: the vLLM spelling
+`repetition_penalty` is ignored, a named `tool_choice` object becomes `auto`,
+and `top_logprobs: 0` returns no logprobs. `--expect-commit`, `--expect-slots`
+and `--expect-ctx` attest the build and slot geometry from `/props`.
+
+Offline, `synthetic-model` writes a tiny random-weight GGUF from a llama.cpp
+checkout's bundled Gemma 4 vocabulary and template; run it with
+`--tool-call-bias 48:40` so the random model reaches the tool-call grammar.
+`--record-fixtures` stores the exact wire request and raw reply that
+`tests/unit/test_openai_backend.py` replays (`tests/fixtures/llamacpp/`).
+Contract: `docs/design/llamacpp-upstream.md`.
 
 ## Results and package boundary
 

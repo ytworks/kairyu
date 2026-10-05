@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "environment": "winnow-12b-q8-1gpu",
+  "hardware": {
+    "gpu_count": 1,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 30
+  },
+  "model": {
+    "repo": "EldanRing/Winnow-12B",
+    "revision": "b2b14213dfa252e6d6b543c8b334762e51772d29",
+    "base_model": "google/gemma-4-12B-it@707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+    "served_name": "winnow-12b",
+    "files": {
+      "gguf/Winnow-12B-Q8_0.gguf": {
+        "bytes": 12669646592,
+        "sha256": "b710efc4c0d048ee61eed92c5fef5ce323a4d17e7c51f9f0533cc72ae50818ea"
+      },
+      "gguf/mmproj-F16.gguf": {
+        "bytes": 175115840,
+        "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e"
+      }
+    },
+    "quantization": "gguf:Q8_0",
+    "trained_context_positions": 262144
+  },
+  "runtime": {
+    "source_repository": "https://github.com/EldanRing/winnow-inference.git",
+    "source_revision": "77d14580c6732ca2f3745750c1dc1fd446d8bcee",
+    "llama_cpp_commit": "911f6cdc8ab8a530b2bee09ee61471a6f3178eeb",
+    "llama_cpp_build": "b11036",
+    "cuda_arch": "120",
+    "image": "local/winnow-inference:77d1458-gemma4req-sm120",
+    "extra_patches": [
+      {
+        "file": "llama-gemma4-required-tool-grammar.patch",
+        "upstream_commit": "f072b103714dfa1eee531f80b24512faf38e3dd2",
+        "sha256": "a7b2ba688a30b5cc401351960f26ba9f33a171ab8cf1bad74a48053e91b940f4",
+        "source_sha256": {
+          "common/parsers/gemma4.cpp": "e6caf03b1291b7315244b164af497e8d93c0dfcb2425adad9ee79186f56e1866"
+        }
+      }
+    ],
+    "port": 8091,
+    "chat_slots": 8,
+    "slot_context_tokens": 65536,
+    "decision_context_tokens": 65536,
+    "decision_parallel": 8,
+    "kv_cache_type": "q8_0",
+    "memory_policy": "auto",
+    "sampling_defaults": {
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "repeat_penalty": 1.0
+    }
+  },
+  "replicas": [
+    {"service": "winnow", "gpu": 0, "host_port": 8091}
+  ],
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "port": 3000
+  },
+  "playground": {
+    "image": "nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
+    "port": 3001
+  },
+  "api_port": 8001,
+  "verification": {
+    "serving": {
+      "concurrency": [1, 4, 8],
+      "requests_per_concurrency": 32,
+      "prompt_tokens_approx": 1024,
+      "output_tokens": 256
+    }
+  }
+}

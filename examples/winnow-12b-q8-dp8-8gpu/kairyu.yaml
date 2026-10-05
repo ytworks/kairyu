@@ -1,0 +1,99 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  # 8 replicas x 8 llama.cpp chat slots: admit exactly what L1 runs at once.
+  # llama-server would queue the rest without a limit.
+  max_concurrency: 64
+  admission_wait_timeout_s: 600
+  # Below winnow-server's 32 MiB request limit, so Kairyu rejects first.
+  max_chat_body_bytes: 25165824
+
+# One pool, eight identical winnow-server replicas (one per card). Kairyu L2
+# only places each request on a replica; no orchestration.
+pools:
+  winnow-12b:
+    replicas:
+      - backend: openai
+        # llama-server serves /health (503 while loading), not /readyz.
+        health_url: http://winnow-0:8091/health
+        options: &winnow
+          base_url: http://winnow-0:8091/v1
+          model: winnow-12b
+          api_key_env: null
+          timeout_s: 1800
+          upstream: llamacpp
+          capabilities:
+            allow_prompt_kinds: [multimodal]
+          # Worst case stays below the 32 MiB request limit after a WebP
+          # image is re-encoded as PNG for llama.cpp (LCP-D3).
+          image_input_policy:
+            max_images: 4
+            max_image_bytes: 8388608
+            max_total_image_bytes: 16777216
+            max_image_pixels: 2097152
+            max_total_image_pixels: 4194304
+            max_image_dimension: 4096
+            max_image_aspect_ratio: 200
+            max_processed_prompt_tokens: 65536
+          model_revision: b2b14213dfa252e6d6b543c8b334762e51772d29
+          # Per-slot context: --context 524288 over --chat-parallel 8.
+          max_model_len: 65536
+          quantization_format: gguf:Q8_0
+          tensor_parallel_size: 1
+      - backend: openai
+        health_url: http://winnow-1:8091/health
+        options: {<<: *winnow, base_url: http://winnow-1:8091/v1}
+      - backend: openai
+        health_url: http://winnow-2:8091/health
+        options: {<<: *winnow, base_url: http://winnow-2:8091/v1}
+      - backend: openai
+        health_url: http://winnow-3:8091/health
+        options: {<<: *winnow, base_url: http://winnow-3:8091/v1}
+      - backend: openai
+        health_url: http://winnow-4:8091/health
+        options: {<<: *winnow, base_url: http://winnow-4:8091/v1}
+      - backend: openai
+        health_url: http://winnow-5:8091/health
+        options: {<<: *winnow, base_url: http://winnow-5:8091/v1}
+      - backend: openai
+        health_url: http://winnow-6:8091/health
+        options: {<<: *winnow, base_url: http://winnow-6:8091/v1}
+      - backend: openai
+        health_url: http://winnow-7:8091/health
+        options: {<<: *winnow, base_url: http://winnow-7:8091/v1}
+    unhealthy_after: 1
+    # A warm-prefix replica is chosen only while it is idle; otherwise
+    # least-outstanding, so concurrent traffic spreads one-per-replica first.
+    queue_depth_threshold: 0
+    prefix_index: true
+    probe_interval_s: 2.0
+    # One JSONL row per placement; verify.sh tool-calling reads it to prove
+    # every replica served a tool call.
+    placement_log_path: /var/lib/kairyu/placement/winnow-12b.jsonl
+
+legacy_chat_models: [winnow-12b]
+
+# Winnow's typed decisions from the same eight loaded models. Each replica
+# evaluates one decision request at a time and answers 429 once 128 wait;
+# Kairyu sends each read to the least busy replica (one retry on another) and
+# answers 429 first. Decision reads never touch the chat pool's health.
+systemone:
+  winnow-12b-systemone:
+    base_urls:
+      - http://winnow-0:8091
+      - http://winnow-1:8091
+      - http://winnow-2:8091
+      - http://winnow-3:8091
+      - http://winnow-4:8091
+      - http://winnow-5:8091
+      - http://winnow-6:8091
+      - http://winnow-7:8091
+    upstream_model: Winnow-12B
+    aliases: [winnow-latest]
+    description: Winnow-12B Q8_0 typed decisions on 8 replicas (llama.cpp, winnow-inference)
+    max_concurrency: 256
+    max_queue: 128
+    queue_wait_s: 30
+    timeout_s: 300
+    max_body_bytes: 25165824

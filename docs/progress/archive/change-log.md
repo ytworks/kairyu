@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-03 — [design] Checklist verifier minimised to what Jev verification needs (PR #619 S2)
+- What: removed from L2 rule-based checks (`checks.py`, inline claim roles, `on_exhausted`), `seed_from` (the answer role writes the draft itself), multi-list curation (one list: the verifier's target) and guarantee groups; kept Jev questions over JSON state (`request`/`tools` sources, conversation bounds), main's `max_questions_per_call`, the acceptance read with per-read accounting, and no guarantee for an empty answer. New: an acceptance FAIL with every point met is not repaired; it publishes unverified (`reason: not_accepted`).
+- Why: owner decision: the framework keeps only shared contracts; the removed parts served one example's workflow. A repair with no unmet point rewrote sound DeepSWE turns.
+- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (R1-R5, J2/B3); m1 D8 text follows in S4
+
+### 2026-10-03 — [progress] Chat API returns the reply's text with its tool calls (PR #619)
+- What: `/v1/chat/completions` publishes the model's prose as `content` beside `tool_calls` (well-formed call envelopes removed; malformed markup stays text; whole-text protocols unchanged). Stream and unary share the choice.
+- Why: `content` was nulled whenever calls existed, so agent frameworks never received the reasoning text they ask for every turn; a Jev judge of the reply then saw no text (DeepSWE, closed PR #618).
+- Refs: PR #619 S1; `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md`
+
+### 2026-10-02 — [amendment] Pre-stage pin mutations are serialized with claim currency (PR #615 second re-review)
+- What: `NodeModelPrestageExecutor` holds one pin lock across "check the exact claim still owns the filling placement, drop superseded owners, pin, complete" and a release's "commit, unpin"; the executor now requires a lookup store.
+- Why: owner re-review: a duplicate in-flight ensure resumed after release and a successor completed, re-pinned its released owner, and invalidated the successor's live evidence although its own completion was rejected as stale.
+- Refs: "Node execution and pins" in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Cache hits keep the residency generation (PR #615 re-review)
+- What: an identical `record_verified()` cache hit now advances only last access and the index revision, like `touch()`; the row generation moves only with verified state or verification source.
+- Why: owner re-review: a duplicate in-flight ensure of one command/claim reached the cache after its twin completed and invalidated that READY pre-stage's live evidence, although its own completion was rejected as stale.
+- Refs: `docs/design/node-model-cache-index-v1.md`; D3.1 in `docs/design/node-model-cache-prestage-v1.md`; PR #615
+
+### 2026-10-02 — [amendment] Runner and model-cache authority review fixes (PR #615)
+- What: cache `touch()` keeps the residency generation; the live cache reader joins node evidence to the published inventory at the latest observation (hints live, inventory within the observation age); pre-stage pin owners name the ensure generation and an ensure drops lower-generation owners; actuation reauthorizes the leader after its last callback and rechecks evidence age before PATCH; Deployment claims accept the one-step generation advance.
+- Why: owner review reproduced five defects with CPU/HTTP mocks: a successful Runner-start verification invalidated its own binding, every current inventory was denied, a delayed release removed a successor's pin, an expired lease could still PATCH, and every first Deployment claim failed.
+- Refs: D3.1, D3.14 in `docs/design/node-model-cache-prestage-v1.md`; `docs/design/node-model-cache-index-v1.md`; `docs/design/runner-state-v1.md`; PR #615
+
 ### 2026-10-02 — [design] Verified-answers example: two-stage extraction, slimmer state builder (VCO-D8 am. 2, VCO-D12)
 - What: stated and implicit conditions come from two parallel extractors (implicit: at most four, Jev-kept); the state builder lists only source/action claims (G1-computation/general removed); step budget 16 -> 24 (worst case 18 published `reason: budget`). InFoBench c8 p50 492 -> 297 s. The requirements gate no longer reuses answers from another build; the implicit gate's judge thinks.
 - Why: one combined extractor lost stated conditions (gold recall 0.867) and re-extraction dropped implicit ones (gate recall 0.525-0.675); owner latency target p50 <= 3 min (not yet met).

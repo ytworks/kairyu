@@ -103,6 +103,12 @@ class OpenAIRequestCapabilities:
     # Appended to preserve the positional ABI of the existing capability key.
     parallel_tool_calls: bool = False
     chat_template_kwargs: frozenset[str] = frozenset()
+    # llama.cpp parses only ``repeat_penalty`` and silently ignores the vLLM
+    # spelling, so the executed wire name is part of the contract.
+    repetition_penalty_wire_name: str = "repetition_penalty"
+    # The upstream chat template can continue a final assistant message
+    # (``continue_final_message``) instead of opening a new generation prompt.
+    assistant_prefill: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -122,6 +128,16 @@ class OpenAIRequestCapabilities:
             raise ValueError("upstream must be a non-empty string")
         if type(self.parallel_tool_calls) is not bool:
             raise ValueError("parallel_tool_calls capability must be a boolean")
+        if type(self.assistant_prefill) is not bool:
+            raise ValueError("assistant_prefill capability must be a boolean")
+        if self.repetition_penalty_wire_name not in {
+            "repetition_penalty",
+            "repeat_penalty",
+        }:
+            raise ValueError(
+                "repetition_penalty_wire_name must be 'repetition_penalty' or "
+                "'repeat_penalty'"
+            )
         if any(
             not isinstance(key, str) or not key
             for key in self.chat_template_kwargs
@@ -186,6 +202,25 @@ _PROFILES = {
         sampling_fields=_OPENAI_CORE | _VLLM_EXTENSIONS,
         parallel_tool_calls=True,
         priority=True,
+        assistant_prefill=True,
+    ),
+    # llama.cpp ``llama-server``: the controls its request schema executes.
+    # Unknown JSON keys are silently ignored upstream, so ``min_tokens``,
+    # ``stop_token_ids``, ``skip_special_tokens``, ``priority``, prompt
+    # logprobs and strict tool schemas stay unsupported. llama.cpp applies
+    # frequency/presence penalties to prompt tokens too, unlike Kairyu's
+    # generated-tokens-only contract, so both fail closed. ``n > 1`` fails
+    # closed too: llama-server reports usage per candidate (only the first
+    # candidate's when unary, one usage chunk per candidate when streaming),
+    # so the summed completion usage cannot be recovered.
+    "llamacpp": OpenAIRequestCapabilities(
+        upstream="llamacpp",
+        sampling_fields=(_OPENAI_CORE - {"frequency_penalty", "presence_penalty"})
+        | {"ignore_eos", "min_p", "repetition_penalty", "top_k"},
+        max_n=1,
+        parallel_tool_calls=True,
+        repetition_penalty_wire_name="repeat_penalty",
+        assistant_prefill=True,
     ),
     # Kairyu's typed HTTP boundary exposes the vLLM-style sampling controls
     # that its native engines execute. ``best_of`` and ``prompt_logprobs``
