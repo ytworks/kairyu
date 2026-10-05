@@ -39,6 +39,26 @@ Diagnostic (not served): the same reads with the call as plain text
 only slightly (first_call 0.650 vs 0.597, progress 0.616 vs 0.542, runs
 0.558 vs 0.546 over all 200 labels): the markup is not the main cause.
 
+Wording trials (owner-approved measurement, not served; tool-agnostic
+wording only, owner requirement): the same 200 turns re-read with variant
+`verified_tool_check` blocks. `runs` is also scored against foreseeable
+failures only: two labellers plus a tie-break judged 12 of the 53 runs NG
+foreseeable before execution (agreement 51/53); the rest (e.g. unset git
+identity) only execution reveals. AUROC over all 200 labels:
+
+| Variant | first_call | progress | runs | runs (foreseeable) | two-question works / goal |
+|---|---:|---:|---:|---:|---:|
+| V0 served wording | 0.597 | 0.542 | 0.546 | 0.599 | |
+| G2 generic failure modes in the criteria | 0.674 | 0.599 | 0.543 | 0.554 | |
+| G3 generic sub-questions (min per angle) | 0.671 | 0.630 | 0.492 | 0.467 | |
+| V1 conversation bounded to 30,000 chars | 0.656 | 0.569 | 0.530 | 0.643 | |
+| V5 one denoise pass | 0.608 | 0.537 | 0.443 | 0.490 | |
+| T2 two questions (works as intended; intent leads to the goal) | | | | | 0.487 / 0.612 |
+| T2s the two questions as sub-questions | | | | | 0.538 (0.554) / 0.432 |
+
+No variant reaches AUROC 0.7 on either the intended-behaviour or the
+goal question; OpenJev does not judge these from the conversation.
+
 ## Readiness (2026-10-01)
 
 `run.sh up` probes: every DeepSeek DP rank answers the `{"answer": 323}`
