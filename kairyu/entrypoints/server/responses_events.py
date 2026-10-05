@@ -43,6 +43,36 @@ from kairyu.entrypoints.server.tool_stream import (
 )
 from kairyu.sse import escape_json_line_separators
 
+# ResponseErrorCode values of the pinned spec, plus context_length_exceeded:
+# Codex auto-compacts only on that code inside response.failed (OpenAI sends it
+# there too, outside the published enum). Every other failure keeps its
+# specific code on the ``error`` event and reports server_error in the response.
+_RESPONSE_ERROR_CODES = frozenset(
+    {
+        "server_error",
+        "rate_limit_exceeded",
+        "invalid_prompt",
+        "data_residency_mismatch",
+        "bio_policy",
+        "misalignment_policy_violation",
+        "vector_store_timeout",
+        "invalid_image",
+        "invalid_image_format",
+        "invalid_base64_image",
+        "invalid_image_url",
+        "image_too_large",
+        "image_too_small",
+        "image_parse_error",
+        "image_content_policy_violation",
+        "invalid_image_mode",
+        "image_file_too_large",
+        "unsupported_image_media_type",
+        "empty_image_file",
+        "failed_to_download_image",
+        "image_file_not_found",
+        "context_length_exceeded",
+    }
+)
 # Codex aborts a stream after 300 s without a *data* event (SSE comments do not
 # count), so a response.in_progress heartbeat repeats the current snapshot after
 # this much data silence; streams check it every _HEARTBEAT_SECONDS / 3.
@@ -371,8 +401,9 @@ class ResponseEmitter:
         code = payload.get("code") or "server_error"
         message = payload.get("message") or "generation failed"
         frames = [self._event("error", code=code, message=message, param=payload.get("param"))]
+        response_code = code if code in _RESPONSE_ERROR_CODES else "server_error"
         envelope = self.envelope(
-            "failed", usage=usage, error={"code": code, "message": message}
+            "failed", usage=usage, error={"code": response_code, "message": message}
         )
         frames.append(self._event("response.failed", response=envelope))
         return envelope, frames

@@ -218,7 +218,7 @@ def test_tool_gates_fail_in_band_and_as_unary_errors(tmp_path, body, code):
         unary = http.post("/v1/responses", json=request)
     events = _events(stream.text)
     assert [e["type"] for e in events[-2:]] == ["error", "response.failed"]
-    assert events[-1]["response"]["error"]["code"] == code
+    assert events[-2]["code"] == code  # response.error.code stays in the spec enum
     assert unary.status_code == 502
     assert unary.json()["error"]["code"] == code
 

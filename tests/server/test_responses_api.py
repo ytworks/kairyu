@@ -856,7 +856,7 @@ def test_empty_compaction_summary_fails_closed(tmp_path, stream):
             "response.failed",
         ]
         assert events[-2]["code"] == "compaction_failed"
-        assert events[-1]["response"]["error"]["code"] == "compaction_failed"
+        assert events[-1]["response"]["error"]["code"] == "server_error"
         assert events[-1]["response"]["output"] == []
     else:
         assert response.status_code == 502
