@@ -17,6 +17,7 @@ from kairyu.entrypoints.server.responses_events import OutputAssembler, Response
 from kairyu.entrypoints.server.responses_protocol import ResponsesRequest
 from kairyu.entrypoints.server.responses_store import PendingSave
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
@@ -41,7 +42,8 @@ _THINKING_TEMPLATE = ChatTemplate(
 
 
 class ScriptedBackend(MockBackend):
-    """Streams cumulative text step by step; a float step is a pause."""
+    """Streams cumulative text step by step: a float step is a pause and a
+    ``{"reasoning": ...}`` step sets backend-separated reasoning so far."""
 
     def __init__(self, *script, reasoning: str | None = None, finish: str = "stop"):
         super().__init__()
@@ -51,7 +53,7 @@ class ScriptedBackend(MockBackend):
         self.prompts: list[str] = []
         self.max_model_len = 4096
 
-    def _result(self, text: str, *, final: bool) -> GenerationResult:
+    def _result(self, text: str, *, final: bool, reasoning: str | None = None) -> GenerationResult:
         return GenerationResult(
             request_id="r",
             prompt="",
@@ -61,7 +63,7 @@ class ScriptedBackend(MockBackend):
                     text=text,
                     token_ids=(1,) * len(text),
                     finish_reason=self.finish if final else None,
-                    reasoning_content=self.reasoning,
+                    reasoning_content=reasoning or self.reasoning,
                 ),
             ),
             finished=final,
@@ -70,18 +72,26 @@ class ScriptedBackend(MockBackend):
 
     async def generate(self, request):
         self.prompts.append(str(request.prompt))
-        return self._result("".join(s for s in self.script if isinstance(s, str)), final=True)
+        steps = [step for step in self.script if isinstance(step, dict)]
+        return self._result(
+            "".join(s for s in self.script if isinstance(s, str)),
+            final=True,
+            reasoning=steps[-1]["reasoning"] if steps else None,
+        )
 
     async def stream(self, request):
         self.prompts.append(str(request.prompt))
-        text = ""
+        text, reasoning = "", None
         for step in self.script:
             if isinstance(step, float):
                 await asyncio.sleep(step)
                 continue
-            text += step
-            yield self._result(text, final=False)
-        yield self._result(text, final=True)
+            if isinstance(step, dict):
+                reasoning = step["reasoning"]
+            else:
+                text += step
+            yield self._result(text, final=False, reasoning=reasoning)
+        yield self._result(text, final=True, reasoning=reasoning)
 
 
 class _NodeAccumulator:
@@ -221,6 +231,49 @@ def test_tool_gates_fail_in_band_and_as_unary_errors(tmp_path, body, code):
     assert events[-2]["code"] == code  # response.error.code stays in the spec enum
     assert unary.status_code == 502
     assert unary.json()["error"]["code"] == code
+
+
+def test_reasoning_interleaved_into_a_call_waits_for_the_call_to_close(tmp_path):
+    backend = ScriptedBackend(
+        '<tool_call>{"name":"add","arguments":{"a":', {"reasoning": "late"}, '1,"b":1}}</tool_call>'
+    )
+    with TestClient(_app(tmp_path, backend)) as http:
+        events, _unary = _run(http, {"model": "m", "input": "add", "tools": [_ADD]})
+
+    output = events[-1]["response"]["output"]
+    assert [item["type"] for item in output] == ["function_call", "reasoning"]
+    assert json.loads(output[0]["arguments"]) == {"a": 1, "b": 1}
+    assert output[1]["content"][0]["text"] == "late"
+
+
+def test_a_failed_gate_settles_tenant_usage_like_the_unary_turn(tmp_path):
+    # The engine finished, so the stream settles exact usage instead of
+    # keeping the whole max_model_len reservation.
+    debits = []
+    limits = {"default": TenantLimits(tokens_per_minute=1, token_burst=100_000)}
+    for stream in (False, True):
+        app = _app(tmp_path, ScriptedBackend("no call"), tenant_config=TenantConfig(limits=limits))
+        with TestClient(app) as http:
+            limiter = http.app.state.tenant_limiter
+            before = limiter.token_balance("default")
+            body = {"model": "m", "input": "add", "tools": [_ADD], "tool_choice": "required"}
+            http.post("/v1/responses", json={**body, "stream": stream})
+            debits.append(before - limiter.token_balance("default"))
+    assert debits[1] == pytest.approx(debits[0], abs=0.5)  # not the ~4k reservation
+
+
+def test_unary_keeps_the_chat_downgrade_of_retroactively_invalid_calls(tmp_path):
+    # Prose after a QWEN call voids it: chat and Messages unary return text.
+    qwen = ChatTemplate(
+        "use <function=NAME><parameter=K>V</parameter></function>"
+        "{% for m in messages %}<|{{ m.role }}|>{{ m.content or '' }}\n{% endfor %}"
+    )
+    text = "<tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n</function>\n"
+    text += "</tool_call>\nI will wait."
+    with TestClient(_app(tmp_path, ScriptedBackend(text), chat_templates={"m": qwen})) as http:
+        unary = http.post("/v1/responses", json={"model": "m", "input": "add", "tools": [_ADD]})
+    assert unary.status_code == 200
+    assert [item["content"][0]["text"] for item in unary.json()["output"]] == [text]
 
 
 def test_heartbeats_are_data_events_carrying_the_streamed_snapshot(tmp_path, monkeypatch):

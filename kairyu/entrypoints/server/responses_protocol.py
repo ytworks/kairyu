@@ -19,7 +19,7 @@ from typing import TypeVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
 from kairyu.entrypoints.server.chat_service import ChatRequestError
 from kairyu.entrypoints.server.errors import openai_error_payload
@@ -50,6 +50,8 @@ _UNSUPPORTED_FEATURES = {
     "access_programs": "access programs are not supported",
 }
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
+# Branch tags pydantic adds to locations of union-typed fields (``input.str``).
+_UNION_TAGS = frozenset({"str", "int", "float", "bool", "dict", "list", "none"})
 _JSON_BODY_ERROR = (
     "We could not parse the JSON body of your request. The Responses API "
     "expects a JSON object."
@@ -165,6 +167,12 @@ class ResponsesRequest(BaseModel):
     moderation: dict | None = None
     access_programs: dict | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+
+    @field_validator("store", "stream", "parallel_tool_calls", mode="before")
+    @classmethod
+    def _null_means_default(cls, value, info: ValidationInfo):
+        # The spec types these booleans as nullable; null means the default.
+        return cls.model_fields[info.field_name].default if value is None else value
 
 
 class ResponsesInputTokensRequest(BaseModel):
@@ -297,7 +305,7 @@ def _param_from_loc(loc: tuple) -> str | None:
     for part in loc:
         if isinstance(part, int):
             path += f"[{part}]"
-        elif isinstance(part, str) and part.isidentifier():
+        elif isinstance(part, str) and part.isidentifier() and part not in _UNION_TAGS:
             path += f".{part}" if path else part
     return path or None
 

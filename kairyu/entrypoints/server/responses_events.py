@@ -211,6 +211,12 @@ class ResponseEmitter:
     def has_answer(self) -> bool:
         return any(item.kind in ("message", "function_call") for item in self._items)
 
+    def reset(self) -> None:
+        """Discard every item; only for unary turns, where nothing was sent."""
+
+        self._items.clear()
+        self._text_encoder = None
+
     def start(self) -> list[str]:
         snapshot = self.envelope("in_progress")
         return [
@@ -431,17 +437,35 @@ class OutputAssembler:
         self._parallel = parallel
         self._namespaces = namespaces or {}
         self._pending_ws = ""
+        self._late_reasoning: list[str] = []
         self.calls = 0
         self.failure: dict | None = None
 
     def reasoning(self, text: str) -> list[str]:
         if not text or self.failure is not None:
             return []
+        if self._emitter.open_kind in ("message", "function_call"):
+            # Reasoning interleaved into an answer item waits for that item to
+            # close: closing it early would split a message or cut a call's
+            # arguments.
+            self._late_reasoning.append(text)
+            return []
         frames: list[str] = []
         if self._emitter.open_kind != "reasoning":
-            frames += self._emitter.close()
             frames += self._emitter.begin_reasoning()
         return frames + self._emitter.reasoning_delta(text)
+
+    def _close(self, status: str = "completed", *, keep_reasoning_open: bool = False) -> list[str]:
+        """Close the open item, then place reasoning that waited for it."""
+
+        frames = self._emitter.close(status)
+        if self._late_reasoning:
+            text = "".join(self._late_reasoning)
+            self._late_reasoning.clear()
+            frames += self._emitter.begin_reasoning() + self._emitter.reasoning_delta(text)
+            if not keep_reasoning_open:
+                frames += self._emitter.close(status)
+        return frames
 
     def content(self, delta: str, *, final: bool = False) -> list[str | bytes]:
         if self.failure is not None:
@@ -481,7 +505,7 @@ class OutputAssembler:
                     if not event.text.strip():
                         self._pending_ws += event.text
                         continue
-                    frames += self._emitter.close()
+                    frames += self._close()
                     frames += self._emitter.begin_message()
                 text, self._pending_ws = self._pending_ws + event.text, ""
                 frames += self._emitter.text_delta(text)
@@ -492,7 +516,7 @@ class OutputAssembler:
                         "upstream model emitted multiple calls while parallel_tool_calls=false",
                     )
                     break
-                frames += self._emitter.close()
+                frames += self._close()
                 self._pending_ws = ""
                 namespace, name = self._namespaces.get(event.name, (None, event.name))
                 frames += self._emitter.begin_call(event.id, name, namespace)
@@ -500,7 +524,7 @@ class OutputAssembler:
             elif isinstance(event, ToolArgsDelta):
                 frames += self._emitter.arguments_delta(event.partial_json)
             elif isinstance(event, ToolStop):
-                frames += self._emitter.close()
+                frames += self._close(keep_reasoning_open=True)
         return frames
 
     def finish(self, *, incomplete: bool) -> list[str | bytes]:
@@ -518,7 +542,7 @@ class OutputAssembler:
             )
             return []
         status = "incomplete" if incomplete else "completed"
-        frames: list[str | bytes] = list(self._emitter.close(status))
+        frames: list[str | bytes] = list(self._close(status))
         if not self._emitter.has_answer:
             frames += self._emitter.begin_message()
             if self._pending_ws:

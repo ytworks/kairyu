@@ -156,6 +156,7 @@ async def engine_stream(
     last: GenerationResult | None = None
     sent = 0
     saw_final = False
+    abandoned = False
 
     def usage() -> dict:
         completions = last.completions if last is not None else ()
@@ -192,6 +193,7 @@ async def engine_stream(
                                 yield frame
                         saw_final = saw_final or partial.finished
                         if assembler.failure is not None:
+                            abandoned = not saw_final
                             break
                     if emitter.heartbeat_due():
                         yield emitter.heartbeat()
@@ -202,6 +204,10 @@ async def engine_stream(
             for frame in frames:
                 yield frame
             return
+        if not abandoned:
+            # The engine finished, so usage settles exactly even when a gate
+            # fails below; only an abandoned generation keeps the reservation.
+            usage_owner.mark_completed()
         if assembler.failure is None and not saw_final:
             reasoning, content = split.feed(None, "", final=True)
             for frame in assembler.reasoning(reasoning) + assembler.content(content, final=True):
@@ -212,7 +218,6 @@ async def engine_stream(
             request, validated, completion.finish_reason if completion is not None else None
         )
         if status == "context_exhausted":
-            usage_owner.mark_completed()
             _envelope, frames = emitter.fail(
                 context_overflow_error(exhausted=True).payload(), usage()
             )
@@ -221,12 +226,10 @@ async def engine_stream(
             return
         frames = assembler.finish(incomplete=status == "incomplete")
         if assembler.failure is not None:
-            # Like the Messages adapter: an abandoned gate settles inexactly.
             _envelope, frames = emitter.fail(assembler.failure, usage())
             for frame in frames:
                 yield frame
             return
-        usage_owner.mark_completed()
         envelope, terminal = emitter.complete(status, usage(), details)
         for frame in frames + terminal:
             yield frame
@@ -299,6 +302,18 @@ async def engine_unary(
     assembler.reasoning(reasoning)
     assembler.content(content, final=True)
     assembler.finish(incomplete=status == "incomplete")
+    if assembler.failure is not None and assembler.failure["code"] == "invalid_tool_call":
+        # Like chat and the Messages unary fold: call markup the protocol
+        # invalidates after the fact (prose after a QWEN/DSML call) is text.
+        emitter.reset()
+        assembler = OutputAssembler(
+            emitter,
+            tool_choice=validated.input.normalized_tool_choice,
+            namespaces=_namespace_names(request.tools),
+        )
+        assembler.reasoning(reasoning)
+        assembler.content(content)
+        assembler.finish(incomplete=status == "incomplete")
     if assembler.failure is not None:
         raise _BufferedFailure(assembler.failure, 502)
     envelope, _frames = emitter.complete(status, usage, details)

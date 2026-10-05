@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.routing import Match
 
@@ -88,7 +88,9 @@ from kairyu.entrypoints.server.responses_store import (
 from kairyu.entrypoints.server.sse_response import sse_response
 
 logger = logging.getLogger(__name__)
-_FALLBACK_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+_FALLBACK_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+# Fixed POST-only sub-paths that would otherwise read as a response id.
+_POST_ONLY = frozenset({"compact", "input_tokens"})
 
 
 def _owner(http_request: Request) -> str:
@@ -99,6 +101,19 @@ def _upstream_failure(error: BaseException) -> JSONResponse:
     # The full traceback stays server-side; the wire gets the sanitized class.
     logger.exception("Responses API upstream backend error")
     return _BufferedFailure(sanitize_backend_error(error), 502).json_response()
+
+
+def _method_not_allowed(http_request: Request, allowed: list[str]) -> JSONResponse:
+    return JSONResponse(
+        status_code=405,
+        headers={"Allow": ", ".join(allowed)},
+        content={
+            "error": openai_error_payload(
+                f"Method {http_request.method} is not allowed for {http_request.url.path}.",
+                code="method_not_allowed",
+            )
+        },
+    )
 
 
 def _query_include(http_request: Request) -> list[str]:
@@ -552,6 +567,8 @@ def add_responses_route(
 
     @app.get("/v1/responses/{response_id}")
     async def retrieve_response(response_id: str, http_request: Request) -> JSONResponse:
+        if response_id in _POST_ONLY:
+            return _method_not_allowed(http_request, ["POST"])
         owner = _owner(http_request)
         try:
             include = _query_include(http_request)
@@ -575,6 +592,8 @@ def add_responses_route(
 
     @app.delete("/v1/responses/{response_id}")
     async def delete_response(response_id: str, http_request: Request) -> JSONResponse:
+        if response_id in _POST_ONLY:
+            return _method_not_allowed(http_request, ["POST"])
         if not store.delete(response_id, owner=_owner(http_request)):
             return responses_error_response(not_found(response_id))
         return JSONResponse(
@@ -622,8 +641,12 @@ def _add_unrouted_fallbacks(app: FastAPI) -> None:
         if isinstance(route, APIRoute) and wants_responses_envelope(route.path)
     ]
 
-    async def unrouted(http_request: Request) -> JSONResponse:
+    async def unrouted(http_request: Request):
         method = http_request.method
+        if http_request.path_params.get("unrouted_path") == "":
+            # "/v1/responses/" keeps Starlette's slash redirect.
+            path = http_request.url.path.rstrip("/")
+            return RedirectResponse(str(http_request.url.replace(path=path)), status_code=307)
         allowed = sorted(
             {
                 allowed_method
@@ -633,16 +656,7 @@ def _add_unrouted_fallbacks(app: FastAPI) -> None:
             }
         )
         if allowed:
-            return JSONResponse(
-                status_code=405,
-                headers={"Allow": ", ".join(allowed)},
-                content={
-                    "error": openai_error_payload(
-                        f"Method {method} is not allowed for {http_request.url.path}.",
-                        code="method_not_allowed",
-                    )
-                },
-            )
+            return _method_not_allowed(http_request, allowed)
         return JSONResponse(
             status_code=404,
             content={
@@ -653,7 +667,7 @@ def _add_unrouted_fallbacks(app: FastAPI) -> None:
     app.add_api_route(
         "/v1/responses",
         unrouted,
-        methods=["PUT", "PATCH", "DELETE"],
+        methods=["HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"],
         include_in_schema=False,
     )
     app.add_api_route(

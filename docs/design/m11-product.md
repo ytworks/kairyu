@@ -399,8 +399,13 @@ streams buffer", "no reasoning output", and "comment keep-alives".
   `tool_stream` scanner. Prose beside calls is kept, and the
   parallel/tool_choice gates fail in-band (`error` + `response.failed`).
   Unary turns keep `execute_chat` and rebuild the same items from the raw
-  completion. AUTO tool streams reuse the #573 raw-stream sentinel and gate in
-  the adapter; AUTO unary maps the chat JSON (prose beside calls since #619).
+  completion; like chat, they downgrade call markup the protocol invalidates
+  afterwards (prose after a QWEN/DSML call) to text, which a stream that already
+  committed the call reports in-band. Reasoning that a backend interleaves into
+  an open message or call follows that item. AUTO tool streams reuse the #573
+  raw-stream sentinel and gate in the adapter; AUTO unary maps the chat JSON
+  (prose beside calls since #619). An engine stream that finished settles exact
+  tenant usage even when a gate fails at its end.
 - Heartbeats: after 15 s without a data event, `response.in_progress` repeats
   the full snapshot. Codex's idle timer ignores SSE comments, and openai-node
   replaces its snapshot on every lifecycle event, so the snapshot holds exactly

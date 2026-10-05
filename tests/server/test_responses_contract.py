@@ -40,6 +40,11 @@ def test_malformed_bodies_are_typed_400s_naming_the_parameter(tmp_path):
         with pytest.raises(openai.BadRequestError) as wrong_value:
             _sdk(http).responses.create(model="m", input="hi", max_output_tokens="many")
         missing = http.post("/v1/responses", json={"input": "hi"})
+        union = http.post("/v1/responses", json={"model": "m", "input": 5})
+        nulls = http.post(
+            "/v1/responses",
+            json={"model": "m", "input": "x", "store": None, "parallel_tool_calls": None},
+        )
         not_json = http.post(
             "/v1/responses",
             content=b"{not json",
@@ -49,9 +54,11 @@ def test_malformed_bodies_are_typed_400s_naming_the_parameter(tmp_path):
     assert missing.status_code == 400
     assert missing.json()["error"]["code"] == "missing_required_parameter"
     assert missing.json()["error"]["param"] == "model"
+    assert union.json()["error"]["param"] == "input"
+    assert nulls.status_code == 200  # nullable in the spec: null means the default
+    assert len(backend.prompts_seen) == 1  # only the valid request dispatched
     assert not_json.status_code == 400
     assert set(not_json.json()["error"]) == _ENVELOPE_KEYS
-    assert backend.prompts_seen == ()
 
 
 def test_unrouted_paths_and_methods_answer_in_the_openai_envelope(tmp_path):
@@ -59,6 +66,8 @@ def test_unrouted_paths_and_methods_answer_in_the_openai_envelope(tmp_path):
         unknown_path = http.get("/v1/responses/resp_x/unknown")
         retrieve_put = http.put("/v1/responses/resp_x")
         create_patch = http.patch("/v1/responses")
+        compact_get = http.get("/v1/responses/compact")
+        slash = http.post("/v1/responses/", json={}, follow_redirects=False)
 
     assert unknown_path.status_code == 404
     assert set(unknown_path.json()["error"]) == _ENVELOPE_KEYS
@@ -67,6 +76,9 @@ def test_unrouted_paths_and_methods_answer_in_the_openai_envelope(tmp_path):
     assert retrieve_put.json()["error"]["code"] == "method_not_allowed"
     assert create_patch.status_code == 405
     assert create_patch.headers["allow"] == "GET, POST"
+    assert compact_get.status_code == 405
+    assert compact_get.headers["allow"] == "POST"
+    assert slash.status_code == 307
 
 
 def test_stored_response_lifecycle_through_the_sdk(tmp_path):
@@ -75,8 +87,12 @@ def test_stored_response_lifecycle_through_the_sdk(tmp_path):
         created = sdk.responses.create(
             model="m",
             input=[
-                {"role": "user", "content": "hello"},
-                {"role": "user", "content": [{"type": "input_text", "text": "again"}]},
+                {"id": "msg_same", "role": "user", "content": "hello"},
+                {
+                    "id": "msg_same",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "again"}],
+                },
             ],
         )
         retrieved = sdk.responses.retrieve(created.id, include=["reasoning.encrypted_content"])

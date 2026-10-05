@@ -24,6 +24,13 @@ _CODEX_INTERNAL_ITEM_FIELDS = {
     "encrypted_function_args",
 }
 _TEXT_PART_TYPES = {"input_text", "output_text", "text"}
+_LISTING_PREFIXES = {
+    "message": "msg",
+    "function_call": "fc",
+    "function_call_output": "fco",
+    "reasoning": "rs",
+    "compaction": "cmp",
+}
 
 
 def _invalid(param: str, message: str, *, code: str = "invalid_value") -> ResponsesError:
@@ -410,6 +417,7 @@ def input_listing(items: Sequence[dict]) -> list[dict]:
     """Wire view of canonical input items for ``GET .../input_items``."""
 
     listed: list[dict] = []
+    seen: set[str] = set()
     for item in items:
         kind = item["type"]
         if kind == "message":
@@ -438,6 +446,10 @@ def input_listing(items: Sequence[dict]) -> list[dict]:
             }
         else:
             entry = {key: value for key, value in item.items() if value is not None}
+        if entry.get("id") in seen:
+            # Client ids can repeat; a cursor (``after``) needs unique ones.
+            entry["id"] = f"{_LISTING_PREFIXES.get(kind, 'item')}_{uuid.uuid4().hex[:24]}"
+        seen.add(entry["id"])
         listed.append(copy.deepcopy(entry))
     return listed
 
