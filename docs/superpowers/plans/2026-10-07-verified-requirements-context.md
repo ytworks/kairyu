@@ -1,4 +1,4 @@
-# Verified route: Winnow does not judge on long conversations
+# Verified route: Winnow stops judging because `reasoning_content` is re-read
 
 Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641),
 follows VCO-D19 (`2026-10-06-winnow-verified-three-wave.md`). Status:
@@ -6,72 +6,102 @@ awaiting owner approval.
 
 ## 1. Problem
 
-In DeepSWE r1 (`deepswe-verified-3wave-full-4w-20261006-r1`) Winnow judged
-61 of 132 VERIFIED turns. On the other 71 no Winnow request was sent at all
-(`judgments` → `checklist_unavailable`, 0.0 s), so the answer was written
-without any judgment. From about turn 20 of each problem, Winnow stops.
+DeepSWE r1 (`deepswe-verified-3wave-full-4w-20261006-r1`): Winnow judged 61
+of 132 VERIFIED turns. On the other 71 no Winnow request was sent
+(`judgments` → `checklist_unavailable` in 0.0 s) and the answer was written
+without judgments. From about turn 20 of each problem Winnow stops.
 
-## 2. Causal chain (each link confirmed)
+## 2. Causal chain (each link measured)
 
-| Link | What happens | Evidence |
+1. `judgments` builds its questions from `requirements`' list; with no list
+   the whole checklist is unavailable and no Winnow request is sent
+   (`checklist._pending_questions` → `_source_items`).
+2. `requirements` (Qwen) gave no list on 69 turns: 67 rejected by Qwen
+   (vLLM 400: "maximum context length is 262144 tokens … at least 196609
+   input tokens"; inputs 199,082-325,598 tokens + 65,536 output cap), 2
+   ended empty inside Qwen's reasoning on 148K / 181K inputs (the same inputs
+   replayed 4 times all returned valid lists).
+3. Qwen's input is that large because of `reasoning_content` (section 3).
+
+## 3. `reasoning_content`: where it comes from and where it goes
+
+| Step | What happens | Evidence |
 |---|---|---|
-| L1 | `judgments` is one checklist: 5 adoption questions (need only the request and the drafts) + 5 x N coverage questions (one per item of `requirements`' list). Building the questions reads that list first; a missing or unparsable list raises `checklist_unavailable` for the whole checklist, so not even the 5 adoption questions reach Winnow. | `checklist._pending_questions` → `_source_items`; trace: failed judgments take 0.0 s, no Winnow read |
-| L2 | `requirements` (Qwen) returned no list on 69 turns: 67 rejected by Qwen, 2 empty. | trace v2 |
-| L3 | Rejected because Qwen's input (199,082-325,598 tokens on the 67 turns) + the 65,536 output cap exceeds Qwen's 262,144 context. | live replay: vLLM 400 "maximum context length is 262144 tokens … at least 196609 input tokens"; live `/tokenize` of Kairyu's exact request |
-| L4 | The input is that large because the L2 conversation keeps every earlier assistant `reasoning_content`, which here is Kairyu's own stage report (five drafts, reasoning, judgments) echoed by the agent: 189,953 of 240,650 tokens on the 14:42 turn. Responses AUTO already drops replayed reasoning for this reason (m11 D4); Chat Completions keeps it (`validate_orchestration_chat_input`). | `/tokenize` of each part; code path |
-| L5 | The 2 empty lists: Qwen ended inside its reasoning after 188 / 342 tokens on 148K / 181K report-filled inputs; the same inputs replayed 4 times all returned valid lists. | live replay |
+| Emitted | With `expose_intermediate_outputs: true` the Conductor returns each turn's stage report in the assistant message's `reasoning_content`: "Final answer attribution", then per stage (drafts, requirements, judgments, answer) the model's reasoning and the stage output. Median 11,815 Qwen tokens per turn (max 14,536) | recorded responses; `/tokenize` |
+| Echoed | The agent (mini-swe-agent via LiteLLM) keeps each assistant message as returned, `reasoning_content` included, and sends it back in the next request | recorded requests: 18 of the 14:42 turn's assistant messages carry it |
+| Accepted | Chat Completions accepts the field (m11 assistant-history amendment, 2026-08-14: kept "for key-sensitive model templates and L2 conversation history") | `protocol.ChatMessage` |
+| Re-read | `validate_orchestration_chat_input` copies every message field into the L2 conversation JSON; every role's `{conversation}` / `{query}` renders it | `chat_service.py` |
+| Size | 14:42 turn (61 messages): L2 conversation 907,608 characters = 240,650 Qwen / 241,080 DeepSeek tokens; without `reasoning_content` 117,040 characters = 46,339 Qwen / 43,326 DeepSeek tokens. The reports are 81 % of what every role reads | `/tokenize` on both L1s |
+| Readers | `requirements` (Qwen, 262,144) overflows; `drafts` and `answer` (DeepSeek, 1,048,576) read 5.6x more than the conversation itself, every turn, and approach their own limit as turns grow; Winnow's state uses only the request (system + latest user message) and is unaffected | role prompts; checklist state config |
+| Precedent | Responses AUTO already drops replayed reasoning: "stage output would grow every L2 prompt" (m11 D4); Chat Completions was never aligned | `docs/design/m11-product.md` |
 
-Without L4 the 67 turns' Qwen input is 30,330-96,837 tokens (median 75,815):
-all fit, and the three replayed returned valid lists (11-13 points).
+The report is output for the caller (UIs show it). It is not an input any
+role asks for: every earlier answer, tool call and tool result is already in
+the conversation as content.
 
-## 3. Fix
+## 4. Fix
 
-| # | Link | Layer | Owner | Change |
+| # | Layer | Owner | File | Change |
 |---|---|---|---|---|
-| A | L1 | L2 | example (`verified.yaml`, `verified-always.yaml`) | Split `judgments` into two checklist verifiers: `adoption` verifies `drafts` (the 5 adoption questions; state: request + drafts) and `coverage` verifies `requirements` (the 5 x N questions; state: request + drafts, waiting for `drafts` as PR #641's F1 allows). `answer` reads `{adoption}` and `{coverage}`. Winnow then judges every draft's adoptability on every VERIFIED turn, whatever happens to Qwen. |
-| B | L3, L4, L5 | L3→L2 | framework (`kairyu/entrypoints/server/chat_service.py`) | The orchestration Chat Completions conversation omits assistant `reasoning_content` (still accepted; direct engines still receive it), as Responses AUTO does. Every role's input loses the echoed reports; Qwen's input on the failed turns falls to ≤ 96,837 tokens. |
+| 1 | L3→L2 | framework | `kairyu/entrypoints/server/chat_service.py` (`validate_orchestration_chat_input`) | Build the L2 conversation without assistant `reasoning_content`. The field is still accepted on the wire, still reaches direct (non-orchestrated) engines' chat templates, and Kairyu still emits the stage report to the caller. |
 
-Framework admission for B: (1) broken contract — an orchestrated
-conversation re-reads every earlier stage report, code path above; (2) no
-extension point — the conversation is built before roles apply; (3)
-independent regression — any orchestrator with
-`expose_intermediate_outputs` behind an agent client that echoes
-`reasoning_content` (LiteLLM, mini-swe-agent) grows every role's input each
-turn; (4) smallest mechanism — omit one field in one place; Responses AUTO
-already follows the rule.
+Framework admission: (1) broken contract — an orchestrated conversation
+re-reads every earlier stage report (code path above); (2) no extension
+point — the conversation is built before any role or example config
+applies; (3) independent regression — any orchestrator with
+`expose_intermediate_outputs` behind a client that echoes
+`reasoning_content` (LiteLLM-based agents) grows every role's input by ~12K
+tokens per turn; (4) smallest mechanism — omit one field in one place, the
+rule Responses AUTO already follows.
 
-Unchanged: Kairyu still emits the stage report to the caller; prompts,
-caps, efforts, routing, L1.
+No example change: prompts, caps, efforts, DAG, routing, Winnow, L1 stay.
 
-Residual: a conversation whose own content exceeds Qwen (~196K tokens,
-roughly 250 messages at the measured ~0.8K tokens per message without
-reports) still loses `coverage` on that turn; `adoption` still runs (A).
+Effect (measured on the r1 turns that failed): Qwen's input 199,082-325,598
+→ 30,330-96,837 tokens; all 67 fit with the 65,536 cap; the three replayed
+returned valid lists (11-13 points); DeepSeek's drafts/answer input falls by
+the same factor (241,080 → 43,326 on the 14:42 turn).
 
-## 4. Tests
+## 5. Considered, not included
 
-- B: one chat-input test — assistant `reasoning_content` is absent from the
-  L2 prompt; content and tool calls stay.
-- A: the example test — with Qwen failing, Winnow still receives the 5
-  adoption questions and `answer` reads them; with Qwen succeeding, both
-  reads happen (replaces the one-read assertion).
+| Option | Why not |
+|---|---|
+| Keep `reasoning_content`, enlarge Qwen (YaRN 1M) | Keeps feeding 81 % unused text to every role; DeepSeek still re-reads it |
+| Keep it, lower Qwen's output cap | Input alone exceeds Qwen on 38 of 67 turns |
+| Keep it, bound what Qwen reads | Cuts real messages while keeping the reports |
+| Stop emitting the report | The caller-facing output is not the defect |
+| Make `judgments` survive a missing list (split into two verifiers) | Changes the verified DAG; with the fix the list is produced on every recorded turn |
 
-## 5. Docs
+## 6. Tests
 
-m11 assistant-history amendment (B); VCO-D19 amendment (A); `PROGRESS.md`.
+One chat-input test: a request whose assistant history carries
+`reasoning_content` yields an L2 prompt without it, with the assistant
+content and tool calls intact. Report base/head collection counts.
 
-## 6. Verification
+## 7. Docs
+
+- `docs/design/m11-product.md`: amend the 2026-08-14 assistant-history
+  amendment — the L2 conversation omits `reasoning_content`, as Responses
+  AUTO does.
+- VCO-D19: note the multi-turn finding and the fix.
+- `PROGRESS.md`: Change Log entry and Current Status line.
+
+## 8. Verification
 
 | # | Step | Pass criteria | Budget |
 |---|---|---|---|
-| 1 | CPU: ruff; changed-path tests | green | 10 min |
-| 2 | Live replay of the 69 failed turns' `requirements` requests rendered by the new code | all accepted; valid lists; 0 empty | 40 min |
+| 1 | CPU: `uv run ruff check .`; `tests/server/test_openai_api.py` and the new test's file | green | 10 min |
+| 2 | Live replay of the 69 turns that lost judgments: Kairyu's new `requirements` request for each, sent to Qwen | all accepted; 69 valid lists; 0 empty | 40 min |
 | 3 | Redeploy (`./run.sh`) | healthy | 15 min |
-| 4 | All nine gates (verified-route expects two Winnow reads: 5 adoption + 5 x N coverage) | existing criteria | 2 h |
-| 5 | New gate `long-conversation`: five r1 turns that lost judgments, through `kairyu-verified-always` | 200; adoption and coverage both judged on all five | 20 min |
-| 6 | Qwen stopped: one verified request | 200; adoption judged; coverage absent | 10 min |
+| 4 | All nine gates in GATES order | existing criteria | 2 h |
+| 5 | New gate `long-conversation`: five r1 turns that lost judgments, through `kairyu-verified-always` | 200; requirements and judgments succeed on all five; the response still carries the stage report in `reasoning_content` | 20 min |
 
 Stop and report at the first failure.
 
-## 7. Decision requested
+## 9. Limits
 
-Approve A (example) and B (framework).
+A conversation whose own content exceeds Qwen (~0.8K tokens per message:
+about 250 messages) would again lose `requirements` on that turn.
+
+## 10. Decision requested
+
+Approve change 1 (framework) with this verification.
