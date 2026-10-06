@@ -186,9 +186,11 @@ async def _relay(
             yield frame
         return
     envelope, terminal = emitter.complete(status, usage, details)
+    # Stored before the terminal frame: a client that disconnects on it
+    # cancels this generator mid-send.
+    saver.commit(envelope)
     for frame in closing + terminal:
         yield frame
-    saver.commit(envelope)
 
 
 async def auto_response(

@@ -99,6 +99,8 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
         if not isinstance(tool, dict):
             raise _invalid(path, f"{path} must be an object")
         kind = tool.get("type")
+        if not isinstance(kind, str):
+            raise _invalid(f"{path}.type", f"{path}.type must be a string")
         if kind == "namespace":
             _unknown_fields(path, tool, {"type", "name", "description", "tools"})
             namespace = tool.get("name")

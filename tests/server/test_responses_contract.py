@@ -61,6 +61,28 @@ def test_malformed_bodies_are_typed_400s_naming_the_parameter(tmp_path):
     assert set(not_json.json()["error"]) == _ENVELOPE_KEYS
 
 
+@pytest.mark.parametrize(
+    "body, param",
+    [
+        ({"tools": [{"type": []}]}, "tools[0].type"),
+        ({"tools": [{"type": {}}]}, "tools[0].type"),
+        ({"input": [{"type": []}]}, "input[0].type"),
+        ({"input": [{"role": {}, "content": "x"}]}, "input[0].role"),
+        ({"input": [{"role": "user", "content": [{"type": []}]}]}, "input[0].content[0].type"),
+        (
+            {"input": [{"type": "function_call_output", "call_id": "c", "output": [{"type": {}}]}]},
+            "input[0].output[0].type",
+        ),
+    ],
+    ids=["tool-list", "tool-object", "item", "role", "content-part", "tool-output-part"],
+)
+def test_non_string_discriminators_are_typed_400s(tmp_path, body, param):
+    with TestClient(_app(tmp_path)) as http:
+        response = http.post("/v1/responses", json={"model": "m", "input": "x", **body})
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == param
+
+
 def test_unrouted_paths_and_methods_answer_in_the_openai_envelope(tmp_path):
     with TestClient(_app(tmp_path)) as http:
         unknown_path = http.get("/v1/responses/resp_x/unknown")

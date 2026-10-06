@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -364,6 +365,32 @@ def test_reasoning_round_trips_through_encrypted_content(tmp_path):
     assert "[reasoning:" not in backend.prompts[3]  # nothing recoverable is dropped
 
 
+def test_reasoning_on_both_sides_of_a_preamble_replays_in_full(tmp_path):
+    backend = ScriptedBackend("done")
+    reasoning = [
+        {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": t}]}
+        for t in ("early plan", "then detail")
+    ]
+    with TestClient(_app(tmp_path, backend, chat_templates={"m": _THINKING_TEMPLATE})) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "tools": [_ADD],
+                "input": [
+                    {"role": "user", "content": "add"},
+                    reasoning[0],
+                    {"role": "assistant", "content": "Adding."},
+                    reasoning[1],
+                    {"type": "function_call", "call_id": "c1", "name": "add", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "c1", "output": "2"},
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert "[reasoning:early plan\n\nthen detail]Adding.[call:add]" in backend.prompts[0]
+
+
 def test_auto_models_do_not_replay_reasoning(tmp_path):
     backend = MockBackend({"next": "done"})
     app = create_legacy_app(
@@ -472,3 +499,81 @@ def test_auto_tool_streams_commit_calls_incrementally(tmp_path):
     assert json.loads(output[1]["arguments"]) == {"a": 2, "b": 3}
     assert len(deltas) > 1
     assert [item["type"] for item in unary["output"]] == ["message", "function_call"]
+
+
+async def _disconnect_after_completed(app, body: dict) -> str:
+    """Drive one stream over raw ASGI; the client disconnects while the
+    ``response.completed`` frame is still being sent. Returns the response id."""
+
+    completed = asyncio.Event()
+    frames: list[bytes] = []
+    requested = False
+
+    async def receive():
+        nonlocal requested
+        if not requested:
+            requested = True
+            return {"type": "http.request", "body": json.dumps(body).encode()}
+        await completed.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] != "http.response.body":
+            return
+        frames.append(message.get("body", b""))
+        if b"event: response.completed" in frames[-1]:
+            completed.set()
+            await asyncio.sleep(0.05)  # the disconnect lands mid-send
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"test"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    await app(scope, receive, send)
+    return _events(b"".join(frames).decode())[0]["response"]["id"]
+
+
+@pytest.mark.parametrize(
+    "model, extra",
+    [
+        ("m", []),
+        ("kairyu-auto", []),
+        ("m", [{"type": "compaction_trigger"}]),
+    ],
+    ids=["engine", "auto", "compaction"],
+)
+async def test_a_completed_stream_is_stored_before_the_client_can_disconnect(
+    tmp_path, model, extra
+):
+    backend = MockBackend({"hello": "stored", "next": "continued"})
+    app = create_legacy_app(
+        {"m": backend},
+        orchestrators={"kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    body = {
+        "model": model,
+        "input": [{"role": "user", "content": "hello"}, *extra],
+        "stream": True,
+    }
+    response_id = await _disconnect_after_completed(app, body)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        retrieved = await client.get(f"/v1/responses/{response_id}")
+        continued = await client.post(
+            "/v1/responses",
+            json={"model": model, "previous_response_id": response_id, "input": "next"},
+        )
+    assert retrieved.status_code == 200
+    assert continued.status_code == 200

@@ -620,12 +620,13 @@ async def buffered_stream(emitter: ResponseEmitter, produce, saver) -> AsyncIter
     for item in output:
         frames += emitter.add_item(item)
     envelope, terminal = emitter.complete(status, usage, incomplete_details)
-    for frame in frames + terminal:
-        yield frame
     if output:
         # An incomplete compaction produced no replacement context; storing an
-        # empty continuation entry would silently blank a thread.
+        # empty continuation entry would silently blank a thread. Stored before
+        # the terminal frame, which a disconnecting client cancels mid-send.
         saver.commit(envelope)
+    for frame in frames + terminal:
+        yield frame
 
 
 async def failed_stream(emitter: ResponseEmitter, payload: dict) -> AsyncIterator[str]:

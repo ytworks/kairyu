@@ -37,6 +37,15 @@ def _invalid(param: str, message: str, *, code: str = "invalid_value") -> Respon
     return ResponsesError(message, param=param, code=code)
 
 
+def _string_field(item: dict, key: str, path: str) -> str | None:
+    """A field compared against known names; any other JSON type is a 400."""
+
+    value = item.get(key)
+    if value is not None and not isinstance(value, str):
+        raise _invalid(f"{path}.{key}", f"{path}.{key} must be a string")
+    return value
+
+
 def _reject_unknown(path: str, item: dict, allowed: set[str]) -> None:
     unknown = sorted(set(item) - allowed)
     if unknown:
@@ -107,7 +116,7 @@ def _canonical_input(
         path = f"input[{index}]"
         if not isinstance(item, dict):
             raise _invalid(path, f"{path} must be an object")
-        kind = item.get("type")
+        kind = _string_field(item, "type", path)
         if kind is None and "role" in item:
             kind = "message"
         # Codex-internal passthrough metadata rides input items verbatim when
@@ -121,7 +130,7 @@ def _canonical_input(
         }
         if kind == "message":
             _reject_unknown(path, item, {"type", "role", "content", "status", "id", "phase"})
-            role = item.get("role")
+            role = _string_field(item, "role", path)
             if role not in _SUPPORTED_ROLES:
                 raise _invalid(
                     f"{path}.role",
@@ -252,7 +261,7 @@ def _function_output_text(parts: list, *, path: str) -> str:
         part_path = f"{path}[{index}]"
         if not isinstance(part, dict):
             raise _invalid(part_path, f"{part_path} must be an object")
-        kind = part.get("type")
+        kind = _string_field(part, "type", part_path)
         if kind in _TEXT_PART_TYPES:
             text = part.get("text")
             if not isinstance(text, str):
@@ -280,7 +289,7 @@ def _content_text(content: object, *, path: str, images: bool = False) -> str:
         part_path = f"{path}[{index}]"
         if not isinstance(part, dict):
             raise _invalid(part_path, f"{part_path} must be an object")
-        kind = part.get("type")
+        kind = _string_field(part, "type", part_path)
         if kind == "input_image" and images:
             _validate_image(part, path=part_path)
             continue
@@ -477,7 +486,11 @@ def _items_to_messages(
 
     def attach_reasoning(message: dict) -> None:
         if reasoning:
-            message["reasoning_content"] = "\n\n".join(reasoning)
+            # Reasoning can arrive on both sides of a preamble; keep both.
+            earlier = message.get("reasoning_content")
+            message["reasoning_content"] = "\n\n".join(
+                [earlier, *reasoning] if earlier else reasoning
+            )
             reasoning.clear()
 
     def flush_calls() -> None:

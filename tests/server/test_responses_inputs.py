@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import openai
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +83,35 @@ def test_input_images_reach_a_vision_backend_in_order(tmp_path):
         ("text", "what is this?", None),
         ("item", None, "high"),
     ]
+
+
+class _FailingVisionStream(VisionBackend):
+    def __init__(self, error: Exception):
+        super().__init__()
+        self.error = error
+
+    async def stream(self, request):
+        raise self.error
+        yield  # pragma: no cover
+
+
+@pytest.mark.parametrize(
+    "error, code",
+    [
+        (RuntimeError("replica went away"), "server_error"),
+        (ValueError("prompt tokens (9) already fill max_model_len (8)"), "context_length_exceeded"),
+    ],
+    ids=["upstream-failure", "overflow"],
+)
+def test_an_image_stream_failing_before_usage_still_fails_in_band(tmp_path, error, code):
+    with TestClient(_app(tmp_path, _FailingVisionStream(error))) as http:
+        stream = http.post(
+            "/v1/responses", json={"model": "m", "input": [_image_message()], "stream": True}
+        )
+    lines = stream.text.splitlines()
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+    assert [event["type"] for event in events[-2:]] == ["error", "response.failed"]
+    assert events[-1]["response"]["error"]["code"] == code
 
 
 _CALL = {"type": "function_call", "call_id": "call_1", "name": "look", "arguments": "{}"}

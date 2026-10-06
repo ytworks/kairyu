@@ -37,6 +37,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     ResponsesRequest,
     _BufferedFailure,
     _usage_payload,
+    _usage_payload_from_wire,
     context_overflow_error,
     is_context_overflow,
     responses_error_payload,
@@ -164,6 +165,13 @@ async def engine_stream(
             validated.generation_request.prompt, completions, usage_owner.latest_usage
         )
 
+    def failed_usage() -> dict:
+        # A failure reports only measured usage: estimating is refused for
+        # multimodal prompts and would raise past the in-band failure.
+        if usage_owner.latest_usage is None:
+            return _usage_payload_from_wire(None)
+        return usage()
+
     try:
         for frame in emitter.start():
             yield frame
@@ -200,7 +208,7 @@ async def engine_stream(
         except Exception as error:
             if not is_context_overflow(error):
                 logger.exception("Responses API upstream stream failed")
-            _envelope, frames = emitter.fail(_failure_payload(error), usage())
+            _envelope, frames = emitter.fail(_failure_payload(error), failed_usage())
             for frame in frames:
                 yield frame
             return
@@ -219,21 +227,23 @@ async def engine_stream(
         )
         if status == "context_exhausted":
             _envelope, frames = emitter.fail(
-                context_overflow_error(exhausted=True).payload(), usage()
+                context_overflow_error(exhausted=True).payload(), failed_usage()
             )
             for frame in frames:
                 yield frame
             return
         frames = assembler.finish(incomplete=status == "incomplete")
         if assembler.failure is not None:
-            _envelope, frames = emitter.fail(assembler.failure, usage())
+            _envelope, frames = emitter.fail(assembler.failure, failed_usage())
             for frame in frames:
                 yield frame
             return
         envelope, terminal = emitter.complete(status, usage(), details)
+        # Stored before the terminal frame: a client that disconnects on it
+        # cancels this generator mid-send.
+        saver.commit(envelope)
         for frame in frames + terminal:
             yield frame
-        saver.commit(envelope)
     finally:
         usage_owner.finalize()
 
