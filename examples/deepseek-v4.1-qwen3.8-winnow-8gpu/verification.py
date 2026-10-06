@@ -5,7 +5,7 @@ Every gate has a time budget and writes its per-request evidence (latency,
 tokens, tok/s, route, efforts) to model-volumes/<environment>/results/<gate>-<UTC>.json.
 
   l1              every DeepSeek DP rank (thinking and chat, grammar JSON),
-                  Qwen chat, Winnow chat and Winnow System One through Kairyu
+                  Qwen chat, Winnow chat and Winnow System One on its L1
   routing         Winnow routes accuracy-critical conversations to VERIFIED
                   (miss rate < 10 % on the calibration and held-out halves)
   think-route     everyday requests stream from deepseek_think at the default effort

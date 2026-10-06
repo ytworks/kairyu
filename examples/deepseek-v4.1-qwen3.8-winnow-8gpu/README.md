@@ -71,7 +71,7 @@ stays empty until the guarantee is rebuilt.
 
 | Gate | Checks |
 |---|---|
-| `l1` | every DeepSeek DP rank (thinking and chat JSON), Qwen chat, Winnow chat, Winnow System One through Kairyu, one verified answer |
+| `l1` | every DeepSeek DP rank (thinking and chat JSON), Qwen chat, Winnow chat, Winnow System One (L1), one verified answer |
 | `routing` | `datasets/routing-set.json`: VERIFIED miss rate < 10 % on the calibration and held-out halves |
 | `think-route` | everyday requests stream from the think route at the default effort |
 | `effort` | the think route gets the caller's effort; the verified route is always max |

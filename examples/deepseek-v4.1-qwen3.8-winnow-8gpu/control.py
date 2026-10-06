@@ -719,11 +719,15 @@ def _validate_deepseek(l1_url: str) -> None:
 
 
 def chat_probe(model: str) -> dict:
-    return {
+    payload: dict = {
         "model": model,
         "messages": [{"role": "user", "content": "What is 17 * 19? Reply with the number only."}],
         "max_tokens": 2048,
     }
+    if model == QWEN_SERVED:
+        # Without an explicit mode the qwen3 parser returns the reply as reasoning.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    return payload
 
 
 def chat_answer_error(body: dict) -> str | None:
@@ -767,12 +771,12 @@ def systemone_probe_error(body: dict) -> str | None:
     return None
 
 
-def _validate_systemone(api_url: str) -> None:
-    """Winnow answers System One through Kairyu, as the route judge reads it."""
+def _validate_systemone(l1_url: str) -> None:
+    """Winnow answers System One on its own L1 (the judge is not a public model)."""
 
     body = post_json(
-        f"{api_url}/v1/systemone",
-        {"model": SPEC["systemone"]["model"], **SYSTEMONE_PROBE},
+        f"{l1_url}/v1/systemone",
+        {"model": SPEC["systemone"]["upstream_model"], **SYSTEMONE_PROBE},
         timeout_s=300,
     )
     error = systemone_probe_error(body)
@@ -871,7 +875,7 @@ def validate_serving(env: dict[str, str]) -> None:
     _validate_deepseek(f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}")
     _validate_chat(f"http://127.0.0.1:{env['QWEN_L1_PORT']}", QWEN_SERVED)
     _validate_chat(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}", WINNOW_SERVED)
-    _validate_systemone(api_url)
+    _validate_systemone(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}")
     validate_verified_answer(api_url)
 
 
