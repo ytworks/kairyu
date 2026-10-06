@@ -1,101 +1,77 @@
-# Verified route: keep `requirements` inside Qwen's context
+# Verified route: Winnow does not judge on long conversations
 
-Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641).
-Follows `2026-10-06-winnow-verified-three-wave.md` (VCO-D19), GPU-verified on
-single-turn requests. Status: awaiting owner approval.
+Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641),
+follows VCO-D19 (`2026-10-06-winnow-verified-three-wave.md`). Status:
+awaiting owner approval.
 
-## 1. Goal
+## 1. Problem
 
-On multi-turn agent conversations every VERIFIED turn runs all three waves:
-Qwen always accepts the `requirements` request, so Winnow can judge the
-drafts. Today long conversations exceed Qwen's 262,144-token context and the
-turn is answered without requirements and judgments.
+In DeepSWE r1 (`deepswe-verified-3wave-full-4w-20261006-r1`) Winnow judged
+61 of 132 VERIFIED turns. On the other 71 no Winnow request was sent at all
+(`judgments` → `checklist_unavailable`, 0.0 s), so the answer was written
+without any judgment. From about turn 20 of each problem, Winnow stops.
 
-## 2. Owner requirements for this fix
+## 2. Causal chain (each link confirmed)
 
-- The cause is Qwen and its token limit; the fix is minimal and does not
-  widen the problem.
-- Kairyu keeps emitting each turn's stage report in `reasoning_content`, and
-  the caller keeps sending earlier turns back; the conversation Qwen reads
-  keeps that information.
-- No framework (`kairyu/`) change: the example fixes its own deployment.
-- Plan only; no benchmark work in this plan.
-
-## 3. Facts (DeepSWE r1 `deepswe-verified-3wave-full-4w-20261006-r1`, recorded turns)
-
-| Fact | Value | How measured |
+| Link | What happens | Evidence |
 |---|---|---|
-| VERIFIED turns / with judgments / without | 132 / 61 / 71 | trace v2 of every recorded call |
-| `requirements` failed (no list) | 67 turns, plus 2 empty lists | trace v2 |
-| Qwen input on the 67 failed turns | 199,082-325,598 tokens (median 267,676) | Kairyu's exact rendered request, live Qwen `/tokenize` |
-| Qwen's reply on those turns | HTTP 400 "maximum context length is 262144 tokens … 65536 output tokens … at least 196609 input tokens" | live replay (Qwen's access log is off, so it was not in its log) |
-| Composition of one conversation (14:42 turn, 61 messages) | 240,650 tokens = earlier `reasoning_content` 189,953 + content 33,852 + tool calls 3,845 + framing | `/tokenize` of each part |
-| Growth | 61 messages → 240,650 tokens; 95 messages → 320,460 tokens (~2.3K tokens per message) | `/tokenize` |
-| `requirements` output when it succeeds | max 3,486 tokens, median 1,899 | trace v2 (61 calls) |
-| The two empty lists (148K / 181K inputs) | Qwen ended inside its reasoning after 188 / 342 tokens; the same inputs replayed 4 times all returned valid lists | live replay |
-| Qwen's context per its model card | 262,144 natively; "extensible up to 1,000,000 tokens" with YaRN; vLLM: `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `--hf-overrides` `rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`, `--max-model-len 1000000`; static YaRN "potentially impacting performance on shorter texts" | `models/qwen/qwen3.8-27b-fp8/README.md` |
-| DeepSeek's context in this example | 1,048,576 | `kairyu.yaml` |
-| Qwen KV cache on GPU 6 | 1,791,840 tokens | Qwen startup log |
+| L1 | `judgments` is one checklist: 5 adoption questions (need only the request and the drafts) + 5 x N coverage questions (one per item of `requirements`' list). Building the questions reads that list first; a missing or unparsable list raises `checklist_unavailable` for the whole checklist, so not even the 5 adoption questions reach Winnow. | `checklist._pending_questions` → `_source_items`; trace: failed judgments take 0.0 s, no Winnow read |
+| L2 | `requirements` (Qwen) returned no list on 69 turns: 67 rejected by Qwen, 2 empty. | trace v2 |
+| L3 | Rejected because Qwen's input (199,082-325,598 tokens on the 67 turns) + the 65,536 output cap exceeds Qwen's 262,144 context. | live replay: vLLM 400 "maximum context length is 262144 tokens … at least 196609 input tokens"; live `/tokenize` of Kairyu's exact request |
+| L4 | The input is that large because the L2 conversation keeps every earlier assistant `reasoning_content`, which here is Kairyu's own stage report (five drafts, reasoning, judgments) echoed by the agent: 189,953 of 240,650 tokens on the 14:42 turn. Responses AUTO already drops replayed reasoning for this reason (m11 D4); Chat Completions keeps it (`validate_orchestration_chat_input`). | `/tokenize` of each part; code path |
+| L5 | The 2 empty lists: Qwen ended inside its reasoning after 188 / 342 tokens on 148K / 181K report-filled inputs; the same inputs replayed 4 times all returned valid lists. | live replay |
 
-## 4. Cause
+Without L4 the 67 turns' Qwen input is 30,330-96,837 tokens (median 75,815):
+all fit, and the three replayed returned valid lists (11-13 points).
 
-Qwen's context (262,144) is smaller than the conversation the example gives
-it. The other roles run on DeepSeek with 1,048,576; Qwen is the only worker
-whose context is below the conversation sizes this route produces, so it
-fails first (from about turn 20 of a DeepSWE problem in r1).
+## 3. Fix
 
-## 5. Options inside the example
+| # | Link | Layer | Owner | Change |
+|---|---|---|---|---|
+| A | L1 | L2 | example (`verified.yaml`, `verified-always.yaml`) | Split `judgments` into two checklist verifiers: `adoption` verifies `drafts` (the 5 adoption questions; state: request + drafts) and `coverage` verifies `requirements` (the 5 x N questions; state: request + drafts, waiting for `drafts` as PR #641's F1 allows). `answer` reads `{adoption}` and `{coverage}`. Winnow then judges every draft's adoptability on every VERIFIED turn, whatever happens to Qwen. |
+| B | L3, L4, L5 | L3→L2 | framework (`kairyu/entrypoints/server/chat_service.py`) | The orchestration Chat Completions conversation omits assistant `reasoning_content` (still accepted; direct engines still receive it), as Responses AUTO does. Every role's input loses the echoed reports; Qwen's input on the failed turns falls to ≤ 96,837 tokens. |
 
-| Option | Against the requirements |
-|---|---|
-| Lower the `requirements` output cap (65,536 → 4,096) | Input alone exceeds 262,144 on 38 of 67 turns; fixes 29. Not enough |
-| Stop exposing stage reports | Removes the information the requirement keeps. Rejected |
-| Run `requirements` on DeepSeek | Changes the owner's design (Qwen lists requirements). Rejected |
-| Add a summary stage for Qwen | Widens the DAG and drops information. Rejected |
-| **Qwen at its documented 1M context (YaRN factor 4)** | Qwen reads the whole conversation; matches DeepSeek's 1M, so Qwen is no longer the first role to overflow; one service's flags. **Chosen** |
-| YaRN factor 2 (524,288) | Covers the 67 recorded turns (max 325,598 + 65,536) but conversations keep growing (~2.3K tokens per message): overflow again near 150 messages, while recorded DeepSWE conversations reached 714. Not chosen |
+Framework admission for B: (1) broken contract — an orchestrated
+conversation re-reads every earlier stage report, code path above; (2) no
+extension point — the conversation is built before roles apply; (3)
+independent regression — any orchestrator with
+`expose_intermediate_outputs` behind an agent client that echoes
+`reasoning_content` (LiteLLM, mini-swe-agent) grows every role's input each
+turn; (4) smallest mechanism — omit one field in one place; Responses AUTO
+already follows the rule.
 
-## 6. Changes (example only)
+Unchanged: Kairyu still emits the stage report to the caller; prompts,
+caps, efforts, routing, L1.
 
-| # | Layer | File | Change |
-|---|---|---|---|
-| 1 | L1 | `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/compose.yaml` (service `qwen`) | `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; `--hf-overrides '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'`; `--max-model-len 1000000` (the model card's values; the other `rope_parameters` are the checkpoint's own) |
-| 2 | L1 | `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/kairyu.yaml` (pool `qwen3.8-27b`) | `max_model_len: 1000000` |
-| 3 | docs | `README.md` (L1 row), `docs/design/example-verified-checklist-orchestration.md` (VCO-D19 note), `PROGRESS.md` | Qwen at 1M with YaRN, why |
+Residual: a conversation whose own content exceeds Qwen (~196K tokens,
+roughly 250 messages at the measured ~0.8K tokens per message without
+reports) still loses `coverage` on that turn; `adoption` still runs (A).
 
-No change to `kairyu/`, prompts, caps, efforts, the DAG, routing, Winnow or
-the stage report.
+## 4. Tests
 
-## 7. Tests
+- B: one chat-input test — assistant `reasoning_content` is absent from the
+  L2 prompt; content and tool calls stay.
+- A: the example test — with Qwen failing, Winnow still receives the 5
+  adoption questions and `answer` reads them; with Qwen succeeding, both
+  reads happen (replaces the one-read assertion).
 
-None added or changed: the change is deployment configuration; its effect is
-checked on GPU (test policy). `test_gateway_builds_from_the_example_configs`
-already loads the edited `kairyu.yaml`.
+## 5. Docs
 
-## 8. Verification
+m11 assistant-history amendment (B); VCO-D19 amendment (A); `PROGRESS.md`.
+
+## 6. Verification
 
 | # | Step | Pass criteria | Budget |
 |---|---|---|---|
-| 1 | CPU: `uv run ruff check .`; `tests/unit/test_deepseek_v41_qwen38_winnow_example.py` | green | 5 min |
-| 2 | Redeploy with plain `./run.sh` (Qwen restarts with YaRN) | healthy; L1 probes pass; Qwen log reports max model len 1,000,000 | 20 min |
-| 3 | Live replay of the 67 failed turns' `requirements` requests (exact rendered requests, 4 at a time) | all 67 accepted; 67 valid lists; 0 empty | 40 min |
-| 4 | All nine GPU gates in GATES order (l1, routing, think-route, effort, verified-route, fallback, serving, serving-routed, browser) | each gate's existing criteria; verified-route also shows Qwen's lists unchanged in size on short requests (5 + 5 x N judgment items, N ≥ 1) | 2 h |
-| 5 | New gate `long-conversation`: five r1 turns whose Qwen input was 199K-326K, through `kairyu-verified-always` | 200; requirements and judgments succeed on all five | 20 min |
+| 1 | CPU: ruff; changed-path tests | green | 10 min |
+| 2 | Live replay of the 69 failed turns' `requirements` requests rendered by the new code | all accepted; valid lists; 0 empty | 40 min |
+| 3 | Redeploy (`./run.sh`) | healthy | 15 min |
+| 4 | All nine gates (verified-route expects two Winnow reads: 5 adoption + 5 x N coverage) | existing criteria | 2 h |
+| 5 | New gate `long-conversation`: five r1 turns that lost judgments, through `kairyu-verified-always` | 200; adoption and coverage both judged on all five | 20 min |
+| 6 | Qwen stopped: one verified request | 200; adoption judged; coverage absent | 10 min |
 
 Stop and report at the first failure.
 
-## 9. Risks and limits
+## 7. Decision requested
 
-- Static YaRN may lower Qwen's quality on short inputs (model card). Qwen
-  only lists requirements; the gates in step 4 run short requests through it.
-- Four long `requirements` calls together can exceed the 1,791,840-token KV
-  cache; vLLM then queues them (slower, not failing).
-- Conversations still grow by every turn's report: at ~2.3K tokens per
-  message, Qwen (1M with the 65,536 cap) and DeepSeek (1,048,576) both
-  reach their contexts near 350 messages; beyond that the request exceeds
-  both. Recorded DeepSWE conversations on this
-  host reached 714 messages (DeepSeek-only run, smaller messages).
-
-## 10. Decision requested
-
-Approve changes 1-3 and the verification above.
+Approve A (example) and B (framework).
