@@ -112,3 +112,40 @@ gates are the long pole (estimated 8-12 h for all nine gates).
 Progress reports during the run use the full format: gate table with times,
 per-route counts (judge success / fallback), stage times, tokens, tok/s,
 TTFT/E2E, live worker load; times in JST.
+
+## Redo plan after DeepSWE r1 (2026-10-06 23:50 JST) — awaiting owner decision
+
+Fact (run `deepswe-verified-3wave-full-4w-20261006-r1`, 64 turns, 4 problems,
+0 finished): Winnow's judgment failed on 13 turns, all `checklist_unavailable`
+before any Winnow read, because `requirements` (Qwen) produced no list:
+
+- 11 turns: Qwen's prompt was ≥ 201K tokens; with the 65,536-token cap it
+  exceeds Qwen's 262,144 context and is rejected before dispatch
+  (`UpstreamClientError`; no 400 in Qwen's log). Largest success: 195,860.
+- 2 turns (148K, 181K prompt): Qwen stopped after 188 / 342 tokens inside its
+  reasoning, stage output empty; cause not yet confirmed.
+- The role prompt embeds the conversation as JSON, about 2x the caller's
+  prompt tokens; a DeepSWE problem takes about 43 turns (median, 10/04 run),
+  so most late turns would run without requirements and judgments.
+
+Plan:
+
+1. Stop r1 (keep its results as an aborted run).
+2. Confirm both causes on CPU by replaying recorded `requirements` requests
+   (prompt size, cap actually sent, why the 188-token stop).
+3. Fix — framework, needs authorization: a role option bounding
+   `{conversation}` with the existing `bounded_conversation` (keeps the system
+   messages and the first task, then the newest messages that fit; the omitted
+   middle is counted), as the route judge and checklist state already do.
+   Example: `requirements` sets the bound so Qwen's prompt stays ≤ ~180K tokens
+   (chars-per-token measured in step 2). Drafts, judgments and answer are
+   unchanged. No example-only alternative exists: the DSL has no other way to
+   shorten what a generation role reads.
+4. Tests: one conductor test (a bounded role reads first task + newest
+   messages, omitted count shown); the example test asserts the bound.
+5. GPU: all nine gates again (~1 h 50 min), plus `long-conversation`: replay
+   recorded r1 turns of > 200K Qwen tokens through `kairyu-verified-always`;
+   pass = requirements and judgments succeed on every replayed turn.
+6. DeepSWE r2: same conditions (113 problems, 1 lap, 4 parallel, server
+   default effort high, API timeout 3600 s). Estimate: ~43 turns x ~2-2.5 min
+   per problem -> about 2 days.
