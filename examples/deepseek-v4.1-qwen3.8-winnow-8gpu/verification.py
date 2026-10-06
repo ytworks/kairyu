@@ -542,17 +542,18 @@ def gate_verified_route(env: dict[str, str], *, budget_s: float = 5400) -> None:
     findings = []
     rows = []
     for index, item in enumerate(items):
+        name = f"{item['category']}#{index}"
         for stream in (False, True):
             effort = efforts[(2 * index + stream) % len(efforts)]
             extra = {"reasoning_effort": effort} if effort else {}
             row = chat(
                 env, messages=item["messages"], model=ALWAYS, trace=True, stream=stream, **extra
             )
-            row.update(id=item["id"], stream=stream, caller_effort=effort)
+            row.update(id=name, stream=stream, caller_effort=effort)
             rows.append(row)
             if row["status"] != 200 or not row["content"].strip() or row["efforts"] != ["max"]:
                 findings.append(
-                    f"{item['id']} stream={stream} effort={effort}: status={row['status']} "
+                    f"{name} stream={stream} effort={effort}: status={row['status']} "
                     f"empty={not row['content'].strip()} efforts={row['efforts']}"
                 )
         deadline.check()
