@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-04 — [amendment] llama.cpp penalties, token counts and attest (PR #620 review)
+- What: `upstream: llamacpp` rejects frequency/presence penalties, sends `repeat_last_n` = `max_model_len` with `repetition_penalty`, requires `max_model_len`, and declines `/v1/messages/count_tokens`; the Winnow examples' `attest` fails on missing or non-numeric sampling defaults.
+- Why: owner review. llama.cpp penalizes prompt tokens with frequency/presence and only the last 64 tokens with repeat. `/tokenize` counts the string without the chat template generation applies. A missing default compared as NaN and passed.
+- Refs: LCP-D2/D3/D5 in `docs/design/llamacpp-upstream.md`; PR #620 review 5406980804
+
+### 2026-10-04 — [design] GGUF models through llama.cpp as an L1 worker (PR #620)
+- What: `backend: openai` + `upstream: llamacpp` attaches `llama-server` with no L2/L3 change: executed-field profile, `repeat_penalty`, `top_k` 0, named tool_choice → that tool + `required`, `top_logprobs` floor, assistant prefill, `/tokenize`, WebP→PNG; passthrough rejected. CPU contract gate `l1.correctness.llamacpp_upstream_contract` passes on stock b11391.
+- Why: llama-server silently ignores unknown keys and object tool_choice, drops logprobs at `top_logprobs: 0`, and reports undecodable images as HTTP 500 (would eject replicas); `generic` cannot express these.
+- Refs: LCP-D1..D6 in `docs/design/llamacpp-upstream.md`; plan `docs/superpowers/plans/2026-10-04-llamacpp-gguf-l1-upstream.md`
+
+### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
+- What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.
+- Why: owner decision: tool requests take the verified-tool route, so the guarantee route assumes a complete answer.
+- Refs: VCO-D17 in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+
+### 2026-10-04 — [design] Verified example: tool route replaces step verification (PR #619)
+- What: Jev routes a request that requires a tool call to TOOL: one DeepSeek call at max effort with the caller's tools, unverified (kairyu-verified THINK/TOOL/VERIFIED; kairyu-verified-always TOOL/VERIFIED). The STEP route and `verified_step` profile are removed.
+- Why: owner decision. Verification failed correct intermediate agent steps and repairs jumped to the final move; step verification did not remove that risk.
+- Refs: VCO-D17 (supersedes VCO-D16) in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+
+### 2026-10-03 — [design] Verified example judges an agent turn as one step (PR #619 S3)
+- What: new profile `verified_step` and Jev route label STEP (kairyu-verified: THINK/STEP/VERIFIED; kairyu-verified-always: STEP/VERIFIED, no think route). Step points come from the task and the latest tool results; coverage and acceptance ask whether the reply is a sound next step (A0) over request, recent conversation (bounded `query`), summary and reply. Repairs in both profiles rewrite the same message in the draft's frame (B1); a step repair gets only points read below 0.5 (B2). Extractors may use 65,536 tokens (C2). STEP thresholds are placeholders until labelled DeepSWE turns (V3).
+- Why: complete-answer criteria failed sound mid-task turns and their repairs drifted to submission (closed PR #618: 73/83 turns hit the refinement limit).
+- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (A0, B1, B2, C2); example `verified.yaml`, `verified-always.yaml`
+
 ### 2026-10-03 — [design] Checklist verifier minimised to what Jev verification needs (PR #619 S2)
 - What: removed from L2 rule-based checks (`checks.py`, inline claim roles, `on_exhausted`), `seed_from` (the answer role writes the draft itself), multi-list curation (one list: the verifier's target) and guarantee groups; kept Jev questions over JSON state (`request`/`tools` sources, conversation bounds), main's `max_questions_per_call`, the acceptance read with per-read accounting, and no guarantee for an empty answer. New: an acceptance FAIL with every point met is not repaired; it publishes unverified (`reason: not_accepted`).
 - Why: owner decision: the framework keeps only shared contracts; the removed parts served one example's workflow. A repair with no unmet point rewrote sound DeepSWE turns.
