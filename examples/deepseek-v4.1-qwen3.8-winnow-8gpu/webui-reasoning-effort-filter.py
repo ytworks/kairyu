@@ -1,6 +1,6 @@
 """
 title: Reasoning Effort
-description: DeepSeek-V4.1 reasoning effort for every DeepSeek step; default high (75).
+description: DeepSeek-V4.1 reasoning effort for the think route; default high (75).
 version: 0.1.0
 """
 
@@ -14,9 +14,9 @@ class Filter:
 
     Open WebUI v0.11.0 renders an enum-typed user valve as a ``<select>`` in
     Chat Controls. The choice is sent as the OpenAI ``reasoning_effort`` body
-    field (low=50, high=75, max=100); Kairyu applies it to every DeepSeek
-    step of the chosen route. ``default`` omits the field, so the
-    orchestration default (high) applies.
+    field (low=50, high=75, max=100); Kairyu applies it to the think route
+    (the verified route always runs at max). ``default`` omits the field, so
+    the orchestration default (high) applies.
     """
 
     class Valves(BaseModel):
@@ -25,7 +25,7 @@ class Filter:
     class UserValves(BaseModel):
         reasoning_effort: Literal["default", "low", "high", "max"] = Field(
             default="default",
-            description="Reasoning effort for every DeepSeek-V4.1 step. default = high (75).",
+            description="Reasoning effort for the think route. default = high (75).",
         )
 
     def __init__(self):

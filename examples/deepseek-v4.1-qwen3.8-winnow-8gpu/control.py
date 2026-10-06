@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for checklist-verified answers.
+"""One-command lifecycle for routed DeepSeek-V4.1 answers.
 
-DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two OpenJev
-replicas (GPU 6, GPU 7) judge through System One; Kairyu L2 runs the
-requirement extraction, Validator, Conductor and repair loop and returns each
-answer with its guarantee flag.
+DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; Qwen3.8-27B
+(GPU 6) is served as an internal pool; Winnow-12B (GPU 7, llama.cpp) routes
+each request through System One to the verified route (max effort) or to one
+answer at the caller's effort.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -24,38 +26,40 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 ROOT = HERE.parents[1]
-PROJECT = "kairyu-deepseek-v4-1-openjev-verified-8gpu"
+PROJECT = "kairyu-deepseek-v4-1-qwen3-8-winnow-8gpu"
 DEEPSEEK = SPEC["allocation"]["deepseek"]
 DEEPSEEK_GPU_IDS: list[int] = [int(index) for index in DEEPSEEK["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in DEEPSEEK["dp_rank_gpu_ids"]]
-OPENJEV_GPU_IDS: list[int] = [int(index) for index in SPEC["allocation"]["openjev"]["gpu_ids"]]
-OPENJEV_SERVICES = [f"openjev-{replica}" for replica in range(len(OPENJEV_GPU_IDS))]
+QWEN_GPU_IDS: list[int] = [int(index) for index in SPEC["allocation"]["qwen"]["gpu_ids"]]
+WINNOW_GPU_IDS: list[int] = [int(index) for index in SPEC["allocation"]["winnow"]["gpu_ids"]]
+L1_SERVICES = ("deepseek", "qwen", "winnow")
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified: Jev routes per request; kairyu-verified-always: always verified.
+# kairyu-verified: Winnow routes per request; kairyu-verified-always: always
+# the verified route.
 ROUTED_MODEL, ALWAYS_MODEL = PUBLIC_MODELS
 DEEPSEEK_SERVED = SPEC["deepseek"]["served_name"]
+QWEN_SERVED = SPEC["qwen"]["served_name"]
+WINNOW_SERVED = SPEC["winnow"]["model"]["served_name"]
 
 
 def _check_allocation() -> None:
     tp = int(DEEPSEEK["tensor_parallel_size"])
     dp = int(DEEPSEEK["data_parallel_size"])
     flat = [index for group in DP_RANK_GPU_IDS for index in group]
-    every = DEEPSEEK_GPU_IDS + OPENJEV_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + QWEN_GPU_IDS + WINNOW_GPU_IDS
     if (
         len(DP_RANK_GPU_IDS) != dp
         or any(len(group) != tp for group in DP_RANK_GPU_IDS)
         or flat != DEEPSEEK_GPU_IDS
         or int(DEEPSEEK["expert_parallel_size"]) != tp * dp
         or len(set(every)) != len(every)
+        or len(QWEN_GPU_IDS) != 1
+        or len(WINNOW_GPU_IDS) != 1
         or len(every) != int(SPEC["hardware"]["gpu_count"])
-        # Kairyu never forwards more System One reads than one OpenJev queues.
-        or int(SPEC["systemone"]["max_concurrency"])
-        > int(SPEC["openjev"]["settings"]["OPENJEV_MAX_QUEUE"])
     ):
         raise SystemExit(
             "example.json allocation is inconsistent (DeepSeek TP x DP must tile its "
-            "GPUs, OpenJev GPUs must be distinct, and Kairyu must forward at most "
-            "OPENJEV_MAX_QUEUE reads)"
+            "GPUs; Qwen and Winnow take one distinct GPU each)"
         )
 
 
@@ -101,14 +105,12 @@ def _storage_paths() -> dict[str, Path]:
     environment = environment_storage()
     paths = {
         "deepseek_models": environment / "models" / "deepseek",
-        "openjev_models": environment / "models" / "openjev",
+        "qwen_models": environment / "models" / "qwen",
+        "winnow_models": environment / "models" / "winnow",
         "deepseek_cache": environment / "compile-cache" / "deepseek",
+        "qwen_cache": environment / "compile-cache" / "qwen",
         "placement_log": environment / "placement-log",
         "webui": environment / "webui-data",
-        **{
-            f"openjev_cache_{replica}": environment / "compile-cache" / f"openjev-{replica}"
-            for replica in range(len(OPENJEV_GPU_IDS))
-        },
     }
     for path in paths.values():
         try:
@@ -125,17 +127,19 @@ def _compose_env() -> dict[str, str]:
         if key not in {"COMPOSE_FILE", "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME"}
     }
     paths = _storage_paths()
-    env.update({key: str(value) for key, value in SPEC["openjev"]["settings"].items()})
     env.update(
         {
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": PROJECT,
             "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["deepseek_models"]),
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
-            "OPENJEV_MODEL_STORAGE_PATH": str(paths["openjev_models"]),
+            "QWEN_MODEL_STORAGE_PATH": str(paths["qwen_models"]),
+            "QWEN_CACHE_PATH": str(paths["qwen_cache"]),
+            "WINNOW_MODEL_STORAGE_PATH": str(paths["winnow_models"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["deepseek"]["image"]),
-            "OPENJEV_IMAGE": os.environ.get("OPENJEV_IMAGE", SPEC["openjev"]["image"]),
+            "QWEN_VLLM_IMAGE": os.environ.get("QWEN_VLLM_IMAGE", SPEC["qwen"]["image"]),
+            "WINNOW_IMAGE": os.environ.get("WINNOW_IMAGE", SPEC["winnow"]["runtime"]["image"]),
             "PLAYGROUND_IMAGE": os.environ.get("PLAYGROUND_IMAGE", SPEC["playground"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
@@ -145,14 +149,13 @@ def _compose_env() -> dict[str, str]:
             "PLAYGROUND_PORT": os.environ.get("PLAYGROUND_PORT", str(SPEC["playground"]["port"])),
             "PLAYGROUND_BIND_ADDRESS": os.environ.get("PLAYGROUND_BIND_ADDRESS", "0.0.0.0"),
             "DEEPSEEK_L1_PORT": os.environ.get("DEEPSEEK_L1_PORT", "8014"),
+            "QWEN_L1_PORT": os.environ.get("QWEN_L1_PORT", "8015"),
+            "WINNOW_L1_PORT": os.environ.get("WINNOW_L1_PORT", "8016"),
             # Render-safe defaults for down/status/logs; `up` replaces them
             # with the GPUs' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
-            "OPENJEV_CPUSET": os.environ.get("OPENJEV_CPUSET", "0"),
-            **{
-                f"OPENJEV_CACHE_PATH_{replica}": str(paths[f"openjev_cache_{replica}"])
-                for replica in range(len(OPENJEV_GPU_IDS))
-            },
+            "QWEN_CPUSET": os.environ.get("QWEN_CPUSET", "0"),
+            "WINNOW_CPUSET": os.environ.get("WINNOW_CPUSET", "0"),
         }
     )
     return env
@@ -224,7 +227,7 @@ def _held_gpus() -> set[int]:
     """GPUs already assigned to this example's own running L1 containers."""
 
     held: set[int] = set()
-    for service in ("deepseek", *OPENJEV_SERVICES):
+    for service in L1_SERVICES:
         state = _run(
             [
                 "docker",
@@ -261,7 +264,7 @@ def _preflight(env: dict[str, str]) -> None:
         ).stdout
     )
     expected = SPEC["hardware"]
-    every = DEEPSEEK_GPU_IDS + OPENJEV_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + QWEN_GPU_IDS + WINNOW_GPU_IDS
     missing = [index for index in every if index not in rows]
     if missing:
         raise SystemExit(f"GPUs {missing} are not present; this example uses GPUs {every}")
@@ -289,13 +292,17 @@ def _preflight(env: dict[str, str]) -> None:
             raise SystemExit(
                 f"host has {available} GiB available; the pinned Engram tables need {required} GiB"
             )
-    deepseek_nodes = [numa_node(str(rows[index]["pci_bus_id"])) for index in DEEPSEEK_GPU_IDS]
-    openjev_nodes = [numa_node(str(rows[index]["pci_bus_id"])) for index in OPENJEV_GPU_IDS]
-    env["DEEPSEEK_CPUSET"] = ",".join(_node_cpulist(node) for node in dict.fromkeys(deepseek_nodes))
-    env["OPENJEV_CPUSET"] = ",".join(_node_cpulist(node) for node in dict.fromkeys(openjev_nodes))
+    placement = {}
+    for name, gpus in (
+        ("DEEPSEEK", DEEPSEEK_GPU_IDS),
+        ("QWEN", QWEN_GPU_IDS),
+        ("WINNOW", WINNOW_GPU_IDS),
+    ):
+        nodes = [numa_node(str(rows[index]["pci_bus_id"])) for index in gpus]
+        env[f"{name}_CPUSET"] = ",".join(_node_cpulist(node) for node in dict.fromkeys(nodes))
+        placement[name.capitalize()] = f"GPUs {gpus} (NUMA {sorted(set(nodes))})"
     print(
-        f"hardware: DeepSeek on GPUs {DEEPSEEK_GPU_IDS} (NUMA {sorted(set(deepseek_nodes))}); "
-        f"OpenJev on GPUs {OPENJEV_GPU_IDS} (NUMA {sorted(set(openjev_nodes))})",
+        "hardware: " + "; ".join(f"{name} on {where}" for name, where in placement.items()),
         flush=True,
     )
 
@@ -346,15 +353,94 @@ def _ensure_deepseek_image(env: dict[str, str]) -> None:
         )
 
 
-def _ensure_openjev_image(env: dict[str, str]) -> None:
-    """Pull the published OpenJev image by digest and attest it by ID."""
+def _ensure_qwen_image(env: dict[str, str]) -> None:
+    """Pull the pinned upstream vLLM release by digest and attest it.
 
-    image = env["OPENJEV_IMAGE"]
+    The pin is the registry digest. The containerd image store reports it as
+    the image ID; the classic store reports the config digest as the ID and
+    keeps the registry digest in RepoDigests, so either match attests it.
+    """
+
+    image = env["QWEN_VLLM_IMAGE"]
     if _image_id(image) is None:
+        if image != SPEC["qwen"]["image"]:
+            raise SystemExit(f"QWEN_VLLM_IMAGE does not exist locally: {image}")
         _run(["docker", "pull", image])
-    actual = _image_id(image)
-    if actual != SPEC["openjev"]["image_id"]:
-        raise SystemExit(f"OpenJev image {image} has ID {actual}; expected the pinned image")
+    inspected = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image],
+        capture=True,
+    ).stdout.strip()
+    actual, _, digests = inspected.partition(" ")
+    pinned = SPEC["qwen"]["image_id"]
+    if actual != pinned and not any(
+        digest.endswith(f"@{pinned}") for digest in json.loads(digests or "null") or ()
+    ):
+        raise SystemExit(f"Qwen vLLM image {image} ({actual}) is not the pinned image {pinned}")
+
+
+def _ensure_winnow_image(env: dict[str, str]) -> None:
+    """Build winnow-server at the pinned revision with the example's backport."""
+
+    image = env["WINNOW_IMAGE"]
+    if _image_id(image) is not None:
+        return
+    runtime = SPEC["winnow"]["runtime"]
+    if image != runtime["image"]:
+        raise SystemExit(f"WINNOW_IMAGE does not exist locally: {image}")
+    print("winnow-server image is absent; building the pinned source revision", flush=True)
+    with tempfile.TemporaryDirectory() as scratch:
+        source = Path(scratch) / "winnow-inference"
+        _run(["git", "clone", "--quiet", runtime["source_repository"], str(source)])
+        _run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "checkout",
+                "--quiet",
+                "--detach",
+                runtime["source_revision"],
+            ]
+        )
+        _add_winnow_patches(source)
+        _run(
+            [
+                "docker",
+                "build",
+                "--build-arg",
+                f"CUDA_ARCH={runtime['cuda_arch']}",
+                "--tag",
+                image,
+                "--label",
+                f"org.opencontainers.image.revision={runtime['source_revision']}",
+                "--label",
+                "io.kairyu.winnow.extra-patches="
+                + ",".join(item["upstream_commit"] for item in runtime["extra_patches"]),
+                str(source),
+            ]
+        )
+
+
+def _add_winnow_patches(source: Path) -> None:
+    """Add upstream llama.cpp backports to Winnow's own patch lock.
+
+    Winnow's build applies every patch listed in ``runtime.lock.json`` and
+    rejects any llama.cpp file change missing from its ``source_sha256``.
+    """
+
+    lock_path = source / "runtime.lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    for item in SPEC["winnow"]["runtime"]["extra_patches"]:
+        patch = (HERE / "winnow-patches" / item["file"]).read_bytes()
+        if hashlib.sha256(patch).hexdigest() != item["sha256"]:
+            raise SystemExit(f"{item['file']} does not match example.json")
+        (source / "patches" / item["file"]).write_bytes(patch)
+        lock["patches"].append({"file": f"patches/{item['file']}", "sha256": item["sha256"]})
+        overlap = set(lock["source_sha256"]) & set(item["source_sha256"])
+        if overlap:
+            raise SystemExit(f"{item['file']} overlaps Winnow's patches: {sorted(overlap)}")
+        lock["source_sha256"].update(item["source_sha256"])
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
 _MODEL_PROGRAM = r"""
@@ -475,6 +561,47 @@ def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> 
     _run(command)
 
 
+def _ensure_winnow_model(env: dict[str, str]) -> None:
+    """Download (or re-verify) the pinned GGUF files with Winnow's own tool.
+
+    ``scripts/download.py`` fetches the manifest's revision-pinned URLs and
+    checks every file's size and SHA-256; the example's pins must match it.
+    """
+
+    image = env["WINNOW_IMAGE"]
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--volume",
+            f"{env['WINNOW_MODEL_STORAGE_PATH']}:/models",
+            "--entrypoint",
+            "python3",
+            image,
+            "scripts/download.py",
+            "--model-dir",
+            "/models",
+        ]
+    )
+    manifest = json.loads(
+        _run(
+            ["docker", "run", "--rm", "--entrypoint", "cat", image, "manifests/models.json"],
+            capture=True,
+        ).stdout
+    )
+    release = manifest["release"]
+    pinned = SPEC["winnow"]["model"]
+    shipped = {
+        release[kind]["file"]: {"bytes": release[kind]["bytes"], "sha256": release[kind]["sha256"]}
+        for kind in ("model", "projector")
+    }
+    if manifest.get("model_revision") != pinned["revision"] or shipped != pinned["files"]:
+        raise SystemExit("winnow-inference manifest differs from example.json model pins")
+
+
 def _json_url(url: str) -> dict:
     with urllib.request.urlopen(url, timeout=5) as response:
         return json.loads(response.read())
@@ -509,17 +636,22 @@ def validate_ready(api_url: str) -> None:
         ready = _json_url(f"{api_url}/readyz")
         listed = _json_url(f"{api_url}/v1/models")
         models = {row["id"] for row in listed["data"]}
-        healthy = _healthy_replicas(_text_url(f"{api_url}/metrics"), DEEPSEEK_SERVED)
+        metrics = _text_url(f"{api_url}/metrics")
+        healthy = {
+            pool: _healthy_replicas(metrics, pool)
+            for pool in (DEEPSEEK_SERVED, QWEN_SERVED, WINNOW_SERVED)
+        }
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
     if ready.get("status") != "ready" or models != set(PUBLIC_MODELS):
         raise SystemExit(f"Kairyu must serve exactly {PUBLIC_MODELS!r}, got {sorted(models)!r}")
-    if healthy != 1:
-        raise SystemExit(f"DeepSeek pool must report 1 healthy replica, got {healthy!r}")
+    unhealthy = {pool: count for pool, count in healthy.items() if count != 1}
+    if unhealthy:
+        raise SystemExit(f"every pool must report 1 healthy replica, got {unhealthy!r}")
 
 
-# Grammar-constrained JSON is what the extractor and state builder rely on;
-# readiness checks it in both thinking and non-thinking mode on every DP rank.
+# Readiness checks grammar-constrained JSON in both thinking and non-thinking
+# mode on every DP rank.
 _ANSWER_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -538,9 +670,7 @@ _ANSWER_SCHEMA = {
 def deepseek_probe(*, thinking: bool) -> dict:
     payload: dict = {
         "model": DEEPSEEK_SERVED,
-        "messages": [
-            {"role": "user", "content": "What is 17 * 19? Answer as JSON {\"answer\": n}."}
-        ],
+        "messages": [{"role": "user", "content": 'What is 17 * 19? Answer as JSON {"answer": n}.'}],
         "max_tokens": 8192,
         "response_format": _ANSWER_SCHEMA,
     }
@@ -588,6 +718,39 @@ def _validate_deepseek(l1_url: str) -> None:
             )
 
 
+def chat_probe(model: str) -> dict:
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": "What is 17 * 19? Reply with the number only."}],
+        "max_tokens": 2048,
+    }
+    if model == QWEN_SERVED:
+        # Without an explicit mode the qwen3 parser returns the reply as reasoning.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    return payload
+
+
+def chat_answer_error(body: dict) -> str | None:
+    try:
+        choice = body["choices"][0]
+        content = choice["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError):
+        return f"malformed response: {str(body)[:200]}"
+    if choice.get("finish_reason") != "stop":
+        return f"finish_reason is {choice.get('finish_reason')!r}"
+    if "323" not in content:
+        return f"answer is {content[:200]!r}, expected 323"
+    return None
+
+
+def _validate_chat(l1_url: str, model: str) -> None:
+    error = chat_answer_error(
+        post_json(f"{l1_url}/v1/chat/completions", chat_probe(model), timeout_s=900)
+    )
+    if error is not None:
+        raise SystemExit(f"{model} chat probe failed: {error}")
+
+
 SYSTEMONE_PROBE = {
     "state": "The invoice for March was paid twice by mistake.",
     "questions": {
@@ -608,79 +771,44 @@ def systemone_probe_error(body: dict) -> str | None:
     return None
 
 
-def _validate_openjev_replicas() -> None:
-    """Each replica answers System One on its own (not only through Kairyu)."""
+def _validate_systemone(l1_url: str) -> None:
+    """Winnow answers System One on its own L1 (the judge is not a public model)."""
 
-    body = json.dumps({"model": SPEC["systemone"]["model"], **SYSTEMONE_PROBE})
-    for service in OPENJEV_SERVICES:
-        captured = _run(
-            [
-                "docker",
-                "exec",
-                f"{PROJECT}-{service}-1",
-                "curl",
-                "-sf",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                body,
-                "http://127.0.0.1:8080/v1/systemone",
-            ],
-            capture=True,
-            check=False,
-        )
-        try:
-            answer = json.loads(captured.stdout)
-        except ValueError:
-            answer = {}
-        error = systemone_probe_error(answer)
-        if captured.returncode != 0 or error is not None:
-            raise SystemExit(f"{service} System One probe failed: {error or captured.stderr}")
+    body = post_json(
+        f"{l1_url}/v1/systemone",
+        {"model": SPEC["systemone"]["upstream_model"], **SYSTEMONE_PROBE},
+        timeout_s=300,
+    )
+    error = systemone_probe_error(body)
+    if error is not None:
+        raise SystemExit(f"Winnow System One probe failed: {error}")
 
 
-def verified_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> dict:
+def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> dict:
     """A chat request; the always-verified model unless ``model`` says otherwise."""
 
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "max_tokens": 32768,
+        # DeepSeek-V4.1's model card: max_tokens >= 256K.
+        "max_tokens": 262144,
     }
     payload.update(overrides)
     return payload
 
 
-def verification_error(body: dict) -> str | None:
-    report = body.get("kairyu_verification")
-    if not isinstance(report, dict):
-        return "the response carries no kairyu_verification"
-    if not isinstance(report.get("guaranteed"), bool):
-        return f"malformed verification {report!r}"
-    if report["guaranteed"] and not report.get("requirements"):
-        return "a guaranteed answer lists no requirements"
-    if not report["guaranteed"] and not report.get("reason"):
-        return "an unguaranteed answer carries no reason"
-    return None
-
-
 def validate_verified_answer(api_url: str) -> None:
     body = post_json(
         f"{api_url}/v1/chat/completions",
-        verified_request(
-            "Name the capital of France in one word, then explain why in one sentence."
-        ),
+        routed_request("Name the capital of France in one word."),
         timeout_s=1800,
     )
-    error = verification_error(body)
-    if error is not None:
-        raise SystemExit(f"verified-answer probe failed: {error}")
-    report = body["kairyu_verification"]
-    print(
-        "verified-answer probe: guaranteed="
-        f"{report['guaranteed']} reason={report['reason']} "
-        f"requirements={[item['id'] for item in report['requirements']]}",
-        flush=True,
-    )
+    try:
+        content = body["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError) as error:
+        raise SystemExit(f"verified-route probe failed: {str(body)[:200]}") from error
+    if "paris" not in content.lower():
+        raise SystemExit(f"verified-route probe failed: {content[:200]!r}")
 
 
 _CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
@@ -717,7 +845,7 @@ def provision_chat_ui(ui_url: str) -> None:
             "id": _CHAT_UI_EFFORT_FILTER_ID,
             "name": "Reasoning Effort",
             "content": filter_source,
-            "meta": {"description": "Reasoning effort for every DeepSeek step."},
+            "meta": {"description": "Reasoning effort for the think route."},
         }
         if existing is None:
             state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
@@ -746,7 +874,9 @@ def validate_serving(env: dict[str, str]) -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_ready(api_url)
     _validate_deepseek(f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}")
-    _validate_openjev_replicas()
+    _validate_chat(f"http://127.0.0.1:{env['QWEN_L1_PORT']}", QWEN_SERVED)
+    _validate_chat(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}", WINNOW_SERVED)
+    _validate_systemone(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}")
     validate_verified_answer(api_url)
 
 
@@ -778,7 +908,8 @@ def up() -> None:
     env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     _ensure_deepseek_image(env)
-    _ensure_openjev_image(env)
+    _ensure_qwen_image(env)
+    _ensure_winnow_image(env)
     _ensure_model(
         env["DEEPSEEK_MODEL_STORAGE_PATH"],
         SPEC["deepseek"],
@@ -786,11 +917,12 @@ def up() -> None:
         "DEEPSEEK_MODEL_SEED",
     )
     _ensure_model(
-        env["OPENJEV_MODEL_STORAGE_PATH"],
-        SPEC["openjev"],
-        env["DEEPSEEK_VLLM_IMAGE"],
-        "OPENJEV_MODEL_SEED",
+        env["QWEN_MODEL_STORAGE_PATH"],
+        SPEC["qwen"],
+        env["QWEN_VLLM_IMAGE"],
+        "QWEN_MODEL_SEED",
     )
+    _ensure_winnow_model(env)
     _compose(
         ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"],
         env=env,
@@ -801,11 +933,6 @@ def up() -> None:
     print(f"Chat UI:     http://{ui_host}:{env['CHAT_UI_PORT']} (Open WebUI, no authentication)")
     print(f"Answer page: http://{ui_host}:{env['PLAYGROUND_PORT']} ({ALWAYS_MODEL})")
     print(f"OpenAI API:  http://{ui_host}:{env['PLAYGROUND_PORT']}/v1 (models {PUBLIC_MODELS})")
-    print(
-        "Each answer carries kairyu_verification: guaranteed true with every "
-        "requirement's p, or false with the reason (refinement_limit, "
-        "judge_unavailable, checklist_unavailable)."
-    )
 
 
 def main() -> None:

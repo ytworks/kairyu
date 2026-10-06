@@ -17,7 +17,7 @@ docker run --rm --init --network host \
   --volume "$SCRIPT_DIR/playground-smoke.mjs:/work/playground_smoke.mjs:ro" \
   "$BROWSER_IMAGE" node /work/playground_smoke.mjs
 
-# Open WebUI (both models, folded Verification section).
+# Open WebUI (both models answer).
 docker run --rm --init --network host \
   --env WEBUI_SMOKE_BASE_URL="${WEBUI_SMOKE_BASE_URL:-http://127.0.0.1:3012}" \
   --volume "$SCRIPT_DIR/webui-browser-smoke.mjs:/work/webui_browser_smoke.mjs:ro" \

@@ -1,38 +1,4 @@
-name: kairyu-deepseek-v4-1-openjev-verified-8gpu
-x-openjev: &openjev
-  # OpenJev (DiffusionGemma 26B-A4B NVFP4) read only through System One:
-  # each `noul` question returns the probability of yes. The published image
-  # is used unchanged; chat is never called, so no think-first overlay.
-  image: ${OPENJEV_IMAGE}
-  ipc: host
-  environment:
-    OPENJEV_MODEL: /models/diffusiongemma-26b-a4b-it-nvfp4
-    OPENJEV_CANVAS: ${OPENJEV_CANVAS}
-    OPENJEV_MAX_NUM_SEQS: ${OPENJEV_MAX_NUM_SEQS}
-    OPENJEV_MAX_MODEL_LEN: ${OPENJEV_MAX_MODEL_LEN}
-    OPENJEV_GPU_UTIL: ${OPENJEV_GPU_UTIL}
-    OPENJEV_MAX_INFLIGHT: ${OPENJEV_MAX_INFLIGHT}
-    OPENJEV_MAX_QUEUE: ${OPENJEV_MAX_QUEUE}
-    HF_HOME: /models/.cache
-    HF_HUB_OFFLINE: '1'
-    HF_HUB_DISABLE_TELEMETRY: '1'
-    VLLM_NO_USAGE_STATS: '1'
-    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-    XDG_CACHE_HOME: /root/.cache
-    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
-    TRITON_CACHE_DIR: /root/.cache/triton
-  healthcheck:
-    test:
-    - CMD
-    - curl
-    - -sf
-    - http://127.0.0.1:8080/health
-    interval: 5s
-    timeout: 3s
-    retries: 1440
-    start_period: 30s
-  restart: unless-stopped
-  cpuset: ${OPENJEV_CPUSET}
+name: kairyu-deepseek-v4-1-qwen3-8-winnow-8gpu
 services:
   # One DeepSeek-V4.1-Flash replica on GPUs 0-5 with the six-GPU example's L1
   # (DP6 / EP6, SM120 overlay, Engram on the host, DSpark 5). Unlike that
@@ -140,19 +106,89 @@ services:
             - '5'
             capabilities:
             - gpu
-  openjev-0:
-    <<: *openjev
-    # Loopback only: launcher probes and calibration read this replica directly.
-    ports:
-    - 127.0.0.1:${OPENJEV_0_PORT:-8015}:8080
+  # Qwen3.8-27B on GPU 6, built as in qwen3.8-27b-1gpu (pinned upstream vLLM
+  # release, example-local chat template). No route references it yet.
+  qwen:
+    image: ${QWEN_VLLM_IMAGE}
+    ipc: host
+    cpuset: ${QWEN_CPUSET}
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      VLLM_NO_USAGE_STATS: '1'
+      VLLM_USE_DEEP_GEMM: '0'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: '1'
     volumes:
     - type: bind
-      source: ${OPENJEV_MODEL_STORAGE_PATH}
+      source: ${QWEN_MODEL_STORAGE_PATH}
       target: /models
       read_only: true
     - type: bind
-      source: ${OPENJEV_CACHE_PATH_0}
-      target: /root/.cache
+      source: ${QWEN_CACHE_PATH}
+      target: /root/.cache/vllm
+    - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+    command:
+    - /models/qwen3.8-27b-fp8
+    - --served-model-name
+    - qwen3.8-27b
+    - --max-model-len
+    - '262144'
+    - --mm-processor-kwargs
+    - '{"min_pixels":65536,"max_pixels":2097152}'
+    - --limit-mm-per-prompt.image
+    - '1'
+    - --limit-mm-per-prompt.video
+    - '0'
+    - --dtype
+    - bfloat16
+    - --kv-cache-dtype
+    - fp8
+    - --mamba-cache-dtype
+    - float16
+    - --mamba-ssm-cache-dtype
+    - float16
+    - --mamba-cache-mode
+    - align
+    - --enable-prefix-caching
+    - --enable-chunked-prefill
+    - --max-num-batched-tokens
+    - '32768'
+    - --max-num-seqs
+    - '32'
+    - --gpu-memory-utilization
+    - '0.95'
+    - --attention-backend
+    - FLASHINFER
+    - --enable-flashinfer-autotune
+    - --compilation-config
+    - '{"cudagraph_mode":"PIECEWISE"}'
+    - --generation-config
+    - vllm
+    - --chat-template
+    - /etc/kairyu/qwen3.8-chat.jinja
+    - --reasoning-parser
+    - qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - qwen3_coder
+    - --disable-uvicorn-access-log
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 720
+      start_period: 30s
+    restart: unless-stopped
+    # Loopback only: the launcher's L1 probe and the l1 gate.
+    ports:
+    - 127.0.0.1:${QWEN_L1_PORT:-8015}:8000
     deploy:
       resources:
         reservations:
@@ -162,19 +198,64 @@ services:
             - '6'
             capabilities:
             - gpu
-  openjev-1:
-    <<: *openjev
-    # Loopback only: launcher probes and calibration read this replica directly.
-    ports:
-    - 127.0.0.1:${OPENJEV_1_PORT:-8016}:8080
+  # Winnow-12B Q8_0 on GPU 7, built as in winnow-12b-q8-1gpu: winnow-server
+  # (llama.cpp b11036 + Winnow's patches + the f072b10 backport) serves chat
+  # and /v1/systemone from one loaded model. Its launcher always passes
+  # --jinja, --reasoning off, --fit off and --no-context-shift.
+  winnow:
+    image: ${WINNOW_IMAGE}
+    cpuset: ${WINNOW_CPUSET}
     volumes:
     - type: bind
-      source: ${OPENJEV_MODEL_STORAGE_PATH}
+      source: ${WINNOW_MODEL_STORAGE_PATH}
       target: /models
       read_only: true
-    - type: bind
-      source: ${OPENJEV_CACHE_PATH_1}
-      target: /root/.cache
+    command:
+    - --alias
+    - winnow-12b
+    - --port
+    - '8091'
+    # 8 chat slots x 65,536 tokens; Winnow's own profile validated 64K.
+    - --context
+    - '524288'
+    - --chat-parallel
+    - '8'
+    - --decision-context
+    - '65536'
+    - --decision-parallel
+    - '8'
+    - --cache
+    - q8_0
+    - --memory
+    - auto
+    # Gemma 4's recommended sampling as the server defaults (LCP-D5).
+    - --temp
+    - '1.0'
+    - --top-k
+    - '64'
+    - --top-p
+    - '0.95'
+    - --min-p
+    - '0.0'
+    - --repeat-penalty
+    - '1.0'
+    - --metrics
+    - --no-webui
+    # Loopback only: the launcher's L1 probes and the fallback gate.
+    ports:
+    - 127.0.0.1:${WINNOW_L1_PORT:-8016}:8091
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8091/health",
+        timeout=3)
+      interval: 5s
+      timeout: 4s
+      retries: 360
+      start_period: 30s
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
@@ -190,7 +271,7 @@ services:
       dockerfile: Dockerfile
       args:
         KAIRYU_VISION: '1'
-    image: ${KAIRYU_IMAGE:-local/kairyu:deepseek-v41-openjev-verified-example}
+    image: ${KAIRYU_IMAGE:-local/kairyu:deepseek-v41-qwen38-winnow-example}
     command:
     - /etc/kairyu/kairyu.yaml
     environment:
@@ -205,9 +286,9 @@ services:
     depends_on:
       deepseek:
         condition: service_healthy
-      openjev-0:
+      qwen:
         condition: service_healthy
-      openjev-1:
+      winnow:
         condition: service_healthy
     ports:
     - 127.0.0.1:${API_PORT:-8013}:8000
@@ -223,15 +304,14 @@ services:
       retries: 120
     restart: unless-stopped
   # Open WebUI: both public models (kairyu-verified routes per request,
-  # kairyu-verified-always always verifies). The guarantee shows in the
-  # folded internal-work section ("Verification").
+  # kairyu-verified-always always takes the verified route).
   chat-ui:
     image: ${OPEN_WEBUI_IMAGE}
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
       DEFAULT_MODELS: kairyu-verified
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":65536,"stream_response":true}'
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":262144,"stream_response":true}'
       ENABLE_PERSISTENT_CONFIG: 'false'
       RESET_CONFIG_ON_START: 'true'
       ENABLE_SIGNUP: 'false'
@@ -252,8 +332,9 @@ services:
     ports:
     - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3012}:8080
     restart: unless-stopped
-  # The answer page: a static chat page that shows each answer's guarantee
-  # flag and requirement probabilities, with Kairyu's API on the same origin.
+  # The answer page: a static chat page for kairyu-verified-always with a
+  # guarantee panel (empty until the guarantee is rebuilt, VCO-D18), with
+  # Kairyu's API on the same origin.
   playground:
     image: ${PLAYGROUND_IMAGE}
     volumes:
