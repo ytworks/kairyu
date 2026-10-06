@@ -73,8 +73,8 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
-- Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API; System One (Jev wire API) at `/v1/systemone` outside ReplicaPool (m11 D8), GPU-verified with OpenJev in `openjev-diffusiongemma-26b-1gpu` (512-token think-first chat, Jev-style playground)
-- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
+- Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, OpenAI-spec Responses API (live reasoning/tool streams, store endpoints, in-band overflow; m11 D4); System One (Jev wire API) at `/v1/systemone` outside ReplicaPool (m11 D8), GPU-verified with OpenJev in `openjev-diffusiongemma-26b-1gpu` (512-token think-first chat, Jev-style playground)
+- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI (0.160 GPU-verified 2026-10-06 on DeepSeek-V4.1 and an AUTO model) and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering; Helm supports immutable images, split-role labels, safe rollout/drain, hardened Pods, and ServiceMonitor plus the kind CI drill
 - AsyncRequest v1 (opt-in `async_requests`): PostgreSQL-backed non-streaming Chat with tenant-scoped status/result/cancel, lease-fenced workers, shared queue telemetry and bounded request/audit retention; the retention-inclusive three-gateway Kind gate runs in F1c CI. Runner State v1 contracts (Kubernetes observation/reconciliation, fenced drain, failure-domain backoff, PostgreSQL leader lease, WP3.1 scaling policies, WP3.2 decision log) exist as a library
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
@@ -111,6 +111,21 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-05 — [amendment] OpenAI Responses compatibility in L3 (m11 D4)
+- What: `/v1/responses` follows the pinned OpenAI spec, so Codex 0.160 and the SDKs work unmodified. It adds:
+  - the OpenAI error envelope with `param` (400/404/405, `previous_response_not_found`, 503 `slow_down` for transient overload)
+  - omitted `max_output_tokens` meaning the remaining context
+  - live reasoning, text and tool-call streams with preamble and in-band gates
+  - `response.in_progress` snapshot heartbeats
+  - reasoning items with `krs1.` tokens, replayed into `reasoning_content`
+  - in-band `context_length_exceeded`
+  - retrieve, delete, `input_items`, `input_tokens`, cancel and `compact`
+  - input images and web-search declarations
+
+  Unsupported fields are typed 400s.
+- Why: Codex retried every 1024-capped turn, aborted on comment keep-alives, never compacted after an HTTP 400, and lost reasoning and preambles. An earlier attempt that widened into L1/L2 was closed, so this one only maps existing capabilities in L3.
+- Refs: m11 D4 amendment 2026-10-05; `kairyu/entrypoints/server/responses_*.py`; `tests/server/test_responses_{contract,stream,inputs}.py`
 
 ### 2026-10-05 — [amendment] llama.cpp `n` limited to 1; Winnow example fixes (PR #620 review)
 - What: `upstream: llamacpp` rejects `n > 1` before dispatch (`max_n=1`), and the contract gate's `n`-above-slots row is removed. In the Winnow examples, `down`/`status`/`logs` no longer need 30 GiB free; the playground sends WebP as PNG; the streaming tool-call gate assembles the deltas instead of searching for the `tool_calls` key.

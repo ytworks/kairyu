@@ -10,8 +10,6 @@ adapter uses (issue #530 pattern).
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -76,6 +74,7 @@ from kairyu.entrypoints.server.protocol import (
     normalize_reasoning_effort,
 )
 from kairyu.entrypoints.server.sse_encode import AnthropicTextDeltaSSEEncoder
+from kairyu.entrypoints.server.sse_keepalive import iter_with_idle_markers, sse_frames
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.entrypoints.server.tool_stream import (
     FoldedToolStream,
@@ -973,52 +972,6 @@ class _AnthropicBlockEmitter:
         return out
 
 
-async def _iter_with_pings(stream) -> AsyncIterator[object]:
-    """Yield stream items, interleaving ``None`` ping markers during silence.
-
-    Claude Code counts every relayed byte and aborts a stream that stays
-    silent for 300 seconds; a backend that thinks before its first partial
-    would otherwise starve the watchdog (the retired buffered path's ping
-    loop used to own this window).
-    """
-
-    iterator = stream.__aiter__()
-    while True:
-        task = asyncio.ensure_future(anext(iterator))
-        try:
-            while True:
-                done, _pending = await asyncio.wait(
-                    {task}, timeout=_KEEPALIVE_SECONDS
-                )
-                if done:
-                    break
-                yield None
-        except BaseException:
-            task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
-            raise
-        try:
-            item = task.result()
-        except StopAsyncIteration:
-            return
-        yield item
-
-
-async def _sse_frames(upstream) -> AsyncIterator[str]:
-    """Split the in-process chat SSE byte stream into frames."""
-
-    buffer = ""
-    async for chunk in upstream:
-        buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
-        while "\n\n" in buffer:
-            frame, buffer = buffer.split("\n\n", 1)
-            if frame:
-                yield frame
-    if buffer:
-        yield buffer
-
-
 async def _live_tool_events(
     request: MessagesRequest,
     validated: ValidatedChatRequest,
@@ -1081,8 +1034,8 @@ async def _live_tool_events(
         yield _message_start_event(request, message_id)
         try:
             usage_owner.mark_dispatched()
-            async for item in _iter_with_pings(
-                validated.engine.stream(validated.generation_request)
+            async for item in iter_with_idle_markers(
+                validated.engine.stream(validated.generation_request), _KEEPALIVE_SECONDS
             ):
                 if item is None:
                     yield _PING_EVENT
@@ -1202,7 +1155,7 @@ async def _relay_auto_tool_stream(
     try:
         yield _message_start_event(request, message_id)
         try:
-            async for frame in _sse_frames(upstream):
+            async for frame in sse_frames(upstream):
                 if frame.startswith(":"):
                     yield f"{frame}\n\n"
                     continue
@@ -1279,7 +1232,7 @@ async def _consume_auto_tool_stream(
     finish_reason: str | None = None
     wire_usage: dict | None = None
     try:
-        async for frame in _sse_frames(upstream):
+        async for frame in sse_frames(upstream):
             if not frame.startswith("data:"):
                 continue
             payload_text = frame[len("data:") :].strip()
@@ -1428,7 +1381,7 @@ async def _relay_auto_stream(
     try:
         yield _message_start_event(request, message_id)
         yield _content_block_start_event(0, {"type": "text", "text": ""})
-        async for frame in _sse_frames(upstream):
+        async for frame in sse_frames(upstream):
             if frame.startswith(":"):
                 yield f"{frame}\n\n"
                 continue

@@ -888,9 +888,10 @@ SM の混在する FA4 ロールは別プロセスで実行してください。
 
 `/v1/chat/completions`(SSE、tools、logprobs、n>1、`response_format: json_schema`、
 vision コンテンツパーツのワイヤ形式)、`/v1/completions`、`/v1/embeddings`
-(float + base64)、`/v1/responses`(`input`、`instructions`、正規の型付き SSE、
-通常／namespace function tools、`function_call_output`、テナント分離された
-`previous_response_id`)、`/v1/models`、`/v1/files` + `/v1/batches`、`/health`、
+(float + base64)、`/v1/responses`(`input`、`instructions`、reasoning と tool call を
+逐次配信する正規の型付き SSE、通常／namespace function tools、`function_call_output`、
+入力画像、テナント分離された `previous_response_id`、取得／削除・`input_items`・
+`input_tokens`・`compact`)、`/v1/models`、`/v1/files` + `/v1/batches`、`/health`、
 `/v1/route`、`/routing`、`/readyz`、`/backends`、`/metrics`、
 `POST /admin/drain` / `POST /admin/undrain`(認証保護。drain は
 readyz を 503 に切り替え)、`GET /admin/usage?tenant=`(台帳有効時)。
@@ -915,14 +916,24 @@ tool-choice、構造化出力フィールドを受け付けます。スカラー
 ステージに到達し、正確な公開 max-token 制限、`n`、logprobs、tools、response
 grammar は選択された最終ワーカーまたは synthesis 境界に適用されます。
 
-Responses ストリームは `response.created` から `response.completed` または
-`response.incomplete` まで、OpenAI のイベント名と欠番のない sequence number を
-返します。失敗時も型付き error/failed イベントで終了します。保存に成功した response
-は `previous_response_id` で継続できますが、ID はテナント境界を越えません。
-function call の引数と結果は通常のチャットテンプレートおよび capability 検証を通って
-往復します。稼働中モデルに対する未変更 Codex CLI の確認には
-`scripts/codex_responses_smoke.sh` を使えます。接続設定と未対応機能は
-`docs/deployment.md` に記載しています。
+Responses API は OpenAI のワイヤ契約(openai-openapi@13fa6e7ab9、openai-python 3.24
+の型)に従います。
+
+- ストリームは `response.created` から `response.completed` または
+  `response.incomplete` まで、OpenAI のイベント名と欠番のない sequence number を
+  返します。
+- 長い待ちの間は、現在の snapshot を載せたデータ heartbeat を送ります。
+- 失敗時も型付きの error/failed イベントで終了します。Codex が compaction を
+  行えるよう、`context_length_exceeded` も in-band で返します。
+- reasoning は reasoning 項目として返し、次のターンで replay します。テナントに
+  束縛された `encrypted_content` を付けることもできます。
+- エラーは `param` 付きの OpenAI envelope で返します。
+- 保存した response は取得でき、`previous_response_id` で継続できます。ただし
+  ID はテナント境界を越えません。
+
+稼働中のモデルに対して改造なしの Codex CLI を試すには、
+`scripts/codex_responses_smoke.sh` を使います。接続設定、Codex での挙動、拒否する
+フィールドは `docs/deployment.md` に記載しています。
 
 `POST /v1/route` は `{model, messages}` を受け取り、実際のチャットと同じモデル別
 チャットテンプレートを描画してから Router の非破壊 `preview()` を呼びます。

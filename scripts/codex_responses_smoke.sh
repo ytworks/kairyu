@@ -28,16 +28,16 @@ codex exec \
   --ignore-rules \
   --ephemeral \
   --skip-git-repo-check \
+  --disable apps \
   -c 'model_provider="kairyu"' \
   -c "model_providers.kairyu={name=\"Kairyu\",base_url=\"$kairyu_base_url\",env_key=\"KAIRYU_CODEX_API_KEY\",wire_api=\"responses\",stream_max_retries=0}" \
-  -c 'model_supports_reasoning_summaries=false' \
   -c 'model_reasoning_effort="minimal"' \
   -c 'web_search="disabled"' \
   -m "$kairyu_model" \
   --sandbox read-only \
   --json \
   --output-last-message "$last_message" \
-  "$smoke_prompt" | tee "$event_log"
+  "$smoke_prompt" </dev/null | tee "$event_log"
 
 grep -q 'PASS' "$last_message"
 if [[ "$kairyu_smoke_mode" == "tool" ]]; then

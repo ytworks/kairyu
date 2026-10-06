@@ -137,53 +137,6 @@ class LengthBackend(MockBackend):
         )
 
 
-def test_buffered_stream_opens_before_generation_and_keeps_alive(
-    tmp_path, monkeypatch
-):
-    # Codex closes SSE streams that stay silent for 300s while buffered
-    # generation on orchestrated models can run for minutes: the opening
-    # events must be emitted before generation finishes and keep-alive
-    # comments must cover the generation window.
-    from kairyu.entrypoints.server import responses_service
-
-    monkeypatch.setattr(responses_service, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
-
-    class SlowBackend(MockBackend):
-        async def generate(self, request):
-            await asyncio.sleep(0.25)
-            return await super().generate(request)
-
-    app = _app(tmp_path, backend=SlowBackend({"hello": "done"}))
-    with TestClient(app) as client:
-        response = client.post(
-            "/v1/responses",
-            json={
-                "model": "m",
-                "input": "hello",
-                "stream": True,
-                "tools": [_tool()],
-                "tool_choice": "auto",
-            },
-        )
-    assert response.status_code == 200
-    lines = [line for line in response.text.splitlines() if line]
-    # The opening events precede generation output; keep-alive comments can
-    # only appear while generation is still pending, so their presence in
-    # the middle of the stream proves the connection never goes silent.
-    assert lines[0] == "event: response.created"
-    keepalive_positions = [
-        index for index, line in enumerate(lines) if line == ": keep-alive"
-    ]
-    assert keepalive_positions
-    first_item_index = next(
-        index
-        for index, line in enumerate(lines)
-        if line == "event: response.output_item.added"
-    )
-    assert all(position < first_item_index for position in keepalive_positions)
-    assert "event: response.completed" in lines
-
-
 @pytest.mark.parametrize(
     ("stream", "with_tools"),
     [
@@ -303,6 +256,7 @@ def test_responses_prepare_failure_precedes_stream_headers_and_dispatch(
     assert response.json()["error"] == {
         "message": expected_message,
         "type": expected_type,
+        "param": None,
         "code": expected_code,
     }
     if not isinstance(failure, ValueError):
@@ -479,22 +433,19 @@ def test_function_tool_stream_has_canonical_argument_lifecycle(tmp_path):
     assert response.status_code == 200
     events = _sse_events(response.text)
     types = [event["type"] for event in events]
-    assert types == [
-        "response.created",
-        "response.in_progress",
-        "response.output_item.added",
-        "response.function_call_arguments.delta",
+    deltas = [e["delta"] for e in events if e["type"] == "response.function_call_arguments.delta"]
+    assert types[:3] == ["response.created", "response.in_progress", "response.output_item.added"]
+    assert types[3 + len(deltas) :] == [
         "response.function_call_arguments.done",
         "response.output_item.done",
         "response.completed",
     ]
     assert [event["sequence_number"] for event in events] == list(range(len(events)))
-    added = events[2]["item"]
-    done = events[5]["item"]
+    added, done = events[2]["item"], events[-2]["item"]
     assert added["id"] == done["id"]
     assert added["call_id"] == done["call_id"]
     assert added["arguments"] == ""
-    assert done["arguments"] == '{"a": 2, "b": 3}'
+    assert "".join(deltas) == done["arguments"] == '{"a":2,"b":3}'
     assert events[-1]["response"]["output"] == [done]
 
 
@@ -554,7 +505,7 @@ def test_function_call_output_accepts_codex_content_item_arrays(tmp_path):
             },
         )
     assert image_output.status_code == 400
-    assert "text tool output only" in image_output.json()["error"]["message"]
+    assert image_output.json()["error"]["param"] == "input[0].output[0].type"
 
 
 def test_codex_internal_passthrough_fields_are_accepted_and_dropped(tmp_path):
@@ -877,8 +828,8 @@ def test_truncated_compaction_is_incomplete(tmp_path, stream):
                 "input": "continue",
             },
         )
-    assert continued.status_code == 404
-    assert "previous response not found" in continued.json()["error"]["message"]
+    assert continued.status_code == 400
+    assert continued.json()["error"]["code"] == "previous_response_not_found"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
@@ -905,7 +856,7 @@ def test_empty_compaction_summary_fails_closed(tmp_path, stream):
             "response.failed",
         ]
         assert events[-2]["code"] == "compaction_failed"
-        assert events[-1]["response"]["error"]["code"] == "compaction_failed"
+        assert events[-1]["response"]["error"]["code"] == "server_error"
         assert events[-1]["response"]["output"] == []
     else:
         assert response.status_code == 502
@@ -1072,21 +1023,18 @@ def test_disabled_web_search_tolerates_search_configuration(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("payload", "param"),
     [
-        ({"mystery": True}, "unsupported request fields"),
-        ({"tools": [{"type": "web_search"}]}, "expected 'function'"),
+        ({"mystery": True}, "mystery"),
+        ({"tools": [{"type": "file_search"}]}, "tools[0].type"),
         ({"context_management": [{"type": "compaction"}]}, "context_management"),
-        ({"include": ["message.output_text.logprobs"]}, "unsupported include values"),
-        ({"service_tier": "priority"}, "service_tier is not supported"),
-        (
-            {"stream_options": {"include_obfuscation": True}},
-            "stream obfuscation is not supported",
-        ),
+        ({"include": ["message.output_text.logprobs"]}, "include[0]"),
+        ({"background": True}, "background"),
+        ({"stream_options": {"include_obfuscation": True}}, "stream_options.include_obfuscation"),
         ({"text": {"verbosity": "maximum"}}, "text.verbosity"),
     ],
 )
-def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, message):
+def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, param):
     backend = MockBackend()
     with TestClient(_app(tmp_path, backend)) as http:
         response = http.post(
@@ -1094,7 +1042,7 @@ def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, me
             json={"model": "m", "input": "hello", **payload},
         )
     assert response.status_code == 400
-    assert message in response.json()["error"]["message"]
+    assert response.json()["error"]["param"] == param
     assert backend.prompts_seen == ()
 
 
@@ -1322,7 +1270,7 @@ def test_namespace_tool_stream_keeps_public_name_and_ids_stable(tmp_path):
         assert item["id"] == added["id"]
         assert item["call_id"] == added["call_id"]
     assert added["arguments"] == ""
-    assert done["arguments"] == '{"cmd": "printf PASS"}'
+    assert done["arguments"] == '{"cmd":"printf PASS"}'
 
 
 def test_namespaced_function_history_survives_legacy_chat_rendering(tmp_path):
@@ -1501,8 +1449,10 @@ def test_store_false_and_cross_tenant_stream_ids_are_not_readable(
             },
         )
     assert first.status_code == 200
-    assert cross_tenant.status_code == 404
-    assert not_found.status_code == 404
+    assert cross_tenant.status_code == not_found.status_code == 400
+    assert {cross_tenant.json()["error"]["param"], not_found.json()["error"]["param"]} == {
+        "previous_response_id"
+    }
 
 
 def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):
@@ -1540,4 +1490,4 @@ def test_stream_failure_emits_error_and_failed_without_storing(tmp_path):
     assert failed["usage"]["input_tokens"] == totals["prompt_tokens"]
     assert failed["usage"]["output_tokens"] == totals["completion_tokens"]
     assert "secret upstream endpoint" not in response.text
-    assert lookup.status_code == 404
+    assert lookup.status_code == 400
