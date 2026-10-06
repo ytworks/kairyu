@@ -474,6 +474,21 @@ Acceptance:
   - in-band overflow, then auto-compaction on the next turn
   - a live web search declaration
   - an image turn whose tool follow-up gets the typed 400
+- GPU (2026-10-06): the PR head as a gateway in front of a live DeepSeek-V4.1
+  DP6/EP6 vLLM replica (8× RTX PRO 6000) and the `kairyu-verified` AUTO model:
+  - codex-cli 0.160.0: text, a tool loop whose second request carries the
+    `krs1.` reasoning token, and an image turn pass; the image turn's tool
+    follow-up gets the typed 400
+  - an AUTO tool loop passes, and a 233 s silent verified-DAG turn completes
+    under a 30 s Codex idle timeout (heartbeat gaps 15-20 s)
+  - a 1.1M-token prompt overflows vLLM's 1M window: unary 400 and in-band
+    `response.failed`, both `context_length_exceeded`
+  - every captured stream event (1254) validates against the openai-python
+    3.24 types; store endpoints and `previous_response_not_found` behave as
+    above; usage matches vLLM's prompt-token counter
+  - not observable here: replayed reasoning in the rendered prompt (this
+    example uses the legacy renderer, which drops it as Chat does), and
+    `reasoning_tokens` (vLLM reports them, but the L1 usage carries none)
 
 ### D5 — Vision wire format
 

@@ -727,6 +727,12 @@ read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
 command event, its tool result, and a final message containing `PASS`;
 `KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke.
 
+A Codex signed in with ChatGPT also declares its connector tools (`apps`:
+Gmail, Drive, Slack, ...) to a custom provider. One such account sent 387 KB of
+tool definitions, about 110K prompt tokens, with every request. Run Codex with
+`--disable apps` (or `[features] apps = false` in `config.toml`) when the
+connectors are not needed; the smoke script does this.
+
 Codex-relevant behavior (codex-cli 0.160):
 
 - **No artificial output cap.** An omitted `max_output_tokens` means the
