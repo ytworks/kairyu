@@ -1,4 +1,4 @@
-# L2 drops replayed reasoning on Chat Completions
+# Qwen requirements reads the conversation without replayed reasoning
 
 Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641).
 Status: approved by the owner (2026-10-07); supersedes the earlier unapproved
@@ -20,35 +20,40 @@ tokens). Responses AUTO already drops replayed reasoning for this reason
 (m11 D4, `responses_service.py` `replay_reasoning=not orchestrated`); Chat
 Completions does not.
 
-## 2. Change (one)
+## 2. Change
 
-- `kairyu/entrypoints/server/chat_service.py`: the L2 conversation built by
-  `validate_orchestration_chat_input` omits assistant `reasoning_content`.
-  Direct-engine chat templates keep it. No example, DSL, checklist or L1
-  change.
-- `docs/design/m11-product.md`: amendment — the 2026-08-14 assistant-history
-  field is preserved for direct engines only; L2 drops it as Responses AUTO
-  does. `PROGRESS.md` entry.
+The owner's correction (2026-10-07): only Qwen and Winnow do without the
+replayed reasoning; DeepSeek needs it. A uniform drop at the Chat
+Completions boundary (commit a3420252) was reverted.
 
-Framework admission: (1) Chat Completions L2 conversation grows by every
-replayed stage report; code path above; (2) no extension point — message
-shaping is server code; (3) any orchestrated model with exposed intermediates
-and a multi-turn client (e.g. the tiered Chat UI) regresses the same way;
-(4) drop one field at the L2 boundary, matching the existing Responses rule.
+- Framework (`kairyu/orchestration/request.py`, `conductor.py`): a role
+  placeholder `{conversation_without_reasoning}` renders `{conversation}`
+  without assistant `reasoning_content`. `{conversation}` is unchanged.
+- Example (`verified.yaml`, `verified-always.yaml`): Qwen `requirements`
+  reads `{conversation_without_reasoning}`. DeepSeek `drafts`
+  (`{conversation}`) and `answer` (`{query}`) keep the reasoning. Winnow
+  `judgments` reads `request` (system/developer + latest user), which holds
+  no assistant turn.
+- Docs: m1 D8 and VCO-D19 amendments; `PROGRESS.md` entry.
+
+Framework admission: (1) a role cannot read the conversation without
+replayed reasoning; `Conductor._render` fixes `{conversation}`; (2) no
+extension point renders a role's conversation differently; (3) any DAG that
+mixes a small-context worker with exposed intermediates and a multi-turn
+client overflows the same way; (4) one placeholder; which role uses it
+stays in the example.
 
 ## 3. Expected effect (measured)
 
 Without `reasoning_content`, the 67 failed turns measured 30,330-96,837 Qwen
 tokens; + 65,536 output ≤ ~162K < 262,144. Three such replays returned valid
-11-13 point lists. DeepSeek prompts shrink alike (241,080 → 43,326 tokens on
-the 14:42:49 turn).
+11-13 point lists. DeepSeek prompts are unchanged.
 
 ## 4. Test
 
-Extend the existing Chat round-trip test
-(`tests/server/test_orchestration_usage_trace.py`) to run through the
-orchestration chat path and assert the second request's L2 prompts carry the
-earlier answer but not the replayed stage report. No new test.
+One conductor test (`tests/unit/test_conductor.py`): over a conversation
+with a replayed `reasoning_content`, `{conversation}` keeps it and
+`{conversation_without_reasoning}` drops it while keeping the messages.
 
 ## 5. Verification
 
@@ -59,7 +64,12 @@ earlier answer but not the replayed stage report. No new test.
 
 ## 6. Out of scope
 
+- DeepSeek reads the full conversation; ~290+ messages may exceed its
+  1,048,576 tokens (estimate, ~3.4K tokens per message).
 - Conversations whose body alone exceeds ~196K Qwen tokens still overflow
   `requirements` (publish unverified); fixing that needs compaction or a Qwen
   context change — a separate owner decision.
 - The 2 short `requirements` outputs (not reproducible on replay).
+- The Winnow route judge (`profile_judge`, `Orchestrator._systemone_judge_body`)
+  still sends replayed `reasoning_content` uncut inside its 120,000-character
+  bound; reported to the owner, not changed here.

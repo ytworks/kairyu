@@ -178,7 +178,7 @@ roles:
       {response_format}
       --- END RESPONSE FORMAT ---
       --- CONVERSATION ---
-      {conversation}
+      {conversation_without_reasoning}
       --- END CONVERSATION ---
 
   # Wave 2: one Winnow request judges every draft, with the request: can it

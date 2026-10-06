@@ -1286,6 +1286,16 @@ class Conductor:
             # a role that analyses the request (rather than answering it)
             # never mistakes Kairyu's instructions for the user's.
             values["conversation"] = conversation_text(query)
+        if (
+            "{conversation_without_reasoning}" in template
+            and "conversation_without_reasoning" not in outputs
+        ):
+            # The same messages without assistant reasoning_content, for a
+            # role whose worker need not read earlier turns' replayed
+            # reasoning (it can outgrow a small context).
+            values["conversation_without_reasoning"] = conversation_text(
+                query, reasoning=False
+            )
         if "{response_format}" in template and "response_format" not in outputs:
             # {response_format}: the caller's output contract (JSON), so a role
             # that analyses the request reads its wording within that format.

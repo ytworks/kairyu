@@ -222,6 +222,9 @@ budget accounting are unchanged. Supporting mechanisms:
   `response_format` to it too. Internal prompts may render `{conversation}`,
   `{response_format}` and `{tools}` (the caller's tool definitions, counted in
   admission bounds); the final unit still carries only the caller's intent.
+  Amended 2026-10-07 (PR #641): `{conversation_without_reasoning}` renders
+  the same messages without assistant `reasoning_content`, for a role whose
+  worker should not read replayed reasoning (the example chooses the role).
 - **Refinement prompt.** `refine_prompt` renders a refinement from
   `{previous}` and `{feedback}` (and any upstream output) instead of the
   appended default. `checklist.max_refinements` bounds one verifier below

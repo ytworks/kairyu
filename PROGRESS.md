@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-07 — [amendment] Qwen requirements reads the conversation without replayed reasoning (PR #641)
+- What: new role placeholder `{conversation_without_reasoning}` (`{conversation}` minus assistant `reasoning_content`); the example's Qwen `requirements` uses it, DeepSeek roles keep the full conversation.
+- Why: DeepSWE r1 replayed Kairyu's stage reports; Qwen `requirements` overflowed 262,144 tokens and 87/160 VERIFIED turns had no Winnow judgment. Owner: only Qwen and Winnow do without reasoning; DeepSeek needs it.
+- Refs: m1 D8 amendment 2026-10-07; VCO-D19 amendment 2026-10-07; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
+
 ### 2026-10-06 — [design] Verified route in three waves; verifiers may wait for a parallel branch (VCO-D19, PR #641)
 - What: VERIFIED = wave 1 DeepSeek five drafts (one call, caller's effort) beside Qwen requirements (MECE, ≤16, low effort); wave 2 one Winnow read per draft (adoptable?) and per draft x requirement (met?); wave 3 DeepSeek (caller's effort) writes the best answer from all of them critically. Framework: a verifier may read a unit running beside its target; the verdict waits for it (deadlock-free validation).
 - Why: owner design; without the framework change wave 1 could not run in parallel (owner authorized the change).

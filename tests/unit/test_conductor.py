@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 from dataclasses import replace
@@ -16,6 +17,7 @@ from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TemplatedProm
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
+from kairyu.orchestration.request import CONVERSATION_JSON_CLOSE, CONVERSATION_JSON_OPEN
 from kairyu.orchestration.trace import WorkerTraceIdentity
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
@@ -234,6 +236,35 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert "build a cli" in backend.prompts_seen[0]
     assert planner_output[-20:] in backend.prompts_seen[1]
     assert result.final_text == result.outputs["worker"]
+
+
+async def test_a_role_may_read_the_conversation_without_replayed_reasoning():
+    # Agent clients replay each assistant turn with its reasoning_content; a
+    # role on a small-context worker can read the same messages without it.
+    turns = [
+        {"role": "user", "content": "fix the bug"},
+        {"role": "assistant", "content": "ran tests", "reasoning_content": "REPLAYED"},
+        {"role": "user", "content": "continue"},
+    ]
+    query = f"{CONVERSATION_JSON_OPEN}{json.dumps(turns)}{CONVERSATION_JSON_CLOSE}"
+    backend = ScriptedBackend(["full", "short", "final"])
+    roles = (
+        RoleSpec(name="full", worker="w", prompt="[full] {conversation}"),
+        RoleSpec(
+            name="short",
+            worker="w",
+            prompt="[short] {conversation_without_reasoning}",
+            depends_on=("full",),
+        ),
+        RoleSpec(name="final", worker="w", prompt="[final] {short}", depends_on=("short",)),
+    )
+
+    await Conductor(roles=roles, workers={"w": backend}).run(query)
+
+    full, short, _ = backend.prompts_seen
+    assert "REPLAYED" in full
+    assert "REPLAYED" not in short
+    assert "ran tests" in short and "continue" in short
 
 
 @pytest.mark.parametrize(
