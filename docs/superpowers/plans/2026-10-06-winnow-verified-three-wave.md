@@ -143,31 +143,30 @@ TTFT/E2E, live worker load; times in JST.
    (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
    that is ~370K tokens.
 
-### Fix (both framework, need authorization)
+### Fix (minimal; owner: the cause is Qwen's token limit, earlier turns'
+### information is passed on as it is)
 
-- F2. Orchestration Chat Completions drops assistant `reasoning_content`
-  from the L2 conversation (still accepted on the wire; direct engines keep
-  it for key-sensitive templates) — the rule Responses AUTO already follows.
-  Every role's input shrinks 3-5x on agent clients that echo it.
-- F3. A role option bounding what `{conversation}` renders with the existing
-  `bounded_conversation` (system messages and the first task, then the newest
-  messages that fit; the omitted count is shown), as the route judge and
-  checklist state already do. Example: `requirements` reads at most 400,000
-  characters (~160K Qwen tokens + 65,536 output < 262,144). DeepSeek roles
-  read the whole conversation (1M context).
-- Tests: one chat-input test (assistant `reasoning_content` absent from the
-  L2 prompt, content and tool calls kept); one conductor test (a bounded role
-  reads the first task and the newest messages, with the omitted count).
+- F3 (framework, needs authorization): a role option `max_conversation_chars`
+  bounding what `{conversation}` renders with the existing
+  `bounded_conversation` (first messages including the task, then the newest
+  messages that fit; the omitted count is shown), as the route judge
+  (`max_conversation_chars`) and checklist state already do. Nothing else in
+  the conversation or in other roles changes.
+- Example: `requirements` sets 400,000 characters. At the worst measured
+  ratio (~2.5 JSON characters per Qwen token) that is ~160K tokens; with the
+  65,536 output cap it stays under Qwen's 262,144.
+- Not addressed: the two stochastic empty lists (cause 3); the answer is then
+  written without judgments, as designed.
+- Tests: one conductor test (the bounded role reads the task and the newest
+  messages with the omitted count); the example test asserts the bound.
 
 ### Verification
 
 1. CPU: ruff, changed-path tests.
-2. Replays (live, before redeploying): the three r1 turns and the longest
-   09/12 conversation through the new code: Qwen's prompt < 196K tokens and a
-   valid list every time.
-3. Redeploy (`./run.sh`), then all nine gates (~1 h 50 min) plus
-   `long-conversation`: those four conversations through
-   `kairyu-verified-always`; pass = requirements and judgments succeed on all.
-4. DeepSWE r2: 113 problems, 1 lap, 4 parallel, server default effort, API
-   timeout 3600 s (~1-2 days; turns are shorter with 3-5x smaller inputs).
-   r1 is stopped and kept as an aborted run.
+2. Live replay before redeploying: the three failed r1 turns and the longest
+   09/12 conversation through the new code; pass = Qwen's prompt fits and a
+   valid list returns every time.
+3. Redeploy (`./run.sh`), all nine gates plus `long-conversation` (those four
+   conversations through `kairyu-verified-always`; pass = requirements and
+   judgments succeed on all).
+4. Stop r1 (kept as an aborted run); DeepSWE r2 with the same conditions.
