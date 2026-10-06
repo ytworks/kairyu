@@ -143,30 +143,28 @@ TTFT/E2E, live worker load; times in JST.
    (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
    that is ~370K tokens.
 
-### Fix (minimal; owner: the cause is Qwen's token limit, earlier turns'
-### information is passed on as it is)
+### Fix (example only; owner: every earlier turn's information stays in)
 
-- F3 (framework, needs authorization): a role option `max_conversation_chars`
-  bounding what `{conversation}` renders with the existing
-  `bounded_conversation` (first messages including the task, then the newest
-  messages that fit; the omitted count is shown), as the route judge
-  (`max_conversation_chars`) and checklist state already do. Nothing else in
-  the conversation or in other roles changes.
-- Example: `requirements` sets 400,000 characters. At the worst measured
-  ratio (~2.5 JSON characters per Qwen token) that is ~160K tokens; with the
-  65,536 output cap it stays under Qwen's 262,144.
-- Not addressed: the two stochastic empty lists (cause 3); the answer is then
-  written without judgments, as designed.
-- Tests: one conductor test (the bounded role reads the task and the newest
-  messages with the omitted count); the example test asserts the bound.
+Qwen3.8-27B's model card: 262,144 tokens natively, extensible to 1,000,000
+with YaRN; for vLLM `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `--hf-overrides` with
+`rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`
+(other `rope_parameters` unchanged), `--max-model-len 1000000`. The card
+notes static YaRN may affect short texts; Qwen serves only `requirements`.
+
+- `compose.yaml` (Qwen service): the env var, `--hf-overrides` and
+  `--max-model-len 1000000`.
+- `kairyu.yaml`: the Qwen pool's `max_model_len: 1000000`.
+- No framework, prompt or DAG change; Qwen reads the whole conversation.
+- KV cache is 1,791,840 tokens on GPU 6, so four long requirement calls may
+  queue in vLLM rather than run at once.
+- Limit: a conversation beyond 1M Qwen tokens still fails; that turn's answer
+  is written without judgments, as designed.
 
 ### Verification
 
-1. CPU: ruff, changed-path tests.
-2. Live replay before redeploying: the three failed r1 turns and the longest
-   09/12 conversation through the new code; pass = Qwen's prompt fits and a
-   valid list returns every time.
-3. Redeploy (`./run.sh`), all nine gates plus `long-conversation` (those four
-   conversations through `kairyu-verified-always`; pass = requirements and
-   judgments succeed on all).
+1. Redeploy (`./run.sh`; the Qwen container restarts with the new flags).
+2. Live replay of the three failed r1 turns (prompts up to ≥ 196,609 tokens)
+   through `requirements`: a valid list every time.
+3. All nine gates plus `long-conversation` (those turns through
+   `kairyu-verified-always`; pass = requirements and judgments succeed).
 4. Stop r1 (kept as an aborted run); DeepSWE r2 with the same conditions.
