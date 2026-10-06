@@ -143,56 +143,47 @@ TTFT/E2E, live worker load; times in JST.
    (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
    that is ~370K tokens.
 
-### Fix plan (2026-10-07) — awaiting owner approval
+### Fix plan (2026-10-07, revision of the F2 + F3 plan) — awaiting approval
 
-Cause (`reasoning_content`): `requirements` (Qwen, 262,144 tokens) reads the
-whole L2 conversation, including every earlier assistant turn's
-`reasoning_content` — here Kairyu's stage report (five drafts, reasoning,
-judgments). On the 14:42 turn that is 189,953 of the conversation's 240,650
-Qwen tokens; on all 67 failed turns Qwen's input was 199,082-325,598 tokens,
-so prompt + 65,536 output exceeded 262,144 and vLLM rejected it.
+Causes (confirmed by live replay of r1 turns):
 
-Unchanged: Kairyu still emits each turn's stage report in
-`reasoning_content`; the caller still returns it; DeepSeek roles (drafts,
-answer, 1M context) and Winnow still read the whole conversation including it.
+1. The L2 conversation re-reads every earlier turn's `reasoning_content`
+   (Kairyu's stage report echoed by the client): 189,953 of 240,650 Qwen
+   tokens on the 14:42 turn; 75-88 % of the characters.
+2. Qwen (262,144) rejects the `requirements` request: on all 67 failed turns
+   its input was 199,082-325,598 tokens + the 65,536 output cap (vLLM 400).
+3. Even without (1), a long agent conversation's own content can exceed Qwen
+   (09/12 DeepSeek-only run: up to 714 messages / 925,539 characters).
 
-Change:
+Unchanged: Kairyu emits each turn's stage report in `reasoning_content`;
+DeepSeek and Winnow roles, prompts, caps and the DAG.
 
-| # | Layer | Owner | What |
-|---|---|---|---|
-| 1 | L2 | framework (needs authorization) | role option `conversation_reasoning: omit` (default `keep`, today's behavior): that role's `{conversation}` is rendered without assistant `reasoning_content`; message content and tool calls stay |
-| 2 | L2 | example | `requirements` in `verified.yaml` and `verified-always.yaml` sets `conversation_reasoning: omit`; nothing else changes (cap stays 65,536) |
+Changes:
 
-Framework admission: the shared contract is "a role's input fits its
-worker's context"; today a role cannot read the conversation without the
-echoed reasoning (no extension point renders it differently), so any
-orchestrator that exposes intermediate outputs to an echoing agent client
-overflows every smaller-context role. The option is a rendering switch; which
-role uses it stays in the example.
+| # | Layer | Owner | What | Solves |
+|---|---|---|---|---|
+| F2 | L3→L2 | framework | orchestration Chat Completions renders the L2 conversation without assistant `reasoning_content` (still accepted on the wire; direct engines keep it) — the rule Responses AUTO already follows (m11 D4) | 1, 2 |
+| F3 | L2 | framework | role option `max_conversation_chars`: `{conversation}` rendered with the existing `bounded_conversation` (first messages incl. the task, then the newest that fit, omitted count shown), as the route judge and checklist state already do | 3 |
+| E | L2 | example | `requirements` sets `max_conversation_chars: 400000` (~160K Qwen tokens at the worst measured 2.5 chars/token; + 65,536 < 262,144) | 3 |
 
-Measured effect (live Qwen `/tokenize`, exact rendered request): the 67
-failed turns' input becomes 30,330-96,837 tokens (median 75,815); all 67 fit
-with the 65,536 cap. Limit: a conversation whose content alone exceeds about
-196K Qwen tokens still overflows; that turn then runs without requirements
-and judgments, as the design already handles.
+Measured with F2 (live `/tokenize` of the exact rendered request): the 67
+failed turns become 30,330-96,837 tokens; all fit, so F3 never truncates them
+(it only acts above 400,000 characters).
 
-Tests: one conductor test (a role with `omit` gets the conversation without
-`reasoning_content`, a role without it gets it unchanged); the example test
-checks that requirements' Qwen request has no earlier `reasoning_content`
-and drafts' DeepSeek request has it.
+Tests: one chat-input test (F2: assistant `reasoning_content` absent from the
+L2 prompt, content and tool calls kept); one conductor test (F3: the bounded
+role reads the task and the newest messages with the omitted count).
 
-Docs: m1 amendment (the option), VCO-D19 note, PROGRESS.
+Docs: m11 assistant-history amendment (F2), m1 (F3), VCO-D19 note, PROGRESS.
 
 Verification:
 
-1. CPU: ruff; `tests/unit/test_conductor.py`,
-   `tests/unit/test_deepseek_v41_qwen38_winnow_example.py`.
-2. Live, before redeploying: the 67 failed r1 turns' requirements requests
-   rendered by the new code and sent to Qwen; pass = every one accepted and a
-   valid list returned.
-3. Redeploy (`./run.sh`; gateway restarts). All nine gates; new gate
-   `long-conversation`: five r1 turns whose old Qwen input exceeded 262,144
-   through `kairyu-verified-always`; pass = requirements and judgments succeed
-   on all five, and the drafts' DeepSeek request still carries the earlier
-   `reasoning_content`.
+1. CPU: ruff; changed-path tests.
+2. Live before redeploying: the 67 failed turns' requirements requests
+   rendered by the new code sent to Qwen — all accepted, valid lists; one
+   synthetic > 400,000-character conversation (the 09/12 longest) — accepted,
+   task kept, valid list.
+3. Redeploy (`./run.sh`); all nine gates and `long-conversation` (five r1
+   turns whose old Qwen input exceeded 262,144, through
+   `kairyu-verified-always`; pass = requirements and judgments succeed).
 
