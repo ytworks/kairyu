@@ -1,4 +1,4 @@
-# Winnow judges every turn of a long agent conversation
+# Exact multi-turn conversations beyond a worker's context (any API)
 
 Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641),
 follows VCO-D19. Status: awaiting owner approval.
@@ -6,80 +6,107 @@ follows VCO-D19. Status: awaiting owner approval.
 ## 1. Problem and goal
 
 DeepSWE r1 (`deepswe-verified-3wave-full-4w-20261006-r1`): Winnow judged 61
-of 132 VERIFIED turns; on 71 no Winnow request was sent. Goal: Winnow judges
-on every turn the route can serve, while every role keeps reading the whole
-conversation, including each earlier turn's `reasoning_content`, so that
-multi-turn exchanges stay exact.
+of 132 VERIFIED turns; on 71 no Winnow request was sent.
+
+Goal, for any orchestration and any public API (Chat Completions, Responses,
+Messages):
+
+- every role works on every turn however long the conversation grows;
+- every earlier turn's information, including `reasoning_content`, stays
+  available to every role (exact multi-turn exchanges);
+- no dependence on the client (Codex-style client compaction exists only on
+  Responses; mini-swe-agent and other Chat Completions clients never compact).
 
 ## 2. Causal chain (measured)
 
 | Link | Measured | Defect |
 |---|---|---|
-| L1 | No `requirements` list → `judgments` sends nothing, not even the 5 adoption questions that need only the request and the drafts (`checklist._pending_questions` raises for the whole checklist when one `foreach` source is missing) | generic: a checklist is all-or-nothing on its item sources |
+| L1 | No `requirements` list → `judgments` sends nothing, not even the 5 adoption questions that need only the request and the drafts (`checklist._pending_questions` raises for the whole checklist when one `foreach` source is missing) | a checklist is all-or-nothing on its item sources |
 | L2 | Qwen gave no list on 69 turns: 67 rejected by vLLM (input 199,082-325,598 + 65,536 cap > 262,144), 2 empty on 148K / 181K inputs (valid on 4 replays each) | consequence of L3 |
-| L3 | The route's roles read the same conversation: DeepSeek (drafts, answer) holds 1,048,576 tokens, Qwen (requirements) 262,144. The conversation, with each turn's stage report in `reasoning_content`, grows ~3.4K Qwen tokens per message (240,650 at 61 messages, 320,460 at 95), so Qwen overflows from ~60 messages while DeepSeek still reads it | example: one worker of the route cannot hold what the route serves |
-| L4 | Winnow's input on judged turns ≤ 15,115 tokens (context 65,536) | none |
+| L3 | Every role renders the whole conversation. It grows ~3.4K tokens per message with each turn's stage report (240,650 tokens at 61 messages, 320,460 at 95): Qwen (262,144) overflows from ~60 messages, DeepSeek (1,048,576) from ~290; the 09/12 DeepSWE conversations reached median 298 and max 714 messages | a role's input is unbounded while its worker's context is fixed; Kairyu has no server-side way to carry a conversation beyond a worker's context, so the request fails |
+| L4 | Responses AUTO drops replayed reasoning so that stage output does not grow every L2 prompt (m11 D4); Chat Completions keeps it | the two APIs give roles different histories; dropping loses information |
+| L5 | Winnow's input on judged turns ≤ 15,115 tokens (context 65,536) | none |
 
 ## 3. Changes
 
-| # | Fixes | Layer | Owner | File | Change |
-|---|---|---|---|---|---|
-| 1 | L3 | L1 | example | `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/compose.yaml` (service `qwen`), `kairyu.yaml` (pool `qwen3.8-27b`) | Qwen at its model card's 1M context: `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; `--hf-overrides` with `rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144` (other `rope_parameters` as in the checkpoint); `--max-model-len 1000000`; pool `max_model_len: 1000000`. Qwen then reads exactly what DeepSeek reads, up to the same limit |
-| 2 | L1 | L2 | framework | `kairyu/orchestration/checklist.py` (`_pending_questions`, `judge`), `kairyu/orchestration/conductor.py` (trace) | A `foreach` source without a usable list skips only the questions bound to it; every other question is still asked; skipped questions are recorded as unjudged with their source in the verdict and trace. With nothing left to ask, behaviour is as today |
+| # | Fixes | Layer | Owner | Change |
+|---|---|---|---|---|
+| C1 | L3, L4 | L2 | framework (`kairyu/orchestration/compaction.py` new, `conductor.py`, `dsl/spec.py`, `dsl/loader.py`) | **Context-fit compaction.** Before a role is dispatched, if its rendered request would exceed its worker (`max_model_len` − the role's `max_tokens`), Kairyu replaces the oldest messages of that role's conversation with a summary and keeps the system/developer messages, the first task message and the newest messages verbatim. The summary is written by the orchestrator's `compaction` worker over the omitted messages (content, tool calls, tool results and `reasoning_content`); it is cached by the hash of the omitted messages and extended incrementally (previous summary + newly omitted messages), so later turns and other roles reuse it and no summarization call ever exceeds its own worker. Compaction leaves headroom (compacts down to half the budget) so it runs every few turns, not every turn. A role that fits reads the whole conversation as today. Trace v2 records per role: compacted, omitted messages, summary tokens, cache hit. Works on the L2 conversation, so Chat Completions, Responses and Messages behave the same |
+| C2 | L4 | L3 | framework (`responses_auto.py`, `responses_codec.py`) | Responses AUTO keeps replayed reasoning as `reasoning_content`, like Chat Completions; C1 now bounds growth |
+| C3 | L1 | L2 | framework (`checklist.py`, `conductor.py` trace) | A `foreach` source without a usable list skips only the questions bound to it; every other question is asked; skipped questions are recorded as unjudged |
+| E | — | L2 | example (`verified.yaml`, `verified-always.yaml`) | `compaction: {worker: deepseek, reasoning_effort: low, max_tokens: 32768, prompt: …}` — the policy: which worker summarizes and how |
 
-Unchanged: the conversation every role reads (whole, with `reasoning_content`),
-prompts, caps, efforts, DAG, routing, Winnow, the emitted report.
+No change to Qwen's L1, the roles' prompts, caps, efforts, DAG, routing,
+Winnow or the emitted stage report.
 
-Framework admission (change 2): (1) contract broken — one failed upstream
-role discards independent questions (code path above); (2) the checklist is
-framework code, no extension point; (3) any checklist mixing static and
-per-item questions loses all of them when its item role fails (overflow,
-backend down, unparsable JSON), independent of this example; (4) skip per
-question and report it; which questions exist stays in the example.
+## 4. Framework admission
 
-## 4. Coverage
+- C1: (1) contract missing — a served conversation that outgrows a worker
+  makes the request fail; code path: `Conductor._render` renders the whole
+  conversation; (2) no extension point — rendering and dispatch are
+  Conductor code, and client compaction exists only on Responses; (3)
+  independent regression — any orchestration whose conversation outgrows
+  its smallest worker (any agent client, any API) fails; (4) smallest
+  mechanism — trigger only when a request would not fit, one summary per
+  omitted prefix, reused; which worker and prompt stay in the example.
+- C2: (1) Responses AUTO and Chat Completions give roles different
+  histories; (2) codec code; (3) Codex on an AUTO model loses earlier
+  reasoning; (4) remove the drop now that C1 bounds growth.
+- C3: (1) one failed upstream role discards independent questions; (2)
+  checklist code; (3) any checklist mixing static and per-item questions;
+  (4) skip per question, report it.
+
+## 5. Coverage
 
 | Case | Before | After |
 |---|---|---|
-| Conversation beyond Qwen's 262,144 (67 turns) | no judgment | Qwen 1M reads it whole: requirements and all judgments |
-| Empty list (2 turns) | no judgment | adoption judged (change 2); the list's absence is recorded |
-| Qwen down or erroring | no judgment | adoption judged |
-| Conversation beyond 1M | DeepSeek fails too | unchanged: the route's own limit (~290 messages at the measured growth) |
+| Conversation beyond Qwen (67 turns; long problems) | no requirements, no judgment | Qwen reads summary + newest verbatim; requirements and all judgments |
+| Conversation beyond DeepSeek (>~290 messages) | turn fails | DeepSeek reads summary + newest verbatim |
+| Empty list (2 turns) | no judgment | adoption judged; the missing list recorded |
+| Qwen down | no judgment | adoption judged |
+| Chat Completions vs Responses vs Messages | different histories; only Responses clients can compact | same L2 history and the same compaction on all |
 
-## 5. Tests
+## 6. Tests (one per contract)
 
-- Change 2: one checklist test — a static question and a `foreach` question
-  whose source failed: the static question is asked, the other is reported
-  unjudged.
-- Example test: `requirements` failing still yields the adoption read and
-  `answer` reads it (replaces the case that expected no read).
-- Change 1: configuration, checked on GPU.
+- C1: a role whose worker is smaller than the conversation gets the summary
+  plus the newest messages; a second turn reuses the cached summary and
+  extends it; a role on a large worker gets the whole conversation; the
+  same behaviour through Chat Completions and Responses input.
+- C2: a replayed reasoning item reaches the L2 conversation as
+  `reasoning_content` on an AUTO model.
+- C3: a static question is asked when the `foreach` source failed; the
+  other is reported unjudged.
+- Example test: compaction config loads; a failed `requirements` still
+  yields the adoption read.
 
-## 6. Docs
+## 7. Docs
 
-m1 D8 amendment (change 2); VCO-D19 note (Qwen 1M, why); example README L1
-row; `PROGRESS.md`.
+m1 (C1 and the C3 amendment to D8), m11 (C2, amending D4 and the
+2026-08-14 assistant-history amendment), VCO-D19 note, example README,
+`PROGRESS.md`.
 
-## 7. Verification
+## 8. Verification
 
 | # | Step | Pass criteria | Budget |
 |---|---|---|---|
-| 1 | CPU: ruff; changed-path tests | green | 10 min |
-| 2 | Redeploy (`./run.sh`; Qwen restarts with YaRN) | healthy; Qwen log shows max model len 1,000,000 | 20 min |
-| 3 | Live replay of the 69 turns that lost judgments (exact requests, whole conversation) | 69 accepted, 69 valid lists | 40 min |
-| 4 | All nine gates (short requests through YaRN Qwen) | existing criteria | 2 h |
-| 5 | New gate `long-conversation`: five r1 turns that lost judgments, through `kairyu-verified-always` | 200; requirements and all judgments on all five | 30 min |
-| 6 | Qwen stopped, one verified request | 200; adoption judged, coverage recorded unjudged | 10 min |
+| 1 | CPU: ruff; changed-path tests | green | 15 min |
+| 2 | Live replay of the 69 turns that lost judgments (whole recorded conversations) | Qwen's request fits after compaction; 69 valid lists; DeepSeek roles uncompacted (they fit) | 60 min |
+| 3 | Live replay of the 714-message 09/12 conversation | both Qwen and DeepSeek requests fit; compaction cache reused across roles | 20 min |
+| 4 | Redeploy (`./run.sh`) | healthy | 15 min |
+| 5 | All nine gates | existing criteria; no compaction on their short requests | 2 h |
+| 6 | New gate `long-conversation`: five r1 turns that lost judgments and the 714-message conversation, via Chat Completions and via Responses | 200; requirements and all judgments on all; compaction recorded in trace; second pass hits the cache | 60 min |
+| 7 | Qwen stopped, one verified request | 200; adoption judged, coverage recorded unjudged | 10 min |
 
 Stop and report at the first failure.
 
-## 8. Risks
+## 9. Risks
 
-- Static YaRN may affect Qwen on short inputs (model card); step 4 covers
-  short requests.
-- Several long `requirements` calls together exceed Qwen's 1,791,840-token
-  KV cache; vLLM queues them (slower, not failing).
+- A summary is not the verbatim text; only the part a worker cannot hold
+  is summarized, newest turns stay exact.
+- The first compaction of a long conversation adds one summarization call
+  (DeepSeek); later turns reuse it until new messages need compacting.
+- The cache is per gateway process; another gateway recomputes it.
 
-## 9. Decision requested
+## 10. Decision requested
 
-Approve changes 1 and 2.
+Approve C1, C2, C3 and E.
