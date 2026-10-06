@@ -9,11 +9,11 @@ tokens, tok/s, route, efforts) to model-volumes/<environment>/results/<gate>-<UT
   routing         Winnow routes accuracy-critical conversations to VERIFIED
                   (miss rate < 10 % on the calibration and held-out halves)
   think-route     everyday requests stream from deepseek_think at the default effort
-  effort          the caller's effort reaches the think route; the verified
-                  route's drafts and answer always run at max
+  effort          the caller's effort reaches the think route and the verified
+                  route's drafts and answer; Qwen's requirements always think at low
   verified-route  a verified request runs the three waves: five DeepSeek drafts
                   beside Qwen's requirements, one Winnow judgment read (5 + 5 x N
-                  items), then the answer at max
+                  items), then the answer, at the efforts the effort gate checks
   fallback        Winnow down: 200 on the think route; Winnow back: routed again
   serving         kairyu-verified-always at c1/c4/c8/c16: latency, tokens, tok/s
   serving-routed  kairyu-verified at c1/c4/c8/c16: route mix, latency, tokens per route
@@ -111,14 +111,14 @@ def _judge_seconds(trace: dict | None) -> float | None:
     return None
 
 
-def _efforts(trace: dict | None) -> list[str | None]:
-    """The reasoning effort of every DeepSeek generation in the trace."""
+def _efforts(trace: dict | None, worker: str = "deepseek") -> list[str | None]:
+    """The reasoning effort of every generation of ``worker`` in the trace."""
 
     return [
         (event.get("detail") or {}).get("reasoning_effort")
         for event in (trace or {}).get("events") or []
         if event.get("kind") == "generation"
-        and event.get("worker") == "deepseek"
+        and event.get("worker") == worker
         and event.get("status") == "success"
     ]
 
@@ -162,8 +162,10 @@ def _stages(trace: dict | None) -> dict[str, dict]:
     return stages
 
 
-def _three_waves(row: dict) -> list[str]:
-    """What a verified row misses of the three-wave route (empty when sound)."""
+def _three_waves(row: dict, caller_effort: str | None) -> list[str]:
+    """What a verified row misses of the three-wave route (empty when sound):
+    the four stages, wave-1 overlap, 5 + 5 x N judgments, and the efforts
+    (DeepSeek's drafts and answer at the caller's, default high; Qwen at low)."""
 
     stages = row["stages"]
     problems = []
@@ -181,8 +183,9 @@ def _three_waves(row: dict) -> list[str]:
         requirements["start_s"] >= drafts["end_s"]
     ):
         problems.append(f"wave 1 not parallel: drafts={drafts} requirements={requirements}")
-    if row["efforts"] != ["max", "max"]:
-        problems.append(f"efforts={row['efforts']}")
+    wanted = caller_effort or "high"
+    if row["efforts"] != [wanted, wanted] or row["qwen_efforts"] != ["low"]:
+        problems.append(f"efforts={row['efforts']} qwen={row['qwen_efforts']}")
     return problems
 
 
@@ -289,6 +292,7 @@ def chat(
         "route": route,
         "p_verified": p_verified,
         "efforts": _efforts(trace_body),
+        "qwen_efforts": _efforts(trace_body, "qwen"),
         "stages": _stages(trace_body),
         "judge_s": _judge_seconds(trace_body),
         "public_completion_tokens": usage.get("completion_tokens"),
@@ -324,7 +328,7 @@ def _print_rows(rows: list[dict]) -> None:
         print(
             f"  #{index:02d} status={row['status']} {row['seconds']:7.1f}s "
             f"ttft={row.get('ttft_s')} route={row['route']} p_verified={row.get('p_verified')} "
-            f"efforts={row['efforts']} judge_s={row.get('judge_s')} "
+            f"efforts={row['efforts']} qwen={row.get('qwen_efforts')} judge_s={row.get('judge_s')} "
             f"in={row['orchestration_input_tokens']} "
             f"out={row['orchestration_output_tokens']} "
             f"({row['orchestration_output_tok_per_s']} tok/s)",
@@ -572,8 +576,8 @@ def gate_think_route(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
 
 def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
-    """The caller's effort reaches the think route (default high); the
-    verified route always runs at max."""
+    """The caller's effort (default high) reaches the think route and the
+    verified route's drafts and answer; Qwen's requirements think at low."""
 
     deadline = Deadline("effort", budget_s)
     easy = next(item for item in _dataset("routing-set.json") if item["label"] == "THINK")
@@ -585,11 +589,14 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
         think = chat(env, messages=easy["messages"], model=ROUTED, trace=True, **extra)
         verified = chat(env, verified_prompt, model=ALWAYS, trace=True, **extra)
         expected = effort or "high"
-        for row, wanted in ((think, [expected]), (verified, ["max", "max"])):
-            if row["status"] != 200 or row["efforts"] != wanted:
+        for row, wanted, qwen in (
+            (think, [expected], []),
+            (verified, [expected, expected], ["low"]),
+        ):
+            if row["status"] != 200 or row["efforts"] != wanted or row["qwen_efforts"] != qwen:
                 findings.append(
                     f"{effort}: {row['route']} status={row['status']} efforts={row['efforts']} "
-                    f"(expected {wanted})"
+                    f"qwen={row['qwen_efforts']} (expected {wanted}, qwen {qwen})"
                 )
         if think["route"] != "deepseek_think":
             findings.append(f"{effort}: everyday request routed to {think['route']}")
@@ -603,15 +610,15 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
         raise SystemExit(1)
 
 
-def gate_verified_route(env: dict[str, str], *, budget_s: float = 5400) -> None:
+def gate_verified_route(env: dict[str, str], *, budget_s: float = 7200) -> None:
     """A verified request runs the three waves into one answer.
 
     Six VERIFIED conversations of the routing set go to the always-verified
     model, unary and streamed, with the caller's effort cycling through none,
     low, high and max: each must return 200 with a non-empty answer after
     DeepSeek's drafts and Qwen's requirements ran in parallel, one Winnow
-    judgment read covered 5 + 5 x N items, and the drafts and the answer ran
-    at max effort.
+    judgment read covered 5 + 5 x N items, and the efforts were the caller's
+    (DeepSeek) and low (Qwen).
     """
 
     deadline = Deadline("verified-route", budget_s)
@@ -629,7 +636,7 @@ def gate_verified_route(env: dict[str, str], *, budget_s: float = 5400) -> None:
             )
             row.update(id=name, stream=stream, caller_effort=effort)
             rows.append(row)
-            problems = _three_waves(row)
+            problems = _three_waves(row, effort)
             if row["status"] != 200 or not row["content"].strip() or problems:
                 findings.append(
                     f"{name} stream={stream} effort={effort}: status={row['status']} "
@@ -717,7 +724,8 @@ def _load(
     env: dict[str, str], gate: str, batches: dict[int, list[dict]], *, per_route: bool
 ) -> dict:
     report = {}
-    deadline = Deadline(gate, 14400)
+    # Each verified request carries five drafts and the answer (plan: 6 h).
+    deadline = Deadline(gate, 21600)
     for concurrency, prompts in batches.items():
         started = time.monotonic()
         rows = _run_concurrently(env, prompts, concurrency)

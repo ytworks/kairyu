@@ -616,8 +616,9 @@ previous routing conditions and serving levels as the verification baseline.
 Owner decision. The VERIFIED route (both public models) becomes:
 
 - Wave 1, in parallel: DeepSeek writes five complete answers D1..D5 from
-  viewpoints as different as possible, in one max-effort call (JSON with
-  fixed keys, so each draft sees the others' viewpoints); Qwen (thinking)
+  viewpoints as different as possible, in one call at the caller's effort
+  (default high; JSON with fixed keys, so each draft sees the others'
+  viewpoints); Qwen (thinking at low, whatever the caller sends)
   lists the requirements an answer must meet, necessary and sufficient and
   MECE, at most 16 (JSON).
 - Wave 2: one Winnow System One request with the request and the drafts in
@@ -625,13 +626,14 @@ Owner decision. The VERIFIED route (both public models) becomes:
   per requirement x draft, is it met (Dk-Rn). Winnow never repairs; threshold
   1.0 lists every judgment below certainty with its probability for wave 3.
   An unreadable judgment leaves wave 3 without judgments.
-- Wave 3: DeepSeek at max effort reads the request, the drafts, the
+- Wave 3: DeepSeek at the caller's effort reads the request, the drafts, the
   requirements and the judgments, treats all of them critically, and writes
   the best reply (the final unit, with the caller's tools and format).
 - No answer carries `kairyu_verification`: the judgments inform the answer.
 - Wave-1 parallelism uses the m1 D8 amendment of 2026-10-06 (a verifier may
   wait for a unit running beside its target).
-- Gates: effort expects drafts and answer at max; verified-route checks the
+- Gates: effort expects drafts and answer at the caller's effort and Qwen at
+  low; verified-route checks the
   four stages, wave-1 overlap and 5 + 5 x N judgment items; all gates re-run.
 
 Why: the owner rebuilds the verified route as diverse drafts judged by

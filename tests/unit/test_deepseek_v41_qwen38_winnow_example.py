@@ -167,7 +167,7 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
     assert body["messages"][-1]["content"].startswith("[deepseek_think_answer]")
 
 
-@pytest.mark.parametrize("effort", [None, "low"])
+@pytest.mark.parametrize("effort", [None, "low", "max"])
 async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
@@ -180,20 +180,23 @@ async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> Non
     result = await orchestrator.run(call)
 
     assert result.text == "Paris"
-    # Wave 1: five DeepSeek drafts in one max call, Qwen's requirements.
+    # Wave 1: five DeepSeek drafts in one call at the caller's effort, Qwen's
+    # requirements at low whatever the caller sent.
     drafts, requirements = sorted(seen[:2], key=lambda body: body["model"])
-    assert drafts["model"] == "deepseek-v4.1-flash" and drafts["reasoning_effort"] == "max"
+    assert drafts["model"] == "deepseek-v4.1-flash"
+    assert drafts["reasoning_effort"] == (effort or "high")
     assert drafts["messages"][-1]["content"].startswith("[drafts]")
-    assert requirements["model"] == "qwen3.8-27b"
+    assert requirements["model"] == "qwen3.8-27b" and requirements["reasoning_effort"] == "low"
     assert requirements["messages"][-1]["content"].startswith("[requirements]")
     # Wave 2: one Winnow read, with the request: 5 adoptions + 5 x 2 points.
     _route, judgment = reads
     assert judgment["state"]["drafts"] == DRAFTS
     assert judgment["state"]["request"][-1]["role"] == "user"
     assert len(judgment["questions"]) == 5 + 5 * 2
-    # Wave 3: the answer at max reads the drafts, requirements and judgments.
+    # Wave 3: the answer at the caller's effort reads the drafts, requirements
+    # and judgments.
     answer = seen[2]
-    assert len(seen) == 3 and answer["reasoning_effort"] == "max"
+    assert len(seen) == 3 and answer["reasoning_effort"] == (effort or "high")
     prompt = answer["messages"][-1]["content"]
     assert '"viewpoint": "view 5"' in prompt and '"names the capital"' in prompt
     assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt

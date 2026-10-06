@@ -3,16 +3,16 @@
 # (primary, below) or to deepseek_think (one DeepSeek answer at the caller's
 # effort). The verified route is identical to verified-always.yaml.
 #
-#   wave 1  drafts        (DeepSeek, max)    five answers, D1..D5, from
+#   wave 1  drafts        (DeepSeek, caller) five answers, D1..D5, from
 #                                            viewpoints as different as
 #                                            possible (one call, JSON)
-#           requirements  (Qwen, thinking)   requirements the answer must
+#           requirements  (Qwen, low)        requirements the answer must
 #                                            meet: necessary, sufficient,
 #                                            MECE (JSON), beside drafts
 #   wave 2  judgments     (Winnow, 1 read)   per draft, with the request:
 #                                            adoptable as the final reply?
 #                                            per requirement x draft: met?
-#   wave 3  answer        (DeepSeek, max)    the request, the drafts, the
+#   wave 3  answer        (DeepSeek, caller) the request, the drafts, the
 #                                            requirements and the judgments,
 #                                            read critically; the best reply
 #   deepseek_think (DeepSeek)  one answer at the caller's effort
@@ -34,7 +34,8 @@ roles:
   # internal_max_tokens (the DSL maximum, 131,072).
   - name: drafts
     worker: deepseek
-    reasoning_effort: max
+    # The caller's effort (default high), like the answer (owner decision).
+    reasoning_effort: inherit
     sampling:
       temperature: 1.0
       top_p: 0.95
@@ -110,12 +111,13 @@ roles:
       --- END CONVERSATION ---
 
   # Wave 1, beside drafts: the requirements an answer must meet. Qwen thinks
-  # (the example's template enables thinking for any explicit effort);
+  # at low whatever the caller sends (owner decision; the example's template
+  # turns any explicit effort into thinking at low);
   # T=1.0/top_p=0.95/top_k=20 are Qwen3.8's official thinking sampling. At
   # most 16 points keep Winnow's 5 + 5 x 16 questions in one request.
   - name: requirements
     worker: qwen
-    reasoning_effort: high
+    reasoning_effort: low
     sampling:
       temperature: 1.0
       top_p: 0.95
@@ -309,7 +311,7 @@ roles:
     worker: deepseek
     role_type: publisher
     depends_on: [judgments, requirements]
-    reasoning_effort: max
+    reasoning_effort: inherit
     sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
     prompt: |-
       {query}

@@ -24,14 +24,14 @@ request
 profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
   │                (kairyu-verified-always skips the judge: VERIFIED)
   ├─ VERIFIED
-  │    wave 1 ┬ drafts        DeepSeek, max: five answers D1..D5 from
+  │    wave 1 ┬ drafts        DeepSeek, the caller's effort: five answers D1..D5 from
   │           │               viewpoints as different as possible (one call)
-  │           └ requirements  Qwen, thinking: what the answer must meet,
+  │           └ requirements  Qwen, thinking at low: what the answer must meet,
   │                           necessary, sufficient, MECE (≤ 16)
   │    wave 2   judgments     Winnow, 1 request with the request: each draft
   │                           adoptable as the final reply? each draft x
   │                           requirement met? (5 + 5 x N probabilities)
-  │    wave 3   answer        DeepSeek, max: reads drafts, requirements and
+  │    wave 3   answer        DeepSeek, the caller's effort: reads drafts, requirements and
   │                           judgments critically, writes the best reply
   └─ THINK ─────► deepseek_think_answer  DeepSeek, the caller's effort
                                           (default high), one call
@@ -85,8 +85,8 @@ stays empty until the guarantee is rebuilt.
 | `l1` | every DeepSeek DP rank (thinking and chat JSON), Qwen chat, Winnow chat, Winnow System One (L1), one verified answer |
 | `routing` | `datasets/routing-set.json`: VERIFIED miss rate < 10 % on the calibration and held-out halves |
 | `think-route` | everyday requests stream from the think route at the default effort |
-| `effort` | the think route gets the caller's effort; the verified route's drafts and answer are always max |
-| `verified-route` | a verified request runs the three waves: drafts beside requirements, one Winnow read of 5 + 5 x N items, the answer at max |
+| `effort` | the think route gets the caller's effort; the verified route's drafts and answer get it too (default high); Qwen always thinks at low |
+| `verified-route` | a verified request runs the three waves: drafts beside requirements, one Winnow read of 5 + 5 x N items, then the answer |
 | `fallback` | Winnow down: 200 on the think route; Winnow back: routed again |
 | `serving` | `kairyu-verified-always` at c1/c4/c8/c16 (8/16/16/32 InFoBench requests) |
 | `serving-routed` | `kairyu-verified` at c1/c4/c8/c16 on the routing set, per-route latency and tokens |
