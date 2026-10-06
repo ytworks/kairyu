@@ -1,4 +1,4 @@
-# Exact multi-turn conversations beyond a worker's context (any API)
+# Exact multi-turn conversations beyond a worker's context (L2 only)
 
 Plan, 2026-10-07. Branch `claude/winnow-verified-three-wave` (PR #641),
 follows VCO-D19. Status: awaiting owner approval.
@@ -24,15 +24,13 @@ Messages):
 | L1 | No `requirements` list → `judgments` sends nothing, not even the 5 adoption questions that need only the request and the drafts (`checklist._pending_questions` raises for the whole checklist when one `foreach` source is missing) | a checklist is all-or-nothing on its item sources |
 | L2 | Qwen gave no list on 69 turns: 67 rejected by vLLM (input 199,082-325,598 + 65,536 cap > 262,144), 2 empty on 148K / 181K inputs (valid on 4 replays each) | consequence of L3 |
 | L3 | Every role renders the whole conversation. It grows ~3.4K tokens per message with each turn's stage report (240,650 tokens at 61 messages, 320,460 at 95): Qwen (262,144) overflows from ~60 messages, DeepSeek (1,048,576) from ~290; the 09/12 DeepSWE conversations reached median 298 and max 714 messages | a role's input is unbounded while its worker's context is fixed; Kairyu has no server-side way to carry a conversation beyond a worker's context, so the request fails |
-| L4 | Responses AUTO drops replayed reasoning so that stage output does not grow every L2 prompt (m11 D4); Chat Completions keeps it | the two APIs give roles different histories; dropping loses information |
 | L5 | Winnow's input on judged turns ≤ 15,115 tokens (context 65,536) | none |
 
 ## 3. Changes
 
 | # | Fixes | Layer | Owner | Change |
 |---|---|---|---|---|
-| C1 | L3, L4 | L2 | framework (`kairyu/orchestration/compaction.py` new, `conductor.py`, `dsl/spec.py`, `dsl/loader.py`) | **Context-fit compaction.** Before a role is dispatched, if its rendered request would exceed its worker (`max_model_len` − the role's `max_tokens`), Kairyu replaces the oldest messages of that role's conversation with a summary and keeps the system/developer messages, the first task message and the newest messages verbatim. The summary is written by the orchestrator's `compaction` worker over the omitted messages (content, tool calls, tool results and `reasoning_content`); it is cached by the hash of the omitted messages and extended incrementally (previous summary + newly omitted messages), so later turns and other roles reuse it and no summarization call ever exceeds its own worker. Compaction leaves headroom (compacts down to half the budget) so it runs every few turns, not every turn. A role that fits reads the whole conversation as today. Trace v2 records per role: compacted, omitted messages, summary tokens, cache hit. Works on the L2 conversation, so Chat Completions, Responses and Messages behave the same |
-| C2 | L4 | L3 | framework (`responses_auto.py`, `responses_codec.py`) | Responses AUTO keeps replayed reasoning as `reasoning_content`, like Chat Completions; C1 now bounds growth |
+| C1 | L3 | L2 | framework (`kairyu/orchestration/compaction.py` new, `conductor.py`, `dsl/spec.py`, `dsl/loader.py`) | **Context-fit compaction.** Before a role is dispatched, if its rendered request would exceed its worker (`max_model_len` − the role's `max_tokens`), Kairyu replaces the oldest messages of that role's conversation with a summary and keeps the system/developer messages, the first task message and the newest messages verbatim. The summary is written by the orchestrator's `compaction` worker over the omitted messages (content, tool calls, tool results and `reasoning_content`); it is cached by the hash of the omitted messages and extended incrementally (previous summary + newly omitted messages), so later turns and other roles reuse it and no summarization call ever exceeds its own worker. Compaction leaves headroom (compacts down to half the budget) so it runs every few turns, not every turn. A role that fits reads the whole conversation as today. Trace v2 records per role: compacted, omitted messages, summary tokens, cache hit. Works on the L2 conversation, so Chat Completions, Responses and Messages behave the same |
 | C3 | L1 | L2 | framework (`checklist.py`, `conductor.py` trace) | A `foreach` source without a usable list skips only the questions bound to it; every other question is asked; skipped questions are recorded as unjudged |
 | E | — | L2 | example (`verified.yaml`, `verified-always.yaml`) | `compaction: {worker: deepseek, reasoning_effort: low, max_tokens: 32768, prompt: …}` — the policy: which worker summarizes and how |
 
@@ -49,9 +47,6 @@ Winnow or the emitted stage report.
   its smallest worker (any agent client, any API) fails; (4) smallest
   mechanism — trigger only when a request would not fit, one summary per
   omitted prefix, reused; which worker and prompt stay in the example.
-- C2: (1) Responses AUTO and Chat Completions give roles different
-  histories; (2) codec code; (3) Codex on an AUTO model loses earlier
-  reasoning; (4) remove the drop now that C1 bounds growth.
 - C3: (1) one failed upstream role discards independent questions; (2)
   checklist code; (3) any checklist mixing static and per-item questions;
   (4) skip per question, report it.
@@ -64,7 +59,7 @@ Winnow or the emitted stage report.
 | Conversation beyond DeepSeek (>~290 messages) | turn fails | DeepSeek reads summary + newest verbatim |
 | Empty list (2 turns) | no judgment | adoption judged; the missing list recorded |
 | Qwen down | no judgment | adoption judged |
-| Chat Completions vs Responses vs Messages | different histories; only Responses clients can compact | same L2 history and the same compaction on all |
+| Chat Completions vs Responses vs Messages | only Responses clients can compact | the same L2 compaction behind every API |
 
 ## 6. Tests (one per contract)
 
@@ -72,8 +67,6 @@ Winnow or the emitted stage report.
   plus the newest messages; a second turn reuses the cached summary and
   extends it; a role on a large worker gets the whole conversation; the
   same behaviour through Chat Completions and Responses input.
-- C2: a replayed reasoning item reaches the L2 conversation as
-  `reasoning_content` on an AUTO model.
 - C3: a static question is asked when the `foreach` source failed; the
   other is reported unjudged.
 - Example test: compaction config loads; a failed `requirements` still
@@ -81,8 +74,7 @@ Winnow or the emitted stage report.
 
 ## 7. Docs
 
-m1 (C1 and the C3 amendment to D8), m11 (C2, amending D4 and the
-2026-08-14 assistant-history amendment), VCO-D19 note, example README,
+m1 (C1 and the C3 amendment to D8), VCO-D19 note, example README,
 `PROGRESS.md`.
 
 ## 8. Verification
@@ -109,4 +101,4 @@ Stop and report at the first failure.
 
 ## 10. Decision requested
 
-Approve C1, C2, C3 and E.
+Approve C1, C3 and E. All changes are in L2; L1 and L3 are untouched.
