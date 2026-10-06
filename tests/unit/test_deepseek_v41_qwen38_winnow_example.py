@@ -1,4 +1,4 @@
-"""Routed answers: DeepSeek-V4.1 six-GPU + Qwen3.8 + Winnow example (VCO-D18).
+"""Routed answers: DeepSeek-V4.1 six-GPU + Qwen3.8 + Winnow example (VCO-D18, D19).
 
 The example's own kairyu.yaml / verified.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
@@ -29,9 +29,24 @@ from kairyu.sampling_params import SamplingParams
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-qwen3.8-winnow-8gpu"
 
 
+DRAFTS = {f"D{k}": {"viewpoint": f"view {k}", "answer": "Paris"} for k in range(1, 6)}
+POINTS = {"points": [{"id": "R1", "point": "names the capital"}, {"id": "R2", "point": "one word"}]}
+
+
 def _deepseek(seen: list[dict]):
+    """The fake vLLM services: DeepSeek and Qwen, answering by role tag."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(json.loads(request.content))
+        body = json.loads(request.content)
+        seen.append(body)
+        prompt = body["messages"][-1]["content"]
+        text = (
+            json.dumps(DRAFTS)
+            if prompt.startswith("[drafts]")
+            else json.dumps(POINTS)
+            if prompt.startswith("[requirements]")
+            else "Paris"
+        )
         return httpx.Response(
             200,
             json={
@@ -39,7 +54,7 @@ def _deepseek(seen: list[dict]):
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "Paris"},
+                        "message": {"role": "assistant", "content": text},
                         "finish_reason": "stop",
                     }
                 ],
@@ -56,20 +71,18 @@ def _winnow(reads: list[dict], *, route: str, down: bool):
             raise httpx.ConnectError("Winnow is down", request=request)
         body = json.loads(request.content)
         reads.append(body)
-        labels = list(body["questions"]["route"]["criteria"])
+        if "route" in body["questions"]:
+            labels = list(body["questions"]["route"]["criteria"])
+            answers = {
+                "route": {
+                    "type": "choice",
+                    "probabilities": {label: 0.9 if label == route else 0.1 for label in labels},
+                }
+            }
+        else:
+            answers = {key: {"type": "noul", "noul": 0.7} for key in body["questions"]}
         return httpx.Response(
-            200,
-            json={
-                "answers": {
-                    "route": {
-                        "type": "choice",
-                        "probabilities": {
-                            label: 0.9 if label == route else 0.1 for label in labels
-                        },
-                    }
-                },
-                "usage": {"input_tokens": 50, "output_tokens": 0},
-            },
+            200, json={"answers": answers, "usage": {"input_tokens": 50, "output_tokens": 0}}
         )
 
     return handler
@@ -133,14 +146,11 @@ def test_compose_gpus_match_the_allocation() -> None:
         assert gpus(service) == spec["allocation"][service]["gpu_ids"]
 
 
-@pytest.mark.parametrize(("route", "served"), [("VERIFIED", "verified"), ("THINK", "think")])
 @pytest.mark.parametrize("effort", [None, "low", "max"])
-async def test_winnow_routes_to_one_deepseek_answer_at_the_routes_effort(
-    route, served, effort
-) -> None:
+async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route=route)
+    orchestrator = _orchestrator(seen, reads, route="THINK")
     call = _call("Name the capital of France in one word.")
     if effort is not None:
         call = dataclasses.replace(call, reasoning_effort=effort)
@@ -153,14 +163,40 @@ async def test_winnow_routes_to_one_deepseek_answer_at_the_routes_effort(
     assert read["state"]["conversation"][-1]["role"] == "user"
     assert result.text == "Paris"
     (body,) = seen
-    prompt = body["messages"][-1]["content"]
-    if served == "verified":
-        # The verified route is one DeepSeek call at max, whatever the caller asked.
-        assert body["reasoning_effort"] == "max"
-        assert not prompt.startswith("[deepseek_think_answer]")
-    else:
-        assert body["reasoning_effort"] == (effort or "high")
-        assert prompt.startswith("[deepseek_think_answer]")
+    assert body["reasoning_effort"] == (effort or "high")
+    assert body["messages"][-1]["content"].startswith("[deepseek_think_answer]")
+
+
+@pytest.mark.parametrize("effort", [None, "low"])
+async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> None:
+    seen: list[dict] = []
+    reads: list[dict] = []
+    orchestrator = _orchestrator(seen, reads, route="VERIFIED")
+    call = _call("Name the capital of France in one word.")
+    if effort is not None:
+        call = dataclasses.replace(call, reasoning_effort=effort)
+
+    call = await orchestrator.judge_role_profile(call)
+    result = await orchestrator.run(call)
+
+    assert result.text == "Paris"
+    # Wave 1: five DeepSeek drafts in one max call, Qwen's requirements.
+    drafts, requirements = sorted(seen[:2], key=lambda body: body["model"])
+    assert drafts["model"] == "deepseek-v4.1-flash" and drafts["reasoning_effort"] == "max"
+    assert drafts["messages"][-1]["content"].startswith("[drafts]")
+    assert requirements["model"] == "qwen3.8-27b"
+    assert requirements["messages"][-1]["content"].startswith("[requirements]")
+    # Wave 2: one Winnow read, with the request: 5 adoptions + 5 x 2 points.
+    _route, judgment = reads
+    assert judgment["state"]["drafts"] == DRAFTS
+    assert judgment["state"]["request"][-1]["role"] == "user"
+    assert len(judgment["questions"]) == 5 + 5 * 2
+    # Wave 3: the answer at max reads the drafts, requirements and judgments.
+    answer = seen[2]
+    assert len(seen) == 3 and answer["reasoning_effort"] == "max"
+    prompt = answer["messages"][-1]["content"]
+    assert '"viewpoint": "view 5"' in prompt and '"names the capital"' in prompt
+    assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt
 
 
 async def test_an_unavailable_winnow_routes_to_the_think_answer() -> None:

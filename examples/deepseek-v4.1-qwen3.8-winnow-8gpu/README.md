@@ -1,14 +1,13 @@
 # Routed answers: DeepSeek-V4.1 (6 GPUs) + Qwen3.8-27B (1 GPU) + Winnow-12B (1 GPU)
 
 Winnow reads each conversation and picks one of two routes: the verified
-route, where DeepSeek answers at max effort, or the think route, where
-DeepSeek answers at the effort the caller asked for. The verified route is
-one DeepSeek call for now; the guarantee that checks its answer is rebuilt
-later (VCO-D18). Qwen is served but no route uses it yet.
+route, three waves of DeepSeek, Qwen and Winnow (VCO-D19), or the think
+route, where DeepSeek answers at the effort the caller asked for.
 
-Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D18);
-framework mechanisms: m1 D9 (the System One route judge) and LCP-D1..D6
-(llama.cpp upstream).
+Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D18,
+VCO-D19); framework mechanisms: m1 D8 (checklist verifiers, including the
+2026-10-06 wait for a parallel branch), m1 D9 (the System One route judge)
+and LCP-D1..D6 (llama.cpp upstream).
 
 | Layer | What runs here |
 |---|---|
@@ -24,7 +23,16 @@ request
   ▼
 profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
   │                (kairyu-verified-always skips the judge: VERIFIED)
-  ├─ VERIFIED ──► verified_answer        DeepSeek, max effort, one call
+  ├─ VERIFIED
+  │    wave 1 ┬ drafts        DeepSeek, max: five answers D1..D5 from
+  │           │               viewpoints as different as possible (one call)
+  │           └ requirements  Qwen, thinking: what the answer must meet,
+  │                           necessary, sufficient, MECE (≤ 16)
+  │    wave 2   judgments     Winnow, 1 request with the request: each draft
+  │                           adoptable as the final reply? each draft x
+  │                           requirement met? (5 + 5 x N probabilities)
+  │    wave 3   answer        DeepSeek, max: reads drafts, requirements and
+  │                           judgments critically, writes the best reply
   └─ THINK ─────► deepseek_think_answer  DeepSeek, the caller's effort
                                           (default high), one call
 ```
@@ -35,7 +43,10 @@ profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
   verified example's.
 - When Winnow does not answer within 10 s (down, overloaded, unreadable),
   the request takes the think route.
-- Both routes pass the caller's tools and response_format to DeepSeek.
+- Both routes pass the caller's tools and response_format to the DeepSeek
+  role that publishes (the verified route's answer).
+- If Winnow cannot read the judgments (down, or the drafts exceed its
+  65,536-token decision context), the answer is written without them.
 
 ## Run
 
@@ -74,8 +85,8 @@ stays empty until the guarantee is rebuilt.
 | `l1` | every DeepSeek DP rank (thinking and chat JSON), Qwen chat, Winnow chat, Winnow System One (L1), one verified answer |
 | `routing` | `datasets/routing-set.json`: VERIFIED miss rate < 10 % on the calibration and held-out halves |
 | `think-route` | everyday requests stream from the think route at the default effort |
-| `effort` | the think route gets the caller's effort; the verified route is always max |
-| `verified-route` | a verified request is one DeepSeek call at max effort |
+| `effort` | the think route gets the caller's effort; the verified route's drafts and answer are always max |
+| `verified-route` | a verified request runs the three waves: drafts beside requirements, one Winnow read of 5 + 5 x N items, the answer at max |
 | `fallback` | Winnow down: 200 on the think route; Winnow back: routed again |
 | `serving` | `kairyu-verified-always` at c1/c4/c8/c16 (8/16/16/32 InFoBench requests) |
 | `serving-routed` | `kairyu-verified` at c1/c4/c8/c16 on the routing set, per-route latency and tokens |
@@ -83,6 +94,8 @@ stays empty until the guarantee is rebuilt.
 
 ## Limits
 
-- No answer carries a guarantee yet (`kairyu_verification` is absent).
-- Qwen is loaded but unused.
+- No answer carries a guarantee (`kairyu_verification` is absent): Winnow's
+  judgments inform the answer, they do not gate it.
+- The drafts share one call capped at 131,072 tokens (the DSL's internal
+  maximum).
 - Latency: measured in `MEASUREMENTS.md`.

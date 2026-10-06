@@ -266,6 +266,20 @@ contracts onto a non-final role. Added with the acceptance read: no repair
 without a failing item (a repair with nothing to fix rewrote sound DeepSWE
 agent turns).
 
+Amendment (2026-10-06, PR #641, owner authorization): a verifier may read units
+that run beside its target, not only the target's own dependencies. Before,
+validation rejected such a dependency, so judging one branch against criteria
+an independent branch produces (drafts against separately listed
+requirements) forced the two branches to run one after the other. Now the
+target's verdict waits for those units (each unit sets a per-run settled
+event when it has run, failed or been excluded; a missing output reads as
+unavailable, as before). Validation keeps the wait deadlock-free under the
+wave scheduler: the waited unit's own dependencies must complete before the
+target generates, and it cannot be the final unit, which streams after the
+rest of the DAG. Policy (which branches, questions, thresholds) stays in the
+example. Code: `Conductor._validate_verdict_waits`, `_run_pending`; test:
+`test_a_verifier_judges_its_target_against_a_branch_running_beside_it`.
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in

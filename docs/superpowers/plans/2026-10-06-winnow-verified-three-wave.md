@@ -29,7 +29,7 @@ L1, UIs and public models are unchanged.
 | `answer` | DeepSeek | 3 | final unit: request + drafts + requirements + judgments; critical comparison, then one best reply in the caller's format, with the caller's tools | max / 262,144 |
 
 - Winnow never repairs (`max_refinements: 0`); an unavailable or oversized
-  judgment (`max_state_chars` within Winnow's 65,536-token decision context)
+  judgment (Winnow's 65,536-token decision context exceeded, Winnow down)
   sends the answer the drafts and requirements without judgments
   (`on_unavailable: publish_unverified`), so the request still completes.
 - The judgments reach wave 3 as text: every item with its probability.
@@ -37,7 +37,10 @@ L1, UIs and public models are unchanged.
   gate on the published answer); the answer page's panel stays as in VCO-D18.
 - Budget: `max_steps` covers drafts, requirements, two Winnow reads, answer.
 
-## Framework (`kairyu/`) — needs owner authorization
+## Framework (`kairyu/`) — F1 authorized by the owner (2026-10-06)
+
+Owner decisions 2026-10-06: F1 yes; five drafts in one call; run every GPU
+gate after the push.
 
 F1. Today a verifier runs inline right after its target and may depend only on
 its target's own dependencies (`conductor.py` validation, "not available when it

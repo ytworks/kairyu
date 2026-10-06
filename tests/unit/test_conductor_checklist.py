@@ -864,3 +864,71 @@ async def test_a_failed_checklist_target_leaves_the_run_unguaranteed():
     assert result.final_text == "It is 42."
     assert result.verification.guaranteed is False
     assert result.verification.reason == "checklist_unavailable"
+
+
+async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
+    # The drafts and the points run at once; the drafts' verdict waits for
+    # the points it reads, and the final answer reads the verdict.
+    drafts_started = asyncio.Event()
+
+    class Gated(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[drafts]"):
+                drafts_started.set()
+            else:
+                await asyncio.wait_for(drafts_started.wait(), timeout=5)
+            return await super().generate(request)
+
+    backend = Gated(
+        {
+            "drafts": ['{"drafts": [{"id": "D1", "answer": "42"}]}'],
+            "points": ['{"points": [{"id": "R1", "point": "states 42"}]}'],
+            "answer": ["The answer is 42."],
+        }
+    )
+    judge = FakeSystemOne(lambda state, question: 0.3)
+    roles = (
+        RoleSpec(name="drafts", worker="gen", prompt="[drafts] {query}"),
+        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
+        RoleSpec(
+            name="judgments",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="drafts",
+            depends_on=("drafts", "points"),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="D1-{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource("points", "points"),
+                        ask="Does draft D1 meet this point?",
+                    ),
+                ),
+                state=(StateSection("drafts", "drafts"),),
+                threshold=1.0,
+                max_refinements=0,
+                on_unavailable="publish_unverified",
+            ),
+        ),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[answer] {drafts}\n{points}\n{judgments}",
+            depends_on=("judgments", "points"),
+        ),
+    )
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.final_text == "The answer is 42."
+    (body,) = judge.bodies
+    assert body["state"] == {"drafts": {"drafts": [{"id": "D1", "answer": "42"}]}}
+    (question,) = body["questions"].values()
+    assert question["instructions"] == "Does draft D1 meet this point?"
+    answer_prompt = backend.prompts[-1]
+    assert answer_prompt.startswith("[answer]")
+    assert "- [D1-R1] states 42 (p=0.30)" in answer_prompt

@@ -51,8 +51,8 @@ pools:
     prefix_index: true
     probe_interval_s: 2.0
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl
-  # Qwen3.8-27B on GPU 6: an internal pool that no route references yet
-  # (VCO-D18); built as in qwen3.8-27b-1gpu.
+  # Qwen3.8-27B on GPU 6: the verified route's requirements (VCO-D19);
+  # built as in qwen3.8-27b-1gpu.
   qwen3.8-27b:
     replicas:
     - backend: openai
@@ -89,7 +89,7 @@ pools:
     probe_interval_s: 2.0
   # Winnow-12B Q8_0 on GPU 7 (llama.cpp, winnow-server); built as in
   # winnow-12b-q8-1gpu. Its chat is an internal pool; its typed decisions
-  # (System One, below) judge the route.
+  # (System One, below) judge the route and the verified route's drafts.
   winnow-12b:
     replicas:
     - backend: openai
@@ -122,10 +122,11 @@ pools:
         tensor_parallel_size: 1
     unhealthy_after: 1
     probe_interval_s: 2.0
-# The route judge: Winnow's typed decisions on GPU 7. winnow-server evaluates
+# The route judge and the drafts' judgments: Winnow's typed decisions on GPU 7. winnow-server evaluates
 # one decision request at a time and answers 429 once 128 wait; Kairyu
 # forwards at most 64 and queues 32, so a burst gets Kairyu's 429 first. When
-# Winnow does not answer, the route falls back to deepseek_think.
+# Winnow does not answer, the route falls back to deepseek_think and the
+# verified answer is written without judgments.
 systemone:
   winnow-12b-systemone:
     base_url: http://winnow:8091

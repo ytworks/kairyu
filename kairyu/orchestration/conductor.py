@@ -572,6 +572,9 @@ class _RunState:
     # Each role's latest public completions, so an unverified fallback
     # publishes its source's choice metadata (finish_reason).
     role_completions: dict[str, tuple[CompletionOutput, ...]] = field(default_factory=dict)
+    # Set when a unit has run (or failed, or was excluded): a verifier that
+    # reads a unit running beside its target waits on it before the verdict.
+    settled: dict[str, asyncio.Event] = field(default_factory=dict)
 
 
 class _BudgetRefused(Exception):
@@ -720,6 +723,9 @@ class Conductor:
             and role.name not in self._inline_executor_target
         )
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
+        # Units a verifier reads that run beside its target (not before it):
+        # the target's verdict waits for them (_validate_verdict_waits).
+        self._verdict_waits: dict[str, frozenset[str]] = {}
         self._validate()
 
     def _selected_final_unit(self) -> RoleSpec:
@@ -1100,26 +1106,9 @@ class Conductor:
                     raise ValueError(
                         f"verifier {role.name!r} must depend on its target {role.verifies!r}"
                     )
-                # a verifier runs INLINE right after its target, so any OTHER
-                # dependency must also be the target's dependency (else it may not
-                # have run yet and _SafeDict would render it as "" → a silent
-                # wrong PASS/FAIL). Catch the misconfiguration loudly (M1).
-                # An executor dependency is re-run inline before each verdict;
-                # its own inputs must be complete before the target generates.
-                target = self._by_name[role.verifies]
-                available = set(target.depends_on) | {role.verifies}
-                for dep in role.depends_on:
-                    dep_role = self._by_name[dep]
-                    if dep_role.role_type == "executor" or dep in self._inline_executor_target:
-                        continue
-                    if dep != role.verifies and dep not in available:
-                        raise ValueError(
-                            f"verifier {role.name!r} depends on {dep!r}, which is not "
-                            f"available when it runs inline after {role.verifies!r}; "
-                            f"add {dep!r} to {role.verifies!r}'s depends_on"
-                        )
         self._validate_head()
         self._check_acyclic()
+        self._validate_verdict_waits()
         self._validate_inline_executors()
         self._validate_checklists()
         if self._units:
@@ -1175,13 +1164,64 @@ class Conductor:
         if len(self._units) < 2:
             raise ValueError("a head role requires at least one downstream unit")
 
+    def _validate_verdict_waits(self) -> None:
+        """A verifier may also read units that run beside its target.
+
+        The verifier runs inline right after its target. A dependency the
+        target does not share is waited for before the verdict, so the judge
+        never reads it missing (_SafeDict would render ""). It must become
+        ready no later than the target: its own dependencies complete before
+        the target generates, so the wave scheduler runs it in the target's
+        wave or earlier and the wait cannot deadlock. After _check_acyclic so
+        the closure walk terminates.
+        """
+
+        for verifier in self._verifier_for.values():
+            target = verifier.verifies
+            if target is None:
+                continue
+            closure = self._transitive_unit_closure(target)
+            waits = set()
+            for name in verifier.depends_on:
+                if name in self._inline_executor_target:
+                    continue
+                dep_role = self._by_name[name]
+                # A dependency on a verifier is one on its target.
+                dep = (
+                    dep_role.verifies
+                    if dep_role.role_type == "verifier" and dep_role.verifies
+                    else name
+                )
+                if dep == target or dep in closure:
+                    continue
+                if dep not in self._unit_deps or dep == self._selected_final_unit().name:
+                    # The final unit streams after the rest of the DAG.
+                    raise ValueError(
+                        f"verifier {verifier.name!r} depends on {dep!r}, which is not "
+                        f"a unit that can run beside {target!r}; add {dep!r} to "
+                        f"{target!r}'s depends_on"
+                    )
+                if not self._unit_deps[dep] <= closure:
+                    raise ValueError(
+                        f"verifier {verifier.name!r} depends on {dep!r}, which may not "
+                        f"be ready before {target!r} is judged: {dep!r}'s dependencies "
+                        f"must complete before {target!r} generates"
+                    )
+                waits.add(dep)
+            if waits:
+                self._verdict_waits[target] = frozenset(waits)
+
     def _validate_checklists(self) -> None:
         for verifier in self._verifier_for.values():
             config = verifier.checklist
             if config is None or verifier.verifies is None:
                 continue
             target = verifier.verifies
-            available = self._transitive_unit_closure(target) | {target}
+            available = (
+                self._transitive_unit_closure(target)
+                | {target}
+                | self._verdict_waits.get(target, frozenset())
+            )
             for name in config.referenced_roles():
                 if name not in available:
                     raise ValueError(
@@ -2711,6 +2751,8 @@ class Conductor:
             await self._emit_intermediate(event_sink, intermediate)
             if verifier is None:
                 break
+            for name in self._verdict_waits.get(spec.name, ()):
+                await self._settled(run, name).wait()
             if verifier.checklist is not None:
                 finished = await self._checklist_round(
                     run,
@@ -3183,6 +3225,10 @@ class Conductor:
                 return candidate
         return None
 
+    @staticmethod
+    def _settled(run: _RunState, name: str) -> asyncio.Event:
+        return run.settled.setdefault(name, asyncio.Event())
+
     def _terminal_units(self) -> list[RoleSpec]:
         dependents: set[str] = set()
         for deps in self._unit_deps.values():
@@ -3201,20 +3247,26 @@ class Conductor:
         pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
         for deps in pending.values():
             deps.difference_update(exclude)
+        for name in exclude:
+            # An excluded unit never runs: a verdict waiting on it reads it
+            # as missing instead of waiting forever.
+            self._settled(run, name).set()
+
+        async def settle(name: str) -> None:
+            try:
+                await self._run_unit_safe(
+                    run,
+                    session,
+                    query,
+                    self._by_name[name],
+                    event_sink=event_sink,
+                )
+            finally:
+                self._settled(run, name).set()
+
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
-            await asyncio.gather(
-                *(
-                    self._run_unit_safe(
-                        run,
-                        session,
-                        query,
-                        self._by_name[name],
-                        event_sink=event_sink,
-                    )
-                    for name in ready
-                )
-            )
+            await asyncio.gather(*(settle(name) for name in ready))
             for name in ready:
                 del pending[name]
             for deps in pending.values():
