@@ -293,8 +293,7 @@ Winnow as the judge: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (VCO-D18).
 A `profile_judge` whose `worker` is a `systemone_ref` worker routes by System
 One probabilities instead of a generated label. Kairyu sends the
 role-tagged conversation (each message cut to `max_message_chars`, plus
-tool/image flags; `without_reasoning: true` drops assistant
-`reasoning_content`, amended 2026-10-07, PR #641) as the state and one `choice` question whose criteria are
+tool/image flags) as the state and one `choice` question whose criteria are
 the choices' criteria. `prefer: {label, min_probability}` selects that
 label whenever its probability reaches the floor (an accuracy-first
 policy), otherwise the most probable route wins. Timeouts, transport

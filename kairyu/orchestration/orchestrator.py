@@ -229,13 +229,11 @@ class ProfileJudge:
     # and ``max_conversation_chars`` bounds the whole conversation so the
     # read fits the judge's context (``bounded_conversation``), the omitted
     # middle counted in ``conversation_omitted_messages``.
-    # ``without_reasoning`` drops assistant ``reasoning_content`` from it.
     question: str = ""
     prefer_label: str | None = None
     prefer_min_probability: float = 0.5
     max_message_chars: int = 4000
     max_conversation_chars: int | None = None
-    without_reasoning: bool = False
 
     def __post_init__(self) -> None:
         if len(self.choices) < 2:
@@ -1027,13 +1025,6 @@ class Orchestrator:
         judge = self._profile_judge
         assert judge is not None
         messages = conversation_messages(call.prompt)
-        if messages is not None and judge.without_reasoning:
-            messages = [
-                {key: value for key, value in message.items() if key != "reasoning_content"}
-                if isinstance(message, dict) and message.get("role") == "assistant"
-                else message
-                for message in messages
-            ]
         if messages is None:
             conversation: object = call.prompt[: judge.max_message_chars]
         else:

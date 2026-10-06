@@ -34,9 +34,7 @@ class FakeJev:
         )
 
 
-def _orchestrator(
-    jev, llm, *, prefer=None, max_conversation_chars=None, without_reasoning=False
-):
+def _orchestrator(jev, llm, *, prefer=None, max_conversation_chars=None):
     verified = (RoleSpec(name="v_final", worker="llm", prompt="[verified] {query}"),)
     think = (RoleSpec(name="t_final", worker="llm", prompt="[think] {query}"),)
     return Orchestrator(
@@ -56,7 +54,6 @@ def _orchestrator(
             prefer_label=prefer[0] if prefer else None,
             prefer_min_probability=prefer[1] if prefer else 0.5,
             max_conversation_chars=max_conversation_chars,
-            without_reasoning=without_reasoning,
         ),
     )
 
@@ -140,26 +137,3 @@ async def test_a_long_conversation_is_bounded_to_fit_the_judge():
     )
     assert plain.role_profile_judgment == "primary"
     assert len(json.dumps(jev.bodies[1]["state"]["conversation"])) <= 1500
-
-
-@pytest.mark.parametrize("without_reasoning", [False, True])
-async def test_the_judge_may_read_the_conversation_without_replayed_reasoning(
-    without_reasoning,
-):
-    jev = FakeJev({"THINK": 0.2, "VERIFIED": 0.8})
-    orchestrator = _orchestrator(jev, MockBackend(), without_reasoning=without_reasoning)
-    turns = (
-        {"role": "user", "content": "Fix the failing test."},
-        {"role": "assistant", "content": "ran tests", "reasoning_content": "REPLAYED"},
-        {"role": "user", "content": "Continue."},
-    )
-
-    await orchestrator.judge_role_profile(_chat(*turns))
-
-    conversation = jev.bodies[0]["state"]["conversation"]
-    assert ("REPLAYED" in json.dumps(conversation)) is not without_reasoning
-    assert [message["content"] for message in conversation] == [
-        "Fix the failing test.",
-        "ran tests",
-        "Continue.",
-    ]
