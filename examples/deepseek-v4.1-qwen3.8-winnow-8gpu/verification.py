@@ -421,7 +421,10 @@ def _routing_probabilities(env: dict[str, str]) -> list[dict[str, float] | None]
         )
         orchestrator = build_orchestrator(
             load_spec(HERE / "verified.yaml"),
-            engine_refs={SPEC["deepseek"]["served_name"]: MockBackend()},
+            engine_refs={
+                SPEC["deepseek"]["served_name"]: MockBackend(),
+                SPEC["qwen"]["served_name"]: MockBackend(),
+            },
             systemone_refs={SPEC["systemone"]["model"]: backend},
         )
 
