@@ -49,10 +49,9 @@ profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
 `run.sh` builds `winnow-server` from its pinned revision with the f072b10
 llama.cpp backport (`winnow-patches/`), pulls the pinned vLLM release for
 Qwen, and builds the DeepSeek SM120 overlay when its pinned image is absent.
-A checkpoint another example already holds on NVMe (attested as the same pin,
-or a GGUF file of the pinned size) is hard-linked instead of downloaded and
-re-hashed against the pin before serving; `DEEPSEEK_MODEL_SEED` /
-`QWEN_MODEL_SEED` may name a different local copy.
+`DEEPSEEK_MODEL_SEED` / `QWEN_MODEL_SEED` may name local copies of the pinned
+checkpoints below `/mnt/nvme`; they are hard-linked and re-hashed against the
+pins before serving.
 
 ## Using it
 

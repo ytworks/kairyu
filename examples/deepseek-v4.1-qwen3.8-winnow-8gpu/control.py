@@ -491,38 +491,18 @@ attestation.write_text(json.dumps({'schema_version': 1, 'repo': repo,
 """
 
 
-def _attested_copy(model: dict) -> Path | None:
-    """Another example's checkpoint attested as this pin, if NVMe holds one."""
-
-    pin = (model["repo"], model["revision"], model["tree_sha256"])
-    volumes = _nvme_root() / "model-volumes"
-    for attestation in sorted(volumes.glob("*/models/**/.kairyu-model-attestation.json")):
-        if environment_storage() in attestation.parents:
-            continue
-        try:
-            current = json.loads(attestation.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if (current.get("repo"), current.get("revision"), current.get("tree_sha256")) == pin:
-            return attestation.parent
-    return None
-
-
-def _seed_model(target: Path, variable: str, image: str, model: dict) -> None:
+def _seed_model(target: Path, variable: str, image: str) -> None:
     """Hard-link an already downloaded checkpoint instead of downloading it.
 
-    The seed is ``variable`` when set, else another example's copy attested
-    as the same pin. Checkpoints written by containers are root-owned and the
-    host forbids hard links to another user's files, so the link runs in a
-    container with /mnt/nvme mounted once (a link cannot cross two bind
-    mounts). The seed is trusted for nothing: the copy is re-hashed against
-    this example's pinned tree before it is served.
+    Checkpoints written by containers are root-owned and the host forbids
+    hard links to another user's files, so the link runs in a container with
+    /mnt/nvme mounted once (a link cannot cross two bind mounts). The seed is
+    trusted for nothing: the copy is re-hashed against this example's pinned
+    tree before it is served.
     """
 
-    if target.exists():
-        return
-    seed = os.environ.get(variable) or _attested_copy(model)
-    if not seed:
+    seed = os.environ.get(variable)
+    if not seed or target.exists():
         return
     source = Path(seed).resolve()
     nvme = Path("/mnt/nvme")
@@ -548,7 +528,7 @@ def _seed_model(target: Path, variable: str, image: str, model: dict) -> None:
 
 def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> None:
     target = Path(storage) / model["slug"]
-    _seed_model(target, seed_variable, image, model)
+    _seed_model(target, seed_variable, image)
     if not (target / "config.json").is_file():
         free_gib = shutil.disk_usage(target.parent).free // (1024**3)
         minimum = int(SPEC["storage"]["minimum_free_gib"])
@@ -581,26 +561,6 @@ def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> 
     _run(command)
 
 
-def _seed_winnow_model(storage: Path) -> None:
-    """Hard-link GGUF files another example already holds at the pinned size.
-
-    Winnow's downloader then checks every file's SHA-256 and fetches only
-    what is missing or differs.
-    """
-
-    volumes = _nvme_root() / "model-volumes"
-    for name, pin in SPEC["winnow"]["model"]["files"].items():
-        target = storage / name
-        if target.exists():
-            continue
-        for source in sorted(volumes.glob(f"*/models/{name}")):
-            if environment_storage() in source.parents or source.stat().st_size != pin["bytes"]:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.link(source, target)
-            break
-
-
 def _ensure_winnow_model(env: dict[str, str]) -> None:
     """Download (or re-verify) the pinned GGUF files with Winnow's own tool.
 
@@ -609,7 +569,6 @@ def _ensure_winnow_model(env: dict[str, str]) -> None:
     """
 
     image = env["WINNOW_IMAGE"]
-    _seed_winnow_model(Path(env["WINNOW_MODEL_STORAGE_PATH"]))
     _run(
         [
             "docker",
