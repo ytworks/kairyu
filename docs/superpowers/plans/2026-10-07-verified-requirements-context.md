@@ -34,7 +34,10 @@ Completions boundary (commit a3420252) was reverted.
   (`{conversation}`) and `answer` (`{query}`) keep the reasoning. Winnow
   `judgments` reads `request` (system/developer + latest user), which holds
   no assistant turn.
-- Docs: m1 D8 and VCO-D19 amendments; `PROGRESS.md` entry.
+- Winnow route judge (owner approval 2026-10-07): `profile_judge` gains
+  `without_reasoning` (default false; other examples unchanged); the example
+  sets it, so the 120,000-character bound holds messages, not stage reports.
+- Docs: m1 D8, D9 and VCO-D19 amendments; `PROGRESS.md` entry.
 
 Framework admission: (1) a role cannot read the conversation without
 replayed reasoning; `Conductor._render` fixes `{conversation}`; (2) no
@@ -54,6 +57,8 @@ tokens; + 65,536 output ≤ ~162K < 262,144. Three such replays returned valid
 One conductor test (`tests/unit/test_conductor.py`): over a conversation
 with a replayed `reasoning_content`, `{conversation}` keeps it and
 `{conversation_without_reasoning}` drops it while keeping the messages.
+One profile-judge test (`tests/unit/test_profile_judge_systemone.py`): the
+judged conversation keeps or drops it per `without_reasoning`.
 
 ## 5. Verification
 
@@ -70,6 +75,3 @@ with a replayed `reasoning_content`, `{conversation}` keeps it and
   `requirements` (publish unverified); fixing that needs compaction or a Qwen
   context change — a separate owner decision.
 - The 2 short `requirements` outputs (not reproducible on replay).
-- The Winnow route judge (`profile_judge`, `Orchestrator._systemone_judge_body`)
-  still sends replayed `reasoning_content` uncut inside its 120,000-character
-  bound; reported to the owner, not changed here.

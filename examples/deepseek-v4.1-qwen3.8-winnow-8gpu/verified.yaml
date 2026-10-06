@@ -353,6 +353,8 @@ profile_judge:
   # Winnow's decision context holds 65,536 tokens; 120,000 characters of a
   # long conversation stay well inside it (VCO-D14 bound, same Gemma family).
   max_conversation_chars: 120000
+  # Replayed reasoning (earlier stage reports) is not read by Winnow.
+  without_reasoning: true
   question: >-
     Which route should answer the latest user request in this conversation?
     The verified route checks the answer against every requirement before

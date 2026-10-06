@@ -643,7 +643,7 @@ Winnow against independently listed requirements, then a critical synthesis.
 **Amendment (2026-10-07, PR #641).** Owner decision: Qwen `requirements`
 reads `{conversation_without_reasoning}`; DeepSeek `drafts` and `answer` keep
 the replayed `reasoning_content`; Winnow `judgments` reads `request` (no
-assistant turn). Why: DeepSWE r1 replayed Kairyu's stage reports in
+assistant turn) and the Winnow route judge sets `without_reasoning: true`. Why: DeepSWE r1 replayed Kairyu's stage reports in
 `reasoning_content` (189,953 of 240,650 Qwen tokens on one turn), so Qwen's
 262,144-token context overflowed and 87 of 160 VERIFIED turns had no Winnow
 judgment; without it the failed turns measured 30,330-96,837 tokens.

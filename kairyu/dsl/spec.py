@@ -461,6 +461,8 @@ class ProfileJudgeSpec(BaseModel):
     prefer: ProfileJudgePreferSpec | None = None
     max_message_chars: int = Field(default=4000, ge=1, le=1_000_000)
     max_conversation_chars: int | None = Field(default=None, ge=1000, le=100_000_000)
+    # Drop assistant reasoning_content from the judged conversation.
+    without_reasoning: bool = False
 
     @model_validator(mode="after")
     def _choices_are_distinct(self) -> ProfileJudgeSpec:
