@@ -6,7 +6,49 @@ overlay), Qwen3.8-27B FP8 on GPU 6 (vLLM v0.23.0), Winnow-12B Q8_0 on GPU 7
 (winnow-server `77d1458` + f072b10).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-qwen3.8-winnow-8gpu/results/`
 (`*-20261006T*.json`), gate logs `gates-20261006.log`, `gates-20261006-256k.log` and
-`gates-20261006-three-wave.log`.
+`gates-20261006-three-wave.log`; `*-20261006T16*`/`T17*` and
+`gates-20261007-requirements-without-reasoning.log` for the 2026-10-07 run.
+
+## GPU gates: Qwen requirements without replayed reasoning (2026-10-07 01:27-02:52 JST)
+
+Commit `0c9e8c2d` (PR #641): Qwen `requirements` reads
+`{conversation_without_reasoning}`; DeepSeek and Winnow unchanged. `./run.sh`
+(only the Kairyu container recreated), then `./verify.sh <gate>` in GATES
+order. All nine gates pass.
+
+| Gate | Result |
+|---|---|
+| l1 | every L1 service and one verified answer (60 s for the gate) |
+| routing | 80 conversations; VERIFIED miss 0 % on both halves; everyday to THINK 96.9 % |
+| think-route | 6/6 THINK at high, streamed; p50 0.80 s, TTFT p50 0.68 s |
+| effort | THINK and VERIFIED drafts/answer follow the caller (none→high, low, high, max), Qwen low every time; verified 29.9-53.3 s, 176-185 tok/s |
+| verified-route | 12/12, all four stages succeed, wave 1 parallel, one Winnow read of 20-40 items in 0.5-1.2 s; p50 162.7 s, p95 272.9 s; 340,828 output tokens; 161-191 tok/s. Stage ranges: requirements 34-90 s, drafts 40-149 s, answer 12-159 s. Streamed TTFT 39-54 s |
+| fallback | Winnow stopped: 2/2 routed requests on THINK (`backend_error`); the always model answers with judgments `failed` (18.4 s); Winnow back: routed again |
+| serving | 72/72 answered (table below) |
+| serving-routed | 72/72 answered; Winnow judged every request (table below) |
+| browser | the answer page and Open WebUI answer |
+
+serving (`kairyu-verified-always`, InFoBench instructions):
+
+| Level | Requests | p50 s | p95 s | Wall s | Requests/min | Output tokens | Output tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| c1 | 8 | 51.5 | 86.5 | 467 | 1.03 | 71,900 | 154 |
+| c4 | 16 | 67.8 | 113.3 | 304 | 3.15 | 159,065 | 523 |
+| c8 | 16 | 95.2 | 169.5 | 268 | 3.58 | 169,509 | 633 |
+| c16 | 32 | 118.6 | 188.7 | 353 | 5.45 | 333,188 | 945 |
+
+serving-routed (`kairyu-verified`, routing set):
+
+| Level | Route | Requests | p50 s | p95 s | Output tokens | Judge p50 s |
+|---|---|---:|---:|---:|---:|---:|
+| c1 | think | 1 | 0.39 | 0.39 | 41 | 0.073 |
+| c1 | verified | 7 | 46.0 | 73.4 | 63,945 | 0.077 |
+| c4 | think | 6 | 1.36 | 2.99 | 919 | 0.074 |
+| c4 | verified | 10 | 106.6 | 200.0 | 193,596 | 0.082 |
+| c8 | think | 5 | 1.74 | 3.02 | 653 | 0.239 |
+| c8 | verified | 11 | 87.5 | 144.0 | 137,377 | 0.082 |
+| c16 | think | 16 | 2.71 | 8.08 | 2,712 | 0.071 |
+| c16 | verified | 16 | 174.4 | 330.5 | 290,733 | 0.220 |
 
 ## GPU gates: three-wave verified route (VCO-D19, 2026-10-06 21:17-23:03 JST)
 
