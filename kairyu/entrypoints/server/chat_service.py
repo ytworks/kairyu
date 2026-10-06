@@ -922,6 +922,12 @@ def validate_orchestration_chat_input(
     _validate_response_format(request.response_format)
     prepared = _prepare_chat_messages(request, validate_message_fields=True)
     messages = [dict(message.text_message) for message in prepared.messages]
+    for wire in messages:
+        # Replayed reasoning is earlier stage output (or private model
+        # reasoning); keeping it in the L2 conversation would grow every later
+        # prompt, as in Responses AUTO.
+        if wire.get("role") == "assistant":
+            wire.pop("reasoning_content", None)
     if prepared.has_images:
         for message, wire in zip(prepared.messages, messages, strict=True):
             if message.content_kind == "list":

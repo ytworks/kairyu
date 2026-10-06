@@ -118,6 +118,14 @@ history so a response can be appended to the next request. Compatibility-only
 value and every other unsupported message field still fail before backend
 dispatch.
 
+**L2 replayed-reasoning amendment (2026-10-07, PR #641).** Amends the
+2026-08-14 amendment: Kairyu keeps a replayed assistant `reasoning_content`
+for direct-engine chat templates only. The L2 conversation of an orchestrated
+Chat Completions request omits it, as Responses AUTO already does (D4): with
+exposed intermediates it is the earlier stage report, and replaying it grew
+every role's prompt past its worker's context (DeepSWE r1: 189,953 of 240,650
+Qwen tokens of one `{conversation}`; 85 `requirements` calls rejected).
+
 **OpenAI output-contract amendment (2026-08-16, issue #496).** Chat
 Completions follows the documented OpenAI output semantics end to end:
 

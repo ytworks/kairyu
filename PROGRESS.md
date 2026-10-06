@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-07 — [amendment] L2 drops replayed `reasoning_content` on Chat Completions (PR #641)
+- What: the orchestrated Chat Completions L2 conversation omits assistant `reasoning_content`; direct-engine templates keep it.
+- Why: agent clients replay Kairyu's exposed stage reports; in DeepSWE r1 they filled ~80% of `{conversation}`, Qwen `requirements` overflowed 262,144 and 87/160 VERIFIED turns had no Winnow judgment. Responses AUTO already dropped them (m11 D4).
+- Refs: m11 L2 replayed-reasoning amendment 2026-10-07; `chat_service.validate_orchestration_chat_input`; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
+
 ### 2026-10-06 — [design] Verified route in three waves; verifiers may wait for a parallel branch (VCO-D19, PR #641)
 - What: VERIFIED = wave 1 DeepSeek five drafts (one call, caller's effort) beside Qwen requirements (MECE, ≤16, low effort); wave 2 one Winnow read per draft (adoptable?) and per draft x requirement (met?); wave 3 DeepSeek (caller's effort) writes the best answer from all of them critically. Framework: a verifier may read a unit running beside its target; the verdict waits for it (deadlock-free validation).
 - Why: owner design; without the framework change wave 1 could not run in parallel (owner authorized the change).

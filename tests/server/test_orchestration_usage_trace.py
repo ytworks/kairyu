@@ -19,6 +19,7 @@ COMPLEX = (
 class AccountingBackend:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.prompts: list[str] = []
 
     @staticmethod
     def _text(prompt: str) -> str:
@@ -50,6 +51,7 @@ class AccountingBackend:
 
     async def generate(self, request):
         self.calls.append(request.request_id)
+        self.prompts.append(request.prompt)
         return self._result(request, self._text(request.prompt))
 
     async def stream(self, request):
@@ -69,6 +71,7 @@ def _app(
     *,
     moa_samples: int = 0,
     expose_intermediate_outputs: bool = False,
+    orchestration_chat: bool = False,
 ):
     return create_legacy_app(
         {"plain": backend},
@@ -84,6 +87,7 @@ def _app(
             )
         },
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        orchestration_chat_models={"auto"} if orchestration_chat else None,
     )
 
 
@@ -202,7 +206,9 @@ def test_visible_intermediates_use_reasoning_content_with_model_attribution(
 
 def test_visible_reasoning_response_round_trips_through_litellm_history(tmp_path):
     backend = AccountingBackend()
-    app = _app(tmp_path, backend, expose_intermediate_outputs=True)
+    app = _app(
+        tmp_path, backend, expose_intermediate_outputs=True, orchestration_chat=True
+    )
 
     from fastapi.testclient import TestClient
 
@@ -215,6 +221,7 @@ def test_visible_reasoning_response_round_trips_through_litellm_history(tmp_path
             },
         )
         assistant = first.json()["choices"][0]["message"]
+        first_calls = len(backend.prompts)
         assistant["function_call"] = None
         assistant["provider_specific_fields"] = {"refusal": None}
         second = client.post(
@@ -232,6 +239,11 @@ def test_visible_reasoning_response_round_trips_through_litellm_history(tmp_path
     assert first.status_code == 200
     assert assistant["reasoning_content"]
     assert second.status_code == 200
+    # Replayed stage output stays out of later L2 prompts; the answer stays in.
+    second_prompts = backend.prompts[first_calls:]
+    assert second_prompts
+    assert not any("Final answer attribution" in p for p in second_prompts)
+    assert all("final synthesized answer" in p for p in second_prompts)
 
 
 def test_non_auto_usage_shape_is_unchanged_and_auto_fields_are_discoverable(
