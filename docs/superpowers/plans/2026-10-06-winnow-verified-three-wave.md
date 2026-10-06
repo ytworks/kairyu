@@ -143,28 +143,29 @@ TTFT/E2E, live worker load; times in JST.
    (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
    that is ~370K tokens.
 
-### Fix (example only; owner: every earlier turn's information stays in)
+### Fix (F2 only)
 
-Qwen3.8-27B's model card: 262,144 tokens natively, extensible to 1,000,000
-with YaRN; for vLLM `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `--hf-overrides` with
-`rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`
-(other `rope_parameters` unchanged), `--max-model-len 1000000`. The card
-notes static YaRN may affect short texts; Qwen serves only `requirements`.
+Cause 1 is the fix: the L2 conversation re-reads every earlier turn's
+`reasoning_content`, which here is Kairyu's own stage report (75-88 % of the
+characters). Exposing that report to the caller stays as it is.
 
-- `compose.yaml` (Qwen service): the env var, `--hf-overrides` and
-  `--max-model-len 1000000`.
-- `kairyu.yaml`: the Qwen pool's `max_model_len: 1000000`.
-- No framework, prompt or DAG change; Qwen reads the whole conversation.
-- KV cache is 1,791,840 tokens on GPU 6, so four long requirement calls may
-  queue in vLLM rather than run at once.
-- Limit: a conversation beyond 1M Qwen tokens still fails; that turn's answer
-  is written without judgments, as designed.
+- F2 (framework, needs authorization): orchestration Chat Completions drops
+  assistant `reasoning_content` from the L2 conversation it renders (the
+  field is still accepted; direct engines keep it). This is the rule
+  Responses AUTO already follows (m11 D4: "AUTO drops replayed reasoning:
+  stage output would grow every L2 prompt"); amends the m11 assistant-history
+  amendment of 2026-08-14 for the L2 path only.
+- Measured by replay: Qwen's prompt 148,455 → 51,387, 180,616 → 55,431,
+  ≥ 196,609 (rejected) → 46,725 tokens; a valid list on all three.
+- Test: one chat-input test (assistant `reasoning_content` absent from the
+  L2 prompt; content and tool calls kept).
+- No example change.
 
 ### Verification
 
-1. Redeploy (`./run.sh`; the Qwen container restarts with the new flags).
-2. Live replay of the three failed r1 turns (prompts up to ≥ 196,609 tokens)
-   through `requirements`: a valid list every time.
+1. CPU: ruff, changed-path tests.
+2. Redeploy (`./run.sh`); live replay of the three failed r1 turns: a valid
+   list every time.
 3. All nine gates plus `long-conversation` (those turns through
    `kairyu-verified-always`; pass = requirements and judgments succeed).
 4. Stop r1 (kept as an aborted run); DeepSWE r2 with the same conditions.
