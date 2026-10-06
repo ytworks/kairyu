@@ -354,16 +354,28 @@ def _ensure_deepseek_image(env: dict[str, str]) -> None:
 
 
 def _ensure_qwen_image(env: dict[str, str]) -> None:
-    """Pull the pinned upstream vLLM release by digest and attest it by ID."""
+    """Pull the pinned upstream vLLM release by digest and attest it.
+
+    The pin is the registry digest. The containerd image store reports it as
+    the image ID; the classic store reports the config digest as the ID and
+    keeps the registry digest in RepoDigests, so either match attests it.
+    """
 
     image = env["QWEN_VLLM_IMAGE"]
     if _image_id(image) is None:
         if image != SPEC["qwen"]["image"]:
             raise SystemExit(f"QWEN_VLLM_IMAGE does not exist locally: {image}")
         _run(["docker", "pull", image])
-    actual = _image_id(image)
-    if actual != SPEC["qwen"]["image_id"]:
-        raise SystemExit(f"Qwen vLLM image {image} has ID {actual}; expected the pinned image")
+    inspected = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image],
+        capture=True,
+    ).stdout.strip()
+    actual, _, digests = inspected.partition(" ")
+    pinned = SPEC["qwen"]["image_id"]
+    if actual != pinned and not any(
+        digest.endswith(f"@{pinned}") for digest in json.loads(digests or "null") or ()
+    ):
+        raise SystemExit(f"Qwen vLLM image {image} ({actual}) is not the pinned image {pinned}")
 
 
 def _ensure_winnow_image(env: dict[str, str]) -> None:
