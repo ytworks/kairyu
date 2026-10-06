@@ -632,6 +632,7 @@ Owner decision. The VERIFIED route (both public models) becomes:
 - No answer carries `kairyu_verification`: the judgments inform the answer.
 - Wave-1 parallelism uses the m1 D8 amendment of 2026-10-06 (a verifier may
   wait for a unit running beside its target).
+- GPU-verified 2026-10-06: all nine gates pass (example `MEASUREMENTS.md`).
 - Gates: effort expects drafts and answer at the caller's effort and Qwen at
   low; verified-route checks the
   four stages, wave-1 overlap and 5 + 5 x N judgment items; all gates re-run.
