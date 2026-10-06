@@ -1,10 +1,14 @@
 # Checklist-Verified Answers (DeepSeek-V4.1 six-GPU + OpenJev x 2)
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
-verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619), GPU gates and the replay of
-recorded DeepSWE turns pending** (evidence: `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`).
-Applies to: `examples/deepseek-v4.1-openjev-verified-8gpu/`. Framework
-mechanisms: m1 D8 (checklist verifiers) and the m11 D8 replica amendment.
+verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
+rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), GPU gates pending**
+(evidence: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
+`examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
+Applies to: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (renamed from
+`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18). Framework
+mechanisms: m1 D8 (checklist verifiers, unused since VCO-D18), m1 D9 and the
+m11 D8 replica amendment.
 
 ## Goal
 
@@ -577,7 +581,41 @@ the same (median |dp| 0.0002). Held-out responses passing every point fell
 from 39 to 23 of 125; acceptance 0.99 guaranteed 39 with 4 violating (10.3 %,
 was 46 and 7, 15.2 %).
 
+### VCO-D18 — Winnow-routed answers; the guarantee is rebuilt later (2026-10-06, PR #640)
+
+Owner decision. The example is rebuilt on main as
+`examples/deepseek-v4.1-qwen3.8-winnow-8gpu`:
+
+- L1: DeepSeek-V4.1-Flash DP6/EP6 on GPUs 0-5 (unchanged), Qwen3.8-27B FP8
+  on GPU 6 (as in `qwen3.8-27b-1gpu`), Winnow-12B Q8_0 on GPU 7 (as in
+  `winnow-12b-q8-1gpu`, chat and System One). OpenJev is removed.
+- Routing: Winnow replaces OpenJev as the System One route judge with the
+  same question and criteria, minus what existed only for the verified-tool
+  route; it chooses THINK or VERIFIED (most probable wins, fallback THINK).
+- Routes: THINK is `deepseek_think` (the caller's effort, unchanged);
+  VERIFIED is, for now, one DeepSeek call at max effort. Both pass the
+  caller's tools.
+- Removed: the verified-tool route and everything attached to it (supersedes
+  VCO-D17); the checklist DAG (extract, history, implicit, adopt, answer,
+  coverage, acceptance, repair) and its calibration, so no answer carries
+  `kairyu_verification` until the guarantee is rebuilt.
+- Qwen is served as an internal pool that no route references yet.
+- Open WebUI and the answer page carry over unchanged; the answer page's
+  guarantee panel stays empty for now.
+- GPU gates are replaced: l1, routing (VERIFIED miss < 10 % on both halves,
+  as before), think-route, effort, verified-route, fallback (Winnow down),
+  serving and serving-routed (c1/c4/c8/c16 with 8/16/16/32 requests, as
+  before), browser.
+
+Why: the owner restarts the verified route from a plain max-effort DeepSeek
+answer on an eight-GPU layout that also hosts Qwen and Winnow, keeping the
+previous routing conditions and serving levels as the verification baseline.
+
 ## Limitations
+
+The items below describe the checklist configuration (VCO-D1..D17), which
+VCO-D18 removed.
+
 
 - A guaranteed answer is not streamed before its checklist finishes (time to
   first token is the whole pipeline).

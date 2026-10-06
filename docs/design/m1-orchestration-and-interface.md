@@ -182,7 +182,8 @@ front-ends; the Conductor consumes only the spec.
 Status: accepted by the owner (2026-10-01, framework scope for the
 checklist-verified example; minimised 2026-10-03, PR #619); CPU tests in
 `tests/unit/test_conductor_checklist.py`, `tests/server/test_orchestration_usage_trace.py`;
-GPU evidence in `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md`.
+GPU evidence in `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at
+`df109a6b` (the example was rebuilt without checklists by VCO-D18).
 
 A verifier may declare a `checklist:` instead of a generation prompt. It judges
 its target attempt without generating: `noul` questions go to a System One
@@ -269,7 +270,8 @@ agent turns).
 
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/unit/test_profile_judge_systemone.py`; GPU evidence in
-`examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` (`routing`).
+`examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b` (`routing`);
+Winnow as the judge: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (VCO-D18).
 
 A `profile_judge` whose `worker` is a `systemone_ref` worker routes by System
 One probabilities instead of a generated label. Kairyu sends the

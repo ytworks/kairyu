@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI (VCO-D6): both public models are
- * offered; an everyday request on kairyu-verified answers (Jev routes it); a
- * request on kairyu-verified-always answers and its folded internal work
- * shows the "Verification" section with the guarantee outcome.
+ * Browser gate for this example's Open WebUI (VCO-D18): both public models are
+ * offered and each answers a request. The guarantee is not checked until it
+ * is rebuilt.
  */
 
 import { chromium } from 'playwright';
@@ -75,13 +74,6 @@ async function send(modelId, prompt) {
 	return item;
 }
 
-async function expandedReasoning(item) {
-	const toggle = item.locator('button[aria-expanded]').filter({ hasText: /Thought|Thinking/ });
-	invariant((await toggle.count()) >= 1, 'no folded internal-work section');
-	await toggle.first().click({ timeout: actionTimeoutMs });
-	return (await item.innerText()).trim();
-}
-
 async function main() {
 	browser = await chromium.launch({ headless: true });
 	const context = await browser.newContext({ serviceWorkers: 'block', locale: 'en-US' });
@@ -102,13 +94,11 @@ async function main() {
 	await step('routed model answers an everyday request', async () => {
 		await send('kairyu-verified', 'Tell me a fun fact about octopuses.');
 	});
-	await step('always-verified model shows its verification', async () => {
-		const item = await send(
+	await step('always-verified model answers', async () => {
+		await send(
 			'kairyu-verified-always',
 			'List three primary colors as a comma-separated line, nothing else.'
 		);
-		const text = await expandedReasoning(item);
-		invariant(text.includes('Verification') && /Guaranteed: (yes|no)/.test(text), `no Verification section: ${text.slice(-600)}`);
 	});
 	console.log('WEBUI BROWSER SMOKE PASS');
 }
