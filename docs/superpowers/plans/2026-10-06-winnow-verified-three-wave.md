@@ -113,39 +113,61 @@ Progress reports during the run use the full format: gate table with times,
 per-route counts (judge success / fallback), stage times, tokens, tok/s,
 TTFT/E2E, live worker load; times in JST.
 
-## Redo plan after DeepSWE r1 (2026-10-06 23:50 JST) — awaiting owner decision
+## Redo plan after DeepSWE r1 (2026-10-07 JST) — awaiting owner decision
 
-Fact (run `deepswe-verified-3wave-full-4w-20261006-r1`, 64 turns, 4 problems,
-0 finished): Winnow's judgment failed on 13 turns, all `checklist_unavailable`
-before any Winnow read, because `requirements` (Qwen) produced no list:
+### Causes (confirmed by replaying recorded r1 turns through the example's
+### own config; Qwen requests sent to the live Qwen)
 
-- 11 turns: Qwen's prompt was ≥ 201K tokens; with the 65,536-token cap it
-  exceeds Qwen's 262,144 context and is rejected before dispatch
-  (`UpstreamClientError`; no 400 in Qwen's log). Largest success: 195,860.
-- 2 turns (148K, 181K prompt): Qwen stopped after 188 / 342 tokens inside its
-  reasoning, stage output empty; cause not yet confirmed.
-- The role prompt embeds the conversation as JSON, about 2x the caller's
-  prompt tokens; a DeepSWE problem takes about 43 turns (median, 10/04 run),
-  so most late turns would run without requirements and judgments.
+1. **The conversation carries Kairyu's own stage report back.** With
+   `expose_intermediate_outputs: true` every answer's `reasoning_content` is
+   the stage report (five drafts, Qwen's reasoning, judgments). mini-swe-agent
+   returns it in the next request's history, and the L2 conversation keeps
+   assistant `reasoning_content` (m11 assistant-history amendment 2026-08-14),
+   so every role re-reads every earlier report: 75-88 % of the conversation
+   characters (14:31 turn: 389,264 of 536,279; 14:42: 776,783 of 887,879).
+   Responses AUTO already drops replayed reasoning for this reason (m11 D4:
+   "stage output would grow every L2 prompt"); Chat Completions does not.
+   Replay without it: Qwen's prompt 148,455 → 51,387, 180,616 → 55,431,
+   ≥ 196,609 (rejected) → 46,725 tokens, and Qwen returns a valid list (11-13
+   points) on all three.
+2. **Over-long turns are rejected by Qwen.** Live replay of the 14:42 turn:
+   vLLM 400 "maximum context length is 262144 tokens … 65536 output tokens and
+   your prompt contains at least 196609 input tokens" (Qwen's access log is
+   off, so the 400 was invisible in its log).
+3. **Two empty lists (14:31, 14:38).** Qwen itself ended generation after
+   188 / 342 tokens in its reasoning (vLLM returned those usage counts with no
+   list). The same inputs replayed four times all returned valid lists, so it
+   is not deterministic; it happened only on the report-polluted inputs.
+4. **Even without the report, long DeepSWE conversations exceed Qwen.** The
+   09/12 DeepSeek-only run reached 714 messages / 925,539 content characters
+   (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
+   that is ~370K tokens.
 
-Plan:
+### Fix (both framework, need authorization)
 
-1. Stop r1 (keep its results as an aborted run).
-2. Confirm both causes on CPU by replaying recorded `requirements` requests
-   (prompt size, cap actually sent, why the 188-token stop).
-3. Fix — framework, needs authorization: a role option bounding
-   `{conversation}` with the existing `bounded_conversation` (keeps the system
-   messages and the first task, then the newest messages that fit; the omitted
-   middle is counted), as the route judge and checklist state already do.
-   Example: `requirements` sets the bound so Qwen's prompt stays ≤ ~180K tokens
-   (chars-per-token measured in step 2). Drafts, judgments and answer are
-   unchanged. No example-only alternative exists: the DSL has no other way to
-   shorten what a generation role reads.
-4. Tests: one conductor test (a bounded role reads first task + newest
-   messages, omitted count shown); the example test asserts the bound.
-5. GPU: all nine gates again (~1 h 50 min), plus `long-conversation`: replay
-   recorded r1 turns of > 200K Qwen tokens through `kairyu-verified-always`;
-   pass = requirements and judgments succeed on every replayed turn.
-6. DeepSWE r2: same conditions (113 problems, 1 lap, 4 parallel, server
-   default effort high, API timeout 3600 s). Estimate: ~43 turns x ~2-2.5 min
-   per problem -> about 2 days.
+- F2. Orchestration Chat Completions drops assistant `reasoning_content`
+  from the L2 conversation (still accepted on the wire; direct engines keep
+  it for key-sensitive templates) — the rule Responses AUTO already follows.
+  Every role's input shrinks 3-5x on agent clients that echo it.
+- F3. A role option bounding what `{conversation}` renders with the existing
+  `bounded_conversation` (system messages and the first task, then the newest
+  messages that fit; the omitted count is shown), as the route judge and
+  checklist state already do. Example: `requirements` reads at most 400,000
+  characters (~160K Qwen tokens + 65,536 output < 262,144). DeepSeek roles
+  read the whole conversation (1M context).
+- Tests: one chat-input test (assistant `reasoning_content` absent from the
+  L2 prompt, content and tool calls kept); one conductor test (a bounded role
+  reads the first task and the newest messages, with the omitted count).
+
+### Verification
+
+1. CPU: ruff, changed-path tests.
+2. Replays (live, before redeploying): the three r1 turns and the longest
+   09/12 conversation through the new code: Qwen's prompt < 196K tokens and a
+   valid list every time.
+3. Redeploy (`./run.sh`), then all nine gates (~1 h 50 min) plus
+   `long-conversation`: those four conversations through
+   `kairyu-verified-always`; pass = requirements and judgments succeed on all.
+4. DeepSWE r2: 113 problems, 1 lap, 4 parallel, server default effort, API
+   timeout 3600 s (~1-2 days; turns are shorter with 3-5x smaller inputs).
+   r1 is stopped and kept as an aborted run.
