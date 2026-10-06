@@ -22,8 +22,8 @@ Completions does not.
 
 ## 2. Change
 
-The owner's correction (2026-10-07): only Qwen and Winnow do without the
-replayed reasoning; DeepSeek needs it. A uniform drop at the Chat
+The owner's correction (2026-10-07): only Qwen does without the replayed
+reasoning; DeepSeek and Winnow keep it. A uniform drop at the Chat
 Completions boundary (commit a3420252) was reverted.
 
 - Framework (`kairyu/orchestration/request.py`, `conductor.py`): a role
@@ -70,6 +70,5 @@ with a replayed `reasoning_content`, `{conversation}` keeps it and
   `requirements` (publish unverified); fixing that needs compaction or a Qwen
   context change — a separate owner decision.
 - The 2 short `requirements` outputs (not reproducible on replay).
-- The Winnow route judge (`profile_judge`, `Orchestrator._systemone_judge_body`)
-  still sends replayed `reasoning_content` uncut inside its 120,000-character
-  bound; reported to the owner, not changed here.
+- Winnow is unchanged (owner decision 2026-10-07: do not drop the reasoning
+  for Winnow); its route judge keeps reading replayed `reasoning_content`.

@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-07 — [amendment] Correction: Winnow keeps replayed reasoning (PR #641)
+- What: corrects the entry below: only Qwen `requirements` drops replayed `reasoning_content`; DeepSeek and Winnow (route judge and `judgments` as configured) are unchanged.
+- Why: owner decision: do not drop the reasoning for Winnow.
+- Refs: entry below; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
+
 ### 2026-10-07 — [amendment] Qwen requirements reads the conversation without replayed reasoning (PR #641)
 - What: new role placeholder `{conversation_without_reasoning}` (`{conversation}` minus assistant `reasoning_content`); the example's Qwen `requirements` uses it, DeepSeek roles keep the full conversation.
 - Why: DeepSWE r1 replayed Kairyu's stage reports; Qwen `requirements` overflowed 262,144 tokens and 87/160 VERIFIED turns had no Winnow judgment. Owner: only Qwen and Winnow do without reasoning; DeepSeek needs it.
