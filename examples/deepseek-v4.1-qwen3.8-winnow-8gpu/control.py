@@ -790,7 +790,8 @@ def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> d
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "max_tokens": 32768,
+        # DeepSeek-V4.1's model card: max_tokens >= 256K.
+        "max_tokens": 262144,
     }
     payload.update(overrides)
     return payload

@@ -311,7 +311,7 @@ services:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
       DEFAULT_MODELS: kairyu-verified
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":65536,"stream_response":true}'
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":262144,"stream_response":true}'
       ENABLE_PERSISTENT_CONFIG: 'false'
       RESET_CONFIG_ON_START: 'true'
       ENABLE_SIGNUP: 'false'

@@ -14,7 +14,9 @@ pools:
         base_url: http://deepseek:8000/v1
         model: deepseek-v4.1-flash
         api_key_env: null
-        timeout_s: 1800
+        # 262,144 output tokens (the model card's >= 256K) at ~100 tok/s per
+        # stream take ~45 min; the call must outlive that.
+        timeout_s: 7200
         upstream: vllm
         capabilities:
           allow_prompt_kinds:

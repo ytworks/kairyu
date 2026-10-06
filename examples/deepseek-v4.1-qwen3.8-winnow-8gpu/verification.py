@@ -177,7 +177,7 @@ def chat(
     model: str = ALWAYS,
     trace: bool = False,
     stream: bool = False,
-    timeout_s: float = 1800,
+    timeout_s: float = 7200,
     **extra,
 ) -> dict:
     """One chat request; returns the per-request evidence row."""

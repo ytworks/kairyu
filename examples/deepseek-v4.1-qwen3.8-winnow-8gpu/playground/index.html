@@ -99,7 +99,7 @@ $("send").onclick = async () => {
   $("send").disabled = true;
   $("status").textContent = "Answering and verifying…";
   const started = performance.now();
-  const payload = { model: "kairyu-verified-always", messages: [{ role: "user", content }], max_tokens: 32768 };
+  const payload = { model: "kairyu-verified-always", messages: [{ role: "user", content }], max_tokens: 262144 };
   if ($("effort").value) payload.reasoning_effort = $("effort").value;
   try {
     const response = await fetch("/v1/chat/completions", {
