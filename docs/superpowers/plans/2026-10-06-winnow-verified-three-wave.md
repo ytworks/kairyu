@@ -1,7 +1,7 @@
 # Verified route as three waves (DeepSeek drafts, Qwen requirements, Winnow judgments)
 
 Owner request, 2026-10-06; revised the same day with the owner's additions
-(Qwen at medium effort, DeepSeek at the caller's effort, a verification plan).
+(Qwen at low effort, DeepSeek at the caller's effort, a verification plan).
 Changes the VERIFIED route of `examples/deepseek-v4.1-qwen3.8-winnow-8gpu`
 (VCO-D18: one max-effort DeepSeek call). Routing (Winnow THINK/VERIFIED), the
 THINK route, L1 models and GPUs, UIs and public models are unchanged.
@@ -26,7 +26,7 @@ THINK route, L1 models and GPUs, UIs and public models are unchanged.
 |---|---|
 | Wave 1 parallel | yes, through framework change F1 |
 | Five drafts | one DeepSeek call writes all five |
-| Qwen effort | always medium |
+| Qwen effort | always low (owner corrected medium to low) |
 | DeepSeek effort | the caller's effort (default high when none is sent), drafts and answer |
 | GPU gates | all gates after the push, per the verification plan below |
 
@@ -35,7 +35,7 @@ THINK route, L1 models and GPUs, UIs and public models are unchanged.
 | Role | Worker | Wave | Output | Effort / cap |
 |---|---|---|---|---|
 | `drafts` | DeepSeek | 1 | JSON `{D1..D5: {viewpoint, answer}}` (fixed keys so Winnow's questions name each draft), one call | caller (`inherit`) / 131,072 (the DSL's internal maximum) |
-| `requirements` | Qwen | 1 | JSON `{points: [{id: R1.., point}]}`, 1-16 points, MECE, necessary and sufficient, never the answer itself | medium (thinking) / 65,536 |
+| `requirements` | Qwen | 1 | JSON `{points: [{id: R1.., point}]}`, 1-16 points, MECE, necessary and sufficient, never the answer itself | low (thinking) / 65,536 |
 | `judgments` | Winnow | 2 | checklist verifier, one System One request: 5 `adoptable` questions + 5 x N `meets` questions; state = the request and the drafts | Winnow default |
 | `answer` | DeepSeek | 3 | final unit: request + drafts + requirements + judgments; critical comparison, then one best reply in the caller's format, with the caller's tools | caller (`inherit`) / 262,144 |
 
@@ -49,17 +49,11 @@ THINK route, L1 models and GPUs, UIs and public models are unchanged.
 - Budget: `max_steps: 6` (drafts, requirements, one Winnow read, answer,
   headroom); `max_refine_depth: 0`.
 
-## Qwen medium effort — example
+## Qwen low effort — example
 
-Kairyu's role efforts are low/high/max (L3 aliases medium to high). This
-example's Qwen template today clamps every effort to low. Change the example's
-own `qwen3.8-chat.jinja` to the two-tier rule already used in
-`qwen3.8-deepseek-v4.1-8gpu` (DTO-D14), written into this example's file (not
-shared): low = plain thinking, high = medium tier (the medium reasoning
-instruction prepended to the system prompt), max clamps to high. The
-`requirements` role declares `reasoning_effort: high`, so Qwen always thinks at
-medium whatever the caller sends. The Qwen container must restart to read
-the template.
+The `requirements` role declares `reasoning_effort: low`. The example's Qwen
+template already turns any explicit effort into thinking at low, so neither
+the template nor the Qwen container changes.
 
 ## Framework (`kairyu/`) — F1, authorized by the owner
 
@@ -77,8 +71,7 @@ could never end is rejected).
 
 ## Files
 
-- Example: `verified.yaml`, `verified-always.yaml`, `qwen3.8-chat.jinja`,
-  `kairyu.yaml` (comments), `verification.py` (effort, verified-route, stage
+- Example: `verified.yaml`, `verified-always.yaml`, `kairyu.yaml` (comments), `verification.py` (effort, verified-route, stage
   report), README, MEASUREMENTS (after the gates).
 - Framework: `kairyu/orchestration/conductor.py`.
 - Tests: `tests/unit/test_conductor_checklist.py` (+1),
@@ -92,8 +85,8 @@ could never end is rejected).
 
 ## Verification plan (GPU)
 
-Deploy: restart the Qwen container (template), then plain `./run.sh` (rebuilds
-the Kairyu image, waits for health, runs its L1 probes). Then the gates in
+Deploy: plain `./run.sh` (rebuilds the Kairyu image, recreates the gateway
+with the new configs, waits for health, runs its L1 probes). Then the gates in
 `verification.py` GATES order; stop and report on the first failure. Every
 gate writes per-request evidence (latency, TTFT, tokens, tok/s, route,
 efforts, stage times) to `model-volumes/<env>/results/`.
@@ -103,7 +96,7 @@ efforts, stage times) to `model-volumes/<env>/results/`.
 | 1 | l1 | every L1 serves; one verified answer end to end | every DeepSeek DP rank (thinking, chat JSON), Qwen chat, Winnow chat and System One answer; the verified probe answers "Paris" | 30 min |
 | 2 | routing | Winnow's route choice is unchanged | VERIFIED miss rate < 10 % on the calibration and held-out halves | 30 min |
 | 3 | think-route | everyday requests stay on THINK | routed to `deepseek_think`, streamed, default effort high | 30 min |
-| 4 | effort | the efforts the owner set | THINK: DeepSeek at the caller's effort (none→high, low, high, max). VERIFIED: drafts and answer at the caller's effort (none→high); Qwen at medium (`high` tier) every time | 90 min |
+| 4 | effort | the efforts the owner set | THINK: DeepSeek at the caller's effort (none→high, low, high, max). VERIFIED: drafts and answer at the caller's effort (none→high); Qwen at low every time | 90 min |
 | 5 | verified-route | the three waves run as designed | 6 VERIFIED conversations x unary/streamed, caller effort cycling none/low/high/max: 200, non-empty answer; drafts, requirements, judgments, answer all succeed; requirements starts before drafts ends (wave 1 parallel); one Winnow read with 5 + 5 x N items (N ≥ 1); efforts as in gate 4 | 120 min |
 | 6 | fallback | Winnow down does not break requests | Winnow stopped: 200 on THINK; Winnow back: routed again | 60 min |
 | 7 | serving | `kairyu-verified-always` under load | c1/c4/c8/c16 with 8/16/16/32 InFoBench requests: every request 200; report p50/p95 latency, TTFT, tokens, tok/s, per-stage times, judgment success rate | 6 h |
