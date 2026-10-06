@@ -2,7 +2,7 @@
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
-rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), GPU gates pending**
+rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06**
 (evidence: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (renamed from
