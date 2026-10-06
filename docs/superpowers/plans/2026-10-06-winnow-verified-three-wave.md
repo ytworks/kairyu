@@ -143,29 +143,52 @@ TTFT/E2E, live worker load; times in JST.
    (p90 437 messages); at the measured ~2.5 JSON characters per Qwen token
    that is ~370K tokens.
 
-### Fix (F2 only)
+### Owner requirements for the fix (2026-10-07)
 
-Cause 1 is the fix: the L2 conversation re-reads every earlier turn's
-`reasoning_content`, which here is Kairyu's own stage report (75-88 % of the
-characters). Exposing that report to the caller stays as it is.
+The cause is Qwen's token limit; the fix is minimal; earlier turns'
+information stays in the input; the problem is not widened. Rejected:
+bounding what Qwen reads, YaRN 1M, dropping echoed `reasoning_content`.
 
-- F2 (framework, needs authorization): orchestration Chat Completions drops
-  assistant `reasoning_content` from the L2 conversation it renders (the
-  field is still accepted; direct engines keep it). This is the rule
-  Responses AUTO already follows (m11 D4: "AUTO drops replayed reasoning:
-  stage output would grow every L2 prompt"); amends the m11 assistant-history
-  amendment of 2026-08-14 for the L2 path only.
-- Measured by replay: Qwen's prompt 148,455 → 51,387, 180,616 → 55,431,
-  ≥ 196,609 (rejected) → 46,725 tokens; a valid list on all three.
-- Test: one chat-input test (assistant `reasoning_content` absent from the
-  L2 prompt; content and tool calls kept).
-- No example change.
+### Measurements (r1, 132 verified turns: 61 judged, 71 not)
+
+- Failed `requirements` turns: 67. Qwen input (live `/tokenize` of the exact
+  rendered request): min 199,082, median 267,676, max 325,598 tokens.
+- Successful `requirements` outputs (61): max 3,486, p99 3,422, median 1,899.
+- Composition (14:42 turn): L2 conversation 240,650 Qwen tokens = earlier
+  turns' `reasoning_content` 189,953 + message content 33,852 + tool calls
+  3,845 + JSON framing.
+- Turns that fit 262,144 by output cap: 65,536 → 0/67, 16,384 → 21/67,
+  8,192 → 27/67, 4,096 → 29/67.
+
+### Fix
+
+- Example only, both `verified.yaml` and `verified-always.yaml`:
+  `requirements` `max_tokens` 65,536 → 8,192 (2.3x the largest output seen;
+  4,096 is within 20 % of it). Qwen then accepts any conversation up to
+  253,952 tokens. No framework, prompt, DAG or test change.
+- A turn whose conversation is still longer than that is answered the way
+  the design already handles an unreadable judgment: drafts and answer run,
+  without requirements and judgments. In r1 that point came after about 20
+  turns of a problem, and a problem takes about 43 turns (median), so roughly
+  half of a long problem's turns will run without judgments; r2 reports the
+  judged share per problem.
 
 ### Verification
 
-1. CPU: ruff, changed-path tests.
-2. Redeploy (`./run.sh`); live replay of the three failed r1 turns: a valid
-   list every time.
-3. All nine gates plus `long-conversation` (those turns through
-   `kairyu-verified-always`; pass = requirements and judgments succeed).
-4. Stop r1 (kept as an aborted run); DeepSWE r2 with the same conditions.
+1. CPU: ruff; the example's test file.
+2. Before redeploying, live: the 67 failed turns' Qwen requests with the new
+   cap — the 27 that fit return a valid list; the other 40 are rejected
+   before generation exactly as predicted (no truncated lists).
+3. Redeploy (`./run.sh`; only the gateway restarts). All nine gates (they
+   use short conversations, ~1 h 50 min) and `long-conversation`: five r1
+   turns whose Qwen input is 199K-253K through `kairyu-verified-always`;
+   pass = requirements and judgments succeed on all five.
+4. Stop r1, keep it as an aborted run (2 problems scored, 1 solved).
+5. DeepSWE r2: 113 problems, 1 lap, 4 parallel, server default effort, API
+   timeout 3,600 s; progress reports include judged / unjudged turns per
+   problem. Estimate about 26 h (r1 pace, 0.9 h per problem).
+
+### Decision asked
+
+Approve this plan, accepting that turns beyond 253,952 Qwen tokens run
+without requirements and judgments.
