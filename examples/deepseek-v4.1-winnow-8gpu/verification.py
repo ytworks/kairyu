@@ -579,7 +579,7 @@ def gate_think_route(env: dict[str, str], *, budget_s: float = 1800) -> None:
             findings.append(f"status={row['status']} empty={not row['content'].strip()}")
         elif row["route"] != "deepseek_think":
             findings.append(f"everyday request routed to {row['route']}")
-        elif row["has_verification"] or row["efforts"] != ["high"]:
+        elif row["has_verification"] or row["efforts"] != {"deepseek_think_answer": "high"}:
             findings.append(
                 f"think route: verification={row['has_verification']} efforts={row['efforts']}"
             )
