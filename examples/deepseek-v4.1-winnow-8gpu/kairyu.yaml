@@ -51,52 +51,45 @@ pools:
     prefix_index: true
     probe_interval_s: 2.0
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl
-  # Qwen3.8-27B on GPU 6: the verified route's requirements (VCO-D19);
-  # built as in qwen3.8-27b-1gpu.
-  qwen3.8-27b:
-    replicas:
-    - backend: openai
-      health_url: http://qwen:8000/health
-      options:
-        base_url: http://qwen:8000/v1
-        model: qwen3.8-27b
-        api_key_env: null
-        timeout_s: 1800
-        upstream: vllm
-        capabilities:
-          allow_prompt_kinds:
-          - multimodal
-          allow_chat_template_kwargs:
-          - enable_thinking
-        image_input_policy:
-          max_images: 1
-          max_image_bytes: 8388608
-          max_total_image_bytes: 8388608
-          max_image_pixels: 2097152
-          max_total_image_pixels: 2097152
-          max_image_dimension: 4096
-          max_image_aspect_ratio: 200
-          max_processed_prompt_tokens: 262144
-        model_revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
-        max_model_len: 262144
-        quantization_format: fp8
-        cache_descriptor:
-          family: qwen3.8-hybrid-mamba-paged-kv
-        tensor_parallel_size: 1
-        mtp_enabled: false
-        container_image_digest: sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
-    unhealthy_after: 1
-    probe_interval_s: 2.0
-  # Winnow-12B Q8_0 on GPU 7 (llama.cpp, winnow-server); built as in
+  # Winnow-12B Q8_0, two replicas (llama.cpp, winnow-server); built as in
   # winnow-12b-q8-1gpu. Its chat is an internal pool; its typed decisions
-  # (System One, below) judge the route and the verified route's drafts.
+  # (System One, below) are split by use: winnow-route (GPU 6) judges the
+  # route, winnow-judge (GPU 7) judges the verified route's drafts.
   winnow-12b:
     replicas:
     - backend: openai
       # llama-server serves /health (503 while loading), not /readyz.
-      health_url: http://winnow:8091/health
+      health_url: http://winnow-route:8091/health
       options:
-        base_url: http://winnow:8091/v1
+        base_url: http://winnow-route:8091/v1
+        model: winnow-12b
+        api_key_env: null
+        timeout_s: 1800
+        upstream: llamacpp
+        capabilities:
+          allow_prompt_kinds:
+          - multimodal
+        # Worst case stays below the 32 MiB request limit after a WebP image
+        # is re-encoded as PNG for llama.cpp (LCP-D3).
+        image_input_policy:
+          max_images: 4
+          max_image_bytes: 8388608
+          max_total_image_bytes: 16777216
+          max_image_pixels: 2097152
+          max_total_image_pixels: 4194304
+          max_image_dimension: 4096
+          max_image_aspect_ratio: 200
+          max_processed_prompt_tokens: 65536
+        model_revision: b2b14213dfa252e6d6b543c8b334762e51772d29
+        # Per-slot context: --context 524288 over --chat-parallel 8.
+        max_model_len: 65536
+        quantization_format: gguf:Q8_0
+        tensor_parallel_size: 1
+    - backend: openai
+      # llama-server serves /health (503 while loading), not /readyz.
+      health_url: http://winnow-judge:8091/health
+      options:
+        base_url: http://winnow-judge:8091/v1
         model: winnow-12b
         api_key_env: null
         timeout_s: 1800
@@ -122,16 +115,28 @@ pools:
         tensor_parallel_size: 1
     unhealthy_after: 1
     probe_interval_s: 2.0
-# The route judge and the drafts' judgments: Winnow's typed decisions on GPU 7. winnow-server evaluates
-# one decision request at a time and answers 429 once 128 wait; Kairyu
-# forwards at most 64 and queues 32, so a burst gets Kairyu's 429 first. When
-# Winnow does not answer, the route falls back to deepseek_think and the
-# verified answer is written without judgments.
+# Winnow's typed decisions, one replica per use: winnow-route-systemone (GPU 6)
+# is the route judge, winnow-judge-systemone (GPU 7) the drafts' judgments, so
+# a burst of judgments never queues the next request's route decision.
+# winnow-server evaluates one decision request at a time and answers 429 once
+# 128 wait; Kairyu forwards at most 64 and queues 32 per replica, so a burst
+# gets Kairyu's 429 first. When the route judge does not answer, the route
+# falls back to deepseek_think; when the judge does not answer, the verified
+# answer is written without judgments.
 systemone:
-  winnow-12b-systemone:
-    base_url: http://winnow:8091
+  winnow-route-systemone:
+    base_url: http://winnow-route:8091
     upstream_model: Winnow-12B
-    description: Winnow-12B Q8_0 typed decisions (llama.cpp, winnow-inference)
+    description: Winnow-12B Q8_0 route judge (llama.cpp, winnow-inference, GPU 6)
+    max_concurrency: 64
+    max_queue: 32
+    queue_wait_s: 30
+    timeout_s: 300
+    max_body_bytes: 25165824
+  winnow-judge-systemone:
+    base_url: http://winnow-judge:8091
+    upstream_model: Winnow-12B
+    description: Winnow-12B Q8_0 draft judgments (llama.cpp, winnow-inference, GPU 7)
     max_concurrency: 64
     max_queue: 32
     queue_wait_s: 30
@@ -151,5 +156,4 @@ public_models:
 # The L1 pools are internal resources, not public models.
 legacy_chat_models:
 - deepseek-v4.1-flash
-- qwen3.8-27b
 - winnow-12b

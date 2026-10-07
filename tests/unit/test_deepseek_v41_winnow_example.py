@@ -1,8 +1,8 @@
-"""Routed answers: DeepSeek-V4.1 six-GPU + Qwen3.8 + Winnow example (VCO-D18, D19).
+"""Routed answers: DeepSeek-V4.1 six-GPU + two Winnow replicas example (VCO-D18, D19).
 
 The example's own kairyu.yaml / verified.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
-(against a fake Winnow), so the tests observe what the deployed L1 services
+(against fake Winnow replicas), so the tests observe what the deployed L1 services
 would receive and which route answers.
 """
 
@@ -26,7 +26,7 @@ from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.sampling_params import SamplingParams
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-qwen3.8-winnow-8gpu"
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-winnow-8gpu"
 
 
 DRAFTS = {f"D{k}": {"viewpoint": f"view {k}", "answer": "Paris"} for k in range(1, 6)}
@@ -34,7 +34,7 @@ POINTS = {"points": [{"id": "R1", "point": "names the capital"}, {"id": "R2", "p
 
 
 def _deepseek(seen: list[dict]):
-    """The fake vLLM services: DeepSeek and Qwen, answering by role tag."""
+    """The fake DeepSeek vLLM service, answering by role tag."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -65,12 +65,14 @@ def _deepseek(seen: list[dict]):
     return handler
 
 
-def _winnow(reads: list[dict], *, route: str, down: bool):
+def _winnow(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool):
+    """One fake Winnow replica; ``reads`` records which replica read what."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if down:
             raise httpx.ConnectError("Winnow is down", request=request)
         body = json.loads(request.content)
-        reads.append(body)
+        reads.append((name, body))
         if "route" in body["questions"]:
             labels = list(body["questions"]["route"]["criteria"])
             answers = {
@@ -88,7 +90,7 @@ def _winnow(reads: list[dict], *, route: str, down: bool):
     return handler
 
 
-def _orchestrator(seen: list[dict], reads: list[dict], *, route: str = "VERIFIED", down=False):
+def _orchestrator(seen: list[dict], reads: list, *, route: str = "VERIFIED", down=frozenset()):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
@@ -102,7 +104,7 @@ def _orchestrator(seen: list[dict], reads: list[dict], *, route: str = "VERIFIED
         name: HTTPSystemOneBackend(
             base_url=section.base_url,
             upstream_model=section.upstream_model,
-            transport=httpx.MockTransport(_winnow(reads, route=route, down=down)),
+            transport=httpx.MockTransport(_winnow(reads, name, route=route, down=name in down)),
         )
         for name, section in deployment.systemone.items()
     }
@@ -142,8 +144,9 @@ def test_compose_gpus_match_the_allocation() -> None:
         devices = services[service]["deploy"]["resources"]["reservations"]["devices"]
         return [int(index) for index in devices[0]["device_ids"]]
 
-    for service in ("deepseek", "qwen", "winnow"):
-        assert gpus(service) == spec["allocation"][service]["gpu_ids"]
+    assert gpus("deepseek") == spec["allocation"]["deepseek"]["gpu_ids"]
+    for replica in spec["allocation"]["winnow"]["replicas"]:
+        assert gpus(replica["service"]) == [replica["gpu_id"]]
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
@@ -158,7 +161,8 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
     call = await orchestrator.judge_role_profile(call)
     result = await orchestrator.run(call)
 
-    (read,) = reads
+    ((judge, read),) = reads
+    assert judge == "winnow-route-systemone"
     assert set(read["questions"]["route"]["criteria"]) == {"THINK", "VERIFIED"}
     assert read["state"]["conversation"][-1]["role"] == "user"
     assert result.text == "Paris"
@@ -180,16 +184,18 @@ async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> Non
     result = await orchestrator.run(call)
 
     assert result.text == "Paris"
-    # Wave 1: five DeepSeek drafts in one call at the caller's effort, Qwen's
-    # requirements at low whatever the caller sent.
-    drafts, requirements = sorted(seen[:2], key=lambda body: body["model"])
-    assert drafts["model"] == "deepseek-v4.1-flash"
-    assert drafts["reasoning_effort"] == (effort or "high")
+    # Wave 1: five DeepSeek drafts in one call at the caller's effort, its
+    # requirements at max whatever the caller sent.
+    drafts, requirements = sorted(seen[:2], key=lambda body: body["messages"][-1]["content"])
     assert drafts["messages"][-1]["content"].startswith("[drafts]")
-    assert requirements["model"] == "qwen3.8-27b" and requirements["reasoning_effort"] == "low"
+    assert drafts["reasoning_effort"] == (effort or "high")
     assert requirements["messages"][-1]["content"].startswith("[requirements]")
-    # Wave 2: one Winnow read, with the request: 5 adoptions + 5 x 2 points.
-    _route, judgment = reads
+    assert requirements["reasoning_effort"] == "max"
+    assert {drafts["model"], requirements["model"]} == {"deepseek-v4.1-flash"}
+    # Wave 2: one read on the judgments replica (the route on its own), with
+    # the request: 5 adoptions + 5 x 2 points.
+    (route_judge, _route), (judge, judgment) = reads
+    assert (route_judge, judge) == ("winnow-route-systemone", "winnow-judge-systemone")
     assert judgment["state"]["drafts"] == DRAFTS
     assert judgment["state"]["request"][-1]["role"] == "user"
     assert len(judgment["questions"]) == 5 + 5 * 2
@@ -202,9 +208,9 @@ async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> Non
     assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt
 
 
-async def test_an_unavailable_winnow_routes_to_the_think_answer() -> None:
+async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:
     seen: list[dict] = []
-    orchestrator = _orchestrator(seen, [], down=True)
+    orchestrator = _orchestrator(seen, [], down={"winnow-route-systemone"})
 
     call = await orchestrator.judge_role_profile(_call("Name the capital of France."))
     await orchestrator.run(call)

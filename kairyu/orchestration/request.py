@@ -131,24 +131,12 @@ def bounded_text(text: str, max_chars: int) -> str:
     )
 
 
-def conversation_text(query: str, *, reasoning: bool = True) -> str:
+def conversation_text(query: str) -> str:
     """The ``{conversation}`` role placeholder: the request's role-tagged
-    messages without the answer-contract wrapper, or the query itself.
-
-    With ``reasoning=False`` (``{conversation_without_reasoning}``) assistant
-    turns drop their replayed ``reasoning_content``."""
+    messages without the answer-contract wrapper, or the query itself."""
 
     messages = conversation_messages(query)
-    if messages is None:
-        return query
-    if not reasoning:
-        messages = [
-            {key: value for key, value in message.items() if key != "reasoning_content"}
-            if isinstance(message, dict) and message.get("role") == "assistant"
-            else message
-            for message in messages
-        ]
-    return json.dumps(messages, ensure_ascii=False, indent=1)
+    return query if messages is None else json.dumps(messages, ensure_ascii=False, indent=1)
 
 
 @dataclass(frozen=True)

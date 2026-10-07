@@ -225,6 +225,8 @@ budget accounting are unchanged. Supporting mechanisms:
   Amended 2026-10-07 (PR #641): `{conversation_without_reasoning}` renders
   the same messages without assistant `reasoning_content`, for a role whose
   worker should not read replayed reasoning (the example chooses the role).
+  Withdrawn the same day (PR #641): its only user, Qwen `requirements`, moved
+  to DeepSeek, which needs the replayed reasoning; the placeholder is removed.
 - **Refinement prompt.** `refine_prompt` renders a refinement from
   `{previous}` and `{feedback}` (and any upstream output) instead of the
   appended default. `checklist.max_refinements` bounds one verifier below
@@ -288,7 +290,7 @@ example. Code: `Conductor._validate_verdict_waits`, `_run_pending`; test:
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/unit/test_profile_judge_systemone.py`; GPU evidence in
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b` (`routing`);
-Winnow as the judge: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (VCO-D18).
+Winnow as the judge: `examples/deepseek-v4.1-winnow-8gpu/` (VCO-D18).
 
 A `profile_judge` whose `worker` is a `systemone_ref` worker routes by System
 One probabilities instead of a generated label. Kairyu sends the

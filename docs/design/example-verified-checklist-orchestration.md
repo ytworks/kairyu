@@ -2,11 +2,14 @@
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
-rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06**
-(evidence: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
+rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
+DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), GPU gates pending**
+(evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
-Applies to: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (renamed from
-`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18). Framework
+Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
+`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18 and from
+`examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
+2026-10-07). Framework
 mechanisms: m1 D8 (checklist verifiers, unused since VCO-D18), m1 D9 and the
 m11 D8 replica amendment.
 
@@ -647,6 +650,30 @@ assistant turn). Why: DeepSWE r1 replayed Kairyu's stage reports in
 `reasoning_content` (189,953 of 240,650 Qwen tokens on one turn), so Qwen's
 262,144-token context overflowed and 87 of 160 VERIFIED turns had no Winnow
 judgment; without it the failed turns measured 30,330-96,837 tokens.
+
+**Amendment (2026-10-07, PR #641): DeepSeek requirements, two Winnow
+replicas.** Owner decision; supersedes the amendment above.
+
+- `requirements` is written by DeepSeek at max effort, whatever the caller
+  sends (same sampling as the other DeepSeek roles, output cap 131,072), and
+  reads `{conversation}` with the replayed reasoning.
+- Qwen leaves the example: no worker, pool, compose service or template. The
+  example is renamed `examples/deepseek-v4.1-winnow-8gpu`.
+- GPU 6 hosts a second Winnow-12B replica. Each replica serves one System One
+  use: `winnow-route` (GPU 6, `winnow-route-systemone`) only the route judge,
+  `winnow-judge` (GPU 7, `winnow-judge-systemone`) only the judgments. Both
+  stay in the internal `winnow-12b` chat pool.
+- Gates: effort expects drafts and answer at the caller's effort and
+  requirements at max, and the route judged on `winnow-route`;
+  verified-route expects the judgments on `winnow-judge`; fallback stops
+  each replica alone (route down: think route while judgments still run;
+  judge down: still routed, answer without judgments).
+
+Why: DeepSWE r1 of the three waves (24 of 113 tasks scored, 8 passed) showed
+Qwen `requirements` as the wave-1 bottleneck (median 107 s against 36 s for
+the drafts). Separate Winnow replicas keep a burst of judgments from queueing
+the next request's route decision. With Qwen gone, the m1 D8 placeholder
+`{conversation_without_reasoning}` has no user and is withdrawn.
 
 ## Limitations
 

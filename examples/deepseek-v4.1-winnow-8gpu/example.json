@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "environment": "deepseek-v4.1-qwen3.8-winnow-8gpu",
+  "environment": "deepseek-v4.1-winnow-8gpu",
   "hardware": {
     "gpu_count": 8,
     "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
@@ -47,14 +47,26 @@
         ]
       ]
     },
-    "qwen": {
-      "gpu_ids": [
-        6
-      ]
-    },
     "winnow": {
       "gpu_ids": [
+        6,
         7
+      ],
+      "replicas": [
+        {
+          "service": "winnow-route",
+          "gpu_id": 6,
+          "l1_port": 8015,
+          "systemone": "winnow-route-systemone",
+          "serves": "profile_judge"
+        },
+        {
+          "service": "winnow-judge",
+          "gpu_id": 7,
+          "l1_port": 8016,
+          "systemone": "winnow-judge-systemone",
+          "serves": "judgments"
+        }
       ]
     }
   },
@@ -88,17 +100,6 @@
       "unhealthy_after": 1,
       "placement_log": "/var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl"
     }
-  },
-  "qwen": {
-    "repo": "Qwen/Qwen3.8-27B-FP8",
-    "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
-    "tree_sha256": "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e",
-    "slug": "qwen3.8-27b-fp8",
-    "served_name": "qwen3.8-27b",
-    "max_context_tokens": 262144,
-    "image": "vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
-    "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
-    "release": "v0.23.0"
   },
   "winnow": {
     "model": {
@@ -153,7 +154,10 @@
     }
   },
   "systemone": {
-    "model": "winnow-12b-systemone",
+    "models": [
+      "winnow-route-systemone",
+      "winnow-judge-systemone"
+    ],
     "upstream_model": "Winnow-12B",
     "max_concurrency": 64,
     "max_queue": 32

@@ -4,17 +4,20 @@
 Every gate has a time budget and writes its per-request evidence (latency,
 tokens, tok/s, route, efforts) to model-volumes/<environment>/results/<gate>-<UTC>.json.
 
-  l1              every DeepSeek DP rank (thinking and chat, grammar JSON),
-                  Qwen chat, Winnow chat and Winnow System One on its L1
+  l1              every DeepSeek DP rank (thinking and chat, grammar JSON), and
+                  chat and System One on each Winnow replica's L1
   routing         Winnow routes accuracy-critical conversations to VERIFIED
                   (miss rate < 10 % on the calibration and held-out halves)
   think-route     everyday requests stream from deepseek_think at the default effort
   effort          the caller's effort reaches the think route and the verified
-                  route's drafts and answer; Qwen's requirements always think at low
+                  route's drafts and answer; DeepSeek's requirements always think
+                  at max; winnow-route judges the route
   verified-route  a verified request runs the three waves: five DeepSeek drafts
-                  beside Qwen's requirements, one Winnow judgment read (5 + 5 x N
+                  beside DeepSeek's requirements, one winnow-judge read (5 + 5 x N
                   items), then the answer, at the efforts the effort gate checks
-  fallback        Winnow down: 200 on the think route; Winnow back: routed again
+  fallback        winnow-route down: 200 on the think route while winnow-judge
+                  still judges; winnow-judge down: still routed, the verified
+                  answer without judgments; both back: routed and judged again
   serving         kairyu-verified-always at c1/c4/c8/c16: latency, tokens, tok/s
   serving-routed  kairyu-verified at c1/c4/c8/c16: route mix, latency, tokens per route
   browser         the answer page and Open WebUI answer in a real browser
@@ -111,16 +114,26 @@ def _judge_seconds(trace: dict | None) -> float | None:
     return None
 
 
-def _efforts(trace: dict | None, worker: str = "deepseek") -> list[str | None]:
-    """The reasoning effort of every generation of ``worker`` in the trace."""
+def _efforts(trace: dict | None) -> dict[str, str | None]:
+    """The reasoning effort of every successful DeepSeek generation, by node
+    (wave-1 nodes finish in either order)."""
 
-    return [
-        (event.get("detail") or {}).get("reasoning_effort")
+    return {
+        event.get("node"): (event.get("detail") or {}).get("reasoning_effort")
         for event in (trace or {}).get("events") or []
         if event.get("kind") == "generation"
-        and event.get("worker") == worker
+        and event.get("worker") == "deepseek"
         and event.get("status") == "success"
-    ]
+    }
+
+
+def _judge_worker(trace: dict | None) -> str | None:
+    """The Winnow worker that answered the route judge, from the trace."""
+
+    for event in (trace or {}).get("events") or []:
+        if event.get("node") == "profile_judge":
+            return event.get("worker")
+    return None
 
 
 def _seconds(timing: dict | None, key: str) -> datetime | None:
@@ -154,6 +167,7 @@ def _stages(trace: dict | None) -> dict[str, dict]:
         detail = event.get("detail") or {}
         stages[event["node"]] = {
             "status": event["status"],
+            "worker": event.get("worker"),
             "start_s": round((start - origin).total_seconds(), 2) if start and origin else None,
             "end_s": round((end - origin).total_seconds(), 2) if end and origin else None,
             **({"items": detail.get("items")} if event["kind"] == "verification" else {}),
@@ -165,7 +179,8 @@ def _stages(trace: dict | None) -> dict[str, dict]:
 def _three_waves(row: dict, caller_effort: str | None) -> list[str]:
     """What a verified row misses of the three-wave route (empty when sound):
     the four stages, wave-1 overlap, 5 + 5 x N judgments, and the efforts
-    (DeepSeek's drafts and answer at the caller's, default high; Qwen at low)."""
+    (DeepSeek's drafts and answer at the caller's, default high; its
+    requirements at max) and the judgments on winnow-judge."""
 
     stages = row["stages"]
     problems = []
@@ -183,10 +198,19 @@ def _three_waves(row: dict, caller_effort: str | None) -> list[str]:
         requirements["start_s"] >= drafts["end_s"]
     ):
         problems.append(f"wave 1 not parallel: drafts={drafts} requirements={requirements}")
-    wanted = caller_effort or "high"
-    if row["efforts"] != [wanted, wanted] or row["qwen_efforts"] != ["low"]:
-        problems.append(f"efforts={row['efforts']} qwen={row['qwen_efforts']}")
+    if stages["judgments"]["worker"] != "winnow_judge":
+        problems.append(f"judgments on {stages['judgments']['worker']}")
+    if row["efforts"] != _verified_efforts(caller_effort):
+        problems.append(f"efforts={row['efforts']}")
     return problems
+
+
+def _verified_efforts(caller_effort: str | None) -> dict[str, str]:
+    """The verified route's efforts: the caller's (default high) for the
+    drafts and the answer, max for the requirements."""
+
+    wanted = caller_effort or "high"
+    return {"drafts": wanted, "requirements": "max", "answer": wanted}
 
 
 def _post_stream(
@@ -292,7 +316,7 @@ def chat(
         "route": route,
         "p_verified": p_verified,
         "efforts": _efforts(trace_body),
-        "qwen_efforts": _efforts(trace_body, "qwen"),
+        "judge_worker": _judge_worker(trace_body),
         "stages": _stages(trace_body),
         "judge_s": _judge_seconds(trace_body),
         "public_completion_tokens": usage.get("completion_tokens"),
@@ -328,7 +352,8 @@ def _print_rows(rows: list[dict]) -> None:
         print(
             f"  #{index:02d} status={row['status']} {row['seconds']:7.1f}s "
             f"ttft={row.get('ttft_s')} route={row['route']} p_verified={row.get('p_verified')} "
-            f"efforts={row['efforts']} qwen={row.get('qwen_efforts')} judge_s={row.get('judge_s')} "
+            f"efforts={row['efforts']} judge={row.get('judge_worker')} "
+            f"judge_s={row.get('judge_s')} "
             f"in={row['orchestration_input_tokens']} "
             f"out={row['orchestration_output_tokens']} "
             f"({row['orchestration_output_tok_per_s']} tok/s)",
@@ -397,8 +422,8 @@ def _routing_probabilities(env: dict[str, str]) -> list[dict[str, float] | None]
     the served judge.
 
     The orchestrator is built from verified.yaml with the real System One
-    backend pointed at Winnow, so the request Winnow reads is the one Kairyu
-    sends in serving; no generation runs.
+    backend pointed at winnow-route, so the request Winnow reads is the one
+    Kairyu sends in serving; no generation or judgment runs.
     """
 
     import asyncio
@@ -413,7 +438,7 @@ def _routing_probabilities(env: dict[str, str]) -> list[dict[str, float] | None]
 
     async def judge_all() -> list[dict[str, float] | None]:
         backend = HTTPSystemOneBackend(
-            base_urls=(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}",),
+            base_urls=(control.winnow_l1_url(env, "winnow-route"),),
             upstream_model=SPEC["systemone"]["upstream_model"],
             max_concurrency=8,
             max_queue=1024,
@@ -421,11 +446,8 @@ def _routing_probabilities(env: dict[str, str]) -> list[dict[str, float] | None]
         )
         orchestrator = build_orchestrator(
             load_spec(HERE / "verified.yaml"),
-            engine_refs={
-                SPEC["deepseek"]["served_name"]: MockBackend(),
-                SPEC["qwen"]["served_name"]: MockBackend(),
-            },
-            systemone_refs={SPEC["systemone"]["model"]: backend},
+            engine_refs={SPEC["deepseek"]["served_name"]: MockBackend()},
+            systemone_refs={model: backend for model in SPEC["systemone"]["models"]},
         )
 
         async def one(item: dict) -> dict[str, float] | None:
@@ -580,7 +602,8 @@ def gate_think_route(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
 def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
     """The caller's effort (default high) reaches the think route and the
-    verified route's drafts and answer; Qwen's requirements think at low."""
+    verified route's drafts and answer; DeepSeek's requirements think at max;
+    winnow-route judges the route."""
 
     deadline = Deadline("effort", budget_s)
     easy = next(item for item in _dataset("routing-set.json") if item["label"] == "THINK")
@@ -592,17 +615,19 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
         think = chat(env, messages=easy["messages"], model=ROUTED, trace=True, **extra)
         verified = chat(env, verified_prompt, model=ALWAYS, trace=True, **extra)
         expected = effort or "high"
-        for row, wanted, qwen in (
-            (think, [expected], []),
-            (verified, [expected, expected], ["low"]),
+        for row, wanted in (
+            (think, {"deepseek_think_answer": expected}),
+            (verified, _verified_efforts(effort)),
         ):
-            if row["status"] != 200 or row["efforts"] != wanted or row["qwen_efforts"] != qwen:
+            if row["status"] != 200 or row["efforts"] != wanted:
                 findings.append(
                     f"{effort}: {row['route']} status={row['status']} efforts={row['efforts']} "
-                    f"qwen={row['qwen_efforts']} (expected {wanted}, qwen {qwen})"
+                    f"(expected {wanted})"
                 )
         if think["route"] != "deepseek_think":
             findings.append(f"{effort}: everyday request routed to {think['route']}")
+        if think["judge_worker"] != "winnow_route":
+            findings.append(f"{effort}: route judged on {think['judge_worker']}")
         print(f"effort={expected}:")
         _print_rows([think, verified])
         report[expected if effort else "default"] = {"rows": [think, verified]}
@@ -619,9 +644,9 @@ def gate_verified_route(env: dict[str, str], *, budget_s: float = 7200) -> None:
     Six VERIFIED conversations of the routing set go to the always-verified
     model, unary and streamed, with the caller's effort cycling through none,
     low, high and max: each must return 200 with a non-empty answer after
-    DeepSeek's drafts and Qwen's requirements ran in parallel, one Winnow
-    judgment read covered 5 + 5 x N items, and the efforts were the caller's
-    (DeepSeek) and low (Qwen).
+    DeepSeek's drafts and requirements ran in parallel, one winnow-judge
+    read covered 5 + 5 x N items, and the efforts were the caller's (drafts,
+    answer) and max (requirements).
     """
 
     deadline = Deadline("verified-route", budget_s)
@@ -684,35 +709,61 @@ def _wait_healthy(service: str, timeout_s: float = 1800) -> None:
 
 
 def gate_fallback(env: dict[str, str], *, budget_s: float = 3600) -> None:
-    """Winnow down: the routed model answers on the think route; Winnow back:
-    routed again."""
+    """Each Winnow replica fails alone: winnow-route down sends the routed
+    model to the think route while winnow-judge still judges the verified
+    route; winnow-judge down leaves routing intact and the verified answer
+    without judgments; both back: routed and judged again."""
 
     deadline = Deadline("fallback", budget_s)
     prompt = "In two sentences, explain why the sky looks blue."
     findings = []
     phases = {}
     try:
-        _compose(env, "stop", "winnow")
+        _compose(env, "stop", "winnow-route")
         down = [chat(env, prompt, model=ROUTED, trace=True) for _ in range(2)]
-        phases["winnow_down"] = down
+        judged = chat(env, prompt, model=ALWAYS, trace=True)
+        phases["route_down"] = [*down, judged]
         for row in down:
             if (
                 row["status"] != 200
                 or not row["content"].strip()
                 or not row["route"].startswith("deepseek_think (fallback")
             ):
-                findings.append(f"winnow down: status={row['status']} route={row['route']}")
-        always = chat(env, prompt, model=ALWAYS, trace=True)
-        phases["winnow_down_always"] = [always]
-        if always["status"] != 200 or not always["content"].strip():
-            findings.append(f"winnow down, always model: status={always['status']}")
+                findings.append(f"route down: status={row['status']} route={row['route']}")
+        problems = _three_waves(judged, None)
+        if judged["status"] != 200 or not judged["content"].strip() or problems:
+            findings.append(f"route down, always model: status={judged['status']} {problems}")
     finally:
-        _compose(env, "start", "winnow")
-        _wait_healthy("winnow")
+        _compose(env, "start", "winnow-route")
+        _wait_healthy("winnow-route")
+    deadline.check()
+    try:
+        _compose(env, "stop", "winnow-judge")
+        routed = chat(env, prompt, model=ROUTED, trace=True)
+        unjudged = chat(env, prompt, model=ALWAYS, trace=True)
+        phases["judge_down"] = [routed, unjudged]
+        if routed["status"] != 200 or "fallback" in routed["route"]:
+            findings.append(f"judge down: status={routed['status']} route={routed['route']}")
+        judgments = unjudged["stages"].get("judgments") or {}
+        if (
+            unjudged["status"] != 200
+            or not unjudged["content"].strip()
+            or (unjudged["stages"].get("answer") or {}).get("status") != "success"
+            or "reason" not in judgments
+        ):
+            findings.append(
+                f"judge down, always model: status={unjudged['status']} judgments={judgments}"
+            )
+    finally:
+        _compose(env, "start", "winnow-judge")
+        _wait_healthy("winnow-judge")
     recovered = chat(env, prompt, model=ROUTED, trace=True)
-    phases["recovered"] = [recovered]
+    rejudged = chat(env, prompt, model=ALWAYS, trace=True)
+    phases["recovered"] = [recovered, rejudged]
     if recovered["status"] != 200 or "fallback" in recovered["route"]:
         findings.append(f"after restart: status={recovered['status']} route={recovered['route']}")
+    if rejudged["status"] != 200 or _three_waves(rejudged, None):
+        findings.append(f"after restart, always model: {_three_waves(rejudged, None)}")
     deadline.check()
     for name, rows in phases.items():
         print(f"{name}:")

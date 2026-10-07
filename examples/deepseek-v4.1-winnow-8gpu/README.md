@@ -1,7 +1,7 @@
-# Routed answers: DeepSeek-V4.1 (6 GPUs) + Qwen3.8-27B (1 GPU) + Winnow-12B (1 GPU)
+# Routed answers: DeepSeek-V4.1 (6 GPUs) + two Winnow-12B replicas (2 GPUs)
 
 Winnow reads each conversation and picks one of two routes: the verified
-route, three waves of DeepSeek, Qwen and Winnow (VCO-D19), or the think
+route, three waves of DeepSeek and Winnow (VCO-D19), or the think
 route, where DeepSeek answers at the effort the caller asked for.
 
 Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D18,
@@ -11,7 +11,7 @@ and LCP-D1..D6 (llama.cpp upstream).
 
 | Layer | What runs here |
 |---|---|
-| L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). Qwen3.8-27B FP8 on GPU 6 (as in `qwen3.8-27b-1gpu`). Winnow-12B Q8_0 on GPU 7 (as in `winnow-12b-q8-1gpu`): chat and System One from one loaded model. |
+| L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). Two Winnow-12B Q8_0 replicas (each as in `winnow-12b-q8-1gpu`, chat and System One from one loaded model): `winnow-route` on GPU 6 answers only the route judge, `winnow-judge` on GPU 7 only the judgments. |
 | L2 | `verified.yaml`: the Winnow route judge, the verified route and the think route. `verified-always.yaml`: the verified route only. |
 | L3 | Public models `kairyu-verified` (routed) and `kairyu-verified-always`; Open WebUI on :3012; the answer page on :3013. |
 
@@ -21,14 +21,14 @@ and LCP-D1..D6 (llama.cpp upstream).
 request
   │
   ▼
-profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
+profile_judge ── winnow-route (System One), 1 request: THINK or VERIFIED?
   │                (kairyu-verified-always skips the judge: VERIFIED)
   ├─ VERIFIED
   │    wave 1 ┬ drafts        DeepSeek, the caller's effort: five answers D1..D5 from
   │           │               viewpoints as different as possible (one call)
-  │           └ requirements  Qwen, thinking at low: what the answer must meet,
+  │           └ requirements  DeepSeek, thinking at max: what the answer must meet,
   │                           necessary, sufficient, MECE (≤ 16)
-  │    wave 2   judgments     Winnow, 1 request with the request: each draft
+  │    wave 2   judgments     winnow-judge, 1 request with the request: each draft
   │                           adoptable as the final reply? each draft x
   │                           requirement met? (5 + 5 x N probabilities)
   │    wave 3   answer        DeepSeek, the caller's effort: reads drafts, requirements and
@@ -41,11 +41,13 @@ profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
   characters, the whole at 120,000) with one choice question; the most
   probable label wins. The question and both criteria are the previous
   verified example's.
-- When Winnow does not answer within 10 s (down, overloaded, unreadable),
-  the request takes the think route.
+- When winnow-route does not answer within 10 s (down, overloaded,
+  unreadable), the request takes the think route.
+- The two Winnow replicas never share a queue: a burst of judgments cannot
+  delay the next request's route decision.
 - Both routes pass the caller's tools and response_format to the DeepSeek
   role that publishes (the verified route's answer).
-- If Winnow cannot read the judgments (down, or the drafts exceed its
+- If winnow-judge cannot read the judgments (down, or the drafts exceed its
   65,536-token decision context), the answer is written without them.
 
 ## Run
@@ -58,11 +60,10 @@ profile_judge ── Winnow (System One), 1 request: THINK or VERIFIED?
 ```
 
 `run.sh` builds `winnow-server` from its pinned revision with the f072b10
-llama.cpp backport (`winnow-patches/`), pulls the pinned vLLM release for
-Qwen, and builds the DeepSeek SM120 overlay when its pinned image is absent.
-`DEEPSEEK_MODEL_SEED` / `QWEN_MODEL_SEED` may name local copies of the pinned
-checkpoints below `/mnt/nvme`; they are hard-linked and re-hashed against the
-pins before serving.
+llama.cpp backport (`winnow-patches/`) once for both replicas, and builds the
+DeepSeek SM120 overlay when its pinned image is absent. `DEEPSEEK_MODEL_SEED`
+may name a local copy of the pinned checkpoint below `/mnt/nvme`; it is
+hard-linked and re-hashed against the pin before serving.
 
 ## Using it
 
@@ -82,12 +83,12 @@ stays empty until the guarantee is rebuilt.
 
 | Gate | Checks |
 |---|---|
-| `l1` | every DeepSeek DP rank (thinking and chat JSON), Qwen chat, Winnow chat, Winnow System One (L1), one verified answer |
+| `l1` | every DeepSeek DP rank (thinking and chat JSON), chat and System One on each Winnow replica (L1), one verified answer |
 | `routing` | `datasets/routing-set.json`: VERIFIED miss rate < 10 % on the calibration and held-out halves |
 | `think-route` | everyday requests stream from the think route at the default effort |
-| `effort` | the think route gets the caller's effort; the verified route's drafts and answer get it too (default high); Qwen always thinks at low |
-| `verified-route` | a verified request runs the three waves: drafts beside requirements, one Winnow read of 5 + 5 x N items, then the answer |
-| `fallback` | Winnow down: 200 on the think route; Winnow back: routed again |
+| `effort` | the think route gets the caller's effort; the verified route's drafts and answer get it too (default high); the requirements always think at max; the route is judged on `winnow-route` |
+| `verified-route` | a verified request runs the three waves: drafts beside requirements, one `winnow-judge` read of 5 + 5 x N items, then the answer |
+| `fallback` | `winnow-route` down: think route, judgments still run; `winnow-judge` down: still routed, answer without judgments; both back: routed and judged |
 | `serving` | `kairyu-verified-always` at c1/c4/c8/c16 (8/16/16/32 InFoBench requests) |
 | `serving-routed` | `kairyu-verified` at c1/c4/c8/c16 on the routing set, per-route latency and tokens |
 | `browser` | `browser-smoke.sh`: both UIs answer |
