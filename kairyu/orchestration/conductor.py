@@ -1062,6 +1062,15 @@ class Conductor:
             frontier.update(self._unit_deps.get(dep, frozenset()))
         return closure
 
+    def _excludable_units(self) -> set[str]:
+        """Units a request may exclude: image-conditional units, the head."""
+
+        return {
+            unit.name
+            for unit in self._units
+            if unit.requires == "image" or unit.role_type == "head"
+        }
+
     def _unconditional_unit_closure(self, name: str) -> set[str]:
         """The part of the closure that precedes unit ``name`` on every request.
 
@@ -1070,11 +1079,7 @@ class Conductor:
         time, so neither it nor what precedes ``name`` only through it is
         counted."""
 
-        excludable = {
-            unit.name
-            for unit in self._units
-            if unit.requires == "image" or unit.role_type == "head"
-        }
+        excludable = self._excludable_units()
         closure: set[str] = set()
         frontier = set(self._unit_deps.get(name, frozenset())) - excludable
         while frontier:
@@ -1205,8 +1210,15 @@ class Conductor:
             target = verifier.verifies
             if target is None:
                 continue
-            closure = self._transitive_unit_closure(target)
+            # What precedes the target on every request is complete when it
+            # is judged, and so is an excludable ancestor (complete, or
+            # excluded and read as missing). Any other static ancestor is
+            # reached only through an excludable unit and can run beside the
+            # target, so it is waited for.
             unconditional = self._unconditional_unit_closure(target)
+            done = unconditional | (
+                self._transitive_unit_closure(target) & self._excludable_units()
+            )
             waits = set()
             for name in verifier.depends_on:
                 if name in self._inline_executor_target:
@@ -1218,7 +1230,7 @@ class Conductor:
                     if dep_role.role_type == "verifier" and dep_role.verifies
                     else name
                 )
-                if dep == target or dep in closure:
+                if dep == target or dep in done:
                     continue
                 if dep not in self._unit_deps or dep == self._selected_final_unit().name:
                     # The final unit streams after the rest of the DAG.

@@ -933,6 +933,52 @@ def test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected():
         Conductor(roles, {"gen": RoutedBackend({})})
 
 
+async def test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_without_an_image():
+    # p -> image (requires image) -> a; va judges a and reads p. Without an
+    # image, image is excluded and a runs beside p: va must wait for p
+    # instead of reading it missing.
+    a_done = asyncio.Event()
+
+    class SlowP(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[p]"):
+                await asyncio.wait_for(a_done.wait(), timeout=5)
+            result = await super().generate(request)
+            if str(request.prompt).startswith("[a]"):
+                a_done.set()
+            return result
+
+    backend = SlowP({"p": ["P-OUT"], "a": ["A-OUT"], "va": ["PASS"], "final": ["done"]})
+    roles = (
+        RoleSpec(name="p", worker="gen", prompt="[p] {query}"),
+        RoleSpec(
+            name="image", worker="gen", prompt="[image] {p}", depends_on=("p",), requires="image"
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}", depends_on=("image",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {p}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "p"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {p}",
+            depends_on=("va", "p"),
+        ),
+    )
+
+    result = await Conductor(roles, {"gen": backend}).run("q", budget=Budget(max_steps=12))
+
+    assert result.final_text == "done"
+    (verdict_prompt,) = [prompt for prompt in backend.prompts if prompt.startswith("[va]")]
+    assert verdict_prompt == "[va] A-OUT P-OUT"
+
+
 async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
     # The drafts and the points run at once; the drafts' verdict waits for
     # the points it reads, and the final answer reads the verdict.
