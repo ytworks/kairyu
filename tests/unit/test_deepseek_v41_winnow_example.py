@@ -29,7 +29,38 @@ from kairyu.sampling_params import SamplingParams
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-winnow-8gpu"
 
 
-DRAFTS = {f"D{k}": {"viewpoint": f"view {k}", "answer": "Paris"} for k in range(1, 6)}
+DRAFTS = {
+    f"D{k}": {"viewpoint": f"view {k}", "answer": "Paris", "tool_calls": []} for k in range(1, 6)
+}
+BASH = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}
+# An agent turn: the conversation ends with a tool result.
+AGENT_TURN = [
+    {"role": "system", "content": "You can run shell commands."},
+    {"role": "user", "content": "Fix the failing test in /app."},
+    {
+        "role": "assistant",
+        "content": "Running the tests first.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command": "pytest -q"}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "1 failed: test_parse"},
+]
 POINTS = {"points": [{"id": "R1", "point": "names the capital"}, {"id": "R2", "point": "one word"}]}
 
 
@@ -123,6 +154,37 @@ def _call(content: str) -> OrchestrationRequest:
         prompt=validate_orchestration_chat_input(chat).prompt,
         sampling_params=SamplingParams(max_tokens=4096),
     )
+
+
+async def test_an_agent_turn_drafts_structured_calls_for_the_next_step() -> None:
+    seen: list[dict] = []
+    reads: list = []
+    orchestrator = _orchestrator(seen, reads, route="VERIFIED")
+    chat = ChatCompletionRequest(model="kairyu-verified", messages=AGENT_TURN, tools=[BASH])
+    call = OrchestrationRequest(
+        prompt=validate_orchestration_chat_input(chat).prompt,
+        sampling_params=SamplingParams(max_tokens=4096),
+        tools=(BASH,),
+    )
+
+    call = await orchestrator.judge_role_profile(call)
+    result = await orchestrator.run(call)
+
+    drafts = next(b for b in seen if b["messages"][-1]["content"].startswith("[drafts]"))
+    prompt = drafts["messages"][-1]["content"]
+    # The drafts read the caller's tools.
+    assert '"name": "bash"' in prompt.split("--- TOOLS ---")[1]
+    # The published reply carries the caller's tools.
+    answer = seen[-1]
+    assert answer["tools"][0]["function"]["name"] == "bash"
+    # The judge reads each draft's text and tool calls.
+    _route, (_judge, judgment) = reads
+    questions = judgment["questions"].values()
+    assert all("tool_calls" in json.dumps(q["instructions"]) for q in questions)
+    # ... and sees where the work stands: the tool result, not only the task.
+    assert judgment["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
+    # Stage reports are not replayed through reasoning_content.
+    assert not result.reasoning_content
 
 
 def test_gateway_builds_from_the_example_configs(tmp_path: Path) -> None:

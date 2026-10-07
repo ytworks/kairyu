@@ -3,7 +3,8 @@
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
-DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07**
+DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
+next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
@@ -677,6 +678,35 @@ Qwen `requirements` as the wave-1 bottleneck (median 107 s against 36 s for
 the drafts). Separate Winnow replicas keep a burst of judgments from queueing
 the next request's route decision. With Qwen gone, the m1 D8 placeholder
 `{conversation_without_reasoning}` has no user and is withdrawn.
+
+**Amendment (2026-10-07, PR #641): the next step, structured tool calls,
+no stage reports.** Owner decision after the content of DeepSWE turns on the
+two-Winnow layout (stopped at 0 of 113 scored).
+
+- The drafts, the requirements and the answer define the reply as the next
+  assistant message. When the conversation ends with tool results or the
+  assistant's own turns, the reply is the next step of that work: the move
+  needed now, not the request's final result and not a step whose result
+  the conversation already shows. The requirements list what that next step
+  must meet; the request's final goal is context.
+- Each draft carries `tool_calls` (name, JSON arguments) and reads the
+  caller's tools; its text never holds a call. The answer makes calls
+  through the tool-calling interface only.
+- The judgments read the whole conversation as well (each message cut at
+  4,000 characters, the whole at 120,000, as for the route judge) and ask
+  whether each draft (text and tool calls) can be adopted as the next reply.
+- `expose_intermediate_outputs: false`: stage reports leave
+  `reasoning_content`; the answer page's "Internal stages" panel is empty.
+
+Why: the drafts wrote calls as text (`[Makes bash tool call with ...]`, 35 of
+54 verified turns) and the answer copied it in 3 of 47, so the agent rejected
+the turn (one 639-second implementation was lost; r1 had 19 of 655). The
+requirements read the latest user message, which in an agent conversation is
+always the task, so they listed the whole task every turn; the judgments
+failed nearly all 85 items and the agent re-explored instead of taking the
+next step (owner's problem definition: choose the move needed now). The
+replayed stage reports (40,000-130,000 characters per turn) grew every
+request and let the next turn read last turn's drafts.
 
 ## Limitations
 

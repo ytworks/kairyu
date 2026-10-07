@@ -24,13 +24,15 @@ request
 profile_judge ── winnow-route (System One), 1 request: THINK or VERIFIED?
   │                (kairyu-verified-always skips the judge: VERIFIED)
   ├─ VERIFIED
-  │    wave 1 ┬ drafts        DeepSeek, the caller's effort: five answers D1..D5 from
-  │           │               viewpoints as different as possible (one call)
-  │           └ requirements  DeepSeek, thinking at max: what the answer must meet,
+  │    wave 1 ┬ drafts        DeepSeek, the caller's effort: five candidate replies
+  │           │               D1..D5 (text and tool calls) from viewpoints as
+  │           │               different as possible (one call)
+  │           └ requirements  DeepSeek, thinking at max: what the reply must meet,
   │                           necessary, sufficient, MECE (≤ 16)
-  │    wave 2   judgments     winnow-judge, 1 request with the request: each draft
-  │                           adoptable as the final reply? each draft x
-  │                           requirement met? (5 + 5 x N probabilities)
+  │    wave 2   judgments     winnow-judge, 1 request with the request and the
+  │                           conversation: each draft adoptable as the next
+  │                           reply? each draft x requirement met?
+  │                           (5 + 5 x N probabilities)
   │    wave 3   answer        DeepSeek, the caller's effort: reads drafts, requirements and
   │                           judgments critically, writes the best reply
   └─ THINK ─────► deepseek_think_answer  DeepSeek, the caller's effort
@@ -45,8 +47,15 @@ profile_judge ── winnow-route (System One), 1 request: THINK or VERIFIED?
   unreadable), the request takes the think route.
 - The two Winnow replicas never share a queue: a burst of judgments cannot
   delay the next request's route decision.
+- The reply is the next assistant message. When the conversation ends with
+  tool results or the assistant's own turns (an agent at work), the drafts,
+  the requirements and the answer target the next step: the move needed now,
+  not the task's final result and not a step the tool results already show.
 - Both routes pass the caller's tools and response_format to the DeepSeek
-  role that publishes (the verified route's answer).
+  role that publishes (the verified route's answer). The drafts read the
+  tools too and put each proposed call in `tool_calls`, never in their text.
+- Stage reports are not returned in `reasoning_content`: an agent replays
+  them in its next request.
 - If winnow-judge cannot read the judgments (down, or the drafts exceed its
   65,536-token decision context), the answer is written without them.
 
@@ -77,7 +86,8 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 
 The answer page (`http://<host>:3013`) sends every request to
 `kairyu-verified-always`. Its guarantee panel is carried over unchanged and
-stays empty until the guarantee is rebuilt.
+stays empty until the guarantee is rebuilt; its "Internal stages" panel stays
+empty since stage reports are no longer returned.
 
 ## GPU gates (`verify.sh`)
 
