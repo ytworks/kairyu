@@ -3,7 +3,7 @@
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
-DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), GPU gates pending**
+DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07**
 (evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
@@ -668,6 +668,9 @@ replicas.** Owner decision; supersedes the amendment above.
   verified-route expects the judgments on `winnow-judge`; fallback stops
   each replica alone (route down: think route while judgments still run;
   judge down: still routed, answer without judgments).
+- GPU-verified 2026-10-07: all nine gates pass (example `MEASUREMENTS.md`);
+  verified-route p50 141.6 s (Qwen layout 162.7 s), serving c1/c16 p50
+  98.3/151.4 s (Qwen layout 51.5/118.6 s).
 
 Why: DeepSWE r1 of the three waves (24 of 113 tasks scored, 8 passed) showed
 Qwen `requirements` as the wave-1 bottleneck (median 107 s against 36 s for

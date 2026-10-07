@@ -1,13 +1,62 @@
-# deepseek-v4.1-qwen3.8-winnow-8gpu evidence
+# deepseek-v4.1-winnow-8gpu evidence
 
 Host: 8 x RTX PRO 6000 Blackwell Server Edition (SM120), PCIe. DeepSeek-V4.1
 DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
-overlay), Qwen3.8-27B FP8 on GPU 6 (vLLM v0.23.0), Winnow-12B Q8_0 on GPU 7
-(winnow-server `77d1458` + f072b10).
-Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-qwen3.8-winnow-8gpu/results/`
-(`*-20261006T*.json`), gate logs `gates-20261006.log`, `gates-20261006-256k.log` and
-`gates-20261006-three-wave.log`; `*-20261006T16*`/`T17*` and
-`gates-20261007-requirements-without-reasoning.log` for the 2026-10-07 run.
+overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
+`winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
+(judgments only).
+Raw evidence for the two-Winnow layout:
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/` (`*-20261007T04*`,
+`T05*`, `browser-20261007T060041Z.json`), gate log `gates-20261007-1307.log`.
+Sections below it ran on the earlier Qwen layout
+(`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-qwen3.8-winnow-8gpu/results/`,
+`*-20261006T*.json` and `*-20261006T16*`/`T17*`; gate logs `gates-20261006.log`,
+`gates-20261006-256k.log`, `gates-20261006-three-wave.log` and
+`gates-20261007-requirements-without-reasoning.log`).
+
+## GPU gates: DeepSeek max requirements, two Winnow replicas (2026-10-07 13:08-15:00 JST)
+
+Commit `256d0ed5` (PR #641, with the verdict-wait validation fixes of the
+review): `requirements` on DeepSeek at max, no Qwen, `winnow-route` judges
+the route and `winnow-judge` the drafts. `./run.sh` (storage prepared by hard
+links from the Qwen layout), then `./verify.sh <gate>` in GATES order. All
+nine gates pass; `browser` passed on its rerun after the smoke script learned
+to close Open WebUI's first-run "What's New" dialog (fresh `webui-data`).
+
+| Gate | Result |
+|---|---|
+| l1 | DeepSeek every DP rank; chat and System One on both Winnow replicas; one verified answer (24 s for the gate) |
+| routing | 80 conversations; VERIFIED miss 0 % on both halves; everyday to THINK 96.9 %; judge wall 5.7 s on `winnow-route` |
+| think-route | 6/6 THINK at high, streamed, route judged on `winnow-route` (~0.07 s); p50 0.74 s, TTFT p50 0.62 s |
+| effort | THINK and VERIFIED drafts/answer follow the caller (none→high, low, high, max), `requirements` at max every time; verified 42.4-66.9 s, 199-243 tok/s |
+| verified-route | 12/12, all four stages succeed, wave 1 parallel, judgments on `winnow-judge` (10-85 items in 0.4-1.0 s); p50 141.6 s, p95 240.1 s; 398,540 output tokens; 181-235 tok/s. Stage ranges: requirements 23.8-124.2 s (median 73.1), drafts 38.9-109.8 s (median 79.5), answer 10.1-145.5 s. Streamed TTFT 24-69 s |
+| fallback | `winnow-route` stopped: 2/2 routed requests on THINK (`backend_error`), the always model still judged on `winnow-judge` (15 items, 22.4 s); `winnow-judge` stopped: routing intact (0.18 s), the always model answers with judgments `failed` (18.4 s); both back: routed and judged |
+| serving | 72/72 answered (table below) |
+| serving-routed | 72/72 answered; every request judged on `winnow-route` (table below) |
+| browser | the answer page and Open WebUI answer |
+
+serving (`kairyu-verified-always`, InFoBench instructions):
+
+| Level | Requests | p50 s | p95 s | Wall s | Requests/min | Output tokens | Output tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| c1 | 8 | 98.3 | 139.8 | 765 | 0.63 | 150,324 | 196 |
+| c4 | 16 | 103.0 | 182.1 | 504 | 1.91 | 278,339 | 553 |
+| c8 | 16 | 116.8 | 178.8 | 320 | 3.00 | 247,367 | 774 |
+| c16 | 32 | 151.4 | 239.9 | 434 | 4.42 | 518,775 | 1,195 |
+
+serving-routed (`kairyu-verified`, routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | VERIFIED n / p50 / p95 s | THINK n / p50 / p95 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 69.8 | 90.3 | 651 | 200 | 7 / 77.9 / 90.3 | 1 / 0.5 / 0.5 | 0.08 |
+| c4 | 16 | 114.1 | 238.2 | 623 | 490 | 10 / 185.5 / 238.2 | 6 / 1.4 / 1.6 | 0.07-0.08 |
+| c8 | 16 | 169.0 | 207.8 | 369 | 688 | 11 / 183.5 / 207.8 | 5 / 2.5 / 3.2 | 0.08-0.09 |
+| c16 | 32 | 56.3 | 409.2 | 496 | 948 | 16 / 282.2 / 434.8 | 16 / 2.9 / 6.5 | 0.07-0.26 |
+
+Against the Qwen layout (section below): verified-route p50 fell from
+162.7 s to 141.6 s on the routing set's VERIFIED conversations; on short
+InFoBench instructions serving p50 rose (c1 51.5 → 98.3 s, c16 118.6 →
+151.4 s), since DeepSeek at max now writes the requirements beside the drafts.
 
 ## GPU gates: Qwen requirements without replayed reasoning (2026-10-07 01:27-02:52 JST)
 

@@ -27,9 +27,21 @@ async function step(name, operation) {
 	return operation();
 }
 
-// Open WebUI's corner notices (bottom-right) can cover the model selector;
-// they are informational, so the gate records and closes them before clicking.
+// Open WebUI's corner notices (bottom-right) and its first-run "what's new"
+// dialog can cover the model selector; they are informational, so the gate
+// records and closes them before clicking.
 async function dismissNotices() {
+	const dialogs = page.locator('div[role="dialog"][aria-modal="true"]');
+	for (let attempt = 0; attempt < 3 && (await dialogs.count()) > 0; attempt += 1) {
+		const dialog = dialogs.first();
+		console.log(JSON.stringify({ dialog: (await dialog.innerText()).trim().slice(0, 200) }));
+		await page.keyboard.press('Escape');
+		await dialog.waitFor({ state: 'detached', timeout: 2_000 }).catch(() => {});
+		if ((await dialogs.count()) > 0) {
+			await dialog.locator('button').last().click({ timeout: actionTimeoutMs }).catch(() => {});
+			await dialog.waitFor({ state: 'detached', timeout: 2_000 }).catch(() => {});
+		}
+	}
 	const notices = page.locator('div.absolute.bottom-8.right-8.z-50');
 	for (const notice of await notices.all()) {
 		console.log(JSON.stringify({ notice: (await notice.innerText()).trim().slice(0, 200) }));
