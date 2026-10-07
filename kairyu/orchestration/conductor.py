@@ -1172,8 +1172,9 @@ class Conductor:
         never reads it missing (_SafeDict would render ""). It must become
         ready no later than the target: its own dependencies complete before
         the target generates, so the wave scheduler runs it in the target's
-        wave or earlier and the wait cannot deadlock. After _check_acyclic so
-        the closure walk terminates.
+        wave or earlier. Two verdicts in one wave may still wait on each
+        other's targets, so the waits join the cycle check. After
+        _check_acyclic so the closure walk terminates.
         """
 
         for verifier in self._verifier_for.values():
@@ -1210,6 +1211,16 @@ class Conductor:
                 waits.add(dep)
             if waits:
                 self._verdict_waits[target] = frozenset(waits)
+        if self._verdict_waits:
+            # A target settles only after its verdict, which waits for these
+            # units to settle: the waits are edges of the same graph.
+            self._check_acyclic(
+                {
+                    name: set(deps) | self._verdict_waits.get(name, frozenset())
+                    for name, deps in self._unit_deps.items()
+                },
+                kind="role DAG with verifier waits",
+            )
 
     def _validate_checklists(self) -> None:
         for verifier in self._verifier_for.values():
@@ -1267,12 +1278,15 @@ class Conductor:
                     "public prefix"
                 )
 
-    def _check_acyclic(self) -> None:
-        remaining = {name: set(deps) for name, deps in self._unit_deps.items()}
+    def _check_acyclic(
+        self, graph: Mapping[str, set[str]] | None = None, *, kind: str = "role DAG"
+    ) -> None:
+        source = self._unit_deps if graph is None else graph
+        remaining = {name: set(deps) for name, deps in source.items()}
         while remaining:
             ready = [name for name, deps in remaining.items() if not deps]
             if not ready:
-                raise ValueError(f"role DAG contains a cycle among: {sorted(remaining)}")
+                raise ValueError(f"{kind} contains a cycle among: {sorted(remaining)}")
             for name in ready:
                 del remaining[name]
             for deps in remaining.values():

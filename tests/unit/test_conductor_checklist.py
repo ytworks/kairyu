@@ -866,6 +866,41 @@ async def test_a_failed_checklist_target_leaves_the_run_unguaranteed():
     assert result.verification.reason == "checklist_unavailable"
 
 
+def test_verifiers_waiting_on_each_others_targets_are_rejected():
+    # va judges a but waits for b; vb judges b but waits for a. Each target
+    # settles only after its verdict, so the run would wait forever.
+    roles = (
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}"),
+        RoleSpec(name="b", worker="gen", prompt="[b] {query}"),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {b}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "b"),
+        ),
+        RoleSpec(
+            name="vb",
+            worker="gen",
+            prompt="[vb] {b} {a}",
+            role_type="verifier",
+            verifies="b",
+            depends_on=("b", "a"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {vb}",
+            depends_on=("va", "vb"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="verifier waits contains a cycle"):
+        Conductor(roles, {"gen": RoutedBackend({})})
+
+
 async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
     # The drafts and the points run at once; the drafts' verdict waits for
     # the points it reads, and the final answer reads the verdict.
