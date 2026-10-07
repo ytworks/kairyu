@@ -283,11 +283,16 @@ wave scheduler: the waited unit's own dependencies must complete before the
 target generates, and it cannot be the final unit, which streams after the
 rest of the DAG. Since a target settles only after its verdict, the waits
 are edges of the unit graph: two verdicts waiting on each other's targets are
-rejected at construction as a cycle (PR #641 review, 2026-10-07). Policy
+rejected at construction as a cycle (PR #641 review, 2026-10-07). The
+waited unit's dependencies must precede the target on every request: units a
+request may exclude (image-conditional units without an image, the head) and
+what precedes the target only through them do not count, since excluding them
+moves the target to an earlier wave (same review). Policy
 (which branches, questions, thresholds) stays in the example. Code:
 `Conductor._validate_verdict_waits`, `_run_pending`; tests:
 `test_a_verifier_judges_its_target_against_a_branch_running_beside_it`,
-`test_verifiers_waiting_on_each_others_targets_are_rejected`.
+`test_verifiers_waiting_on_each_others_targets_are_rejected`,
+`test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected`.
 
 ### D9. System One profile judge (2026-10-01)
 

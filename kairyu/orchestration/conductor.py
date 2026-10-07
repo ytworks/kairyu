@@ -1062,6 +1062,29 @@ class Conductor:
             frontier.update(self._unit_deps.get(dep, frozenset()))
         return closure
 
+    def _unconditional_unit_closure(self, name: str) -> set[str]:
+        """The part of the closure that precedes unit ``name`` on every request.
+
+        A unit a request may exclude (an image-conditional unit without an
+        image, or the head) drops out of its dependents' dependencies at run
+        time, so neither it nor what precedes ``name`` only through it is
+        counted."""
+
+        excludable = {
+            unit.name
+            for unit in self._units
+            if unit.requires == "image" or unit.role_type == "head"
+        }
+        closure: set[str] = set()
+        frontier = set(self._unit_deps.get(name, frozenset())) - excludable
+        while frontier:
+            dep = frontier.pop()
+            if dep in closure:
+                continue
+            closure.add(dep)
+            frontier.update(self._unit_deps.get(dep, frozenset()) - excludable)
+        return closure
+
     def _validate(self) -> None:
         if len(self._by_name) != len(self._roles):
             raise ValueError("duplicate role names")
@@ -1172,7 +1195,8 @@ class Conductor:
         never reads it missing (_SafeDict would render ""). It must become
         ready no later than the target: its own dependencies complete before
         the target generates, so the wave scheduler runs it in the target's
-        wave or earlier. Two verdicts in one wave may still wait on each
+        wave or earlier, also when a request excludes an image-conditional
+        unit or the head. Two verdicts in one wave may still wait on each
         other's targets, so the waits join the cycle check. After
         _check_acyclic so the closure walk terminates.
         """
@@ -1182,6 +1206,7 @@ class Conductor:
             if target is None:
                 continue
             closure = self._transitive_unit_closure(target)
+            unconditional = self._unconditional_unit_closure(target)
             waits = set()
             for name in verifier.depends_on:
                 if name in self._inline_executor_target:
@@ -1202,11 +1227,15 @@ class Conductor:
                         f"a unit that can run beside {target!r}; add {dep!r} to "
                         f"{target!r}'s depends_on"
                     )
-                if not self._unit_deps[dep] <= closure:
+                if not self._unit_deps[dep] <= unconditional:
+                    # Checked against what precedes the target on every
+                    # request: an excluded unit moves the target to an
+                    # earlier wave, and the waited unit must not fall behind.
                     raise ValueError(
                         f"verifier {verifier.name!r} depends on {dep!r}, which may not "
                         f"be ready before {target!r} is judged: {dep!r}'s dependencies "
-                        f"must complete before {target!r} generates"
+                        f"must complete before {target!r} generates on every request "
+                        "(not only through an image-conditional unit or the head)"
                     )
                 waits.add(dep)
             if waits:

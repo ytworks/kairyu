@@ -901,6 +901,38 @@ def test_verifiers_waiting_on_each_others_targets_are_rejected():
         Conductor(roles, {"gen": RoutedBackend({})})
 
 
+def test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected():
+    # p -> image (requires image) -> a, and p -> b; va judges a and waits
+    # for b. Without an image, image is excluded and a runs beside p, while b
+    # still waits for p's wave: a's verdict would wait for b forever.
+    roles = (
+        RoleSpec(name="p", worker="gen", prompt="[p] {query}"),
+        RoleSpec(
+            name="image", worker="gen", prompt="[image] {p}", depends_on=("p",), requires="image"
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {image}", depends_on=("image",)),
+        RoleSpec(name="b", worker="gen", prompt="[b] {p}", depends_on=("p",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {b}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "b"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {b}",
+            depends_on=("va", "b"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="on every request"):
+        Conductor(roles, {"gen": RoutedBackend({})})
+
+
 async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
     # The drafts and the points run at once; the drafts' verdict waits for
     # the points it reads, and the final answer reads the verdict.
