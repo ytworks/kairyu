@@ -1062,32 +1062,26 @@ class Conductor:
             frontier.update(self._unit_deps.get(dep, frozenset()))
         return closure
 
-    def _excludable_units(self) -> set[str]:
-        """Units a request may exclude: image-conditional units, the head."""
+    def _exclusion_cases(self) -> list[set[str]]:
+        """The unit sets a request may exclude: the head (caller intent) and
+        the image-conditional units (no image) drop out independently."""
 
-        return {
-            unit.name
-            for unit in self._units
-            if unit.requires == "image" or unit.role_type == "head"
-        }
+        head = {unit.name for unit in self._units if unit.role_type == "head"}
+        image = {unit.name for unit in self._units if unit.requires == "image"}
+        return [set(), head, image, head | image]
 
-    def _unconditional_unit_closure(self, name: str) -> set[str]:
-        """The part of the closure that precedes unit ``name`` on every request.
+    def _closure_without(self, name: str, excluded: set[str]) -> set[str]:
+        """What precedes unit ``name`` when ``excluded`` drops out: an
+        excluded unit leaves its dependents' dependencies at run time."""
 
-        A unit a request may exclude (an image-conditional unit without an
-        image, or the head) drops out of its dependents' dependencies at run
-        time, so neither it nor what precedes ``name`` only through it is
-        counted."""
-
-        excludable = self._excludable_units()
         closure: set[str] = set()
-        frontier = set(self._unit_deps.get(name, frozenset())) - excludable
+        frontier = set(self._unit_deps.get(name, frozenset())) - excluded
         while frontier:
             dep = frontier.pop()
             if dep in closure:
                 continue
             closure.add(dep)
-            frontier.update(self._unit_deps.get(dep, frozenset()) - excludable)
+            frontier.update(self._unit_deps.get(dep, frozenset()) - excluded)
         return closure
 
     def _validate(self) -> None:
@@ -1210,14 +1204,15 @@ class Conductor:
             target = verifier.verifies
             if target is None:
                 continue
-            # What precedes the target on every request is complete when it
-            # is judged, and so is an excludable ancestor (complete, or
-            # excluded and read as missing). Any other static ancestor is
-            # reached only through an excludable unit and can run beside the
-            # target, so it is waited for.
-            unconditional = self._unconditional_unit_closure(target)
-            done = unconditional | (
-                self._transitive_unit_closure(target) & self._excludable_units()
+            # A dependency is complete when the target is judged if, for
+            # every combination of exclusions, it precedes the target or is
+            # excluded (read as missing). Any other one can run beside the
+            # target, so it is waited for; what it waits on must precede the
+            # target even when everything excludable drops out.
+            cases = self._exclusion_cases()
+            unconditional = self._closure_without(target, cases[-1])
+            done = set.intersection(
+                *(self._closure_without(target, excluded) | excluded for excluded in cases)
             )
             waits = set()
             for name in verifier.depends_on:

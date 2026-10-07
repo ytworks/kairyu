@@ -979,6 +979,58 @@ async def test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_witho
     assert verdict_prompt == "[va] A-OUT P-OUT"
 
 
+async def test_a_verdict_waits_for_a_head_that_runs_beside_its_target_without_an_image():
+    # head -> image (requires image) -> a; va judges a and reads the head.
+    # Without an image only image drops out, so the head (still enabled)
+    # runs beside a: va must wait for it instead of reading it missing.
+    a_done = asyncio.Event()
+
+    class SlowHead(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[head]"):
+                await asyncio.wait_for(a_done.wait(), timeout=5)
+            result = await super().generate(request)
+            if str(request.prompt).startswith("[a]"):
+                a_done.set()
+            return result
+
+    backend = SlowHead({"head": ["H-OUT"], "a": ["A-OUT"], "va": ["PASS"], "final": ["done"]})
+    roles = (
+        RoleSpec(name="head", worker="gen", role_type="head", prompt="[head] {query}"),
+        RoleSpec(
+            name="image",
+            worker="gen",
+            prompt="[image] {head}",
+            depends_on=("head",),
+            requires="image",
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}", depends_on=("image",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {head}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "head"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va}",
+            depends_on=("va",),
+        ),
+    )
+    conductor = Conductor(
+        roles, {"gen": backend}, final_sampling_params=SamplingParams(max_tokens=64)
+    )
+
+    await conductor.run("q", budget=Budget(max_steps=12))
+
+    (verdict_prompt,) = [prompt for prompt in backend.prompts if prompt.startswith("[va]")]
+    assert verdict_prompt == "[va] A-OUT H-OUT"
+
+
 async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
     # The drafts and the points run at once; the drafts' verdict waits for
     # the points it reads, and the final answer reads the verdict.

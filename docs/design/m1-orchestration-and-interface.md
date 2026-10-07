@@ -288,14 +288,18 @@ waited unit's dependencies must precede the target on every request: units a
 request may exclude (image-conditional units without an image, the head) and
 what precedes the target only through them do not count, since excluding them
 moves the target to an earlier wave (same review). For the same reason a
-static ancestor reached only through such a unit is waited for, not assumed
-complete; an excludable ancestor itself is complete or reads as missing. Policy
+dependency counts as complete only if, for each combination of exclusions
+(the head and the image-conditional units drop out independently), it
+precedes the target or is itself excluded; any other one, such as an ancestor
+reached only through an image-conditional unit or a head still running beside
+the target, is waited for. Policy
 (which branches, questions, thresholds) stays in the example. Code:
 `Conductor._validate_verdict_waits`, `_run_pending`; tests:
 `test_a_verifier_judges_its_target_against_a_branch_running_beside_it`,
 `test_verifiers_waiting_on_each_others_targets_are_rejected`,
 `test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected`,
-`test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_without_an_image`.
+`test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_without_an_image`,
+`test_a_verdict_waits_for_a_head_that_runs_beside_its_target_without_an_image`.
 
 ### D9. System One profile judge (2026-10-01)
 
