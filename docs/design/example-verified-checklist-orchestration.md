@@ -693,8 +693,9 @@ two-Winnow layout (stopped at 0 of 113 scored).
   caller's tools; its text never holds a call. The answer makes calls
   through the tool-calling interface only.
 - The judgments read the whole conversation as well (each message cut at
-  4,000 characters, the whole at 120,000, as for the route judge) and ask
-  whether each draft (text and tool calls) can be adopted as the next reply.
+  4,000 characters, the whole at 120,000, as for the route judge) and the
+  caller's tools (PR #641 review), and ask whether each draft (text and tool
+  calls) can be adopted as the next reply.
 - `expose_intermediate_outputs: false`: stage reports leave
   `reasoning_content`; the answer page's "Internal stages" panel is empty.
 

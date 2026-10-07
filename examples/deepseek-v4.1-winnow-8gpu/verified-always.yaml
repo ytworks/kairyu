@@ -363,12 +363,14 @@ roles:
           criteria_false: Some part of the requirement is missing, only partly met, or met incorrectly
           context:
             point: "{item[point]}"
-      # The request, and the whole conversation so the judge sees where the
-      # work stands on an agent turn (each message cut at 4,000 characters,
-      # the whole at 120,000, as for the route judge).
+      # The request, the whole conversation so the judge sees where the work
+      # stands on an agent turn (each message cut at 4,000 characters, the
+      # whole at 120,000, as for the route judge), and the caller's tools so
+      # it can tell whether a drafted call fits their names and arguments.
       state:
         - {key: request, source: request, max_total_chars: 40000}
         - {key: conversation, source: query, max_chars: 4000, max_total_chars: 120000}
+        - {key: tools, source: tools}
         - {key: drafts, source: drafts}
       threshold: 1.0
       max_questions_per_call: 256

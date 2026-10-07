@@ -181,8 +181,10 @@ async def test_an_agent_turn_drafts_structured_calls_for_the_next_step() -> None
     _route, (_judge, judgment) = reads
     questions = judgment["questions"].values()
     assert all("tool_calls" in json.dumps(q["instructions"]) for q in questions)
-    # ... and sees where the work stands: the tool result, not only the task.
+    # ... and sees where the work stands: the tool result, not only the task,
+    # and the caller's tools the drafted calls must fit.
     assert judgment["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
+    assert judgment["state"]["tools"] == [BASH]
     # Stage reports are not replayed through reasoning_content.
     assert not result.reasoning_content
 
