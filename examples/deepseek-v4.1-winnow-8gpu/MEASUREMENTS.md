@@ -5,7 +5,7 @@ DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
 overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
 `winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
 (judgments only).
-Raw evidence for the two-Winnow layout:
+Raw evidence for the two-Winnow layout (both sections on it):
 `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/` (`*-20261007T04*`,
 `T05*`, `browser-20261007T060041Z.json`), gate log `gates-20261007-1307.log`.
 Sections below it ran on the earlier Qwen layout
@@ -13,6 +13,60 @@ Sections below it ran on the earlier Qwen layout
 `*-20261006T*.json` and `*-20261006T16*`/`T17*`; gate logs `gates-20261006.log`,
 `gates-20261006-256k.log`, `gates-20261006-three-wave.log` and
 `gates-20261007-requirements-without-reasoning.log`).
+
+## GPU gates: next-step replies, structured tool calls (2026-10-07 17:13-18:58 JST)
+
+Commit `17242799` (PR #641): drafts, requirements and answer target the next
+step on agent turns; each draft carries `tool_calls` and reads the caller's
+tools; the judgments read the conversation and the tools; no stage reports in
+`reasoning_content`. Kairyu restarted to load the spec, `./run.sh`, then
+`./verify.sh <gate>` in GATES order. All nine gates pass. Log
+`gates-20261007-1712-nextstep.log`, results `*-20261007T081*` to `T0958*`.
+
+Before the gates, five saved DeepSWE turns (actionlint, abs-module, adaptix;
+replayed reasoning removed) were sent to `kairyu-verified-always` twice: 10/10
+returned a structured tool call and an empty `reasoning_content`, including the
+actionlint turn whose answer had written its call as text. Run locally with
+stage reports on, two turns' requirements targeted the next step (inspect the
+unread `uses:` handling and do not edit yet; build and run a reproduction
+before touching the loader), no draft wrote a call as text (0 of 10), and the
+judge ranked the drafts that fit those requirements highest (p 0.889, 0.679).
+
+| Gate | Result |
+|---|---|
+| l1 | DeepSeek every DP rank; chat and System One on both Winnow replicas; one verified answer (39 s) |
+| routing | VERIFIED miss 0 % on both halves; everyday to THINK 96.9 %; judge wall 5.7 s |
+| think-route | 6/6 THINK at high, streamed; p50 0.81 s, TTFT p50 0.70 s |
+| effort | drafts/answer follow the caller, requirements at max; verified 30.5-52.5 s, 183-241 tok/s |
+| verified-route | 12/12; judgments on `winnow-judge` (10-85 items, 0.6-1.7 s); p50 181.6 s, p95 267.8 s; 440,555 output tokens; 183-252 tok/s. Stage medians: requirements 92.5 s, drafts 80.3 s, answer 56.8 s. Streamed TTFT 80-297 s |
+| fallback | `winnow-route` down: THINK fallback, judgments still on `winnow-judge` (85 items); `winnow-judge` down: routed, judgments `failed`; both back: routed and judged |
+| serving | 72/72 answered (table below) |
+| serving-routed | 72/72 answered (table below) |
+| browser | the answer page and Open WebUI answer |
+
+serving (`kairyu-verified-always`, InFoBench instructions):
+
+| Level | Requests | p50 s | p95 s | Wall s | Requests/min | Output tokens | Output tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| c1 | 8 | 77.4 | 91.0 | 572 | 0.84 | 115,548 | 202 |
+| c4 | 16 | 94.4 | 142.9 | 401 | 2.39 | 219,206 | 547 |
+| c8 | 16 | 127.8 | 301.2 | 350 | 2.74 | 273,706 | 782 |
+| c16 | 32 | 147.6 | 242.1 | 391 | 4.91 | 488,978 | 1,251 |
+
+serving-routed (`kairyu-verified`, routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | VERIFIED n / p50 / p95 s | THINK n / p50 / p95 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 82.7 | 138.1 | 679 | 196 | 7 / 89.5 / 138.1 | 1 / 0.5 / 0.5 | 0.07-0.08 |
+| c4 | 16 | 116.8 | 213.2 | 560 | 473 | 10 / 173.6 / 213.2 | 6 / 1.8 / 4.5 | 0.07-0.08 |
+| c8 | 16 | 141.4 | 180.4 | 312 | 693 | 11 / 151.7 / 180.4 | 5 / 1.7 / 3.7 | 0.08 |
+| c16 | 32 | 86.8 | 430.5 | 465 | 1,000 | 16 / 261.7 / 437.2 | 16 / 2.8 / 9.8 | 0.08-0.23 |
+
+Against the section below (same layout, before this change): verified-route
+p50 rose from 141.6 s to 181.6 s and streamed TTFT from 24-69 s to 80-297 s;
+serving p50 fell at c1/c4/c16 (98.3/103.0/151.4 → 77.4/94.4/147.6 s) and rose
+at c8 (116.8 → 127.8 s); serving-routed VERIFIED p50 fell at c4/c8/c16 and
+rose at c1 (77.9 → 89.5 s).
 
 ## GPU gates: DeepSeek max requirements, two Winnow replicas (2026-10-07 13:08-15:00 JST)
 

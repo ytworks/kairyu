@@ -4,7 +4,7 @@ Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
-next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), GPU gates pending**
+next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07**
 (evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
@@ -698,6 +698,9 @@ two-Winnow layout (stopped at 0 of 113 scored).
   calls) can be adopted as the next reply.
 - `expose_intermediate_outputs: false`: stage reports leave
   `reasoning_content`; the answer page's "Internal stages" panel is empty.
+- GPU-verified 2026-10-07: all nine gates pass; replayed DeepSWE turns return
+  structured tool calls (10/10) and next-step requirements (example
+  `MEASUREMENTS.md`). Verified-route p50 181.6 s (141.6 s before).
 
 Why: the drafts wrote calls as text (`[Makes bash tool call with ...]`, 35 of
 54 verified turns) and the answer copied it in 3 of 47, so the agent rejected
