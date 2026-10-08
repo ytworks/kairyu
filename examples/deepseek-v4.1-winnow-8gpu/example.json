@@ -71,9 +71,9 @@
     }
   },
   "orchestration": {
-    "spec": "verified.yaml",
+    "spec": "verified-tool.yaml",
     "routes": {
-      "VERIFIED": "primary",
+      "TOOL": "primary",
       "THINK": "deepseek_think"
     },
     "final_unit": "verified_answer",
@@ -173,13 +173,8 @@
     ]
   },
   "public_models": [
-    "kairyu-verified",
-    "kairyu-verified-always"
+    "kairyu-verified-tool"
   ],
-  "playground": {
-    "image": "nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
-    "port": 3013
-  },
   "api_port": 8013,
   "verification": {
     "concurrency_plan": {

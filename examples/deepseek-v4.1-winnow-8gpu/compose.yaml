@@ -174,7 +174,7 @@ services:
             - '6'
             capabilities:
             - gpu
-  # GPU 7: the verified route's judgments only.
+  # GPU 7: the verified tool route's judgments only.
   winnow-judge:
     image: ${WINNOW_IMAGE}
     cpuset: ${WINNOW_JUDGE_CPUSET}
@@ -254,8 +254,7 @@ services:
       source: ${PLACEMENT_LOG_PATH}
       target: /var/lib/kairyu/placement
     - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-    - ./verified.yaml:/etc/kairyu/verified.yaml:ro
-    - ./verified-always.yaml:/etc/kairyu/verified-always.yaml:ro
+    - ./verified-tool.yaml:/etc/kairyu/verified-tool.yaml:ro
     depends_on:
       deepseek:
         condition: service_healthy
@@ -276,14 +275,13 @@ services:
       timeout: 3s
       retries: 120
     restart: unless-stopped
-  # Open WebUI: both public models (kairyu-verified routes per request,
-  # kairyu-verified-always always takes the verified route).
+  # Open WebUI: kairyu-verified-tool (Winnow routes per request).
   chat-ui:
     image: ${OPEN_WEBUI_IMAGE}
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
-      DEFAULT_MODELS: kairyu-verified
+      DEFAULT_MODELS: kairyu-verified-tool
       DEFAULT_MODEL_PARAMS: '{"max_tokens":262144,"stream_response":true}'
       ENABLE_PERSISTENT_CONFIG: 'false'
       RESET_CONFIG_ON_START: 'true'
@@ -304,29 +302,4 @@ services:
         condition: service_healthy
     ports:
     - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3012}:8080
-    restart: unless-stopped
-  # The answer page: a static chat page for kairyu-verified-always with a
-  # guarantee panel (empty until the guarantee is rebuilt, VCO-D18), with
-  # Kairyu's API on the same origin.
-  playground:
-    image: ${PLAYGROUND_IMAGE}
-    volumes:
-    - ./playground/index.html:/usr/share/nginx/html/index.html:ro
-    - ./playground/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      kairyu:
-        condition: service_healthy
-    ports:
-    - ${PLAYGROUND_BIND_ADDRESS:-0.0.0.0}:${PLAYGROUND_PORT:-3013}:8080
-    healthcheck:
-      test:
-      - CMD
-      - wget
-      - -q
-      - -O
-      - /dev/null
-      - http://127.0.0.1:8080/
-      interval: 5s
-      timeout: 3s
-      retries: 60
     restart: unless-stopped

@@ -1,6 +1,6 @@
 # Verified tool route: tool-call routing and prompts tuned on DeepSWE (2026-10-09)
 
-Status: proposed, awaiting owner approval. Branch: PR #641 (`claude/winnow-verified-three-wave`, reused).
+Status: approved 2026-10-09, implemented (VCO-D20). Branch: PR #641 (`claude/winnow-verified-three-wave`, reused).
 
 ## Context
 

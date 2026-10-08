@@ -3,8 +3,9 @@
 
 DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two Winnow-12B
 replicas (llama.cpp) judge through System One: winnow-route (GPU 6) routes each
-request to the verified route or to one answer at the caller's effort, and
-winnow-judge (GPU 7) judges the verified route's drafts.
+request to the verified tool route (the next reply needs a tool call) or to one
+answer at the caller's effort, and winnow-judge (GPU 7) judges the verified
+tool route's drafts.
 """
 
 from __future__ import annotations
@@ -37,9 +38,8 @@ WINNOW_REPLICAS: list[dict] = list(WINNOW["replicas"])
 WINNOW_SERVICES: list[str] = [replica["service"] for replica in WINNOW_REPLICAS]
 L1_SERVICES = ("deepseek", *WINNOW_SERVICES)
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified: Winnow routes per request; kairyu-verified-always: always
-# the verified route.
-ROUTED_MODEL, ALWAYS_MODEL = PUBLIC_MODELS
+# kairyu-verified-tool: Winnow routes per request (TOOL or THINK).
+(MODEL,) = PUBLIC_MODELS
 DEEPSEEK_SERVED = SPEC["deepseek"]["served_name"]
 WINNOW_SERVED = SPEC["winnow"]["model"]["served_name"]
 
@@ -147,14 +147,11 @@ def _compose_env() -> dict[str, str]:
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["deepseek"]["image"]),
             "WINNOW_IMAGE": os.environ.get("WINNOW_IMAGE", SPEC["winnow"]["runtime"]["image"]),
-            "PLAYGROUND_IMAGE": os.environ.get("PLAYGROUND_IMAGE", SPEC["playground"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
             "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
-            "PLAYGROUND_PORT": os.environ.get("PLAYGROUND_PORT", str(SPEC["playground"]["port"])),
-            "PLAYGROUND_BIND_ADDRESS": os.environ.get("PLAYGROUND_BIND_ADDRESS", "0.0.0.0"),
             "DEEPSEEK_L1_PORT": os.environ.get("DEEPSEEK_L1_PORT", "8014"),
             **{
                 _winnow_variable(replica, "L1_PORT"): os.environ.get(
@@ -771,8 +768,8 @@ def _validate_systemone(l1_url: str) -> None:
         raise SystemExit(f"Winnow System One probe failed: {error}")
 
 
-def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> dict:
-    """A chat request; the always-verified model unless ``model`` says otherwise."""
+def routed_request(content: str, *, model: str = MODEL, **overrides) -> dict:
+    """A chat request to the public model unless ``model`` says otherwise."""
 
     payload = {
         "model": model,
@@ -784,18 +781,36 @@ def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> d
     return payload
 
 
-def validate_verified_answer(api_url: str) -> None:
+# A caller tool for the serving probe: the next reply must call it.
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+def validate_tool_answer(api_url: str) -> None:
+    """The public model answers a tool turn with a structured tool call."""
+
     body = post_json(
         f"{api_url}/v1/chat/completions",
-        routed_request("Name the capital of France in one word."),
+        routed_request("What is the weather in Paris right now?", tools=[WEATHER_TOOL]),
         timeout_s=1800,
     )
     try:
-        content = body["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError) as error:
-        raise SystemExit(f"verified-route probe failed: {str(body)[:200]}") from error
-    if "paris" not in content.lower():
-        raise SystemExit(f"verified-route probe failed: {content[:200]!r}")
+        call = body["choices"][0]["message"]["tool_calls"][0]["function"]
+        city = json.loads(call["arguments"]).get("city", "")
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise SystemExit(f"tool-call probe failed: {str(body)[:300]}") from error
+    if call.get("name") != "get_weather" or "paris" not in str(city).lower():
+        raise SystemExit(f"tool-call probe failed: {call!r}")
 
 
 _CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
@@ -817,7 +832,7 @@ def _webui_api(ui_url: str, path: str, *, token: str | None = None, payload: dic
 
 
 def provision_chat_ui(ui_url: str) -> None:
-    """Install the Reasoning Effort dropdown and check both models are offered."""
+    """Install the Reasoning Effort dropdown and check the public model is offered."""
 
     filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
     base = f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}"
@@ -832,7 +847,7 @@ def provision_chat_ui(ui_url: str) -> None:
             "id": _CHAT_UI_EFFORT_FILTER_ID,
             "name": "Reasoning Effort",
             "content": filter_source,
-            "meta": {"description": "Reasoning effort for the think route."},
+            "meta": {"description": "DeepSeek reasoning effort."},
         }
         if existing is None:
             state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
@@ -864,7 +879,7 @@ def validate_serving(env: dict[str, str]) -> None:
     for service in WINNOW_SERVICES:
         _validate_chat(winnow_l1_url(env, service), WINNOW_SERVED)
         _validate_systemone(winnow_l1_url(env, service))
-    validate_verified_answer(api_url)
+    validate_tool_answer(api_url)
 
 
 _NO_PUBLIC_HOST = "cannot discover an externally reachable UI host; set PUBLIC_HOST"
@@ -890,7 +905,7 @@ def _public_ui_host() -> str:
 
 def up() -> None:
     env = _compose_env()
-    bind = env["PLAYGROUND_BIND_ADDRESS"]
+    bind = env["CHAT_UI_BIND_ADDRESS"]
     ui_host = _public_ui_host() if bind == "0.0.0.0" else bind
     env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
@@ -911,8 +926,7 @@ def up() -> None:
     provision_chat_ui(f"http://127.0.0.1:{env['CHAT_UI_PORT']}")
     print("\nEnvironment is ready.")
     print(f"Chat UI:     http://{ui_host}:{env['CHAT_UI_PORT']} (Open WebUI, no authentication)")
-    print(f"Answer page: http://{ui_host}:{env['PLAYGROUND_PORT']} ({ALWAYS_MODEL})")
-    print(f"OpenAI API:  http://{ui_host}:{env['PLAYGROUND_PORT']}/v1 (models {PUBLIC_MODELS})")
+    print(f"OpenAI API:  http://127.0.0.1:{env['API_PORT']}/v1 (model {MODEL})")
 
 
 def main() -> None:

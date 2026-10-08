@@ -54,7 +54,7 @@ pools:
   # Winnow-12B Q8_0, two replicas (llama.cpp, winnow-server); built as in
   # winnow-12b-q8-1gpu. Its chat is an internal pool; its typed decisions
   # (System One, below) are split by use: winnow-route (GPU 6) judges the
-  # route, winnow-judge (GPU 7) judges the verified route's drafts.
+  # route, winnow-judge (GPU 7) judges the verified tool route's drafts.
   winnow-12b:
     replicas:
     - backend: openai
@@ -122,7 +122,7 @@ pools:
 # 128 wait; Kairyu forwards at most 64 and queues 32 per replica, so a burst
 # gets Kairyu's 429 first. When the route judge does not answer, the route
 # falls back to deepseek_think; when the judge does not answer, the verified
-# answer is written without judgments.
+# tool route's answer is written without judgments.
 systemone:
   winnow-route-systemone:
     base_url: http://winnow-route:8091
@@ -143,16 +143,12 @@ systemone:
     timeout_s: 300
     max_body_bytes: 25165824
 orchestrators:
-  # Winnow routes each request: the verified route or one DeepSeek answer at
-  # the caller's effort.
-  kairyu-verified:
-    spec: /etc/kairyu/verified.yaml
-  # Every request takes the verified route (answer page, serving gate).
-  kairyu-verified-always:
-    spec: /etc/kairyu/verified-always.yaml
+  # Winnow routes each request: the verified tool route when the next reply
+  # needs a tool call, else one DeepSeek answer at the caller's effort.
+  kairyu-verified-tool:
+    spec: /etc/kairyu/verified-tool.yaml
 public_models:
-- kairyu-verified
-- kairyu-verified-always
+- kairyu-verified-tool
 # The L1 pools are internal resources, not public models.
 legacy_chat_models:
 - deepseek-v4.1-flash

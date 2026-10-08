@@ -1,6 +1,6 @@
-"""Routed answers: DeepSeek-V4.1 six-GPU + two Winnow replicas example (VCO-D18, D19).
+"""Routed answers: DeepSeek-V4.1 six-GPU + two Winnow replicas example (VCO-D18..D20).
 
-The example's own kairyu.yaml / verified.yaml drive the production loaders, the
+The example's own kairyu.yaml / verified-tool.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
 (against fake Winnow replicas), so the tests observe what the deployed L1 services
 would receive and which route answers.
@@ -121,7 +121,7 @@ def _winnow(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool)
     return handler
 
 
-def _orchestrator(seen: list[dict], reads: list, *, route: str = "VERIFIED", down=frozenset()):
+def _orchestrator(seen: list[dict], reads: list, *, route: str = "TOOL", down=frozenset()):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
@@ -140,7 +140,7 @@ def _orchestrator(seen: list[dict], reads: list, *, route: str = "VERIFIED", dow
         for name, section in deployment.systemone.items()
     }
     return build_orchestrator(
-        load_spec(EXAMPLE / "verified.yaml"), engine_refs=engines, systemone_refs=judges
+        load_spec(EXAMPLE / "verified-tool.yaml"), engine_refs=engines, systemone_refs=judges
     )
 
 
@@ -148,7 +148,7 @@ def _call(content: str) -> OrchestrationRequest:
     """The orchestration call the chat route makes for one user message."""
 
     chat = ChatCompletionRequest(
-        model="kairyu-verified", messages=[{"role": "user", "content": content}]
+        model="kairyu-verified-tool", messages=[{"role": "user", "content": content}]
     )
     return OrchestrationRequest(
         prompt=validate_orchestration_chat_input(chat).prompt,
@@ -156,45 +156,22 @@ def _call(content: str) -> OrchestrationRequest:
     )
 
 
-async def test_an_agent_turn_drafts_structured_calls_for_the_next_step() -> None:
-    seen: list[dict] = []
-    reads: list = []
-    orchestrator = _orchestrator(seen, reads, route="VERIFIED")
-    chat = ChatCompletionRequest(model="kairyu-verified", messages=AGENT_TURN, tools=[BASH])
-    call = OrchestrationRequest(
+def _agent_call() -> OrchestrationRequest:
+    """The orchestration call for an agent turn with the caller's bash tool."""
+
+    chat = ChatCompletionRequest(model="kairyu-verified-tool", messages=AGENT_TURN, tools=[BASH])
+    return OrchestrationRequest(
         prompt=validate_orchestration_chat_input(chat).prompt,
         sampling_params=SamplingParams(max_tokens=4096),
         tools=(BASH,),
     )
-
-    call = await orchestrator.judge_role_profile(call)
-    result = await orchestrator.run(call)
-
-    drafts = next(b for b in seen if b["messages"][-1]["content"].startswith("[drafts]"))
-    prompt = drafts["messages"][-1]["content"]
-    # The drafts read the caller's tools.
-    assert '"name": "bash"' in prompt.split("--- TOOLS ---")[1]
-    # The published reply carries the caller's tools.
-    answer = seen[-1]
-    assert answer["tools"][0]["function"]["name"] == "bash"
-    # The judge reads each draft's text and tool calls.
-    _route, (_judge, judgment) = reads
-    questions = judgment["questions"].values()
-    assert all("tool_calls" in json.dumps(q["instructions"]) for q in questions)
-    # ... and sees where the work stands: the tool result, not only the task,
-    # and the caller's tools the drafted calls must fit.
-    assert judgment["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
-    assert judgment["state"]["tools"] == [BASH]
-    # Stage reports are not replayed through reasoning_content.
-    assert not result.reasoning_content
 
 
 def test_gateway_builds_from_the_example_configs(tmp_path: Path) -> None:
     raw = (
         (EXAMPLE / "kairyu.yaml")
         .read_text()
-        .replace("/etc/kairyu/verified.yaml", str(EXAMPLE / "verified.yaml"))
-        .replace("/etc/kairyu/verified-always.yaml", str(EXAMPLE / "verified-always.yaml"))
+        .replace("/etc/kairyu/verified-tool.yaml", str(EXAMPLE / "verified-tool.yaml"))
         .replace("/var/lib/kairyu/placement", str(tmp_path))
     )
     build_app_from_spec(load_deployment_spec(raw, resolve_credentials=False), EXAMPLE)
@@ -227,8 +204,9 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
 
     ((judge, read),) = reads
     assert judge == "winnow-route-systemone"
-    assert set(read["questions"]["route"]["criteria"]) == {"THINK", "VERIFIED"}
+    assert set(read["questions"]["route"]["criteria"]) == {"THINK", "TOOL"}
     assert read["state"]["conversation"][-1]["role"] == "user"
+    assert read["state"]["tool_calling"] is False
     assert result.text == "Paris"
     (body,) = seen
     assert body["reasoning_effort"] == (effort or "high")
@@ -236,11 +214,11 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
-async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> None:
+async def test_tool_route_runs_three_waves_into_one_critical_answer(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="VERIFIED")
-    call = _call("Name the capital of France in one word.")
+    orchestrator = _orchestrator(seen, reads, route="TOOL")
+    call = _agent_call()
     if effort is not None:
         call = dataclasses.replace(call, reasoning_effort=effort)
 
@@ -248,25 +226,39 @@ async def test_verified_runs_three_waves_into_one_critical_answer(effort) -> Non
     result = await orchestrator.run(call)
 
     assert result.text == "Paris"
+    # Stage reports are not replayed through reasoning_content.
+    assert not result.reasoning_content
     # Wave 1: five DeepSeek drafts in one call at the caller's effort, its
-    # requirements at max whatever the caller sent.
+    # requirements at max whatever the caller sent; both read the caller's
+    # tools.
     drafts, requirements = sorted(seen[:2], key=lambda body: body["messages"][-1]["content"])
     assert drafts["messages"][-1]["content"].startswith("[drafts]")
     assert drafts["reasoning_effort"] == (effort or "high")
     assert requirements["messages"][-1]["content"].startswith("[requirements]")
     assert requirements["reasoning_effort"] == "max"
     assert {drafts["model"], requirements["model"]} == {"deepseek-v4.1-flash"}
-    # Wave 2: one read on the judgments replica (the route on its own), with
-    # the request: 5 adoptions + 5 x 2 points.
-    (route_judge, _route), (judge, judgment) = reads
+    for body in (drafts, requirements):
+        assert '"name": "bash"' in body["messages"][-1]["content"].split("--- TOOLS ---")[1]
+    # Wave 2: one read on the judgments replica (the route on its own, told
+    # that the caller declared tools): 5 adoptions + 5 x 2 points, each on a
+    # draft's text and tool calls, with where the work stands (the tool
+    # result) and the tools the drafted calls must fit.
+    (route_judge, route), (judge, judgment) = reads
     assert (route_judge, judge) == ("winnow-route-systemone", "winnow-judge-systemone")
+    assert route["state"]["tool_calling"] is True
     assert judgment["state"]["drafts"] == DRAFTS
     assert judgment["state"]["request"][-1]["role"] == "user"
+    assert judgment["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
+    assert judgment["state"]["tools"] == [BASH]
     assert len(judgment["questions"]) == 5 + 5 * 2
+    assert all(
+        "tool_calls" in json.dumps(q["instructions"]) for q in judgment["questions"].values()
+    )
     # Wave 3: the answer at the caller's effort reads the drafts, requirements
-    # and judgments.
+    # and judgments, and publishes with the caller's tools.
     answer = seen[2]
     assert len(seen) == 3 and answer["reasoning_effort"] == (effort or "high")
+    assert answer["tools"][0]["function"]["name"] == "bash"
     prompt = answer["messages"][-1]["content"]
     assert '"viewpoint": "view 5"' in prompt and '"names the capital"' in prompt
     assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt

@@ -4,7 +4,8 @@ Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
-next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07**
+next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
+one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
@@ -711,6 +712,55 @@ failed nearly all 85 items and the agent re-explored instead of taking the
 next step (owner's problem definition: choose the move needed now). The
 replayed stage reports (40,000-130,000 characters per turn) grew every
 request and let the next turn read last turn's drafts.
+
+### VCO-D20 — The verified tool route (2026-10-09, PR #641)
+
+Owner decision after DeepSWE `deepswe-verified-3wave-nextstep-4w-20261007-r1`
+(stopped at 75 of 113 scored, 35 passed). Plan:
+`docs/superpowers/plans/2026-10-09-verified-tool-route.md`.
+
+- One public model, `kairyu-verified-tool` (spec `verified-tool.yaml`);
+  `kairyu-verified`, `kairyu-verified-always` and `verified-always.yaml` are
+  removed, and so is the answer page (`playground/`). Open WebUI stays.
+- The route judge asks whether the next reply needs to call one of the
+  caller's tools: `TOOL` takes the three waves (profile `primary`), `THINK`
+  takes `deepseek_think`; fallback stays `deepseek_think`. The judge state
+  already carries `tool_calling` beside the conversation. The VERIFIED route
+  for requests without tools is gone; the think route serves them.
+- The DSL stays: the same roles, workers, efforts and schemas. Only prompts
+  change, kept generic for any tool-calling agent:
+  - drafts and requirements share one reply definition: the call(s) for the
+    one move needed now with at most a short text; the finishing move only
+    once tool results show the request done;
+  - requirements read the tools and, from the request's literal words and
+    the current position, cover exact names and public entry points, checks
+    taken from the request (the request wins over a check), verification
+    through the public path, build mode and type checks that existing checks
+    use ("all" checked on more than one case), must-not behaviour, and order
+    and finishing (finish alone, after success is shown);
+  - drafts: five different moves; near the end, one checks the work against
+    the request before finishing; never announce a call without making it;
+  - judgments: adoptable means the move needed now, calls that fit the tools
+    and the protocol, and text that matches its calls;
+  - answer: makes every call it announces; the finishing move goes alone,
+    after tool results show success.
+- Gates: `routing` uses `datasets/tool-routing-set.json` (40 TOOL turns; 96
+  THINK: the 80 earlier chats without tools and 16 tool-declared turns whose
+  next reply is text), TOOL miss rate < 10 % on both halves and THINK
+  precision >= 90 %; `verified-route` becomes `verified-tool-route` on
+  `datasets/tool-turns.json` (24 agent turns), which also needs a structured
+  call to a declared tool; `serving` runs those turns and `serving-routed`
+  the routing set; `l1` ends with one tool-call answer; the browser gate
+  checks Open WebUI only. The InFoBench serving set is dropped.
+
+Why: the 75 scored tasks failed on the public surface differing from what the
+request names (about 9), on checks that encode the agent's misreading (about
+8), on verification at an internal layer instead of the tests' path or type
+check (5), on missing must-not behaviour (3), and on a finishing action
+batched with an unseen failing step (2); 9 replies announced a call without
+making it. Running tests did not separate passes from failures; what was
+checked did. The owner keeps the verified route for tool calls only and
+routes every other request to the think route.
 
 ## Limitations
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI (VCO-D18): both public models are
- * offered and each answers a request. The guarantee is not checked until it
- * is rebuilt.
+ * Browser gate for this example's Open WebUI (VCO-D18, VCO-D20): the public
+ * model is offered and answers a request.
  */
 
 import { chromium } from 'playwright';
@@ -12,7 +11,7 @@ const baseUrl = new URL(process.env.WEBUI_SMOKE_BASE_URL ?? 'http://127.0.0.1:30
 const actionTimeoutMs = 20_000;
 const navigationTimeoutMs = 30_000;
 const responseTimeoutMs = Number(process.env.WEBUI_SMOKE_RESPONSE_TIMEOUT_MS ?? 1_800_000);
-const models = ['kairyu-verified', 'kairyu-verified-always'];
+const models = ['kairyu-verified-tool'];
 
 let browser;
 let page;
@@ -94,7 +93,7 @@ async function main() {
 		await page.goto(baseUrl.href, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
 		await page.locator('#chat-input').waitFor({ state: 'visible', timeout: navigationTimeoutMs });
 	});
-	await step('both models offered', async () => {
+	await step('the public model offered', async () => {
 		const ids = await page.evaluate(async () => {
 			const response = await fetch('/api/models', {
 				headers: { Authorization: `Bearer ${localStorage.token}` }
@@ -103,14 +102,8 @@ async function main() {
 		});
 		invariant(JSON.stringify(ids) === JSON.stringify(models), `models offered: ${JSON.stringify(ids)}`);
 	});
-	await step('routed model answers an everyday request', async () => {
-		await send('kairyu-verified', 'Tell me a fun fact about octopuses.');
-	});
-	await step('always-verified model answers', async () => {
-		await send(
-			'kairyu-verified-always',
-			'List three primary colors as a comma-separated line, nothing else.'
-		);
+	await step('the routed model answers an everyday request', async () => {
+		await send('kairyu-verified-tool', 'Tell me a fun fact about octopuses.');
 	});
 	console.log('WEBUI BROWSER SMOKE PASS');
 }
