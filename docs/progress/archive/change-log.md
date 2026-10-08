@@ -11,6 +11,41 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-06 — [design] Verified route in three waves; verifiers may wait for a parallel branch (VCO-D19, PR #641)
+- What: VERIFIED = wave 1 DeepSeek five drafts (one call, caller's effort) beside Qwen requirements (MECE, ≤16, low effort); wave 2 one Winnow read per draft (adoptable?) and per draft x requirement (met?); wave 3 DeepSeek (caller's effort) writes the best answer from all of them critically. Framework: a verifier may read a unit running beside its target; the verdict waits for it (deadlock-free validation).
+- Why: owner design; without the framework change wave 1 could not run in parallel (owner authorized the change).
+- Refs: VCO-D19; m1 D8 amendment 2026-10-06; plan `docs/superpowers/plans/2026-10-06-winnow-verified-three-wave.md`
+
+### 2026-10-06 — [design] Verified example rebuilt as Winnow-routed answers (VCO-D18, PR #640)
+- What: `deepseek-v4.1-openjev-verified-8gpu` → `deepseek-v4.1-qwen3.8-winnow-8gpu`: DeepSeek GPU 0-5, Qwen3.8-27B GPU 6 (idle pool), Winnow-12B GPU 7. Winnow judges THINK/VERIFIED with the old criteria; VERIFIED = one max-effort DeepSeek call. Verified-tool route, checklist DAG, calibration and OpenJev removed; UIs kept; gates rebuilt with the c1/c4/c8/c16 plan.
+- Why: owner restarts the verified route from a plain max-effort answer on a layout that also hosts Qwen and Winnow.
+- Refs: VCO-D18 (supersedes VCO-D17), `docs/superpowers/plans/2026-10-06-deepseek-v41-winnow-routed-8gpu.md`
+
+### 2026-10-05 — [amendment] OpenAI Responses compatibility in L3 (m11 D4)
+- What: `/v1/responses` follows the pinned OpenAI spec, so Codex 0.160 and the SDKs work unmodified. It adds:
+  - the OpenAI error envelope with `param` (400/404/405, `previous_response_not_found`, 503 `slow_down` for transient overload)
+  - omitted `max_output_tokens` meaning the remaining context
+  - live reasoning, text and tool-call streams with preamble and in-band gates
+  - `response.in_progress` snapshot heartbeats
+  - reasoning items with `krs1.` tokens, replayed into `reasoning_content`
+  - in-band `context_length_exceeded`
+  - retrieve, delete, `input_items`, `input_tokens`, cancel and `compact`
+  - input images and web-search declarations
+
+  Unsupported fields are typed 400s.
+- Why: Codex retried every 1024-capped turn, aborted on comment keep-alives, never compacted after an HTTP 400, and lost reasoning and preambles. An earlier attempt that widened into L1/L2 was closed, so this one only maps existing capabilities in L3.
+- Refs: m11 D4 amendment 2026-10-05; `kairyu/entrypoints/server/responses_*.py`; `tests/server/test_responses_{contract,stream,inputs}.py`
+
+### 2026-10-05 — [amendment] llama.cpp `n` limited to 1; Winnow example fixes (PR #620 review)
+- What: `upstream: llamacpp` rejects `n > 1` before dispatch (`max_n=1`), and the contract gate's `n`-above-slots row is removed. In the Winnow examples, `down`/`status`/`logs` no longer need 30 GiB free; the playground sends WebP as PNG; the streaming tool-call gate assembles the deltas instead of searching for the `tool_calls` key.
+- Why: owner review. llama-server reports usage per candidate (the first candidate's when unary, one usage chunk per candidate when streaming), so Kairyu under-reported and under-billed completion tokens. System One forwards images untouched, and Winnow's build cannot decode WebP. Plain text chunks also carry `"tool_calls": null`.
+- Refs: LCP-D2 in `docs/design/llamacpp-upstream.md`; PR #620 review 5409395128
+
+### 2026-10-05 — [amendment] Winnow examples GPU-verified; Gemma 4 `required` backport (PR #620)
+- What: both Winnow-12B examples pass all six `verify.sh` gates on RTX PRO 6000 (1 GPU; DP8 on 8 GPUs). The examples add llama.cpp `f072b10` as a fifth winnow-server patch, registered in Winnow's own `runtime.lock.json`. They also add a Jev-style System One playground on `:3001`, and the UIs now listen on all interfaces. Kairyu code is unchanged.
+- Why: at b11036 the Gemma 4 grammar ignores `tool_choice: "required"`. The named-tool adaptation (LCP-D3) then got text, and Kairyu failed closed with 502. The source re-read had missed this. Owner approved the backport (example-owned runtime), the playground and the public binds.
+- Refs: LCP-D3 and the Winnow amendment in `docs/design/llamacpp-upstream.md`; `examples/winnow-12b-q8-*/MEASUREMENTS.md`
+
 ### 2026-10-04 — [amendment] llama.cpp penalties, token counts and attest (PR #620 review)
 - What: `upstream: llamacpp` rejects frequency/presence penalties, sends `repeat_last_n` = `max_model_len` with `repetition_penalty`, requires `max_model_len`, and declines `/v1/messages/count_tokens`; the Winnow examples' `attest` fails on missing or non-numeric sampling defaults.
 - Why: owner review. llama.cpp penalizes prompt tokens with frequency/presence and only the last 64 tokens with repeat. `/tokenize` counts the string without the chat template generation applies. A missing default compared as NaN and passed.
