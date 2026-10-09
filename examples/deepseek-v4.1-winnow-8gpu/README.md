@@ -65,7 +65,9 @@ profile_judge ── winnow-route (System One), 1 request: does the next reply
   finishing. The prompts name no agent, language or test runner.
 - Both routes pass the caller's tools and response_format to the DeepSeek
   role that publishes. The drafts and the requirements read the tools, and
-  each draft puts its calls in `tool_calls`, never in its text.
+  each draft puts its calls in `tool_calls`, never in its text. A call
+  DeepSeek writes at the end of its reply in its own format but without its
+  marker tokens is still returned as a tool call (m9 D2 amendment).
 - Stage reports are not returned in `reasoning_content`: an agent replays
   them in its next request.
 - If winnow-judge cannot read the judgments (down, or the drafts exceed its

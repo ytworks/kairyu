@@ -2361,6 +2361,62 @@ async def test_text_written_with_tool_calls_reaches_the_client(stream):
     )
 
 
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    },
+}
+_BARE_INVOKE = (
+    '<invoke name="bash">\n<parameter name="command">npx tsc --noEmit</parameter>\n'
+    '<parameter name="timeout">60</parameter>\n</invoke>'
+)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # DeepSeek wrote its DSML call without the marker tokens (verified-tool
+        # gate 2026-10-09): the declared call is returned as a call.
+        (
+            f"Run the type check first.\n\n{_BARE_INVOKE}",
+            ("Run the type check first.", ["bash"], "tool_calls"),
+        ),
+        (f"<tool_calls>\n{_BARE_INVOKE}\n</tool_calls>", (None, ["bash"], "tool_calls")),
+        # Anything else stays text: an undeclared tool, a missing required or
+        # unknown parameter, or prose after the block.
+        ('<invoke name="sh"><parameter name="command">ls</parameter></invoke>', None),
+        ('<invoke name="bash"><parameter name="timeout">5</parameter></invoke>', None),
+        ('<invoke name="bash"><parameter name="cmd">ls</parameter></invoke>', None),
+        (f"{_BARE_INVOKE}\nThen I will commit.", None),
+    ],
+)
+async def test_deepseek_call_without_markers_is_returned_as_a_call(stream, text, expected):
+    engine = StubBackend(text=text, finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body("check", tools=[_BASH_TOOL], stream=stream)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert _tool_response_contract(response, stream) == (expected or (text, [], "stop"))
+    if expected and not stream:
+        (call,) = response.json()["choices"][0]["message"]["tool_calls"]
+        assert json.loads(call["function"]["arguments"]) == {
+            "command": "npx tsc --noEmit",
+            "timeout": 60,
+        }
+
+
 @pytest.mark.parametrize("stream", [False, True])
 async def test_auto_suppresses_undeclared_model_function_names(stream):
     text = '<tool_call>{"name":"undeclared","arguments":{}}</tool_call>'

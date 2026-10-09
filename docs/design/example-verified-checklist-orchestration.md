@@ -784,6 +784,13 @@ Why: the old THINK criterion "final report once the work is done" pulled an
 agent's last turns to the think route, whose replies then wrote the submit
 command as text or batched it with a commit: the failures this route is for.
 
+**Amendment (2026-10-09, PR #641): calls DeepSeek writes without markers.**
+Owner decision after `verified-tool-route` failed 1 of 12 (the type-check
+turn, streamed, effort max): the answer wrote DeepSeek's DSML call without
+its marker tokens, so vLLM returned it as text. Kairyu now returns such a
+trailing block for a declared tool with schema-valid arguments as a tool
+call (m9 D2 amendment 2026-10-09). The example's prompts are unchanged.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

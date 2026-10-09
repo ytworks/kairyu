@@ -112,6 +112,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-09 — [amendment] DeepSeek calls written without DSML markers become tool calls (PR #641)
+- What: on the generic protocol, a reply ending with `<invoke name=...>`/`<parameter name=...>` blocks (DeepSeek's DSML without its marker tokens) for declared tools with schema-valid arguments is returned as `tool_calls`; prose before it stays `content`; anything else stays text.
+- Why: `verified-tool-route` failed 1/12 (effort max): the answer wrote such a block, vLLM returned it as text and the agent saw no call; DeepSWE showed the same (1/1,410 and 5/77 replies).
+- Refs: m9 D2 amendment 2026-10-09; VCO-D20 amendment; `kairyu/entrypoints/server/chat_service.py`
+
 ### 2026-10-09 — [amendment] Route judge keeps an agent's task; TOOL covers protocol-required calls (VCO-D20, PR #641)
 - What: `bounded_conversation` also keeps system/developer messages and the latest user message when it cuts a conversation (m1 D9 amendment); the route judge's question and criteria count calls the conversation's protocol requires (including finishing) as TOOL; judge timeout 10 -> 60 s.
 - Why: DeepSWE replay before the gates: 20/64 real agent turns routed THINK (task dropped behind a system prompt, "final report" criterion), 4/6 concurrent long turns timed out, `routing` failed; with the changes 1/64 misrouted.
