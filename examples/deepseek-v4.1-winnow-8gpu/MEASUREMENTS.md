@@ -6,8 +6,9 @@ overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
 `winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
 (judgments only).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/`.
-The verified tool route (first section): `*-20261009T04*` to `T06*`, gate log
-`gates-20261009-verified-tool-4.log`. The two-Winnow sections below it:
+The verified tool route: `*-20261009T07*` to `T09*` (rerun, gate log
+`gates-20261009-verified-tool-5.log`) and `*-20261009T04*` to `T06*` (gate log
+`gates-20261009-verified-tool-4.log`). The two-Winnow sections below it:
 `*-20261007T04*`, `T05*`, `T08*`, `T09*`, `browser-20261007T060041Z.json`, gate
 logs `gates-20261007-1307.log` and `gates-20261007-1712-nextstep.log`.
 Sections on the earlier Qwen layout
@@ -15,6 +16,45 @@ Sections on the earlier Qwen layout
 `*-20261006T*.json` and `*-20261006T16*`/`T17*`; gate logs `gates-20261006.log`,
 `gates-20261006-256k.log`, `gates-20261006-three-wave.log` and
 `gates-20261007-requirements-without-reasoning.log`).
+
+## GPU gates: rerun after the review fixes (2026-10-09 16:37-18:19 JST)
+
+Commit `2b4ae850` (PR #641 review fixes: typed markerless DSML parameters,
+validated messages passed as `OrchestrationRequest.conversation`, character
+cost of a native conversation, orphan cleanup in `up`/`down`). `./run.sh`
+removed no orphan (none left), then `./verify.sh <gate>` in GATES order. All
+nine gates pass. Log `gates-20261009-verified-tool-5.log`, results
+`*-20261009T07*` to `T09*`.
+
+| Gate | Result |
+|---|---|
+| l1 | pass (1 s) |
+| routing | TOOL miss 5 % on both halves; THINK precision 97.9 % (unchanged) |
+| think-route | 6/6 THINK; p50 1.15 s, TTFT p50 0.91 s |
+| effort | THINK 0.6-1.3 s; TOOL 111-152 s, 29,295-43,227 output tokens, 250-285 tok/s, structured `bash` call at every effort |
+| verified-tool-route | 12/12 TOOL with a structured call; p50 122.1 s, p95 155.4 s; 346,246 output tokens; 211-271 tok/s |
+| fallback | route down: 2/2 THINK with a call (0.85 s); judge down: TOOL, `judge_unavailable`, a call (167.0 s); recovered: judged (147.0 s) |
+| serving | 72/72, every reply a structured call (table below) |
+| serving-routed | 72/72 (table below) |
+| browser | Open WebUI answers |
+
+serving (agent turns):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n / p50 s |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| c1 | 8 | 137.2 | 166.5 | 1,075 | 255,436 | 238 | 8 / 137.2 | 0 |
+| c4 | 16 | 131.5 | 205.5 | 541 | 321,438 | 594 | 12 / 160.3 | 4 / 1.6 |
+| c8 | 16 | 195.8 | 305.3 | 472 | 401,993 | 852 | 13 / 213.3 | 3 / 1.1 |
+| c16 | 32 | 208.6 | 344.9 | 491 | 766,927 | 1,562 | 27 / 217.8 | 5 / 2.7 |
+
+serving-routed (routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n / p50 s |
+|---|---:|---:|---:|---:|---:|---|---|
+| c1 | 8 | 10.1 | 126.7 | 355 | 184 | 2 / 131.3 | 6 / 9.3 |
+| c4 | 16 | 13.4 | 130.8 | 268 | 455 | 5 / 125.1 | 11 / 2.5 |
+| c8 | 16 | 97.7 | 213.5 | 304 | 649 | 6 / 185.1 | 10 / 17.8 |
+| c16 | 32 | 57.6 | 238.7 | 276 | 1,115 | 11 / 193.7 | 21 / 15.1 |
 
 ## GPU gates: verified tool route (2026-10-09 13:30-15:15 JST)
 
