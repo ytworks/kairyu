@@ -5,7 +5,7 @@ verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-1
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
-one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20), GPU gates pending**
+one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
@@ -761,6 +761,28 @@ batched with an unseen failing step (2); 9 replies announced a call without
 making it. Running tests did not separate passes from failures; what was
 checked did. The owner keeps the verified route for tool calls only and
 routes every other request to the think route.
+
+**Amendment (2026-10-09, PR #641): the route judge on long agent runs.**
+Owner decision after replaying DeepSWE turns before the GPU gates: 20 of 64
+real agent turns, each needing a tool call, were routed THINK, almost all
+near the end of the run; 4 of 6 concurrent long turns hit the 10 s cut; and
+the `routing` gate failed (TOOL miss 15 % on both halves).
+
+- The judge's question adds that when the conversation's instructions
+  require a tool call or command in every reply, or end the work with one,
+  every reply up to that final one needs a call; THINK applies only when
+  the conversation accepts a plain-text reply; TOOL names finishing calls.
+- The judge's conversation bound keeps the request's messages (m1 D9
+  amendment 2026-10-09), so the task and protocol stay visible.
+- `timeout_seconds` 10 -> 60 (the DSL maximum).
+- One authored routing item had no edit step before its check; it was fixed
+  (label unchanged).
+- Measured before the gates: real-turn misses 21 -> 1 of 64; authored set
+  TOOL misses 2 of 40 (one per half), THINK sent to TOOL 2 of 96.
+
+Why: the old THINK criterion "final report once the work is done" pulled an
+agent's last turns to the think route, whose replies then wrote the submit
+command as text or batched it with a commit: the failures this route is for.
 
 ## Limitations
 

@@ -498,7 +498,11 @@ roles:
 # deepseek_think.
 profile_judge:
   worker: winnow_route
-  timeout_seconds: 10.0
+  # The DSL maximum: one read of a long agent conversation (about 40,000
+  # tokens) takes 6-7 s on winnow-route, and a few agents' reads queue there,
+  # so 10 s sent 4 of 6 concurrent agent turns to the fallback (owner
+  # decision 2026-10-09).
+  timeout_seconds: 60.0
   fallback: deepseek_think
   max_message_chars: 4000
   # Winnow's decision context holds 65,536 tokens; 120,000 characters of a
@@ -507,7 +511,10 @@ profile_judge:
   question: >-
     Does the next assistant reply in this conversation need to call one of
     the caller's tools? tool_calling in the state says whether the caller
-    declared any tools; without tools no call can be made.
+    declared any tools; without tools no call can be made. When the
+    conversation's instructions require a tool call or command in every
+    reply, or end the work with a tool call or command, every reply up to
+    and including that final one needs a tool call.
   # The most probable route wins (owner decision 2026-10-04; no preferred
   # label).
   choices:
@@ -515,17 +522,19 @@ profile_judge:
       label: THINK
       criteria: >-
         no tool call is needed next: the caller declared no tools, or the
-        next reply is text only, such as a direct answer from what the
-        model knows or what the conversation already shows, a question back
-        to the user, or the final report once tool results show the work
-        done
+        conversation accepts a plain-text reply and the next reply is text
+        only, such as a direct answer from what the model knows or what the
+        conversation already shows, a question back to the user, or the
+        final report once tool results show the work done
     - profile: primary
       label: TOOL
       criteria: >-
         the next reply must call one of the caller's tools: the request
-        needs an action or information only a tool provides, or the
+        needs an action or information only a tool provides; the
         conversation ends with tool results or the assistant's own turns
-        while the work is not yet done
+        while the work is not yet finished; or the conversation's
+        instructions require a tool call or command in every reply or to
+        finish the work (for example a submit or finish command)
 
 profiles:
   - name: deepseek_think

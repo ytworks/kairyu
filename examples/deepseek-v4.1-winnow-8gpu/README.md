@@ -42,10 +42,14 @@ profile_judge ── winnow-route (System One), 1 request: does the next reply
                                           (default high), one call
 ```
 
-- The judge sends the whole conversation (each message cut at 4,000
-  characters, the whole at 120,000) and whether the caller declared tools,
-  with one choice question; the most probable label wins.
-- When winnow-route does not answer within 10 s (down, overloaded,
+- The judge sends the whole conversation and whether the caller declared
+  tools, with one choice question; the most probable label wins. Each
+  message is cut at 4,000 characters and the whole at 120,000; a long run
+  keeps its first message, its system and developer messages and its latest
+  user message, so an agent's task and protocol stay visible.
+- When the conversation's instructions require a tool call in every reply
+  or end the work with one, every reply up to that final one is TOOL.
+- When winnow-route does not answer within 60 s (down, overloaded,
   unreadable), the request takes the think route.
 - The two Winnow replicas never share a queue: a burst of judgments cannot
   delay the next request's route decision.

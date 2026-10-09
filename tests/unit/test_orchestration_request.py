@@ -448,6 +448,12 @@ def test_bounded_conversation_never_exceeds_its_bound():
         ),
         # Escaped characters (Codex review, PR #619): the cut keeps a prefix.
         ([{"role": "user", "content": "Summarize this log:\n" + "entry\n" * 1500}], 1500),
+        # More request messages than the bound can hold, even cut.
+        (
+            [{"role": "system", "content": "s" * 500} for _ in range(40)]
+            + [{"role": "user", "content": "u" * 4000}, {"role": "tool", "content": "t" * 4000}],
+            1000,
+        ),
     ]
     for messages, max_chars in cases:
         bounded, omitted = bounded_conversation(messages, max_chars)
@@ -461,3 +467,23 @@ def test_bounded_conversation_never_exceeds_its_bound():
     text = "Summarize this log:\n" + "entry\n" * 1500
     cut = bounded_text(text, 1000)
     assert len(json.dumps(cut)) <= 1000 and cut.startswith("Summarize this log:")
+
+
+def test_bounded_conversation_keeps_an_agents_task_behind_a_system_prompt():
+    # DeepSWE replay (2026-10-09): an agent's task and protocol sit in the
+    # user message after a one-line system prompt; the route judge must still
+    # see them when a long run is cut to the bound.
+    task = {"role": "user", "content": "Fix the bug. Finish with the submit command."}
+    messages = [{"role": "system", "content": "You are a helpful assistant."}, task]
+    for step in range(60):
+        messages.append({"role": "assistant", "content": f"step {step}"})
+        messages.append({"role": "tool", "content": "x" * 3000})
+
+    bounded, omitted = bounded_conversation(messages, 120_000)
+
+    assert len(json.dumps(bounded, ensure_ascii=False)) <= 120_000
+    assert bounded[:2] == messages[:2]
+    assert bounded[-1] == messages[-1]
+    assert omitted == len(messages) - len(bounded) > 0
+    # The newest messages fill the rest, in conversation order.
+    assert bounded[2:] == messages[len(messages) - len(bounded) + 2 :]

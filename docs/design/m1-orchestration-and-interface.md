@@ -331,6 +331,23 @@ checklist appends a "Verification" section to exposed internal work (PR #616
 review). `max_conversation_chars` bounds the judge's conversation as a whole
 so a long agent conversation still fits the judge (issue #617).
 
+Amendment (2026-10-09, PR #641, owner authorization): when
+`bounded_conversation` cuts a conversation to its bound, it keeps the
+request's messages (every system and developer message and the latest user
+message, the definition the checklist `request` source already uses) beside
+the first and the newest message; the newest of the others fill the rest,
+in conversation order. Before, only the first message was kept as "the
+task", so an agent whose run starts with a one-line system prompt lost its
+task and protocol from long conversations.
+Why (framework boundary): (1) the bound serves the route judge (D9) and
+checklist `query`/`request` sections (D8) and dropped the request whenever a
+system prompt came first; (2) no setting chooses which messages survive, and
+larger sizes cannot hold a long run; (3) replaying 64 DeepSWE agent turns
+through the route judge, 20 were misrouted with the task dropped and 1 once
+it was kept; any DSL routing or judging a long agent run with a system
+prompt shows the same loss; (4) the mechanism only pins messages: sizes,
+questions and criteria stay in the example.
+
 ## 3. Out of scope for M1 (deferred with reasons)
 
 - Custom scheduler / KV manager / CUDA graphs / spec decode / quantized load — M2/M3.
