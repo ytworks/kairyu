@@ -4266,6 +4266,78 @@ async def test_auto_best_of_is_forwarded_only_to_the_final_engine(
     assert transport_payloads[-1]["best_of"] == 2
 
 
+async def test_native_conversation_publisher_keeps_a_legacy_chat_prompt():
+    # PR #641 review: a legacy-rendered chat has no L2 transcript, so a
+    # native_conversation publisher must receive the rendered prompt, never
+    # an empty conversation.
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.router import RuleRouter
+
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "4"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    upstream = OpenAICompatBackend(
+        base_url="https://native.example/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+    )
+
+    multi_step = (
+        "First, research the options. Then design a plan. After that, implement it. "
+        "Finally, verify everything works end to end."
+    )
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+    orchestrator = Orchestrator(
+        {"tier1": upstream, "tier2": upstream},
+        roles=(
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                prompt="",
+                native_conversation=True,
+            ),
+        ),
+        router=MultiAgentRouter(),
+    )
+    app = create_legacy_app(engines={}, orchestrators={"auto": orchestrator})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions", json=_chat_body("What is 2 + 2?", model="auto")
+        )
+
+    assert response.status_code == 200
+    (sent,) = payloads
+    assert len(sent["messages"]) == 1
+    assert "What is 2 + 2?" in sent["messages"][0]["content"]
+
+
 # --- Issue #496: OpenAI compatibility for output limits, model retrieve, ---
 # --- tool-result continuations, and empty-answer honesty.                 ---
 

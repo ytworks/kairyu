@@ -2079,7 +2079,8 @@ class Orchestrator:
 
         if not any(role.native_conversation for role in roles):
             return ()
-        if call.conversation is None:
+        if not call.conversation:
+            # No chat messages (or none recorded): the prompt is the request.
             return ({"role": "user", "content": call.prompt},)
         return call.conversation
 

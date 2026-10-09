@@ -149,7 +149,8 @@ class ValidatedChatInput:
     conversation_affinity_key: str | None = None
     # The validated role-tagged messages the L2 transcript carries, for a
     # publisher that receives the conversation natively (m1 D8 amendment).
-    conversation_messages: tuple[Mapping[str, object], ...] = ()
+    # None when the prompt is not an L2 transcript (legacy chat rendering).
+    conversation_messages: tuple[Mapping[str, object], ...] | None = None
 
 
 @dataclass(frozen=True)

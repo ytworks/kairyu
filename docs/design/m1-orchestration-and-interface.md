@@ -308,8 +308,9 @@ followed by the role's rendered prompt as one final user message, omitted
 when the prompt is empty; an image request sends the caller's own image
 conversation the same way. Every other role keeps the role-tagged JSON
 transcript. The chat route passes its validated messages as
-`OrchestrationRequest.conversation`; a plain prompt (no chat messages) is sent
-as one user message and is never parsed for a transcript (PR #641 review).
+`OrchestrationRequest.conversation`; a plain prompt (no chat messages,
+including a legacy-rendered chat) is sent as one user message and is never
+parsed for a transcript (PR #641 review).
 The worker request carries the messages in
 `GenerationRequest.conversation_prefix`; only an OpenAI-compatible worker
 whose upstream declares the capability (vLLM) accepts it, and every other
