@@ -216,9 +216,25 @@ class OrchestrationRequest:
     # None means the judge was deterministically skipped, not that a dispatched
     # call necessarily failed to return a verdict.
     role_profile_judge_event: TraceEvent | None = None
+    # The caller's validated chat messages, sent natively to a
+    # native_conversation publisher (m1 D8 amendment 2026-10-09). None for a
+    # plain prompt, which such a role receives as one user message; it is
+    # never parsed out of ``prompt`` text (PR #641 review).
+    conversation: tuple[Mapping[str, object], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
+        if self.conversation is not None:
+            if isinstance(self.conversation, (str, bytes)) or any(
+                not isinstance(message, Mapping) or not isinstance(message.get("role"), str)
+                for message in self.conversation
+            ):
+                raise TypeError("conversation must be role-tagged message mappings")
+            object.__setattr__(
+                self,
+                "conversation",
+                tuple(dict(message) for message in self.conversation),
+            )
         sampling_format = self.sampling_params.extra_args.get("response_format")
         if self.response_format != sampling_format:
             raise ValueError("response_format intent must match sampling_params.extra_args")

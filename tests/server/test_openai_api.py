@@ -2396,6 +2396,17 @@ _BARE_INVOKE = (
         ('<invoke name="bash"><parameter name="timeout">5</parameter></invoke>', None),
         ('<invoke name="bash"><parameter name="cmd">ls</parameter></invoke>', None),
         (f"{_BARE_INVOKE}\nThen I will commit.", None),
+        # The string attribute decides decoding, never the declared type.
+        (
+            '<invoke name="bash"><parameter name="command">ls</parameter>'
+            '<parameter name="timeout" string="true">oops</parameter></invoke>',
+            None,
+        ),
+        (
+            '<invoke name="bash"><parameter name="command" string="false">42</parameter>'
+            "</invoke>",
+            None,
+        ),
     ],
 )
 async def test_deepseek_call_without_markers_is_returned_as_a_call(stream, text, expected):

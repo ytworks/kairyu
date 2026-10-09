@@ -2429,6 +2429,7 @@ def create_app(
                         if validated_input.orchestration_multimodal_prompt is not None
                         else None
                     ),
+                    conversation=validated_input.conversation_messages,
                 )
                 selected = auto_models[request.model]
                 judge_will_run = selected.will_judge_role_profile(orchestration_request)

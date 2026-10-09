@@ -93,7 +93,13 @@ def chars_cost_model(usd_per_1k_chars: float) -> CostModel:
             raise ValueError("character cost estimation supports text prompts only")
         text = prompt_text(request.prompt)
         assert text is not None
-        chars = len(text) + sum(len(c.text) for c in result.completions)
+        # A native conversation is prompt input too (PR #641 review).
+        prefix = (
+            len(json.dumps(list(request.conversation_prefix), ensure_ascii=False))
+            if request.conversation_prefix
+            else 0
+        )
+        chars = len(text) + prefix + sum(len(c.text) for c in result.completions)
         return chars / 1000 * usd_per_1k_chars
 
     return estimate

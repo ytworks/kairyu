@@ -150,9 +150,11 @@ def _call(content: str) -> OrchestrationRequest:
     chat = ChatCompletionRequest(
         model="kairyu-verified-tool", messages=[{"role": "user", "content": content}]
     )
+    validated = validate_orchestration_chat_input(chat)
     return OrchestrationRequest(
-        prompt=validate_orchestration_chat_input(chat).prompt,
+        prompt=validated.prompt,
         sampling_params=SamplingParams(max_tokens=4096),
+        conversation=validated.conversation_messages,
     )
 
 
@@ -160,10 +162,12 @@ def _agent_call() -> OrchestrationRequest:
     """The orchestration call for an agent turn with the caller's bash tool."""
 
     chat = ChatCompletionRequest(model="kairyu-verified-tool", messages=AGENT_TURN, tools=[BASH])
+    validated = validate_orchestration_chat_input(chat)
     return OrchestrationRequest(
-        prompt=validate_orchestration_chat_input(chat).prompt,
+        prompt=validated.prompt,
         sampling_params=SamplingParams(max_tokens=4096),
         tools=(BASH,),
+        conversation=validated.conversation_messages,
     )
 
 

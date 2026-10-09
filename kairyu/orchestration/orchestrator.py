@@ -2073,17 +2073,15 @@ class Orchestrator:
         roles: tuple[RoleSpec, ...],
     ) -> tuple[Mapping[str, object], ...]:
         """The caller's messages for a native_conversation publisher: the
-        chat request's role-tagged messages, or a plain prompt as one user
-        message (m1 D8 amendment 2026-10-09)."""
+        chat request's validated messages, or a plain prompt as one user
+        message, never parsed out of the prompt text (m1 D8 amendment
+        2026-10-09, PR #641 review)."""
 
         if not any(role.native_conversation for role in roles):
             return ()
-        messages = conversation_messages(call.prompt)
-        if messages is None:
+        if call.conversation is None:
             return ({"role": "user", "content": call.prompt},)
-        if not all(isinstance(message, dict) for message in messages):
-            raise ValueError("the conversation must be a list of message objects")
-        return tuple(messages)
+        return call.conversation
 
     def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:
         if call.reasoning_effort is not None:

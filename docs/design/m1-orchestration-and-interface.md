@@ -307,12 +307,16 @@ conversation as native chat messages (tool calls and tool results included)
 followed by the role's rendered prompt as one final user message, omitted
 when the prompt is empty; an image request sends the caller's own image
 conversation the same way. Every other role keeps the role-tagged JSON
-transcript. The request carries the messages in
+transcript. The chat route passes its validated messages as
+`OrchestrationRequest.conversation`; a plain prompt (no chat messages) is sent
+as one user message and is never parsed for a transcript (PR #641 review).
+The worker request carries the messages in
 `GenerationRequest.conversation_prefix`; only an OpenAI-compatible worker
 whose upstream declares the capability (vLLM) accepts it, and every other
 backend rejects it. The prompt cannot use `{query}` or `{conversation}`, nor
 the text scaffolds (`prompt_suffix`, `prompt_headless`, `reasoning_closed`, a
-prefix reasoning continuation). Admission counts the messages as prompt input.
+prefix reasoning continuation). Admission and the character cost model count
+the messages as prompt input (PR #641 review).
 Why (framework boundary): (1) a publisher answering an agent's tool turn
 received the conversation only as a JSON transcript inside one user message,
 and DeepSeek-V4.1 at max effort then wrote its calls as JSON text (11 of 12

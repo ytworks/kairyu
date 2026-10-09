@@ -918,8 +918,10 @@ def up() -> None:
         "DEEPSEEK_MODEL_SEED",
     )
     _ensure_winnow_model(env)
+    # --remove-orphans: an update from a release that still defined a service
+    # (the answer page before VCO-D20) stops and removes its old container.
     _compose(
-        ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"],
+        ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200", "--remove-orphans"],
         env=env,
     )
     validate_serving(env)
@@ -936,7 +938,7 @@ def main() -> None:
     if args.action == "up":
         up()
     elif args.action == "down":
-        _compose(["down"])
+        _compose(["down", "--remove-orphans"])
     elif args.action == "status":
         _compose(["ps"])
     else:

@@ -128,8 +128,9 @@ token-granularity TPOT, results files).
   children, optionally in a markerless `<tool_calls>` or `<function_calls>`
   wrapper) is returned as tool calls when every invoke names a declared tool
   and its parameters satisfy that tool's schema (typed as for Qwen's XML
-  parameters; required present, no unknown name when
-  `additionalProperties` is false). The prose before the block stays as
+  parameters; a `string` attribute decides only the decoding, and the value
+  must still have a declared type (PR #641 review); required present, no
+  unknown name when `additionalProperties` is false). The prose before the block stays as
   `content`; any other shape, trailing prose, or a call the tool choice
   forbids leaves the whole text as content.
   Why (framework boundary): (1) the OpenAI-wire contract returns a declared

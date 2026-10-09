@@ -147,6 +147,9 @@ class ValidatedChatInput:
     # distinguishes tasks that share a long agent-harness preamble while
     # keeping appended turns on the same replica.
     conversation_affinity_key: str | None = None
+    # The validated role-tagged messages the L2 transcript carries, for a
+    # publisher that receives the conversation natively (m1 D8 amendment).
+    conversation_messages: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -985,6 +988,7 @@ def validate_orchestration_chat_input(
             for message in prepared.messages
         ),
         conversation_affinity_key=_conversation_affinity_key(prepared),
+        conversation_messages=tuple(messages),
     )
 
 
@@ -1475,6 +1479,26 @@ def _parse_tool_calls(
     return [call] if call is not None else []
 
 
+def _fits_schema_types(value: object, schema: object) -> bool:
+    """Whether a decoded parameter value has one of the schema's types."""
+
+    if not isinstance(schema, Mapping):
+        return True
+    kinds = _schema_types(schema)
+    if not kinds:
+        return True
+    checks = {
+        "null": lambda v: v is None,
+        "string": lambda v: isinstance(v, str),
+        "boolean": lambda v: isinstance(v, bool),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+    }
+    return any(checks.get(kind, lambda _v: False)(value) for kind in kinds)
+
+
 def _bare_invoke_arguments(body: str, schema: Mapping[str, object]) -> dict[str, object]:
     """The arguments of one markerless DSML invoke, typed and checked by the
     tool's schema (as for Qwen's XML parameters)."""
@@ -1504,12 +1528,16 @@ def _bare_invoke_arguments(body: str, schema: Mapping[str, object]) -> dict[str,
             if additional is False:
                 raise ValueError("unknown tool parameter")
             parameter_schema = additional if isinstance(additional, Mapping) else {}
-        if is_string == "true":
-            arguments[name] = value
-        elif is_string == "false":
-            arguments[name] = _strict_json_loads(value)
-        else:
+        if is_string is None:
             arguments[name] = _qwen_parameter_value(value, parameter_schema)
+            cursor = match.end()
+            continue
+        decoded = value if is_string == "true" else _strict_json_loads(value)
+        # The attribute decides the decoding, never the type: the value must
+        # still fit the declared schema (PR #641 review).
+        if not _fits_schema_types(decoded, parameter_schema):
+            raise ValueError("tool parameter does not match its schema")
+        arguments[name] = decoded
         cursor = match.end()
     if body[cursor:].strip():
         raise ValueError("unexpected text after tool parameters")
