@@ -64,6 +64,8 @@ class MockBackend:
 
     @staticmethod
     def _execution_text(request: GenerationRequest) -> str:
+        if request.conversation_prefix:
+            raise ValueError("MockBackend does not support conversation_prefix")
         prompt = prompt_with_tool_intent(request)
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(

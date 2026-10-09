@@ -791,6 +791,16 @@ its marker tokens, so vLLM returned it as text. Kairyu now returns such a
 trailing block for a declared tool with schema-valid arguments as a tool
 call (m9 D2 amendment 2026-10-09). The example's prompts are unchanged.
 
+**Amendment (2026-10-09, PR #641): both publishers get the caller's
+conversation natively.** Owner decision after the rerun failed 3 of 12: the
+answer wrote its calls as JSON text. On the same six turns at effort max,
+DeepSeek given the conversation natively made 0 of 12 such replies; the think
+route made 11 of 12 and the verified tool route 6 of 12, both handing it a
+JSON transcript. The `answer` role now declares `native_conversation` (m1 D8
+amendment 2026-10-09): the caller's messages, then its prompt without
+`{query}` as one final user message. `deepseek_think_answer` declares it with
+no prompt: the caller's conversation goes to DeepSeek as it was sent.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

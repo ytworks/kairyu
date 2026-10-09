@@ -748,6 +748,108 @@ def test_validate_request_rejects_unsupported_chat_continuation_retry() -> None:
     assert backend.generated == []
 
 
+class _ChatRecorder(MockBackend):
+    """A chat worker that accepts native conversations and images."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[GenerationRequest] = []
+
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in {"text", "multimodal"}
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        return None
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests.append(request)
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(CompletionOutput(index=0, text="ok", token_ids=(), finish_reason="stop"),),
+        )
+
+
+@pytest.mark.parametrize("image", [False, True])
+async def test_native_conversation_publisher_answers_the_callers_own_turn(image) -> None:
+    # m1 D8 amendment 2026-10-09: the publisher gets the caller's messages
+    # natively (an agent's tool transcript, or an image conversation) and its
+    # prompt as one final user message; another role keeps the transcript.
+    from kairyu.engine.prompt import (
+        MultimodalItem,
+        MultimodalMessage,
+        MultimodalMessagePart,
+        MultimodalPrompt,
+    )
+    from kairyu.entrypoints.server.chat_service import validate_orchestration_chat_input
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    worker = _ChatRecorder()
+    orchestrator = _orchestrator(
+        engines={"tier2": worker},
+        roles=(
+            RoleSpec(name="notes", worker="tier2", prompt="[notes] {conversation}"),
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                depends_on=("notes",),
+                prompt="Material: {notes}",
+                native_conversation=True,
+            ),
+        ),
+    )
+    messages = [
+        {"role": "system", "content": "You can run shell commands."},
+        {"role": "user", "content": COMPLEX},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "a.py"},
+    ]
+    caller = ChatCompletionRequest(model="m", messages=messages)
+    multimodal = None
+    if image:
+        multimodal = MultimodalPrompt(
+            COMPLEX,
+            (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),),
+            (
+                MultimodalMessage(
+                    "user",
+                    (
+                        MultimodalMessagePart("text", text=COMPLEX),
+                        MultimodalMessagePart("item", item_index=0),
+                    ),
+                ),
+            ),
+        )
+    call = OrchestrationRequest(
+        prompt=validate_orchestration_chat_input(caller).prompt,
+        sampling_params=SamplingParams(max_tokens=64),
+        multimodal_prompt=multimodal,
+    )
+
+    await orchestrator.run(call)
+
+    notes, final = worker.requests
+    assert notes.conversation_prefix == ()
+    if image:
+        assert final.conversation_prefix == ()
+        assert final.prompt.messages[:-1] == multimodal.messages
+        assert final.prompt.messages[-1].content[0].text == "Material: ok"
+    else:
+        assert final.conversation_prefix == tuple(messages)
+        assert final.prompt == "Material: ok"
+
+
 async def test_async_prepare_keeps_chat_retry_intent_validation_only() -> None:
     events: list[tuple[str, str]] = []
     backend = _PreparingBackend("tier2", events)

@@ -210,7 +210,10 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
     assert result.text == "Paris"
     (body,) = seen
     assert body["reasoning_effort"] == (effort or "high")
-    assert body["messages"][-1]["content"].startswith("[deepseek_think_answer]")
+    # The caller's conversation reaches DeepSeek as it was sent.
+    assert body["messages"] == [
+        {"role": "user", "content": "Name the capital of France in one word."}
+    ]
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
@@ -254,12 +257,15 @@ async def test_tool_route_runs_three_waves_into_one_critical_answer(effort) -> N
     assert all(
         "tool_calls" in json.dumps(q["instructions"]) for q in judgment["questions"].values()
     )
-    # Wave 3: the answer at the caller's effort reads the drafts, requirements
-    # and judgments, and publishes with the caller's tools.
+    # Wave 3: the answer at the caller's effort gets the caller's turn as
+    # native messages, then one message with the drafts, requirements and
+    # judgments, and publishes with the caller's tools.
     answer = seen[2]
     assert len(seen) == 3 and answer["reasoning_effort"] == (effort or "high")
     assert answer["tools"][0]["function"]["name"] == "bash"
+    assert answer["messages"][:-1] == AGENT_TURN
     prompt = answer["messages"][-1]["content"]
+    assert answer["messages"][-1]["role"] == "user" and prompt.startswith("Before replying")
     assert '"viewpoint": "view 5"' in prompt and '"names the capital"' in prompt
     assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt
 
@@ -273,4 +279,4 @@ async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:
 
     assert call.role_profile_judgment is None
     (body,) = seen
-    assert body["messages"][-1]["content"].startswith("[deepseek_think_answer]")
+    assert body["messages"] == [{"role": "user", "content": "Name the capital of France."}]

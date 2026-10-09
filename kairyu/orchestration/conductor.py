@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from kairyu.async_thread import run_prompt_work
@@ -28,6 +28,7 @@ from kairyu.engine.prompt import (
     MultimodalPrompt,
     TemplatedPrompt,
     derive_multimodal_prompt,
+    extend_multimodal_prompt,
     prompt_kind,
     prompt_text,
 )
@@ -222,8 +223,33 @@ class RoleSpec:
     # template is rendered over the role outputs plus {previous} and
     # {feedback}.
     refine_prompt: str = ""
+    # A publisher that answers the caller's turn itself: its worker receives
+    # the caller's conversation as native chat messages (tool calls and tool
+    # results included) and the rendered prompt as one final user message,
+    # omitted when empty (m1 D8 amendment 2026-10-09).
+    native_conversation: bool = False
 
     def __post_init__(self) -> None:
+        if self.native_conversation:
+            if self.role_type != "publisher":
+                raise ValueError(
+                    f"role {self.name!r}: native_conversation is for a publisher role"
+                )
+            if self.prompt_suffix or self.prompt_headless or self.reasoning_closed or (
+                self.reasoning_close_tag and self.reasoning_continuation != "chat"
+            ):
+                # Text scaffolds assume the prompt is the whole model input.
+                raise ValueError(
+                    f"role {self.name!r}: native_conversation cannot combine with "
+                    "prompt_suffix, prompt_headless, reasoning_closed or a prefix "
+                    "reasoning continuation"
+                )
+            for template in (self.prompt, self.refine_prompt):
+                if "{query}" in template or "{conversation}" in template:
+                    raise ValueError(
+                        f"role {self.name!r}: a native_conversation prompt cannot use "
+                        "{query} or {conversation}; the conversation is sent natively"
+                    )
         if isinstance(self.prompt, TemplatedPrompt):
             raise ValueError(
                 "Conductor role templates cannot be tokenizer-owned pre-rendered "
@@ -634,6 +660,7 @@ class Conductor:
         reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
         decision_workers: Mapping[str, DecisionBackend] | None = None,
+        conversation: Sequence[Mapping[str, object]] = (),
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -669,6 +696,9 @@ class Conductor:
         self._affinity_key = affinity_key
         self._expose_intermediate_outputs = expose_intermediate_outputs
         self._multimodal_prompt = multimodal_prompt
+        # The caller's role-tagged messages, sent natively to a
+        # native_conversation publisher (m1 D8 amendment 2026-10-09).
+        self._conversation = tuple(dict(message) for message in conversation)
         self._chat_template_kwargs = (
             None if chat_template_kwargs is None else dict(chat_template_kwargs)
         )
@@ -1385,7 +1415,33 @@ class Conductor:
             "multimodal",
         ):
             return text
+        if spec.native_conversation:
+            # The caller's own image conversation, then the role's prompt.
+            return extend_multimodal_prompt(self._multimodal_prompt, text)
         return derive_multimodal_prompt(self._multimodal_prompt, text)
+
+    def _conversation_prefix(
+        self,
+        spec: RoleSpec,
+        prompt: object,
+    ) -> tuple[Mapping[str, object], ...]:
+        """The caller's messages a native_conversation role sends before its
+        prompt (an image prompt already carries the caller's messages)."""
+
+        if not spec.native_conversation or isinstance(prompt, MultimodalPrompt):
+            return ()
+        return self._conversation
+
+    def final_intent_conversation_prefix(
+        self,
+        prompt: object,
+    ) -> tuple[Mapping[str, object], ...]:
+        """The conversation the final unit's dispatch carries for ``prompt``,
+        for an exact preflight contract."""
+
+        if not self._units:
+            return ()
+        return self._conversation_prefix(self._selected_final_unit(), prompt)
 
     def _worker_chat_template_kwargs(
         self,
@@ -1513,6 +1569,7 @@ class Conductor:
                         parallel_tool_calls=parallel_tool_calls,
                         tool_call_protocol=tool_call_protocol,
                         reasoning_effort=self._role_reasoning_effort(spec),
+                        conversation_prefix=self._conversation_prefix(spec, role_prompt),
                     ),
                 )
             )
@@ -1562,6 +1619,7 @@ class Conductor:
             tool_call_protocol=tool_call_protocol,
             reasoning_effort=self._role_reasoning_effort(spec),
             assistant_prefill=assistant_prefill,
+            conversation_prefix=self._conversation_prefix(spec, request_prompt),
         )
         if attempt != 0:
             return candidate

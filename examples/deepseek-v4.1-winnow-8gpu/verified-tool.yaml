@@ -21,7 +21,8 @@
 #                                            requirements and the judgments,
 #                                            read critically; the best move,
 #                                            made through the tool interface
-#   deepseek_think (DeepSeek)  one answer at the caller's effort
+#   deepseek_think (DeepSeek)  one answer at the caller's effort, the
+#                              caller's conversation sent as it is
 #
 # DeepSeek writes. Two Winnow replicas return probabilities through System
 # One: winnow-route (GPU 6) the route, winnow-judge (GPU 7) the judgments.
@@ -444,16 +445,18 @@ roles:
   # Wave 3: the published move. DeepSeek reads the request, the five
   # drafts, the requirements and Winnow's judgments, and writes the best
   # reply critically. As the final unit it carries the caller's
-  # response_format and tools.
+  # response_format and tools, and receives the caller's conversation as
+  # native chat messages with this prompt as one final user message: given a
+  # JSON transcript instead, DeepSeek at max effort wrote its calls as text
+  # (m1 D8 amendment 2026-10-09).
   - name: answer
     worker: deepseek
     role_type: publisher
     depends_on: [judgments, requirements]
     reasoning_effort: inherit
+    native_conversation: true
     sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
     prompt: |-
-      {query}
-
       Before replying, read the material below. It is not part of the
       conversation: never mention it, the drafts, the requirements or the
       judgments in the reply. The reply is the next assistant message: the
@@ -539,25 +542,15 @@ profile_judge:
 profiles:
   - name: deepseek_think
     roles:
+      # The caller's conversation goes to DeepSeek as it was sent (native
+      # chat messages, the caller's tools and format, the caller's effort),
+      # with no added prompt (m1 D8 amendment 2026-10-09).
       - name: deepseek_think_answer
         worker: deepseek
         role_type: publisher
         reasoning_effort: inherit
+        native_conversation: true
         sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
-        prompt: |-
-          [deepseek_think_answer] Write the complete final answer to the request
-          below, in exactly the reply format the conversation demands: if it
-          requires a specific structure (for example a JSON envelope with fixed
-          fields), produce precisely that structure and nothing else; if it asks
-          for an exact, fixed, or trivially short output, write exactly that
-          output. If the conversation context ends with a tool result, answer
-          the user's request using that result directly. If the conversation
-          requires calling an external tool or function next, emit exactly that
-          call in the format the conversation specifies. Output only the answer
-          itself and do not describe any internal pipeline.
-          --- REQUEST ---
-          {query}
-          --- END REQUEST ---
 
 # Every request reaches the judge (zero markers always meets the
 # multi-agent rule), so no request skips routing.

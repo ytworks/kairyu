@@ -186,6 +186,7 @@ def role_spec(role: RoleNodeSpec) -> RoleSpec:
         requires=role.requires,
         checklist=_checklist(role.checklist),
         refine_prompt=role.refine_prompt,
+        native_conversation=role.native_conversation,
     )
 
 

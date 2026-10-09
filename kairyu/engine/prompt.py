@@ -331,6 +331,25 @@ def derive_multimodal_prompt(
     )
 
 
+def extend_multimodal_prompt(
+    source: MultimodalPrompt,
+    text: str,
+) -> MultimodalPrompt:
+    """The caller's own multimodal conversation, followed by ``text`` as one
+    final user message when it is not empty (a role that answers the
+    caller's turn natively, m1 D8 amendment 2026-10-09)."""
+
+    if not isinstance(source, MultimodalPrompt):
+        raise TypeError("source must be a MultimodalPrompt")
+    if type(text) is not str:
+        raise TypeError("appended multimodal text must be a string")
+    messages = source.messages
+    if text:
+        final = MultimodalMessage("user", (MultimodalMessagePart("text", text=text),))
+        messages = (*messages, final)
+    return MultimodalPrompt(base=TextPrompt(text), items=source.items, messages=messages)
+
+
 PromptInput: TypeAlias = (
     str | TextPrompt | TemplatedPrompt | TokensPrompt | MultimodalPrompt
 )

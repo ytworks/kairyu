@@ -35,11 +35,14 @@ profile_judge ── winnow-route (System One), 1 request: does the next reply
   │                           conversation and the tools: each draft adoptable
   │                           as the next move? each draft x requirement met?
   │                           (5 + 5 x N probabilities)
-  │    wave 3   answer        DeepSeek, the caller's effort: reads drafts,
-  │                           requirements and judgments critically, makes the
-  │                           best move through the tool-calling interface
+  │    wave 3   answer        DeepSeek, the caller's effort: the caller's
+  │                           conversation as native messages, then drafts,
+  │                           requirements and judgments in one message; reads
+  │                           them critically, makes the best move through the
+  │                           tool-calling interface
   └─ THINK ─────► deepseek_think_answer  DeepSeek, the caller's effort
-                                          (default high), one call
+                                          (default high), one call with the
+                                          caller's conversation as sent
 ```
 
 - The judge sends the whole conversation and whether the caller declared
@@ -68,6 +71,10 @@ profile_judge ── winnow-route (System One), 1 request: does the next reply
   each draft puts its calls in `tool_calls`, never in its text. A call
   DeepSeek writes at the end of its reply in its own format but without its
   marker tokens is still returned as a tool call (m9 D2 amendment).
+- The roles that publish receive the caller's conversation as native chat
+  messages (m1 D8 amendment): given a JSON transcript instead, DeepSeek at
+  max effort wrote its calls as text. The drafts, the requirements and the
+  judgments read the conversation as JSON.
 - Stage reports are not returned in `reasoning_content`: an agent replays
   them in its next request.
 - If winnow-judge cannot read the judgments (down, or the drafts exceed its
