@@ -5,14 +5,73 @@ DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
 overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
 `winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
 (judgments only).
-Raw evidence for the two-Winnow layout (both sections on it):
-`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/` (`*-20261007T04*`,
-`T05*`, `browser-20261007T060041Z.json`), gate log `gates-20261007-1307.log`.
-Sections below it ran on the earlier Qwen layout
+Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/`.
+The verified tool route (first section): `*-20261009T04*` to `T06*`, gate log
+`gates-20261009-verified-tool-4.log`. The two-Winnow sections below it:
+`*-20261007T04*`, `T05*`, `T08*`, `T09*`, `browser-20261007T060041Z.json`, gate
+logs `gates-20261007-1307.log` and `gates-20261007-1712-nextstep.log`.
+Sections on the earlier Qwen layout
 (`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-qwen3.8-winnow-8gpu/results/`,
 `*-20261006T*.json` and `*-20261006T16*`/`T17*`; gate logs `gates-20261006.log`,
 `gates-20261006-256k.log`, `gates-20261006-three-wave.log` and
 `gates-20261007-requirements-without-reasoning.log`).
+
+## GPU gates: verified tool route (2026-10-09 13:30-15:15 JST)
+
+Commit `8e85b30f` (PR #641, VCO-D20 and its amendments): one public model,
+`kairyu-verified-tool`; Winnow routes TOOL (the next reply needs a tool call)
+to the three waves and THINK to DeepSeek at the caller's effort; both
+publishers receive the caller's conversation natively (m1 D8 amendment); the
+route judge keeps an agent's task in long runs (m1 D9 amendment). `./run.sh`,
+then `./verify.sh <gate>` in GATES order. All nine gates pass.
+
+Before the gates (same day, committed code):
+- 64 real DeepSWE agent turns (`deepswe-verified-3wave-nextstep-4w-20261007-r1`),
+  each needing a tool call, through the route judge one at a time: 1 routed
+  THINK (21 before the m1 D9 amendment and the TOOL criteria); slowest read
+  6.8 s.
+- The arktype, helm-unified and fd failure turns, twice each: 6/6 routed TOOL,
+  each with one structured call; helm-unified made the submit call alone,
+  arktype never batched commit and submit.
+
+Earlier runs that day failed and led to the amendments: `routing` (TOOL miss
+15 % on both halves), then `verified-tool-route` 11/12 (a DSML call written
+without its markers) and 9/12 (calls written as JSON text).
+
+| Gate | Result |
+|---|---|
+| l1 | DeepSeek every DP rank; chat and System One on both Winnow replicas; one structured tool call from the public model |
+| routing | 136 conversations; TOOL miss 5 % on both halves; THINK precision 97.9 %, THINK recall 97.9 % (tool-declared THINK 87.5 %); judge wall 10.1 s |
+| think-route | 6/6 THINK at high, streamed; p50 0.99 s, p95 2.93 s, TTFT p50 0.83 s |
+| effort | THINK follows the caller (0.6-0.9 s); TOOL drafts/answer follow the caller, requirements at max, structured `bash` call each time; 126-269 s, 31,799-63,134 output tokens, 219-270 tok/s |
+| verified-tool-route | 12/12 routed TOOL with a structured call to a declared tool (`bash`, `http_get`, `create_event`), all four stages, wave 1 parallel, judgments on `winnow-judge` (30-85 items); p50 131.7 s, p95 182.1 s; 385,506 output tokens; 180-306 tok/s; requirements end 74-184 s, answer 1-60 s |
+| fallback | `winnow-route` stopped: 2/2 THINK (`backend_error`, 0.9-1.0 s) with a structured call; `winnow-judge` stopped: routed TOOL, judgments `judge_unavailable`, structured call (132.4 s); both back: routed and judged (170.0 s) |
+| serving | 72/72 answered, every reply a structured call (table below) |
+| serving-routed | 72/72 answered (table below) |
+| browser | Open WebUI answers |
+
+serving (agent turns, `datasets/tool-turns.json`):
+
+| Level | Requests | p50 s | p95 s | Wall s | Requests/min | Output tokens | Output tok/s | TOOL n / p50 s | THINK n / p50 s |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| c1 | 8 | 119.1 | 163.3 | 991 | 0.48 | 226,029 | 228 | 8 / 119.1 | 0 |
+| c4 | 16 | 148.4 | 221.9 | 546 | 1.76 | 314,925 | 576 | 12 / 152.1 | 4 / 2.5 |
+| c8 | 16 | 170.3 | 280.1 | 404 | 2.38 | 378,347 | 937 | 13 / 186.0 | 3 / 2.2 |
+| c16 | 32 | 198.5 | 317.0 | 479 | 4.01 | 706,211 | 1,474 | 27 / 219.6 | 5 / 2.8 |
+
+Four of the 24 agent turns (dedup-case, wrong-column, official-schedule,
+code-blocks: a tool result that reads like an answer but needs a further
+move) were routed THINK every time (12 of 72); their replies still carried a
+structured call.
+
+serving-routed (`datasets/tool-routing-set.json`):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 / p95 s | THINK n / p50 / p95 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 35.6 | 92.5 | 396 | 201 | 2 / 126.1 / 92.5 | 6 / 15.7 / 48.5 | 0.08-0.09 |
+| c4 | 16 | 9.4 | 133.5 | 247 | 513 | 5 / 130.6 / 133.5 | 11 / 2.3 / 36.9 | 0.08-0.09 |
+| c8 | 16 | 76.9 | 189.9 | 216 | 733 | 6 / 166.5 / 189.9 | 10 / 17.2 / 111.4 | 0.10-0.12 |
+| c16 | 32 | 70.2 | 242.9 | 282 | 1,136 | 11 / 185.8 / 242.9 | 21 / 19.5 / 124.6 | 0.09-0.17 |
 
 ## GPU gates: next-step replies, structured tool calls (2026-10-07 17:13-18:58 JST)
 
