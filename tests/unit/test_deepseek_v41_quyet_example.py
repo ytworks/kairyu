@@ -3,8 +3,9 @@
 The example's own kairyu.yaml / verified-tool.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
 (against fake Quyet adapters that, like the real one, refuse more than 32
-questions per request), so the tests observe what the deployed L1 services would
-receive and which route answers.
+questions per request and any question whose instructions are not one non-empty
+string), so the tests observe what the deployed L1 services would receive and
+which route answers.
 """
 
 from __future__ import annotations
@@ -126,6 +127,14 @@ def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, 
             return httpx.Response(
                 400, json={"detail": f"at most {QUYET_MAX_QUESTIONS} questions per request"}
             )
+        for key, question in body["questions"].items():
+            # The quyet package's own question check (quyet.questions).
+            instructions = question.get("instructions")
+            if not isinstance(instructions, str) or not instructions.strip():
+                return httpx.Response(
+                    400,
+                    json={"detail": f"question {key!r}: instructions must be a non-empty string"},
+                )
         reads.append((name, body))
         if "route" in body["questions"]:
             labels = list(body["questions"]["route"]["criteria"])
@@ -284,7 +293,10 @@ async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) 
     questions = [q for _, read in judged for q in read["questions"].values()]
     assert len(questions) == 6 * len(CANDIDATES["candidates"])
     assert all(len(read["questions"]) <= QUYET_MAX_QUESTIONS for _, read in judged)
-    assert questions[0]["instructions"]["candidate_arguments"] == '{"command": "step-1"}'
+    assert (
+        'tool bash, arguments {"command": "step-1"}; purpose: step 1.'
+        in (questions[0]["instructions"])
+    )
     for _, read in judged:
         assert list(read["state"]) == ["conversation", "tools"]
         assert read["state"]["conversation"][-1]["content"] == "1 failed: test_parse"

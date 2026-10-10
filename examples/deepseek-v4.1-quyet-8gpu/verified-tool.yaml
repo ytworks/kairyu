@@ -106,7 +106,8 @@ roles:
 
   # One Quyet judgment set over every candidate: six questions per candidate,
   # sent 32 at a time (the adapter's limit) in parallel reads of one state.
-  # The candidate goes in each question, so the state holds only the
+  # The candidate goes in each question's text (Quyet takes instructions as
+  # one string, not an object), so the state holds only the
   # conversation (the request's messages and the newest ones, bounded to fit
   # Quyet's 6,000 tokens) and the caller's tools. Quyet only informs the
   # answer: threshold 1.0 lists every judgment with its probability, and it
@@ -124,6 +125,8 @@ roles:
           proposition: "{item[id]} is a move needed now"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             Reading the conversation and the caller's tools, is this candidate
             call a move needed now, from where the work stands?
           criteria_true: >-
@@ -132,15 +135,13 @@ roles:
           criteria_false: >-
             It skips ahead to a later step, rests on something the conversation
             does not show, or does not advance the request now
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
         - id: "{item[id]}-new"
           group: new
           proposition: "{item[id]} repeats no step whose result is shown"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             Does this candidate call avoid repeating a step whose result the
             conversation already shows?
           criteria_true: >-
@@ -150,15 +151,13 @@ roles:
           criteria_false: >-
             It repeats a read, run or change whose result the conversation already
             shows and that nothing since has made stale
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
         - id: "{item[id]}-fits"
           group: fits
           proposition: "{item[id]} fits the caller's tools and the conversation's protocol"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             Does this candidate call fit the caller's tools and the conversation's
             protocol?
           criteria_true: >-
@@ -168,15 +167,13 @@ roles:
           criteria_false: >-
             It names no declared tool, has missing, extra or invalid arguments, or
             breaks the conversation's protocol for calls
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
         - id: "{item[id]}-exact"
           group: exact
           proposition: "{item[id]} follows the request exactly as written"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             Does this candidate call follow the request exactly as written?
           criteria_true: >-
             Every name, path, export, entry point, signature and message the call
@@ -185,15 +182,13 @@ roles:
           criteria_false: >-
             It uses a name, path, entry point or wording other than the request's,
             or adds a check that encodes a different reading of the request
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
         - id: "{item[id]}-check"
           group: check
           proposition: "{item[id]} checks the work the way it will be judged"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             If this candidate call checks or tests the work, does it check it the
             way the request will be judged?
           criteria_true: >-
@@ -205,15 +200,13 @@ roles:
             It checks only an internal layer, skips the build mode or static
             checks that existing checks use, or checks a claim about all or every
             on a single case
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
         - id: "{item[id]}-safe"
           group: safe
           proposition: "{item[id]} is safe to make now"
           foreach: {role: candidates, path: candidates}
           ask: >-
+            Candidate call {item[id]}: tool {item[name]}, arguments
+            {item[arguments]}; purpose: {item[purpose]}.
             Is this candidate call safe to make now?
           criteria_true: >-
             It destroys, overwrites or reverts no work or data the request needs,
@@ -224,10 +217,6 @@ roles:
             It can destroy, overwrite or revert needed work or data, changes what
             the request keeps, adds an error or warning on valid input, or
             finishes the work before its steps are shown to succeed
-          context:
-            candidate_tool: "{item[name]}"
-            candidate_arguments: "{item[arguments]}"
-            candidate_purpose: "{item[purpose]}"
       state:
         - {key: conversation, source: query, max_chars: 4000, max_total_chars: 8000}
         - {key: tools, source: tools}
