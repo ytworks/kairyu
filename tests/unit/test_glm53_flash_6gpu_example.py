@@ -227,3 +227,27 @@ def test_streamed_tool_call_gate_rejects_broken_streams(example, events, error):
         lines.append(f"data: {body}")
     result = example("verification").streamed_tool_call_error("\n".join(lines))
     assert (result is None) if error is None else (error in result)
+
+
+@pytest.mark.parametrize(
+    "effort,reasoning_chars,content,ok",
+    [
+        ("low", 0, "323", True),
+        ("high", 0, "323", True),
+        ("max", 0, "323", False),
+        ("default", 41, "323", True),
+        ("low", 0, "324", False),
+    ],
+)
+def test_reasoning_gate_requires_thinking_only_at_max(
+    example, effort, reasoning_chars, content, ok
+):
+    row = {
+        "effort": effort,
+        "done": True,
+        "error": None,
+        "finish_reason": "stop",
+        "content": content,
+        "reasoning_chars": reasoning_chars,
+    }
+    assert (example("verification").reasoning_row_error(row) is None) is ok

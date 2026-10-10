@@ -11,6 +11,7 @@
 | [`qwen3.8-deepseek-v4-8gpu`](qwen3.8-deepseek-v4-8gpu/README.md) | Qwen TP1 x 4 replicas + DeepSeek TP4/EP4 | Qwen-judged five-route Kairyu L2 (four direct routes + verifier-gated ensemble DAG) |
 | [`qwen3.8-deepseek-v4.1-8gpu`](qwen3.8-deepseek-v4.1-8gpu/README.md) | DeepSeek-V4.1 DP6/EP6 (GPU 0-5) + Qwen TP1 x 2 replicas (GPU 6, 7) | the same judged five-route L2 with native image input on every route (no Qwen image-description stage) |
 | [`deepseek-v4.1-winnow-8gpu`](deepseek-v4.1-winnow-8gpu/README.md) | DeepSeek-V4.1 DP6/EP6 (GPU 0-5) + Winnow-12B Q8_0 x 2 replicas (GPU 6 route judge, GPU 7 judgments; chat and System One) | one public model, `kairyu-verified-tool`: Winnow routes a turn whose next reply needs a tool call to the verified tool route (five DeepSeek drafts of the next move beside DeepSeek's max-effort requirements, Winnow's judgments, a critical DeepSeek answer that makes the call) and every other request to DeepSeek at the caller's effort; Open WebUI |
+| [`glm-5.3-flash-6gpu`](glm-5.3-flash-6gpu/README.md) | GLM-5.3-Flash (official FP8) as one TP2 x DP3 / EP6 replica with MTP on GPUs 0-5 | text + image, OpenAI tools, efforts low/high/max (default max), 1,048,576 tokens; replica pool only |
 | [`qwen3.8-27b-dp8-8gpu`](qwen3.8-27b-dp8-8gpu/README.md) | Qwen TP1 x 8 replicas, one per card | one public model with OpenAI tool calling; Kairyu L2 is the replica pool only (even, prefix-aware placement) |
 | [`deepseek-v4-flash-0731-dp2-8gpu`](deepseek-v4-flash-0731-dp2-8gpu/README.md) | DeepSeek TP4+EP4 x 2 replicas (GPU 0-3, 4-7) | one public model with OpenAI tool calling; Kairyu L2 is the replica pool only (even, prefix-aware placement) |
 | [`deepseek-v4-flash-vision-exp-dp2-8gpu`](deepseek-v4-flash-vision-exp-dp2-8gpu/README.md) | DeepSeek-V4-Flash-Vision-Exp TP4+EP4 x 2 replicas (GPU 0-3, 4-7) | one public text + image model with OpenAI tool calling and a Chat UI reasoning-effort dropdown (default/low/high/max); replica pool only |
@@ -33,7 +34,8 @@ over identical L1 replicas, and their `verify.sh` proves the per-replica split
 and the OpenAI tool-calling agent contract (`tool-calling`); the two vision
 `dp2` environments also prove image requests on every replica (`vision`).
 Each `run.sh` command prints its API and Chat UI URLs when the stack is ready.
-Qwen3.8-27B uses the digest-pinned official vLLM v0.23.0 image. Both
+Qwen3.8-27B uses the digest-pinned official vLLM v0.23.0 image;
+GLM-5.3-Flash uses the digest-pinned official vLLM v0.31.0 image, unpatched. Both
 DeepSeek-V4-Flash-0731 deployments share the same measured `aa0d513027` SM120
 build, retaining DSpark performance and checkpoint compatibility that v0.23.0
 cannot provide. The two vision environments (DeepSeek-V4-Flash-Vision-Exp and
@@ -56,6 +58,7 @@ Start everything and print the local Chat UI URL:
 ./examples/qwen3.8-deepseek-v4-8gpu/run.sh
 ./examples/qwen3.8-deepseek-v4.1-8gpu/run.sh
 ./examples/qwen3.8-27b-dp8-8gpu/run.sh
+./examples/glm-5.3-flash-6gpu/run.sh
 ./examples/deepseek-v4-flash-0731-dp2-8gpu/run.sh
 ./examples/deepseek-v4-flash-vision-exp-dp2-8gpu/run.sh
 ./examples/qwen3.8-flash-next-dp2-8gpu/run.sh
@@ -73,6 +76,7 @@ Run serving verification through the Kairyu L3 endpoint:
 ./examples/qwen3.8-deepseek-v4-8gpu/verify.sh serving-auto-max
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max
 ./examples/qwen3.8-27b-dp8-8gpu/verify.sh serving
+./examples/glm-5.3-flash-6gpu/verify.sh serving
 ./examples/deepseek-v4-flash-0731-dp2-8gpu/verify.sh serving
 ./examples/deepseek-v4-flash-vision-exp-dp2-8gpu/verify.sh serving
 ./examples/qwen3.8-flash-next-dp2-8gpu/verify.sh serving
