@@ -949,8 +949,10 @@ class ReplicaPool:
             representatives.append(backend)
         return tuple(representatives)
 
-    async def count_prompt_tokens_async(self, prompt: str) -> int | None:
-        """Delegate ``/v1/messages/count_tokens`` to one capable replica.
+    async def count_prompt_tokens_async(
+        self, request: GenerationRequest
+    ) -> int | None:
+        """Delegate token counting to one capable replica.
 
         Replicas in one pool share a model (and therefore a tokenizer), so the
         first non-``None`` answer is authoritative.
@@ -958,7 +960,7 @@ class ReplicaPool:
 
         for replica_id in self.replica_ids:
             count = await backend_count_prompt_tokens_async(
-                self._entries[replica_id].backend, prompt
+                self._entries[replica_id].backend, request
             )
             if count is not None:
                 return count

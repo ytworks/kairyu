@@ -1,7 +1,7 @@
 # Issue #621: token counts equal billed prompt tokens on vLLM upstreams
 
 Status: **Approved 2026-10-10 (owner: exact count, request-based count
-interface, image counts declined).**
+interface, image counts declined); implemented, GPU verification pending.**
 
 ## Problem
 
@@ -18,9 +18,11 @@ every example that publishes a vLLM model directly), they do not:
 - No tools: the count misses the template's role delimiters and generation
   prompt (too low). Tools: the count includes Kairyu's tool-intent suffix, which
   the `openai` backend never sends, and misses the template's own tool rendering.
-- Images (found while planning): `/v1/messages/count_tokens` counts an image
-  request as the empty string (about 0). `/v1/responses/input_tokens` already
-  declines image input.
+- Images: no change needed. The planning-time finding that
+  `/v1/messages/count_tokens` counts an image request as an empty string was
+  wrong: the Messages surface rejects image blocks with 400 before counting
+  (correction found while writing the tests). `/v1/responses/input_tokens`
+  already declines image input.
 
 Cause: the count interface receives only a string; only the backend knows what
 it sends.
@@ -42,8 +44,9 @@ Count exactly what generation sends.
   adding `reasoning_effort` / `enable_thinking` the way vLLM's chat request
   merges them (`/tokenize` does not merge them itself; checked on vLLM
   `0.30.1rc1.dev396`).
-- Image (multimodal) requests are declined (404 on Messages, the existing
-  `unsupported_value` error on Responses). llama.cpp stays declined (LCP-D3).
+- Image (multimodal) prompts stay declined: the Messages surface rejects image
+  blocks (400) and Responses keeps its `unsupported_value` error; the vLLM
+  count returns `None` for a multimodal prompt. llama.cpp stays declined (LCP-D3).
 - Known limit: vLLM's Kimi K3 and Cohere renderers read `tool_choice` /
   `response_format`, which `/tokenize` cannot carry; no served example uses them.
 
@@ -63,7 +66,7 @@ Framework admission (`.claude/rules/framework-boundary.md`):
 
 | Layer | File | Change |
 |---|---|---|
-| L3 | `kairyu/entrypoints/server/messages_service.py` | count the generation request; decline images |
+| L3 | `kairyu/entrypoints/server/messages_service.py` | count the generation request |
 | L3 | `kairyu/entrypoints/server/responses_service.py` | count the generation request |
 | L1 | `kairyu/engine/backend.py` | count helper takes the request |
 | L1 | `kairyu/engine/openai_backend.py` | `/tokenize` body from `_payload()`; decline images |
@@ -74,10 +77,10 @@ Framework admission (`.claude/rules/framework-boundary.md`):
 ## CPU tests
 
 - Add one parametrized route test (`tests/server/test_messages_api.py`): a fake
-  vLLM (`httpx.MockTransport`) whose `/tokenize` and `/v1/chat/completions`
-  derive counts from the template-relevant fields by one rule; count_tokens
-  equals `/v1/messages` `usage.input_tokens` for no-tools and tools+thinking;
-  image requests get 404. The first two fail on main.
+  vLLM (`tests/server/_fake_vllm.py`, `httpx.MockTransport`) whose `/tokenize`
+  and `/v1/chat/completions` derive counts from the template-relevant fields
+  by vLLM's merge rules; count_tokens equals `/v1/messages`
+  `usage.input_tokens` for no-tools and tools+thinking. Both fail on main.
 - Replace `tests/server/test_responses_contract.py::test_input_tokens_counts_the_rendered_prompt`
   with the same fake-vLLM equality against `/v1/responses` usage.
 - `tests/unit/test_openai_backend.py`: drop the `vllm-count` body-shape case
@@ -93,12 +96,12 @@ the branch build (vLLM keeps running).
 | Gate | Example | Covers | Budget |
 |---|---|---|---|
 | V1 | `qwen3.8-27b-1gpu` | Jinja template, `enable_thinking`, direct engine | start 15 min + 5 min |
-| V2 | `deepseek-v4.1-flash-8gpu` | DeepSeek encoder, ReplicaPool, images | start 30 min + 10 min |
+| V2 | `deepseek-v4.1-flash-8gpu` | DeepSeek encoder, ReplicaPool | start 30 min + 10 min |
 
 Cases per model (generation `max_tokens` 1): text only; system + three tools;
-multi-turn tool_use/tool_result transcript + tools; thinking + tools; image
-(DeepSeek only). Cases 1-3 also through `/v1/responses/input_tokens`.
+multi-turn tool_use/tool_result transcript + tools; thinking + tools. Cases 1-3
+also through `/v1/responses/input_tokens`.
 
-Pass: every count equals the generation's input tokens (difference 0); image
-requests are declined; the current image shows the mismatch. The probe script
+Pass: every count equals the generation's input tokens (difference 0); the
+current image shows the mismatch. The probe script
 stays in the session scratchpad; results go to the PR and the m9 amendment.

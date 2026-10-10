@@ -30,7 +30,6 @@ from kairyu.engine.backend import (
     backend_count_prompt_tokens_async,
     backend_supports_slo_defer,
     prepare_backend_request,
-    render_tool_intent,
     validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import prompt_text
@@ -44,7 +43,6 @@ from kairyu.entrypoints.server.chat_service import (
     _normalize_tool_choice,
     chat_error_from_upstream_client_error,
     execute_chat,
-    validate_chat_input_async,
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
 )
@@ -1607,11 +1605,10 @@ def add_messages_route(
 
         Tier resolution: orchestrated models count the L2-rendered prompt with
         the same word-split billing uses for multi-stage routes; direct
-        engines count the rendered (tool-intent-augmented) prompt exactly via
-        the backend tokenizer when one is exposed, else fall back to the same
-        approximation billing uses when a backend omits usage. Served models
-        always get a number — Claude Code's graceful fallback is proven only
-        for the endpoint-absent 404, not per-request errors.
+        engines count the generation request exactly, through the backend
+        that would send it. A backend that cannot count authoritatively
+        declines with the Anthropic-shaped 404 that Claude Code treats as an
+        absent endpoint.
         """
 
         request_id = getattr(http_request.state, "request_id", None)
@@ -1658,20 +1655,19 @@ def add_messages_route(
                 text = prompt_text(validated_input.prompt) or ""
                 input_tokens = _approx_tokens(text)
             else:
-                validated_input = await validate_chat_input_async(
+                validated = await validate_chat_request_async(
                     chat_request,
+                    engines,
                     chat_templates,
-                    allow_multimodal=True,
+                    request_id=request_id or f"msg-{uuid.uuid4().hex[:12]}",
                     legacy_chat_models=legacy_chat_models,
                 )
-                effective = render_tool_intent(
-                    validated_input.prompt,
-                    tools=tuple(chat_request.tools or ()),
-                    tool_choice=chat_request.tool_choice,
-                    tools_in_prompt=validated_input.tools_in_prompt,
-                )
-                text = prompt_text(effective) or ""
-                counted = await backend_count_prompt_tokens_async(engine, text)
+                try:
+                    counted = await backend_count_prompt_tokens_async(
+                        validated.engine, validated.generation_request
+                    )
+                except UpstreamClientError as error:
+                    raise chat_error_from_upstream_client_error(error) from error
                 if counted is None:
                     return request_error(
                         f"model {request.model!r} does not support "

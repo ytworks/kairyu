@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-10 — [amendment] Token counts tokenize what generation sends (m9 D1, #621, PR #643)
+- What: `/v1/messages/count_tokens` and `/v1/responses/input_tokens` pass the generation `GenerationRequest` to the backend; vLLM upstreams build the `/tokenize` chat body from the dispatch payload (messages, tools, template kwargs incl. vLLM's `reasoning_effort`/`enable_thinking` merge). Native/mock counts unchanged; images and llama.cpp stay declined.
+- Why: on vLLM upstreams without a Kairyu template the count tokenized a rendered string without the chat template (too low) and with a tool-intent suffix generation never sends (either direction); clients sizing context from it got a wrong budget.
+- Refs: m9 D1 amendment 2026-10-10; plan `docs/superpowers/plans/2026-10-10-issue-621-count-tokens.md`; `kairyu/engine/openai_backend.py`
+
 ### 2026-10-10 — [progress] Quyet-1.0-Large System One example: all nine GPU gates pass (PR #642)
 - What: `examples/quyet-1.0-large-1gpu` serves the Jev-family decision model as System One only (no chat): example-owned adapter on the `quyet` package with a batch-invariant vLLM v0.31.0 as an internal pool (`public_models`); `kairyu/` unchanged. Gates rebuilt from TypeSafe's documented usage (reference, attest, parity, JevBench, fan-out, consistency, SDK, throughput, overload); run `20261010-s1-r2` passes all nine.
 - Why: owner direction: Jev models are decision APIs, so chat, tool-call and image surfaces were removed. vLLM's kernels differ from transformers in the tail (median probability difference 0.0001, max 0.22), so parity is judged on prompts, confident decisions (>= 99 %) and JevBench quality; batch invariance makes repeats identical at about 10 % latency.

@@ -2045,9 +2045,14 @@ class ZmqEngineBackend:
                 self._preflight_tokenizer = tokenizer
         return tokenizer
 
-    async def count_prompt_tokens_async(self, prompt: str) -> int:
+    async def count_prompt_tokens_async(
+        self, request: GenerationRequest
+    ) -> int | None:
         """Exact prompt-token count via the parent-side preflight tokenizer."""
 
+        prompt = prompt_text(prompt_with_tool_intent(request))
+        if prompt is None:
+            return None
         return await self._run_tokenizer_work(
             lambda: len(self._get_preflight_tokenizer().encode(prompt))
         )

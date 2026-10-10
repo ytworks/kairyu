@@ -1084,17 +1084,21 @@ class OpenAICompatBackend:
         return payload
 
     async def count_prompt_tokens_async(
-        self, prompt: str, *, timeout_s: float = 2.0
+        self, request: GenerationRequest, *, timeout_s: float = 2.0
     ) -> int | None:
-        """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
+        """Exact count of the body dispatch sends, via vLLM's ``POST /tokenize``.
 
         Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
         fail-soft ``None`` on any transport or shape problem. Only a vLLM
-        upstream is known to expose the endpoint.
+        upstream is known to expose the endpoint. Image prompts are declined:
+        their processor-expanded counts are not verified against generation.
         """
 
-        if self._capabilities.upstream != "vllm":
+        if self._capabilities.upstream != "vllm" or isinstance(
+            request.prompt, MultimodalPrompt
+        ):
             return None
+        body = await run_prompt_work(self._tokenize_body, request)
         root = (
             self._base_url[: -len("/v1")]
             if self._base_url.endswith("/v1")
@@ -1103,7 +1107,7 @@ class OpenAICompatBackend:
         try:
             response = await self._get_client().post(
                 f"{root}/tokenize",
-                json={"model": self._model, "prompt": prompt},
+                json=body,
                 headers=self._headers(),
                 timeout=timeout_s,
             )
@@ -1117,6 +1121,48 @@ class OpenAICompatBackend:
             return None
         count = payload.get("count") if isinstance(payload, dict) else None
         return count if type(count) is int and count >= 0 else None
+
+    def _tokenize_body(self, request: GenerationRequest) -> dict[str, object]:
+        """Map the dispatch body onto ``/tokenize`` with the same rendering.
+
+        A Kairyu-rendered prompt goes to ``/completions`` and is counted as
+        one. A chat body keeps the fields vLLM's chat template renders; vLLM's
+        chat request also merges ``reasoning_effort`` (and ``enable_thinking``
+        unless the caller set it) into the template kwargs, which its tokenize
+        request does not, so the merge is repeated here. ``tool_choice`` and
+        ``response_format`` cannot be carried; vLLM's Kimi K3 and Cohere
+        renderers read them.
+        """
+
+        payload = self._payload(
+            request,
+            validated=self._dispatch_preflight(request),
+            image_urls=None,
+        )
+        if "prompt" in payload:
+            return {"model": self._model, "prompt": payload["prompt"]}
+        body: dict[str, object] = {
+            key: payload[key]
+            for key in (
+                "model",
+                "messages",
+                "tools",
+                "add_generation_prompt",
+                "continue_final_message",
+            )
+            if key in payload
+        }
+        caller_kwargs = payload.get("chat_template_kwargs") or {}
+        template_kwargs = dict(caller_kwargs)
+        effort = payload.get("reasoning_effort")
+        if effort is not None:
+            if effort != "auto":
+                template_kwargs["reasoning_effort"] = effort
+            if "enable_thinking" not in caller_kwargs:
+                template_kwargs["enable_thinking"] = effort != "none"
+        if template_kwargs:
+            body["chat_template_kwargs"] = template_kwargs
+        return body
 
     def _api_key(self) -> str:
         assert self._api_key_env is not None

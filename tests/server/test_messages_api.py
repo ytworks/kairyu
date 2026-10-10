@@ -17,6 +17,7 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
+from tests.server._fake_vllm import fake_vllm_backend
 from tests.server._legacy_chat import create_legacy_app
 
 
@@ -1172,9 +1173,34 @@ def test_count_tokens_matches_billed_usage_direct(tmp_path):
     assert counted.json()["input_tokens"] > lower["input_tokens"]
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({}, id="no-tools"),
+        pytest.param(
+            {
+                "tools": [_tool()],
+                "system": "Be terse.",
+                "output_config": {"effort": "high"},
+            },
+            id="tools-thinking",
+        ),
+    ],
+)
+def test_count_tokens_matches_vllm_billed_prompt(tmp_path, overrides):
+    # Issue #621: a vLLM upstream bills the chat messages and tools its
+    # template renders, so the count must tokenize that same chat body.
+    client = TestClient(_app(tmp_path, backend=fake_vllm_backend()))
+    body = _body(**overrides)
+    usage = client.post("/v1/messages", json=body).json()["usage"]
+    count_body = {k: v for k, v in body.items() if k != "max_tokens"}
+    counted = client.post("/v1/messages/count_tokens", json=count_body)
+    assert counted.json() == {"input_tokens": usage["input_tokens"]}
+
+
 def test_count_tokens_does_not_substitute_a_non_authoritative_estimate(tmp_path):
     class NoAuthoritativeCountBackend(MockBackend):
-        async def count_prompt_tokens_async(self, prompt: str) -> None:
+        async def count_prompt_tokens_async(self, request) -> None:
             return None
 
     client = TestClient(
