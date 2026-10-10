@@ -1,0 +1,133 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 128
+  admission_wait_timeout_s: 600
+  max_chat_body_bytes: 100663296
+pools:
+  deepseek-v4.1-flash:
+    replicas:
+    - backend: openai
+      health_url: http://deepseek:8000/health
+      options:
+        base_url: http://deepseek:8000/v1
+        model: deepseek-v4.1-flash
+        api_key_env: null
+        # 262,144 output tokens (the model card's >= 256K) at ~100 tok/s per
+        # stream take ~45 min; the call must outlive that.
+        timeout_s: 7200
+        upstream: vllm
+        capabilities:
+          allow_prompt_kinds:
+          - multimodal
+          # V4.1 thinks unless a request turns it off; a role without an
+          # effort would be sent enable_thinking: false (every role of this
+          # example declares one: the caller's, or max).
+          allow_chat_template_kwargs:
+          - enable_thinking
+        image_input_policy:
+          max_images: 8
+          max_image_bytes: 8388608
+          max_total_image_bytes: 67108864
+          max_image_pixels: 16777216
+          max_total_image_pixels: 134217728
+          max_image_dimension: 8192
+          max_image_aspect_ratio: 200
+          max_processed_prompt_tokens: 1048576
+        model_revision: dba1be0a40aa45a94ad051997016db3960a90277
+        max_model_len: 1048576
+        quantization_format: mixed-fp4-fp8
+        cache_descriptor:
+          family: deepseek-v41-swa-csa-engram
+          block_size: 64
+        tensor_parallel_size: 1
+        expert_parallel_size: 6
+        attention_data_parallel_size: 6
+        dspark_enabled: true
+        container_image_digest: sha256:119afb09d8b71203707c50e8f9da1300c9992aea6c7aaa959cdb18df7e2483c5
+    unhealthy_after: 1
+    queue_depth_threshold: 0
+    prefix_index: true
+    probe_interval_s: 2.0
+    placement_log_path: /var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl
+  # Quyet-1.0-Large (bf16), two vLLM replicas, registered so that Kairyu
+  # reports ready only while they are healthy. Quyet is a System One model:
+  # no route chats with this pool; its adapters (below) read the weights.
+  quyet-1.0-large:
+    replicas:
+    - backend: openai
+      # vLLM serves /health, not Kairyu's default /readyz.
+      health_url: http://quyet-route-vllm:8000/health
+      options:
+        base_url: http://quyet-route-vllm:8000/v1
+        model: quyet-1.0-large
+        api_key_env: null
+        timeout_s: 300
+        upstream: vllm
+        container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+        model_revision: 9a0f051112ba4301f6e4c8b87fc088ce00b11aae
+        max_model_len: 8192
+        quantization_format: bf16
+        tensor_parallel_size: 1
+    - backend: openai
+      # vLLM serves /health, not Kairyu's default /readyz.
+      health_url: http://quyet-judge-vllm:8000/health
+      options:
+        base_url: http://quyet-judge-vllm:8000/v1
+        model: quyet-1.0-large
+        api_key_env: null
+        timeout_s: 300
+        upstream: vllm
+        container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+        model_revision: 9a0f051112ba4301f6e4c8b87fc088ce00b11aae
+        max_model_len: 8192
+        quantization_format: bf16
+        tensor_parallel_size: 1
+    unhealthy_after: 1
+    queue_depth_threshold: 0
+    probe_interval_s: 2.0
+# Quyet's typed decisions through this example's adapter (quyet_systemone.py),
+# one replica per use: quyet-route-systemone (GPU 6) is the route judge,
+# quyet-judge-systemone (GPU 7) the verified tool route's judgments and form
+# check, so a burst of judgments never queues the next request's route
+# decision. Each adapter reads 16 requests at a time and queues 16 more, then
+# answers 529; Kairyu forwards at most 16 and queues 64 for 30 s, so a burst
+# gets Kairyu's limit, never the adapter's 529. When the route judge does not
+# answer, the route falls back to deepseek_think; when the judge does not
+# answer, the verified tool route's answer is written without judgments and
+# published without the form check.
+systemone:
+  quyet-route-systemone:
+    base_url: http://quyet-route:8092
+    upstream_model: Quyet-1.0-Large
+    description: Quyet-1.0-Large route judge (bf16 on vLLM, GPU 6)
+    max_concurrency: 16
+    max_queue: 64
+    queue_wait_s: 30
+    timeout_s: 300
+    max_questions: 32
+    # the adapter's own 8 MiB limit
+    max_body_bytes: 8388608
+  quyet-judge-systemone:
+    base_url: http://quyet-judge:8092
+    upstream_model: Quyet-1.0-Large
+    description: Quyet-1.0-Large judgments and form check (bf16 on vLLM, GPU 7)
+    max_concurrency: 16
+    max_queue: 64
+    queue_wait_s: 30
+    timeout_s: 300
+    max_questions: 32
+    # the adapter's own 8 MiB limit
+    max_body_bytes: 8388608
+orchestrators:
+  # Quyet routes each request: the verified tool route when the next reply
+  # needs a tool call, else one DeepSeek answer at the caller's effort.
+  kairyu-verified-tool:
+    spec: /etc/kairyu/verified-tool.yaml
+public_models:
+- kairyu-verified-tool
+# The L1 pools are internal resources, not public models.
+legacy_chat_models:
+- deepseek-v4.1-flash
+- quyet-1.0-large

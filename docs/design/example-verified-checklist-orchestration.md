@@ -5,14 +5,15 @@ verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-1
 rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
-one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09**
-(evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
+one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
+Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), 8 of 9 GPU gates pass 2026-10-11 (`verified-tool-route` fails on routing)**
+(evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
-Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
-`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18 and from
+Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
+`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18, from
 `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
-2026-10-07). Framework
-mechanisms: m1 D8 (checklist verifiers, unused since VCO-D18), m1 D9 and the
+2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21). Framework
+mechanisms: m1 D8 (checklist verifiers), m1 D9 and the
 m11 D8 replica amendment.
 
 ## Goal
@@ -800,6 +801,86 @@ JSON transcript. The `answer` role now declares `native_conversation` (m1 D8
 amendment 2026-10-09): the caller's messages, then its prompt without
 `{query}` as one final user message. `deepseek_think_answer` declares it with
 no prompt: the caller's conversation goes to DeepSeek as it was sent.
+
+### VCO-D21 — Quyet replaces Winnow (2026-10-11, PR #645)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-11-deepseek-v4.1-quyet-8gpu.md`.
+
+- L1: Quyet-1.0-Large replaces both Winnow-12B replicas, served as in
+  `examples/quyet-1.0-large-1gpu`: stock vLLM v0.31.0 (bf16, batch-invariant)
+  on GPU 6 and on GPU 7, each behind this example's own copy of the System One
+  adapter (the `quyet` package's prompt and calibration; one log line per
+  read). `quyet-route-systemone` (GPU 6) answers only the route judge,
+  `quyet-judge-systemone` (GPU 7) the verified tool route's judgments and form
+  check. The two vLLMs form the internal pool `quyet-1.0-large`.
+- Quyet is used within its documented 6,000-token state (a longer object is
+  cut at its end): the route judge reads at most 12,000 characters of the
+  conversation (was 120,000), the judgments 8,000, the form check 6,000. The
+  bound keeps the request's messages and the newest ones (m1 D9 amendment).
+- Routing (question, choices, fallback, 60 s) and the think route are
+  unchanged. The example is renamed `examples/deepseek-v4.1-quyet-8gpu`.
+- `kairyu/` is unchanged.
+
+GPU-verified 2026-10-11 (example `MEASUREMENTS.md`): 8 of 9 gates pass;
+`verified-tool-route` fails 2 of 12 (`own-check` routed THINK) and the route
+replay misroutes 11 of 64 real DeepSWE turns (Winnow: 1), all final turns
+before the submit command. Judgments fixed during the run: a question's
+instructions go to Quyet as one string (the candidate in its text).
+
+Why: the owner moves the decisions to Quyet (JevBench open-weights first, a
+calibrated System One model). On DeepSWE turns
+(`deepswe-verified-tool-4w-20261009-r2`) Winnow read a median 34,873 tokens
+for the route and 43,779 for the judgments; the owner chose to keep Quyet
+within its documented input over extending it beyond its trained and
+calibrated range (where each long read would also take about 15 s).
+
+### VCO-D22 — The verified tool route: judged candidates and a form check (2026-10-11, PR #645)
+
+Owner decision; supersedes the TOOL profile of VCO-D19/D20 (drafts,
+requirements, judgments, answer). The route judge and the think route stay.
+
+- `candidates` (DeepSeek, the caller's effort): 10-16 candidate tool calls for
+  the next move from different viewpoints, one call each (`id`, `viewpoint`,
+  `purpose`, `name`, `arguments`), all in one request. `requirements` is
+  removed.
+- `judgments` (quyet-judge, informational, threshold 1.0): six noul questions
+  per candidate, each carrying the candidate: needed now, repeats no shown
+  step, fits the tools and protocol, follows the request exactly, checks the
+  way it will be judged, safe now. 32 per read (the adapter's limit), the
+  reads in parallel over one state (conversation, tools).
+- `answer` (DeepSeek, the caller's effort, native conversation): weighs the
+  candidates and judgments critically and makes the move; it batches several
+  calls when each is sound and safe, none depends on another's result and the
+  conversation allows more than one call; the finishing call goes alone after
+  success is shown.
+- `format_check` (quyet-judge, threshold 0.5): seven questions on the reply
+  (announced calls made, no call written as text, declared tools with valid
+  arguments, at least one call, batched calls independent, finishing call
+  alone after success, short text without internal material). A failing reply
+  is written again by `answer`'s `refine_prompt` (the previous reply and the
+  unmet items; change only what they need, keep the move), at most twice; the
+  last reply is published. Its outcome is the response's
+  `kairyu_verification`.
+- Budget `max_steps` 10, `max_refine_depth` 2.
+- Limits that follow from the framework (unchanged): an unreadable judgment
+  set skips the form check (one unjudgeable flag per run, m1 D8); a fix is the
+  same role, worker and effort and reads the previous reply as text; a
+  DeepSeek error during a fix fails the request; the route is not streamed.
+- Gates: `effort` expects candidates, answer and fixes at the caller's
+  effort; `verified-tool-route` expects 10-16 candidates judged six times on
+  quyet-judge, a seven-question form check with its report and a structured
+  call; `fallback` stops a replica's vLLM and adapter (judge down: published
+  unverified); `serving` requires a structured call in every reply; every gate
+  records Quyet's reads and cut states from the adapters' logs.
+
+Why: the owner rebuilds the route so that the move needed now is chosen from
+many candidate calls judged by Quyet against the failure modes seen on DeepSWE
+(skipping ahead, repeated steps, names other than the request's, own checks,
+checks at an internal layer, unsafe or early finishing moves), so that one
+move covers as much safe work as possible, and so that the reply's form
+(calls made through the interface, never announced or written as text) is
+checked and fixed before it is published. The form threshold is 0.5 because
+VCO-D16's 0.99 sent near-passes to repair and the repairs changed the move.
 
 ## Limitations
 

@@ -1,9 +1,11 @@
-"""Routed answers: DeepSeek-V4.1 six-GPU + two Winnow replicas example (VCO-D18..D20).
+"""Routed answers: DeepSeek-V4.1 six-GPU + two Quyet replicas example (VCO-D21, VCO-D22).
 
 The example's own kairyu.yaml / verified-tool.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
-(against fake Winnow replicas), so the tests observe what the deployed L1 services
-would receive and which route answers.
+(against fake Quyet adapters that, like the real one, refuse more than 32
+questions per request and any question whose instructions are not one non-empty
+string), so the tests observe what the deployed L1 services would receive and
+which route answers.
 """
 
 from __future__ import annotations
@@ -26,11 +28,21 @@ from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.sampling_params import SamplingParams
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-winnow-8gpu"
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-quyet-8gpu"
 
-
-DRAFTS = {
-    f"D{k}": {"viewpoint": f"view {k}", "answer": "Paris", "tool_calls": []} for k in range(1, 6)
+# The real adapter's QUYET_MAX_QUESTIONS (example.json).
+QUYET_MAX_QUESTIONS = 32
+CANDIDATES = {
+    "candidates": [
+        {
+            "id": f"C{k}",
+            "viewpoint": f"view {k}",
+            "purpose": f"step {k}",
+            "name": "bash",
+            "arguments": json.dumps({"command": f"step-{k}"}),
+        }
+        for k in range(1, 11)
+    ]
 }
 BASH = {
     "type": "function",
@@ -61,34 +73,38 @@ AGENT_TURN = [
     },
     {"role": "tool", "tool_call_id": "call_1", "content": "1 failed: test_parse"},
 ]
-POINTS = {"points": [{"id": "R1", "point": "names the capital"}, {"id": "R2", "point": "one word"}]}
+# The move the fake DeepSeek makes: short text and one structured call.
+MOVE = {
+    "role": "assistant",
+    "content": "Reading the failing test.",
+    "tool_calls": [
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "cat tests/test_parse.py"}'},
+        }
+    ],
+}
 
 
 def _deepseek(seen: list[dict]):
-    """The fake DeepSeek vLLM service, answering by role tag."""
+    """The fake DeepSeek vLLM service: candidates by role tag, else the move."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         seen.append(body)
         prompt = body["messages"][-1]["content"]
-        text = (
-            json.dumps(DRAFTS)
-            if prompt.startswith("[drafts]")
-            else json.dumps(POINTS)
-            if prompt.startswith("[requirements]")
-            else "Paris"
-        )
+        if prompt.startswith("[candidates]"):
+            message = {"role": "assistant", "content": json.dumps(CANDIDATES)}
+        elif body.get("tools"):
+            message = MOVE
+        else:
+            message = {"role": "assistant", "content": "Paris"}
         return httpx.Response(
             200,
             json={
                 "id": "chatcmpl-fake",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": text},
-                        "finish_reason": "stop",
-                    }
-                ],
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 16, "completion_tokens": 4, "total_tokens": 20},
             },
         )
@@ -96,13 +112,29 @@ def _deepseek(seen: list[dict]):
     return handler
 
 
-def _winnow(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool):
-    """One fake Winnow replica; ``reads`` records which replica read what."""
+def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, form):
+    """One fake Quyet adapter; ``reads`` records which replica read what.
+
+    ``form(n)`` is the probability every form question reads on the n-th form
+    check (0-based); judgments read 0.7.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if down:
-            raise httpx.ConnectError("Winnow is down", request=request)
+            raise httpx.ConnectError("Quyet is down", request=request)
         body = json.loads(request.content)
+        if len(body["questions"]) > QUYET_MAX_QUESTIONS:
+            return httpx.Response(
+                400, json={"detail": f"at most {QUYET_MAX_QUESTIONS} questions per request"}
+            )
+        for key, question in body["questions"].items():
+            # The quyet package's own question check (quyet.questions).
+            instructions = question.get("instructions")
+            if not isinstance(instructions, str) or not instructions.strip():
+                return httpx.Response(
+                    400,
+                    json={"detail": f"question {key!r}: instructions must be a non-empty string"},
+                )
         reads.append((name, body))
         if "route" in body["questions"]:
             labels = list(body["questions"]["route"]["criteria"])
@@ -113,7 +145,9 @@ def _winnow(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool)
                 }
             }
         else:
-            answers = {key: {"type": "noul", "noul": 0.7} for key in body["questions"]}
+            checks = sum(1 for _, seen in reads if "reply" in seen["state"]) - 1
+            p = form(checks) if "reply" in body["state"] else 0.7
+            answers = {key: {"type": "noul", "noul": p} for key in body["questions"]}
         return httpx.Response(
             200, json={"answers": answers, "usage": {"input_tokens": 50, "output_tokens": 0}}
         )
@@ -121,7 +155,9 @@ def _winnow(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool)
     return handler
 
 
-def _orchestrator(seen: list[dict], reads: list, *, route: str = "TOOL", down=frozenset()):
+def _orchestrator(
+    seen: list[dict], reads: list, *, route: str = "TOOL", down=frozenset(), form=lambda n: 0.9
+):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
@@ -135,7 +171,9 @@ def _orchestrator(seen: list[dict], reads: list, *, route: str = "TOOL", down=fr
         name: HTTPSystemOneBackend(
             base_url=section.base_url,
             upstream_model=section.upstream_model,
-            transport=httpx.MockTransport(_winnow(reads, name, route=route, down=name in down)),
+            transport=httpx.MockTransport(
+                _quyet(reads, name, route=route, down=name in down, form=form)
+            ),
         )
         for name, section in deployment.systemone.items()
     }
@@ -190,8 +228,10 @@ def test_compose_gpus_match_the_allocation() -> None:
         return [int(index) for index in devices[0]["device_ids"]]
 
     assert gpus("deepseek") == spec["allocation"]["deepseek"]["gpu_ids"]
-    for replica in spec["allocation"]["winnow"]["replicas"]:
-        assert gpus(replica["service"]) == [replica["gpu_id"]]
+    for replica in spec["allocation"]["quyet"]["replicas"]:
+        assert gpus(replica["vllm_service"]) == [replica["gpu_id"]]
+        adapter = services[replica["service"]]["environment"]
+        assert adapter["QUYET_UPSTREAM"] == f"http://{replica['vllm_service']}:8000"
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
@@ -207,7 +247,7 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
     result = await orchestrator.run(call)
 
     ((judge, read),) = reads
-    assert judge == "winnow-route-systemone"
+    assert judge == "quyet-route-systemone"
     assert set(read["questions"]["route"]["criteria"]) == {"THINK", "TOOL"}
     assert read["state"]["conversation"][-1]["role"] == "user"
     assert read["state"]["tool_calling"] is False
@@ -221,7 +261,7 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
-async def test_tool_route_runs_three_waves_into_one_critical_answer(effort) -> None:
+async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(seen, reads, route="TOOL")
@@ -232,51 +272,83 @@ async def test_tool_route_runs_three_waves_into_one_critical_answer(effort) -> N
     call = await orchestrator.judge_role_profile(call)
     result = await orchestrator.run(call)
 
-    assert result.text == "Paris"
+    # The published move carries its structured call.
+    assert '<tool_call>{"name":"bash"' in result.text
     # Stage reports are not replayed through reasoning_content.
     assert not result.reasoning_content
-    # Wave 1: five DeepSeek drafts in one call at the caller's effort, its
-    # requirements at max whatever the caller sent; both read the caller's
-    # tools.
-    drafts, requirements = sorted(seen[:2], key=lambda body: body["messages"][-1]["content"])
-    assert drafts["messages"][-1]["content"].startswith("[drafts]")
-    assert drafts["reasoning_effort"] == (effort or "high")
-    assert requirements["messages"][-1]["content"].startswith("[requirements]")
-    assert requirements["reasoning_effort"] == "max"
-    assert {drafts["model"], requirements["model"]} == {"deepseek-v4.1-flash"}
-    for body in (drafts, requirements):
-        assert '"name": "bash"' in body["messages"][-1]["content"].split("--- TOOLS ---")[1]
-    # Wave 2: one read on the judgments replica (the route on its own, told
-    # that the caller declared tools): 5 adoptions + 5 x 2 points, each on a
-    # draft's text and tool calls, with where the work stands (the tool
-    # result) and the tools the drafted calls must fit.
-    (route_judge, route), (judge, judgment) = reads
-    assert (route_judge, judge) == ("winnow-route-systemone", "winnow-judge-systemone")
-    assert route["state"]["tool_calling"] is True
-    assert judgment["state"]["drafts"] == DRAFTS
-    assert judgment["state"]["request"][-1]["role"] == "user"
-    assert judgment["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
-    assert judgment["state"]["tools"] == [BASH]
-    assert len(judgment["questions"]) == 5 + 5 * 2
-    assert all(
-        "tool_calls" in json.dumps(q["instructions"]) for q in judgment["questions"].values()
+    # The candidates: one DeepSeek call at the caller's effort that reads the
+    # caller's tools.
+    candidates, answer = seen
+    prompt = candidates["messages"][-1]["content"]
+    assert prompt.startswith("[candidates]") and candidates["model"] == "deepseek-v4.1-flash"
+    assert candidates["reasoning_effort"] == (effort or "high")
+    assert '"name": "bash"' in prompt.split("--- TOOLS ---")[1]
+    # The route on its own replica (told the caller declared tools); six
+    # questions per candidate on the judge replica, at most 32 per read, each
+    # quoting its candidate's call, over the conversation and the tools; then
+    # seven form questions over the reply, the tools and the conversation.
+    (route_judge, route), *judged, (form_judge, form) = reads
+    assert route_judge == "quyet-route-systemone" and route["state"]["tool_calling"] is True
+    assert {name for name, _ in judged} | {form_judge} == {"quyet-judge-systemone"}
+    questions = [q for _, read in judged for q in read["questions"].values()]
+    assert len(questions) == 6 * len(CANDIDATES["candidates"])
+    assert all(len(read["questions"]) <= QUYET_MAX_QUESTIONS for _, read in judged)
+    assert (
+        'tool bash, arguments {"command": "step-1"}; purpose: step 1.'
+        in (questions[0]["instructions"])
     )
-    # Wave 3: the answer at the caller's effort gets the caller's turn as
-    # native messages, then one message with the drafts, requirements and
-    # judgments, and publishes with the caller's tools.
-    answer = seen[2]
-    assert len(seen) == 3 and answer["reasoning_effort"] == (effort or "high")
+    for _, read in judged:
+        assert list(read["state"]) == ["conversation", "tools"]
+        assert read["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
+        assert read["state"]["tools"] == [BASH]
+    assert list(form["state"])[:3] == ["reply", "tools", "conversation"]
+    assert '<tool_call>{"name":"bash"' in form["state"]["reply"]
+    assert len(form["questions"]) == 7
+    # The answer at the caller's effort gets the caller's turn as native
+    # messages, then one message with the candidates and every judgment, and
+    # publishes with the caller's tools.
+    assert answer["reasoning_effort"] == (effort or "high")
     assert answer["tools"][0]["function"]["name"] == "bash"
     assert answer["messages"][:-1] == AGENT_TURN
-    prompt = answer["messages"][-1]["content"]
-    assert answer["messages"][-1]["role"] == "user" and prompt.startswith("Before replying")
-    assert '"viewpoint": "view 5"' in prompt and '"names the capital"' in prompt
-    assert "- [D1] p=0.70" in prompt and "- [D5-R2] p=0.70 one word" in prompt
+    material = answer["messages"][-1]["content"]
+    assert answer["messages"][-1]["role"] == "user" and material.startswith("Before replying")
+    assert '"viewpoint": "view 10"' in material
+    assert "- [C1-now] p=0.70" in material and "- [C10-safe] p=0.70" in material
+
+
+@pytest.mark.parametrize(
+    ("form", "answers"),
+    [(lambda n: 0.2 if n == 0 else 0.9, 2), (lambda n: 0.2, 3)],
+    ids=["fixed", "exhausted"],
+)
+async def test_a_reply_failing_the_form_check_is_fixed_and_checked_again(form, answers) -> None:
+    seen: list[dict] = []
+    reads: list[dict] = []
+    orchestrator = _orchestrator(seen, reads, route="TOOL", form=form)
+
+    result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
+
+    # One fix and a passing check, or two fixes and the last reply published.
+    _, *replies = seen
+    assert len(replies) == answers
+    assert sum(1 for _, read in reads if "reply" in read["state"]) == answers
+    for fix in replies[1:]:
+        # The fix is DeepSeek again, with the caller's turn, tools and effort,
+        # the previous reply (its call included) and the unmet requirements.
+        assert fix["messages"][:-1] == AGENT_TURN
+        assert fix["tools"] == replies[0]["tools"]
+        assert fix["reasoning_effort"] == "high"
+        material = fix["messages"][-1]["content"]
+        draft = material.split("--- DRAFT ---")[1].split("--- END DRAFT ---")[0]
+        assert '<tool_call>{"name":"bash"' in draft
+        unmet = material.split("--- UNMET REQUIREMENTS ---")[1]
+        assert "- [F1] p=0.20" in unmet and "- [F7] p=0.20" in unmet
+    assert '<tool_call>{"name":"bash"' in result.text
 
 
 async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:
     seen: list[dict] = []
-    orchestrator = _orchestrator(seen, [], down={"winnow-route-systemone"})
+    orchestrator = _orchestrator(seen, [], down={"quyet-route-systemone"})
 
     call = await orchestrator.judge_role_profile(_call("Name the capital of France."))
     await orchestrator.run(call)

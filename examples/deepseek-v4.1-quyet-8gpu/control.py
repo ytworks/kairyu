@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """One-command lifecycle for routed DeepSeek-V4.1 answers.
 
-DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two Winnow-12B
-replicas (llama.cpp) judge through System One: winnow-route (GPU 6) routes each
-request to the verified tool route (the next reply needs a tool call) or to one
-answer at the caller's effort, and winnow-judge (GPU 7) judges the verified
-tool route's drafts.
+DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two Quyet-1.0-Large
+replicas (stock vLLM plus this example's System One adapter) judge through System
+One: quyet-route (GPU 6) routes each request to the verified tool route (the next
+reply needs a tool call) or to one answer at the caller's effort, and quyet-judge
+(GPU 7) judges the verified tool route's candidates and the form of its reply.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import re
 import shutil
 import socket
 import subprocess
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,40 +26,44 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 ROOT = HERE.parents[1]
-PROJECT = "kairyu-deepseek-v4-1-winnow-8gpu"
+PROJECT = "kairyu-deepseek-v4-1-quyet-8gpu"
 DEEPSEEK = SPEC["allocation"]["deepseek"]
 DEEPSEEK_GPU_IDS: list[int] = [int(index) for index in DEEPSEEK["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in DEEPSEEK["dp_rank_gpu_ids"]]
-WINNOW = SPEC["allocation"]["winnow"]
-WINNOW_GPU_IDS: list[int] = [int(index) for index in WINNOW["gpu_ids"]]
-# One Winnow replica per System One use: the route judge, the judgments.
-WINNOW_REPLICAS: list[dict] = list(WINNOW["replicas"])
-WINNOW_SERVICES: list[str] = [replica["service"] for replica in WINNOW_REPLICAS]
-L1_SERVICES = ("deepseek", *WINNOW_SERVICES)
+QUYET = SPEC["allocation"]["quyet"]
+QUYET_GPU_IDS: list[int] = [int(index) for index in QUYET["gpu_ids"]]
+# One Quyet replica per System One use: the route judge; the judgments and the
+# form check. Each is a vLLM on its GPU plus its adapter on the CPU.
+QUYET_REPLICAS: list[dict] = list(QUYET["replicas"])
+QUYET_SERVICES: list[str] = [replica["service"] for replica in QUYET_REPLICAS]
+# The services that hold GPUs.
+L1_SERVICES = ("deepseek", *(replica["vllm_service"] for replica in QUYET_REPLICAS))
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified-tool: Winnow routes per request (TOOL or THINK).
+# kairyu-verified-tool: Quyet routes per request (TOOL or THINK).
 (MODEL,) = PUBLIC_MODELS
 DEEPSEEK_SERVED = SPEC["deepseek"]["served_name"]
-WINNOW_SERVED = SPEC["winnow"]["model"]["served_name"]
+QUYET_SERVED = SPEC["quyet"]["model"]["served_name"]
+QUYET_VLLM = SPEC["quyet"]["vllm"]
+QUYET_SYSTEMONE = SPEC["quyet"]["systemone"]
 
 
 def _check_allocation() -> None:
     tp = int(DEEPSEEK["tensor_parallel_size"])
     dp = int(DEEPSEEK["data_parallel_size"])
     flat = [index for group in DP_RANK_GPU_IDS for index in group]
-    every = DEEPSEEK_GPU_IDS + WINNOW_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + QUYET_GPU_IDS
     if (
         len(DP_RANK_GPU_IDS) != dp
         or any(len(group) != tp for group in DP_RANK_GPU_IDS)
         or flat != DEEPSEEK_GPU_IDS
         or int(DEEPSEEK["expert_parallel_size"]) != tp * dp
         or len(set(every)) != len(every)
-        or [int(replica["gpu_id"]) for replica in WINNOW_REPLICAS] != WINNOW_GPU_IDS
+        or [int(replica["gpu_id"]) for replica in QUYET_REPLICAS] != QUYET_GPU_IDS
         or len(every) != int(SPEC["hardware"]["gpu_count"])
     ):
         raise SystemExit(
             "example.json allocation is inconsistent (DeepSeek TP x DP must tile its "
-            "GPUs; each Winnow replica takes one distinct GPU)"
+            "GPUs; each Quyet replica takes one distinct GPU)"
         )
 
 
@@ -106,8 +109,12 @@ def _storage_paths() -> dict[str, Path]:
     environment = environment_storage()
     paths = {
         "deepseek_models": environment / "models" / "deepseek",
-        "winnow_models": environment / "models" / "winnow",
+        "quyet_models": environment / "models" / "quyet",
         "deepseek_cache": environment / "compile-cache" / "deepseek",
+        **{
+            f"{replica['service']}_cache": environment / "compile-cache" / replica["service"]
+            for replica in QUYET_REPLICAS
+        },
         "placement_log": environment / "placement-log",
         "webui": environment / "webui-data",
     }
@@ -119,15 +126,24 @@ def _storage_paths() -> dict[str, Path]:
     return paths
 
 
-def _winnow_variable(replica: dict, suffix: str) -> str:
-    """WINNOW_ROUTE_<suffix> / WINNOW_JUDGE_<suffix> for a Winnow replica."""
+def _quyet_variable(replica: dict, suffix: str) -> str:
+    """QUYET_ROUTE_<suffix> / QUYET_JUDGE_<suffix> for a Quyet replica."""
 
     return f"{replica['service'].upper().replace('-', '_')}_{suffix}"
 
 
-def winnow_l1_url(env: dict[str, str], service: str) -> str:
-    replica = next(item for item in WINNOW_REPLICAS if item["service"] == service)
-    return f"http://127.0.0.1:{env[_winnow_variable(replica, 'L1_PORT')]}"
+def quyet_l1_url(env: dict[str, str], service: str) -> str:
+    """The replica's System One adapter (host loopback)."""
+
+    replica = next(item for item in QUYET_REPLICAS if item["service"] == service)
+    return f"http://127.0.0.1:{env[_quyet_variable(replica, 'L1_PORT')]}"
+
+
+def quyet_vllm_url(env: dict[str, str], service: str) -> str:
+    """The replica's vLLM (host loopback)."""
+
+    replica = next(item for item in QUYET_REPLICAS if item["service"] == service)
+    return f"http://127.0.0.1:{env[_quyet_variable(replica, 'VLLM_L1_PORT')]}"
 
 
 def _compose_env() -> dict[str, str]:
@@ -137,16 +153,19 @@ def _compose_env() -> dict[str, str]:
         if key not in {"COMPOSE_FILE", "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME"}
     }
     paths = _storage_paths()
+    env.update({key: str(value) for key, value in QUYET_VLLM["settings"].items()})
+    env.update({key: str(value) for key, value in QUYET_SYSTEMONE["settings"].items()})
     env.update(
         {
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": PROJECT,
             "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["deepseek_models"]),
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
-            "WINNOW_MODEL_STORAGE_PATH": str(paths["winnow_models"]),
+            "QUYET_MODEL_STORAGE_PATH": str(paths["quyet_models"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["deepseek"]["image"]),
-            "WINNOW_IMAGE": os.environ.get("WINNOW_IMAGE", SPEC["winnow"]["runtime"]["image"]),
+            "QUYET_VLLM_IMAGE": QUYET_VLLM["image"],
+            "QUYET_SYSTEMONE_IMAGE": QUYET_SYSTEMONE["image"],
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
@@ -154,19 +173,27 @@ def _compose_env() -> dict[str, str]:
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "DEEPSEEK_L1_PORT": os.environ.get("DEEPSEEK_L1_PORT", "8014"),
             **{
-                _winnow_variable(replica, "L1_PORT"): os.environ.get(
-                    _winnow_variable(replica, "L1_PORT"), str(replica["l1_port"])
+                _quyet_variable(replica, suffix): os.environ.get(
+                    _quyet_variable(replica, suffix), str(replica[key])
                 )
-                for replica in WINNOW_REPLICAS
+                for replica in QUYET_REPLICAS
+                for suffix, key in (
+                    ("L1_PORT", "systemone_l1_port"),
+                    ("VLLM_L1_PORT", "vllm_l1_port"),
+                )
+            },
+            **{
+                _quyet_variable(replica, "CACHE_PATH"): str(paths[f"{replica['service']}_cache"])
+                for replica in QUYET_REPLICAS
             },
             # Render-safe defaults for down/status/logs; `up` replaces them
             # with the GPUs' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
             **{
-                _winnow_variable(replica, "CPUSET"): os.environ.get(
-                    _winnow_variable(replica, "CPUSET"), "0"
+                _quyet_variable(replica, "CPUSET"): os.environ.get(
+                    _quyet_variable(replica, "CPUSET"), "0"
                 )
-                for replica in WINNOW_REPLICAS
+                for replica in QUYET_REPLICAS
             },
         }
     )
@@ -276,7 +303,7 @@ def _preflight(env: dict[str, str]) -> None:
         ).stdout
     )
     expected = SPEC["hardware"]
-    every = DEEPSEEK_GPU_IDS + WINNOW_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + QUYET_GPU_IDS
     missing = [index for index in every if index not in rows]
     if missing:
         raise SystemExit(f"GPUs {missing} are not present; this example uses GPUs {every}")
@@ -308,8 +335,8 @@ def _preflight(env: dict[str, str]) -> None:
     for variable, name, gpus in (
         ("DEEPSEEK_CPUSET", "DeepSeek", DEEPSEEK_GPU_IDS),
         *(
-            (_winnow_variable(replica, "CPUSET"), replica["service"], [int(replica["gpu_id"])])
-            for replica in WINNOW_REPLICAS
+            (_quyet_variable(replica, "CPUSET"), replica["service"], [int(replica["gpu_id"])])
+            for replica in QUYET_REPLICAS
         ),
     ):
         nodes = [numa_node(str(rows[index]["pci_bus_id"])) for index in gpus]
@@ -367,69 +394,65 @@ def _ensure_deepseek_image(env: dict[str, str]) -> None:
         )
 
 
-def _ensure_winnow_image(env: dict[str, str]) -> None:
-    """Build winnow-server at the pinned revision with the example's backport."""
+def _image_field(image: str, template: str) -> str | None:
+    inspected = _run(
+        ["docker", "image", "inspect", "--format", template, image], capture=True, check=False
+    )
+    return inspected.stdout.strip() if inspected.returncode == 0 else None
 
-    image = env["WINNOW_IMAGE"]
-    if _image_id(image) is not None:
+
+def _vllm_image_matches(image: str) -> bool:
+    """The image is the pinned registry digest. An image ID is not compared: the classic
+    store reports the config digest, the containerd store the manifest-list digest."""
+
+    digests = json.loads(_image_field(image, "{{json .RepoDigests}}") or "null") or []
+    return QUYET_VLLM["repo_digest"] in digests
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def adapter_labels() -> dict[str, str]:
+    """What the Quyet adapter image is built from, recorded as labels on the image."""
+
+    return {
+        "org.kairyu.quyet.vllm": QUYET_VLLM["repo_digest"],
+        "org.kairyu.quyet.version": QUYET_SYSTEMONE["quyet_version"],
+        "org.kairyu.quyet.requirements-sha256": _sha256(HERE / "quyet-requirements.txt"),
+        "org.kairyu.quyet.dockerfile-sha256": _sha256(HERE / QUYET_SYSTEMONE["dockerfile"]),
+        "org.kairyu.quyet.adapter-sha256": _sha256(HERE / "quyet_systemone.py"),
+    }
+
+
+def _adapter_image_matches(image: str) -> bool:
+    labels = json.loads(_image_field(image, "{{json .Config.Labels}}") or "null") or {}
+    return all(labels.get(key) == value for key, value in adapter_labels().items())
+
+
+def _ensure_quyet_images() -> None:
+    """Pull the pinned vLLM image; build the adapter on it whenever its sources changed."""
+
+    image = QUYET_VLLM["image"]
+    if _image_field(image, "{{.Id}}") is None:
+        _run(["docker", "pull", image])
+    if not _vllm_image_matches(image):
+        raise SystemExit(f"local {image} is not {QUYET_VLLM['repo_digest']}")
+    adapter = QUYET_SYSTEMONE["image"]
+    if _adapter_image_matches(adapter):
         return
-    runtime = SPEC["winnow"]["runtime"]
-    if image != runtime["image"]:
-        raise SystemExit(f"WINNOW_IMAGE does not exist locally: {image}")
-    print("winnow-server image is absent; building the pinned source revision", flush=True)
-    with tempfile.TemporaryDirectory() as scratch:
-        source = Path(scratch) / "winnow-inference"
-        _run(["git", "clone", "--quiet", runtime["source_repository"], str(source)])
-        _run(
-            [
-                "git",
-                "-C",
-                str(source),
-                "checkout",
-                "--quiet",
-                "--detach",
-                runtime["source_revision"],
-            ]
-        )
-        _add_winnow_patches(source)
-        _run(
-            [
-                "docker",
-                "build",
-                "--build-arg",
-                f"CUDA_ARCH={runtime['cuda_arch']}",
-                "--tag",
-                image,
-                "--label",
-                f"org.opencontainers.image.revision={runtime['source_revision']}",
-                "--label",
-                "io.kairyu.winnow.extra-patches="
-                + ",".join(item["upstream_commit"] for item in runtime["extra_patches"]),
-                str(source),
-            ]
-        )
-
-
-def _add_winnow_patches(source: Path) -> None:
-    """Add upstream llama.cpp backports to Winnow's own patch lock.
-
-    Winnow's build applies every patch listed in ``runtime.lock.json`` and
-    rejects any llama.cpp file change missing from its ``source_sha256``.
-    """
-
-    lock_path = source / "runtime.lock.json"
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    for item in SPEC["winnow"]["runtime"]["extra_patches"]:
-        patch = (HERE / "winnow-patches" / item["file"]).read_bytes()
-        if hashlib.sha256(patch).hexdigest() != item["sha256"]:
-            raise SystemExit(f"{item['file']} does not match example.json")
-        (source / "patches" / item["file"]).write_bytes(patch)
-        lock["patches"].append({"file": f"patches/{item['file']}", "sha256": item["sha256"]})
-        overlap = set(lock["source_sha256"]) & set(item["source_sha256"])
-        if overlap:
-            raise SystemExit(f"{item['file']} overlaps Winnow's patches: {sorted(overlap)}")
-        lock["source_sha256"].update(item["source_sha256"])
-    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    print("building the Quyet System One adapter image from the current sources", flush=True)
+    labels = [
+        arg for key, value in adapter_labels().items() for arg in ("--label", f"{key}={value}")
+    ]
+    _run(
+        ["docker", "build", "--file", str(HERE / QUYET_SYSTEMONE["dockerfile"]),
+         "--build-arg", f"VLLM_IMAGE={image}",
+         "--build-arg", f"QUYET_VERSION={QUYET_SYSTEMONE['quyet_version']}",
+         *labels, "--tag", adapter, str(HERE)]
+    )  # fmt: skip
+    if not _adapter_image_matches(adapter):
+        raise SystemExit(f"the built {adapter} does not carry the expected source labels")
 
 
 _MODEL_PROGRAM = r"""
@@ -550,45 +573,86 @@ def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> 
     _run(command)
 
 
-def _ensure_winnow_model(env: dict[str, str]) -> None:
-    """Download (or re-verify) the pinned GGUF files with Winnow's own tool.
+# Runs inside the adapter image (huggingface_hub is vLLM's). Downloads the pinned
+# revision when needed, then checks every file against the publisher's
+# MANIFEST.sha256 and the whole tree against example.json.
+_QUYET_MODEL_PROGRAM = r"""
+import hashlib, json, os, sys
+from pathlib import Path
 
-    ``scripts/download.py`` fetches the manifest's revision-pinned URLs and
-    checks every file's size and SHA-256; the example's pins must match it.
-    """
+repo, revision, slug, expected_tree = sys.argv[1:]
+target = Path('/models') / slug
+attestation = target / '.kairyu-model-attestation.json'
 
-    image = env["WINNOW_IMAGE"]
-    _run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
-            "--volume",
-            f"{env['WINNOW_MODEL_STORAGE_PATH']}:/models",
-            "--entrypoint",
-            "python3",
-            image,
-            "scripts/download.py",
-            "--model-dir",
-            "/models",
-        ]
-    )
-    manifest = json.loads(
-        _run(
-            ["docker", "run", "--rm", "--entrypoint", "cat", image, "manifests/models.json"],
-            capture=True,
-        ).stdout
-    )
-    release = manifest["release"]
-    pinned = SPEC["winnow"]["model"]
-    shipped = {
-        release[kind]["file"]: {"bytes": release[kind]["bytes"], "sha256": release[kind]["sha256"]}
-        for kind in ("model", "projector")
-    }
-    if manifest.get("model_revision") != pinned["revision"] or shipped != pinned["files"]:
-        raise SystemExit("winnow-inference manifest differs from example.json model pins")
+def inventory():
+    rows = []
+    for path in sorted(target.rglob('*')):
+        if not path.is_file() or path == attestation or '.cache' in path.parts:
+            continue
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(16 * 1024 * 1024), b''):
+                digest.update(chunk)
+        rows.append({'path': str(path.relative_to(target)), 'size': path.stat().st_size,
+                     'sha256': digest.hexdigest()})
+    tree = hashlib.sha256(json.dumps(rows, sort_keys=True,
+                                     separators=(',', ':')).encode()).hexdigest()
+    return rows, tree
+
+def check_manifest(rows):
+    listed = {}
+    for line in (target / 'MANIFEST.sha256').read_text().splitlines():
+        if line.strip():
+            digest, name = line.split(None, 1)
+            listed[name.strip()] = digest
+    have = {row['path']: row['sha256'] for row in rows}
+    wrong = sorted(name for name, digest in listed.items() if have.get(name) != digest)
+    if wrong:
+        raise SystemExit(f'files differ from the publisher MANIFEST.sha256: {wrong}')
+
+if attestation.exists() and os.environ.get('VERIFY_MODEL') != '1':
+    current = json.loads(attestation.read_text())
+    pinned = (current.get('repo'), current.get('revision'), current.get('tree_sha256'))
+    if pinned != (repo, revision, expected_tree):
+        raise SystemExit('model attestation does not match the pinned checkpoint')
+    raise SystemExit(0)
+
+if not attestation.exists():
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo, revision=revision, local_dir=target,
+                      token=os.environ.get('HF_TOKEN') or None)
+rows, tree = inventory()
+check_manifest(rows)
+if tree != expected_tree:
+    raise SystemExit(f'checkpoint tree {tree} differs from model.tree_sha256 {expected_tree}')
+attestation.write_text(json.dumps({'schema_version': 1, 'repo': repo, 'revision': revision,
+                                   'tree_sha256': tree, 'files': rows}, sort_keys=True))
+print(f'model attested: {len(rows)} files, tree {tree}')
+"""
+
+
+def _ensure_quyet_model(env: dict[str, str]) -> None:
+    """Download (or re-verify) the pinned Quyet checkpoint both replicas read."""
+
+    model = SPEC["quyet"]["model"]
+    storage = env["QUYET_MODEL_STORAGE_PATH"]
+    if not (Path(storage) / model["slug"] / ".kairyu-model-attestation.json").exists():
+        free_gib = shutil.disk_usage(storage).free // (1024**3)
+        minimum = int(SPEC["storage"]["minimum_free_gib"])
+        if free_gib < minimum:
+            raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
+    command = ["docker", "run", "--rm", "--entrypoint", "python3",
+               "--env", "HF_HUB_DISABLE_TELEMETRY=1",
+               "--volume", f"{storage}:/models"]  # fmt: skip
+    if "HF_TOKEN" in os.environ:
+        command.extend(["--env", "HF_TOKEN"])
+    if os.environ.get("VERIFY_MODEL") == "1":
+        command.extend(["--env", "VERIFY_MODEL=1"])
+    command.extend(
+        [QUYET_SYSTEMONE["image"], "-c", _QUYET_MODEL_PROGRAM, model["repo"], model["revision"],
+         model["slug"], str(model["tree_sha256"])]
+    )  # fmt: skip
+    _run(command)
 
 
 def _json_url(url: str) -> dict:
@@ -627,13 +691,13 @@ def validate_ready(api_url: str) -> None:
         models = {row["id"] for row in listed["data"]}
         metrics = _text_url(f"{api_url}/metrics")
         healthy = {
-            pool: _healthy_replicas(metrics, pool) for pool in (DEEPSEEK_SERVED, WINNOW_SERVED)
+            pool: _healthy_replicas(metrics, pool) for pool in (DEEPSEEK_SERVED, QUYET_SERVED)
         }
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
     if ready.get("status") != "ready" or models != set(PUBLIC_MODELS):
         raise SystemExit(f"Kairyu must serve exactly {PUBLIC_MODELS!r}, got {sorted(models)!r}")
-    expected = {DEEPSEEK_SERVED: 1, WINNOW_SERVED: len(WINNOW_REPLICAS)}
+    expected = {DEEPSEEK_SERVED: 1, QUYET_SERVED: len(QUYET_REPLICAS)}
     if healthy != expected:
         raise SystemExit(f"healthy replicas must be {expected!r}, got {healthy!r}")
 
@@ -706,35 +770,6 @@ def _validate_deepseek(l1_url: str) -> None:
             )
 
 
-def chat_probe(model: str) -> dict:
-    return {
-        "model": model,
-        "messages": [{"role": "user", "content": "What is 17 * 19? Reply with the number only."}],
-        "max_tokens": 2048,
-    }
-
-
-def chat_answer_error(body: dict) -> str | None:
-    try:
-        choice = body["choices"][0]
-        content = choice["message"].get("content") or ""
-    except (KeyError, IndexError, TypeError):
-        return f"malformed response: {str(body)[:200]}"
-    if choice.get("finish_reason") != "stop":
-        return f"finish_reason is {choice.get('finish_reason')!r}"
-    if "323" not in content:
-        return f"answer is {content[:200]!r}, expected 323"
-    return None
-
-
-def _validate_chat(l1_url: str, model: str) -> None:
-    error = chat_answer_error(
-        post_json(f"{l1_url}/v1/chat/completions", chat_probe(model), timeout_s=900)
-    )
-    if error is not None:
-        raise SystemExit(f"{model} chat probe failed: {error}")
-
-
 SYSTEMONE_PROBE = {
     "state": "The invoice for March was paid twice by mistake.",
     "questions": {
@@ -756,7 +791,7 @@ def systemone_probe_error(body: dict) -> str | None:
 
 
 def _validate_systemone(l1_url: str) -> None:
-    """Winnow answers System One on its own L1 (the judge is not a public model)."""
+    """Quyet answers System One on its own adapter (the judge is not a public model)."""
 
     body = post_json(
         f"{l1_url}/v1/systemone",
@@ -765,7 +800,7 @@ def _validate_systemone(l1_url: str) -> None:
     )
     error = systemone_probe_error(body)
     if error is not None:
-        raise SystemExit(f"Winnow System One probe failed: {error}")
+        raise SystemExit(f"Quyet System One probe failed: {error}")
 
 
 def routed_request(content: str, *, model: str = MODEL, **overrides) -> dict:
@@ -876,9 +911,12 @@ def validate_serving(env: dict[str, str]) -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_ready(api_url)
     _validate_deepseek(f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}")
-    for service in WINNOW_SERVICES:
-        _validate_chat(winnow_l1_url(env, service), WINNOW_SERVED)
-        _validate_systemone(winnow_l1_url(env, service))
+    for service in QUYET_SERVICES:
+        try:
+            _json_url(f"{quyet_vllm_url(env, service)}/v1/models")
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            raise SystemExit(f"{service} vLLM is not serving: {error}") from error
+        _validate_systemone(quyet_l1_url(env, service))
     validate_tool_answer(api_url)
 
 
@@ -910,16 +948,16 @@ def up() -> None:
     env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     _ensure_deepseek_image(env)
-    _ensure_winnow_image(env)
+    _ensure_quyet_images()
     _ensure_model(
         env["DEEPSEEK_MODEL_STORAGE_PATH"],
         SPEC["deepseek"],
         env["DEEPSEEK_VLLM_IMAGE"],
         "DEEPSEEK_MODEL_SEED",
     )
-    _ensure_winnow_model(env)
+    _ensure_quyet_model(env)
     # --remove-orphans: an update from a release that still defined a service
-    # (the answer page before VCO-D20) stops and removes its old container.
+    # stops and removes its old container.
     _compose(
         ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200", "--remove-orphans"],
         env=env,

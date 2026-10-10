@@ -11,6 +11,30 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-09 — [progress] Verified tool route: all nine GPU gates pass (PR #641)
+- What: at `8e85b30f`, l1, routing (TOOL miss 5 %/5 %, THINK precision 97.9 %), think-route, effort, verified-tool-route (12/12 structured calls, p50 131.7 s), fallback, serving (72/72, every reply a structured call), serving-routed and browser pass. 4 of 24 agent turns route THINK in serving.
+- Refs: example `MEASUREMENTS.md`; VCO-D20 and its amendments
+
+### 2026-10-09 — [amendment] Publishers can receive the caller's conversation natively (m1 D8, PR #641)
+- What: `native_conversation` on a publisher role sends the caller's messages (tool transcript included) natively via `GenerationRequest.conversation_prefix`, the role prompt as one final user message; vLLM upstreams accept it, other backends reject it. The example's `answer` and `deepseek_think_answer` (no prompt) use it.
+- Why: `verified-tool-route` failed 3/12 on calls written as JSON text; at effort max the same turns gave 0/12 sent natively vs 11/12 (think route) and 6/12 (verified tool route) as a JSON transcript.
+- Refs: m1 D8 amendment 2026-10-09; VCO-D20 amendment; `kairyu/orchestration/conductor.py`, `kairyu/engine/openai_backend.py`
+
+### 2026-10-09 — [amendment] DeepSeek calls written without DSML markers become tool calls (PR #641)
+- What: on the generic protocol, a reply ending with `<invoke name=...>`/`<parameter name=...>` blocks (DeepSeek's DSML without its marker tokens) for declared tools with schema-valid arguments is returned as `tool_calls`; prose before it stays `content`; anything else stays text.
+- Why: `verified-tool-route` failed 1/12 (effort max): the answer wrote such a block, vLLM returned it as text and the agent saw no call; DeepSWE showed the same (1/1,410 and 5/77 replies).
+- Refs: m9 D2 amendment 2026-10-09; VCO-D20 amendment; `kairyu/entrypoints/server/chat_service.py`
+
+### 2026-10-09 — [amendment] Route judge keeps an agent's task; TOOL covers protocol-required calls (VCO-D20, PR #641)
+- What: `bounded_conversation` also keeps system/developer messages and the latest user message when it cuts a conversation (m1 D9 amendment); the route judge's question and criteria count calls the conversation's protocol requires (including finishing) as TOOL; judge timeout 10 -> 60 s.
+- Why: DeepSWE replay before the gates: 20/64 real agent turns routed THINK (task dropped behind a system prompt, "final report" criterion), 4/6 concurrent long turns timed out, `routing` failed; with the changes 1/64 misrouted.
+- Refs: m1 D9 amendment 2026-10-09; VCO-D20 amendment; `kairyu/orchestration/request.py`
+
+### 2026-10-09 — [design] Verified tool route: one routed model, TOOL/THINK by Winnow (VCO-D20, PR #641)
+- What: `kairyu-verified-tool` (`verified-tool.yaml`) replaces `kairyu-verified` and `kairyu-verified-always`; Winnow routes TOOL (the next reply needs a tool call) to the three waves and THINK to DeepSeek at the caller's effort. Same DSL; prompts rewritten generically: exact names and public entry points, checks from the request's words, verification on the public path and type checks, must-not behaviour, finishing alone after success shown, every announced call made. Answer page removed; gates adapted with authored `tool-routing-set.json` and `tool-turns.json`.
+- Why: owner decision after DeepSWE nextstep r1 (35 passes of 75 scored): failures came from surface-name mismatches, misread self-checks, internal-layer verification, missing must-not behaviour, batched finishing and calls announced but not made.
+- Refs: VCO-D20; plan `docs/superpowers/plans/2026-10-09-verified-tool-route.md`
+
 ### 2026-10-07 — [amendment] Verified replies target the next step; drafts carry structured tool calls (PR #641)
 - What: drafts/requirements/answer define the reply as the next assistant message (on agent turns, the move needed now); each draft carries `tool_calls` and reads the caller's tools; judgments also read the conversation; stage reports leave `reasoning_content`. DeepSWE on the two-Winnow layout stopped at 0/113 scored. All nine GPU gates pass.
 - Why: drafts wrote tool calls as text and the answer copied it (3/47 turns rejected by the agent); requirements read the task as the request every turn, so agents re-explored instead of stepping; replayed stage reports grew every request.
