@@ -1,0 +1,52 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+
+# The model server, registered so that Kairyu reports ready only while it is
+# healthy. It is not public (public_models below): Quyet is a System One model,
+# and its weights are read by the adapter, never chatted with.
+pools:
+  quyet-1.0-large:
+    replicas:
+    - backend: openai
+      # vLLM serves /health, not Kairyu's default /readyz.
+      health_url: http://vllm:8000/health
+      options:
+        base_url: http://vllm:8000/v1
+        model: quyet-1.0-large
+        api_key_env: null
+        timeout_s: 300
+        upstream: vllm
+        container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+        model_revision: 9a0f051112ba4301f6e4c8b87fc088ce00b11aae
+        max_model_len: 8192
+        quantization_format: bf16
+        tensor_parallel_size: 1
+    unhealthy_after: 1
+    queue_depth_threshold: 0
+    probe_interval_s: 2.0
+# Kairyu requires a chat policy for every registered engine, public or not.
+legacy_chat_models:
+- quyet-1.0-large
+
+public_models:
+- quyet-1.0-large-systemone
+
+# Quyet's typed decisions (Jev wire format) through this example's adapter
+# (quyet_systemone.py). The adapter reads 16 requests at a time and queues 16
+# more, then answers 529. Kairyu forwards at most 16 and queues 64, so a burst
+# gets Kairyu's 429, never the adapter's 529.
+systemone:
+  quyet-1.0-large-systemone:
+    base_url: http://quyet-systemone:8092
+    upstream_model: Quyet-1.0-Large
+    aliases: [quyet-latest, jev-latest, jev-preview]
+    description: Quyet-1.0-Large calibrated decisions (Gemma-4-31B-it decision fine-tune, bf16 on vLLM)
+    max_concurrency: 16
+    max_queue: 64
+    queue_wait_s: 30
+    timeout_s: 300
+    max_questions: 32
+    # the adapter's own 8 MiB limit
+    max_body_bytes: 8388608

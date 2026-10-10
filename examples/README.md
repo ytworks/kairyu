@@ -6,6 +6,7 @@
 |---|---|---|
 | [`qwen3.8-27b-1gpu`](qwen3.8-27b-1gpu/README.md) | one selected RTX PRO 6000 Blackwell | official FP8, 262,144 tokens |
 | [`openjev-diffusiongemma-26b-1gpu`](openjev-diffusiongemma-26b-1gpu/README.md) | OpenJev (DiffusionGemma 26B-A4B NVFP4 on vLLM), one replica on one selected RTX PRO 6000 Blackwell | text + image, OpenAI tools, every answer thinks first (fixed 512-token thought); ReplicaPool/API/UI structure |
+| [`quyet-1.0-large-1gpu`](quyet-1.0-large-1gpu/README.md) | Quyet-1.0-Large (Gemma-4-31B-it decision fine-tune, bf16) on vLLM, one selected RTX PRO 6000 Blackwell | System One only: calibrated typed decisions on `/v1/systemone` (the `quyet` package's prompt and calibration, read on vLLM), verified with JevBench and TypeSafe's SDK; Jev-style playground, no chat |
 | [`deepseek-v4-flash-0731-8gpu`](deepseek-v4-flash-0731-8gpu/README.md) | TP8 + EP8 on eight RTX PRO 6000 Blackwell cards | mixed FP4/FP8, 1,048,576 tokens |
 | [`qwen3.8-deepseek-v4-8gpu`](qwen3.8-deepseek-v4-8gpu/README.md) | Qwen TP1 x 4 replicas + DeepSeek TP4/EP4 | Qwen-judged five-route Kairyu L2 (four direct routes + verifier-gated ensemble DAG) |
 | [`qwen3.8-deepseek-v4.1-8gpu`](qwen3.8-deepseek-v4.1-8gpu/README.md) | DeepSeek-V4.1 DP6/EP6 (GPU 0-5) + Qwen TP1 x 2 replicas (GPU 6, 7) | the same judged five-route L2 with native image input on every route (no Qwen image-description stage) |
@@ -19,7 +20,10 @@
 | [`winnow-12b-q8-dp8-8gpu`](winnow-12b-q8-dp8-8gpu/README.md) | Winnow-12B Q8_0 GGUF on llama.cpp x 8 replicas, one per card | one public model behind a Kairyu ReplicaPool (`upstream: llamacpp`); System One over the same 8 servers |
 
 All of them use Kairyu as L3 and Open WebUI as the public chat surface (the
-checklist-verified example uses its own answer page instead). L1 is
+checklist-verified example uses its own answer page instead), except
+`quyet-1.0-large-1gpu`, a System One decision model with no chat: Kairyu publishes
+only `/v1/systemone`, and an example-owned adapter reads the answers from an
+internal vLLM. L1 is
 vLLM, except in `openjev-diffusiongemma-26b-1gpu`, whose L1 is OpenJev (vLLM
 inside its container), and in the two `winnow-12b-q8` environments, whose L1 is
 llama.cpp serving a GGUF checkpoint (`upstream: llamacpp`,
@@ -48,6 +52,7 @@ Start everything and print the local Chat UI URL:
 ./examples/deepseek-v4-flash-0731-8gpu/run.sh
 ./examples/qwen3.8-27b-1gpu/run.sh
 ./examples/openjev-diffusiongemma-26b-1gpu/run.sh
+./examples/quyet-1.0-large-1gpu/run.sh
 ./examples/qwen3.8-deepseek-v4-8gpu/run.sh
 ./examples/qwen3.8-deepseek-v4.1-8gpu/run.sh
 ./examples/qwen3.8-27b-dp8-8gpu/run.sh
@@ -64,6 +69,7 @@ Run serving verification through the Kairyu L3 endpoint:
 ./examples/deepseek-v4-flash-0731-8gpu/verify.sh serving
 ./examples/qwen3.8-27b-1gpu/verify.sh serving
 ./examples/openjev-diffusiongemma-26b-1gpu/verify.sh serving
+./examples/quyet-1.0-large-1gpu/verify.sh all
 ./examples/qwen3.8-deepseek-v4-8gpu/verify.sh serving-auto-max
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max
 ./examples/qwen3.8-27b-dp8-8gpu/verify.sh serving

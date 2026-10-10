@@ -1,0 +1,5 @@
+# The Quyet runtime package, installed without dependencies: the System One
+# adapter uses its prompt, truncation, calibration and answer code, and the
+# reference gate its transformers forward pass, both on the vLLM image's own
+# torch and transformers.
+quyet==1.0.2 --hash=sha256:60a36fdb575aec9f1b82462856ebacd165a9d2941cf68b3b83c044ecdec9a1d0

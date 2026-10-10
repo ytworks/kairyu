@@ -370,3 +370,32 @@ System One playground on :3011 (a static page behind nginx, on Kairyu's
 origin) shows each answer's distribution, confidence, tokens, latency and
 `Server-Timing`, next to the think-first chat answer for the same state;
 Open WebUI stays on :3010 for chat.
+
+### Quyet-1.0-Large one-GPU amendment (2026-10-10)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-10-10-quyet-large-1gpu-example.md`); GPU-verified
+2026-10-10 (all nine gates, run `20261010-s1-r2`, in the example's `MEASUREMENTS.md`).
+
+`examples/quyet-1.0-large-1gpu` serves `chinhnc/Quyet-1.0-Large` (Gemma-4-31B-it
+with a merged decision LoRA, bf16) on one selected GPU as a System One model only, the
+way Jev-family models are used: Kairyu publishes `/v1/systemone` (m11 D8) and no chat
+model. The stock vLLM `v0.31.0` image holds the weights as an internal, non-public
+pool (`public_models`), so Kairyu's readiness follows the model server; it runs
+vLLM's batch-invariant kernels so a request's answer does not depend on concurrent
+load. `kairyu/` is not changed.
+
+Quyet's runtime, the `quyet` package, has no server. The example's System One adapter
+(example-owned L1 code, like OpenJev's JevK5 backend) keeps the package's prompt,
+truncation, calibration and answer code and replaces only the forward pass: vLLM's
+`/v1/completions` returns the option letters' logprobs (`logprob_token_ids`) for the
+exact prompt token IDs the package built. The adapter follows OpenJev's Jev error
+shapes, refuses the Jev options Quyet lacks (images, think, samples, steps,
+sequential) with a 400, and answers 529 past 16 running and 16 waiting requests;
+Kairyu forwards at most 16 and queues 64, so callers get Kairyu's 429. The gates
+follow TypeSafe's documented usage: the served answers are checked against the
+package's own transformers run on the same GPU (same prompts, confident decisions
+kept, median probability difference bounded; vLLM's kernels differ in the tail), JevBench's runner scores Kairyu beside
+that run, and fan-out, consistency, TypeSafe's SDK, throughput and overload are
+checked through Kairyu. Only SHA-bound rows in the example's `MEASUREMENTS.md`
+establish runtime and performance claims.
