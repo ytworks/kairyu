@@ -399,3 +399,30 @@ kept, median probability difference bounded; vLLM's kernels differ in the tail),
 that run, and fan-out, consistency, TypeSafe's SDK, throughput and overload are
 checked through Kairyu. Only SHA-bound rows in the example's `MEASUREMENTS.md`
 establish runtime and performance claims.
+
+### GLM-5.3-Flash six-GPU amendment (2026-10-11)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-10-10-glm-5.3-flash-example.md`; the owner allowed six
+GPUs if four did not fit); GPU-verified 2026-10-11 (all nine gates, run
+`20261011-r2`, in the example's `MEASUREMENTS.md`).
+
+`examples/glm-5.3-flash-6gpu` serves `zai-org/GLM-5.3-Flash` (320B-total / 18B-active
+multimodal MoE with KDA linear attention and NoPE sparse MLA, official FP8
+checkpoint) as one replica on GPUs 0-5 with the `deepseek-v4.1-flash-6gpu` L2/L3
+structure: one public model behind one `ReplicaPool` replica, the OpenAI-compatible
+API, and Open WebUI with an effort dropdown (low/high/max, the template's own
+vocabulary). `kairyu/` is not changed and no file is shared with another example.
+The plan targeted four GPUs; the fit probe left 1.81 GiB of KV memory per GPU on one
+TP4 replica against 7.56 GiB for a 1M-token request, so the example uses six.
+
+L1 is the stock vLLM `v0.31.0` image pinned by registry digest, with the recipe's
+FP8 KV and `glm47` parsers. Measured deviations from the recipe: TP2 x DP3 with EP6
+instead of TP4 (six GPUs; +12 % / +11 % at c1 / c16 over DP6 at equal capacity),
+MTP drafting 3 tokens instead of 5 (c1 x2; 5 lost 6 % at c16), NCCL instead of the
+custom all-reduce (which fails while the drafter's CUDA graphs are captured on
+TP2), and a pinned 16.75 GiB KV pool per GPU (2,028,392 tokens per engine). The
+model author asks chat clients to pass `clear_thinking=true`; Kairyu's legacy chat
+path rejects `chat_template_kwargs` on text requests, so the Chat UI sends only the
+effort and the template default applies. Only SHA-bound rows in the example's
+`MEASUREMENTS.md` establish runtime and performance claims.
