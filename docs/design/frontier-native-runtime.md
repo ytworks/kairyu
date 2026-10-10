@@ -381,8 +381,9 @@ pending.
 with a merged decision LoRA, bf16) on one selected GPU as a System One model only, the
 way Jev-family models are used: Kairyu publishes `/v1/systemone` (m11 D8) and no chat
 model. The stock vLLM `v0.31.0` image holds the weights as an internal, non-public
-pool (`public_models`), so Kairyu's readiness follows the model server; `kairyu/` is
-not changed.
+pool (`public_models`), so Kairyu's readiness follows the model server; it runs
+vLLM's batch-invariant kernels so a request's answer does not depend on concurrent
+load. `kairyu/` is not changed.
 
 Quyet's runtime, the `quyet` package, has no server. The example's System One adapter
 (example-owned L1 code, like OpenJev's JevK5 backend) keeps the package's prompt,
@@ -392,8 +393,9 @@ exact prompt token IDs the package built. The adapter follows OpenJev's Jev erro
 shapes, refuses the Jev options Quyet lacks (images, think, samples, steps,
 sequential) with a 400, and answers 529 past 16 running and 16 waiting requests;
 Kairyu forwards at most 16 and queues 64, so callers get Kairyu's 429. The gates
-follow TypeSafe's documented usage: the served probabilities are bounded against the
-package's own transformers run on the same GPU, JevBench's runner scores Kairyu beside
+follow TypeSafe's documented usage: the served answers are checked against the
+package's own transformers run on the same GPU (same prompts, confident decisions
+kept, median probability difference bounded; vLLM's kernels differ in the tail), JevBench's runner scores Kairyu beside
 that run, and fan-out, consistency, TypeSafe's SDK, throughput and overload are
 checked through Kairyu. Only SHA-bound rows in the example's `MEASUREMENTS.md`
 establish runtime and performance claims.

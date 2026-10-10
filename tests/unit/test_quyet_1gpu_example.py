@@ -200,27 +200,29 @@ def test_served_config_matches_example_json():
     assert spec["vllm"]["repo_digest"].endswith("@" + options["container_image_digest"])
 
 
-def test_reference_comparison_fails_only_flipped_confident_decisions(example):
-    """The systemone gate fails a served answer whose top option differs from a confident
-    official one, and tolerates a flip of a near-even official answer."""
+def test_reference_comparison_counts_flips_of_confident_answers_only(example):
+    """The systemone gate counts a changed top option against a confident official answer,
+    not against a near-even one, and reports any prompt or shape mismatch."""
 
     verification = example("verification")
 
-    def answer(a: float) -> dict:
+    def answer(a: float, tokens: int = 90) -> dict:
         return {
-            "usage": {"input_tokens": 90},
+            "usage": {"input_tokens": tokens},
             "warnings": [],
             "answers": {
                 "team": {"type": "choice", "choice": "a", "probabilities": {"a": a, "b": 1 - a}}
             },
         }
 
-    diffs, problems = verification.compare_answers(answer(0.8), answer(0.79), 0.5)
-    assert problems == [] and max(diffs) == pytest.approx(0.01)
-    _, problems = verification.compare_answers(answer(0.8), answer(0.3), 0.5)
-    assert problems == ["team: top 'b' vs 'a'"]
-    _, problems = verification.compare_answers(answer(0.56), answer(0.47), 0.5)
-    assert problems == []
+    diffs, problems, confident, flips = verification.compare_answers(answer(0.8), answer(0.79), 0.5)
+    assert (problems, confident, flips) == ([], 1, []) and max(diffs) == pytest.approx(0.01)
+    _, _, confident, flips = verification.compare_answers(answer(0.8), answer(0.3), 0.5)
+    assert (confident, flips) == (1, ["team: top 'b' vs 'a'"])
+    _, _, confident, flips = verification.compare_answers(answer(0.56), answer(0.47), 0.5)
+    assert (confident, flips) == (0, [])
+    _, problems, _, _ = verification.compare_answers(answer(0.8), answer(0.8, tokens=91), 0.5)
+    assert problems and problems[0].startswith("input_tokens")
 
 
 def test_reference_is_reused_only_for_the_same_requests(example, monkeypatch, tmp_path):

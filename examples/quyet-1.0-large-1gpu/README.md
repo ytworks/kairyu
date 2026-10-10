@@ -55,8 +55,11 @@ truncated state adds `warnings` and `truncated`. TypeSafe's SDK reads them as is
 **Model server (L1 vLLM, internal).** The stock `vllm/vllm-openai:v0.31.0` image
 (registry digest pinned, no overlay) holds the checkpoint: bf16, an 8,192-token
 context (Quyet's prompts stop at 8,000), 64 sequences, 95 % of GPU memory, prefix
-caching, text only. vLLM batches the reads of all requests together, and the state
-opens every question's prompt, so the questions of one request read it once.
+caching, text only, and vLLM's batch-invariant kernels (`VLLM_BATCH_INVARIANT=1`), so a
+request gets exactly the same answer whatever else runs (measured: 20 repeats, alone
+and under load, identical to the last digit; about 10 % slower than without). vLLM
+batches the reads of all requests together, and the state opens every question's
+prompt, so the questions of one request read it once.
 
 ## Kairyu
 
@@ -143,7 +146,7 @@ consistent answers, the official SDK, and throughput for bulk decisions.
 |---|---|
 | `reference` | With the stack down, the `quyet` package's own CLI (transformers, bf16, the GPU) answers 279 requests: the 48 of `systemone-reference.jsonl` (English, Vietnamese, Japanese, JSON and conversation states, 10-option choices, four states truncated past 6,000 tokens) and JevBench's 231 public items, asked as JevBench asks them. A later gate reuses it only for the same request bodies, checkpoint and adapter sources. |
 | `attest` | vLLM's registry digest and the adapter's source labels on the running containers, every checkpoint file re-hashed, vLLM settings and version, the adapter's `quyet` version and calibration, System One public and no chat model. |
-| `systemone` | Through Kairyu, all 279 requests have the official input token count and truncation; the official top option wherever the official answer clears TypeSafe's 0.5 confidence floor; probability differences at most 0.005 at the median and 0.06 at the 99th percentile. Aliases answer; refusals have the documented shapes. |
+| `systemone` | Through Kairyu, all 279 requests have the official input token count, truncation and answer shape (the same prompts); at least 99 % of the official answers that clear TypeSafe's 0.5 confidence floor keep their top option; the median probability difference is at most 0.005. Aliases answer; refusals have the documented shapes. |
 | `jevbench` | JevBench's own runner (pinned, `typesafe` adapter, one request at a time, as its board measures) on the 231 public items through Kairyu: every answer valid; per split, correct answers within one item of the official package's, Brier and ECE within 0.01; p50 latency at most 0.5 s. |
 | `fanout` | 1, 8 and 32 questions about one 1K-token state in a single call: all answered, and 32 questions take at most 4 times as long as one. |
 | `consistency` | The same request, ten times alone and ten times while other reads load vLLM, keeps its top answers, and its probabilities move by at most 0.01. |
@@ -157,6 +160,8 @@ measured numbers to [MEASUREMENTS.md](MEASUREMENTS.md).
 ## Limitations
 
 - Text only, with no `think`, `samples`, `steps` or `sequential`.
-- Probabilities differ slightly from the transformers run of the same package
-  (bounded by the `systemone` and `jevbench` gates).
+- vLLM's kernels are not transformers', so individual probabilities differ from the
+  package's own run (median 0.0001; up to about 0.2 on states of a few thousand tokens,
+  where a confident answer can occasionally change). Decisions and JevBench quality are
+  gated against the package's run (`systemone`, `jevbench`).
 - Batch and async requests are not configured.

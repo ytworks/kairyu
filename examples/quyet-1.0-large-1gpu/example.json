@@ -37,7 +37,8 @@
     "settings": {
       "VLLM_MAX_MODEL_LEN": 8192,
       "VLLM_MAX_NUM_SEQS": 64,
-      "VLLM_GPU_MEMORY_UTILIZATION": 0.95
+      "VLLM_GPU_MEMORY_UTILIZATION": 0.95,
+      "VLLM_BATCH_INVARIANT": 1
     },
     "repo_digest": "vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
   },
@@ -76,8 +77,8 @@
     "reference": {
       "dataset": "systemone-reference.jsonl",
       "same_top_min_official_confidence": 0.5,
-      "max_median_abs_diff": 0.005,
-      "max_p99_abs_diff": 0.06
+      "min_confident_agreement": 0.99,
+      "max_median_abs_diff": 0.005
     },
     "jevbench": {
       "repository": "https://github.com/fstandhartinger/jevbench",

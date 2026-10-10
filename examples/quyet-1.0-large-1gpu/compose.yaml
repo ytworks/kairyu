@@ -21,6 +21,8 @@ services:
       XDG_CACHE_HOME: /root/.cache
       TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
       TRITON_CACHE_DIR: /root/.cache/triton
+      # Batch-invariant kernels: a read's answer does not depend on what else runs.
+      VLLM_BATCH_INVARIANT: "${VLLM_BATCH_INVARIANT}"
     volumes:
       - type: bind
         source: ${MODEL_STORAGE_PATH}

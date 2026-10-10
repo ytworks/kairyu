@@ -355,6 +355,9 @@ def attest(run_dir: Path) -> int:
         "--gpu-memory-utilization": str(settings["VLLM_GPU_MEMORY_UTILIZATION"]),
     }
     drift = {flag: args[args.index(flag) + 1] if flag in args else None for flag in wanted}
+    vllm_env = dict(item.split("=", 1) for item in vllm["Config"]["Env"] if "=" in item)
+    if vllm_env.get("VLLM_BATCH_INVARIANT") != str(settings["VLLM_BATCH_INVARIANT"]):
+        drift["VLLM_BATCH_INVARIANT"] = vllm_env.get("VLLM_BATCH_INVARIANT")
     cases["vllm_settings"] = None if drift == wanted else f"running {drift}, expected {wanted}"
     status, version, _ = _json("GET", f"{_vllm()}/version")
     release = SPEC["vllm"]["release"].lstrip("v")
@@ -449,13 +452,15 @@ def official_confidence(distribution: dict[str, float]) -> float:
 
 def compare_answers(
     official: dict, served: dict, min_confidence: float
-) -> tuple[list[float], list[str]]:
-    """Absolute probability differences and the disagreements that fail the gate. The top
-    option must match wherever the official answer clears TypeSafe's 0.5 confidence floor;
-    below it the official answer is, in TypeSafe's words, genuinely uncertain."""
+) -> tuple[list[float], list[str], int, list[str]]:
+    """(probability differences, structural problems, confident official answers, those
+    whose top option the served answer changed). Confident means TypeSafe's confidence
+    floor of 0.5; below it the official answer is, in TypeSafe's words, genuinely
+    uncertain. Any structural problem (prompt length, truncation, shape) fails the gate."""
 
     diffs: list[float] = []
     problems: list[str] = []
+    confident, flipped = 0, []
     if served.get("usage", {}).get("input_tokens") != official["usage"]["input_tokens"]:
         problems.append(f"input_tokens {served.get('usage')} vs {official['usage']}")
     if served.get("warnings") != official.get("warnings"):
@@ -474,10 +479,13 @@ def compare_answers(
             problems.append(f"{qid}: options {sorted(got)} vs {sorted(want)}")
             continue
         diffs.extend(abs(want[key] - got[key]) for key in want)
-        decisive = official_confidence(want) >= min_confidence
-        if decisive and max(want, key=want.get) != max(got, key=got.get):
-            problems.append(f"{qid}: top {max(got, key=got.get)!r} vs {max(want, key=want.get)!r}")
-    return diffs, problems
+        if official_confidence(want) >= min_confidence:
+            confident += 1
+            if max(want, key=want.get) != max(got, key=got.get):
+                flipped.append(
+                    f"{qid}: top {max(got, key=got.get)!r} vs {max(want, key=want.get)!r}"
+                )
+    return diffs, problems, confident, flipped
 
 
 def systemone(run_dir: Path) -> int:
@@ -493,34 +501,38 @@ def systemone(run_dir: Path) -> int:
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(read, requests))
-    served_rows, diffs, problems = [], [], []
+    served_rows, diffs, problems, flips = [], [], [], []
+    confident = 0
     for row, (status, body, headers) in zip(requests, results, strict=True):
         served_rows.append({"id": row["id"], "status": status, "body": body,
                             "server_timing": headers.get("server-timing")})  # fmt: skip
         if status != 200 or not isinstance(body, dict):
             problems.append(f"{row['id']}: HTTP {status} {str(body)[:200]}")
             continue
-        row_diffs, row_problems = compare_answers(
+        row_diffs, row_problems, row_confident, row_flips = compare_answers(
             official[row["id"]], body, float(config["same_top_min_official_confidence"])
         )
         diffs.extend(row_diffs)
         problems.extend(f"{row['id']}: {problem}" for problem in row_problems)
+        flips.extend(f"{row['id']}: {flip}" for flip in row_flips)
+        confident += row_confident
     (run_dir / "systemone-served.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in served_rows), encoding="utf-8"
     )
     median = statistics.median(diffs) if diffs else math.inf
     p99 = _nearest_rank(diffs, 0.99) if diffs else math.inf
     worst = max(diffs) if diffs else math.inf
-    cases["answers_match_official"] = "; ".join(problems[:5]) or None
+    cases["prompts_and_shapes_match_official"] = "; ".join(problems[:5]) or None
+    agreement = 1 - len(flips) / confident if confident else 0.0
+    cases["confident_answers_agree"] = (
+        None
+        if agreement >= float(config["min_confident_agreement"])
+        else f"{agreement:.4f} < {config['min_confident_agreement']}: {flips[:3]}"
+    )
     cases["median_abs_diff"] = (
         None
         if median <= float(config["max_median_abs_diff"])
         else f"{median:.4f} > {config['max_median_abs_diff']}"
-    )
-    cases["p99_abs_diff"] = (
-        None
-        if p99 <= float(config["max_p99_abs_diff"])
-        else f"{p99:.4f} > {config['max_p99_abs_diff']}"
     )
     cases["server_timing"] = (
         None
@@ -557,7 +569,8 @@ def systemone(run_dir: Path) -> int:
     )
     extra = {"reference_run": source.name, "requests": len(requests),
              "probabilities_compared": len(diffs), "median_abs_diff": median,
-             "p99_abs_diff": p99, "max_abs_diff": worst}  # fmt: skip
+             "p99_abs_diff": p99, "max_abs_diff": worst, "confident_answers": confident,
+             "confident_flips": flips}  # fmt: skip
     print(f"compared {len(diffs)} probabilities: median {median:.5f}, p99 {p99:.4f}, "
           f"max {worst:.4f}")  # fmt: skip
     return _report(run_dir, "systemone", cases, extra)

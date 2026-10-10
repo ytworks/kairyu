@@ -41,7 +41,8 @@ apps / TypeSafe SDK / playground (:3015) -> Kairyu (:8014) /v1/systemone -> quye
 ```
 
 - **L1 vLLM** (stock `v0.31.0`, registry digest pinned): bf16, 8,192-token context
-  (Quyet's 8,000-token prompts), 64 sequences, prefix caching, text only. Internal.
+  (Quyet's 8,000-token prompts), 64 sequences, prefix caching, text only,
+  batch-invariant kernels. Internal.
 - **L1 quyet-systemone** (example-owned, CPU): `quyet` 1.0.2 with only the forward pass
   replaced by vLLM letter logprobs; Jev error shapes as OpenJev; 529 past 16 running
   and 16 waiting requests; the image carries its source hashes as labels.
@@ -77,7 +78,7 @@ GPU gates, in order; stop and report at the first failure:
 |---|---|---|
 | `reference` | official answers exist | stack down; the `quyet` CLI (transformers, GPU) answers 48 authored + 231 JevBench public items; reused only for the same request bodies, checkpoint and adapter sources |
 | `attest` | the pinned stack runs | registry digest and source labels, checkpoint re-hash, vLLM settings and version, adapter calibration, System One public, no chat model |
-| `systemone` | Kairyu's answers are the official package's | all 279: same input tokens and truncation; same top option where the official answer's TypeSafe confidence >= 0.5; probability difference median <= 0.005, 99th percentile <= 0.06; aliases; error shapes |
+| `systemone` | Kairyu's answers are the official package's | all 279: same input tokens, truncation and shape; >= 99 % of official answers with TypeSafe confidence >= 0.5 keep their top option; probability difference median <= 0.005; aliases; error shapes |
 | `jevbench` | Jev-standard quality and speed | JevBench's runner (typesafe adapter, sequential) on Kairyu: 100 % valid; per split correct within 1 item of official, Brier and ECE within 0.01; p50 <= 0.5 s |
 | `fanout` | many questions per call | 1/8/32 questions on one 1K-token state all answered; 32 questions <= 4x one |
 | `consistency` | same request, same answer | 10 alone + 10 under load: top answers stable, probabilities within 0.01 |
@@ -85,10 +86,18 @@ GPU gates, in order; stop and report at the first failure:
 | `systemone-serving` | bulk decisions | states ~50/2,000/6,000 tokens, 3 questions, c1/16/32/64 x 64: all answered; req/s, p50/p95 |
 | `systemone-isolation` | overload is shed cleanly | 640 reads: 200 or 429 only, never 529; ready and answering right after |
 
-Owner decision (2026-10-10), after run `20261010-jev-r1` (median difference 0.0001,
-p99 0.043, max 0.12; one flip of an official 0.56/0.44 answer): the top option must
-match where the official answer clears TypeSafe's 0.5 confidence floor, and the tail
-bound is the 99th percentile.
+Owner decisions (2026-10-10):
+
+- After run `20261010-jev-r1` (median difference 0.0001, p99 0.043, max 0.12; one flip
+  of an official 0.56/0.44 answer): judge the top option only where the official
+  answer clears TypeSafe's 0.5 confidence floor.
+- After runs `20261010-s1-r1` and `20261010-s1-bi`: the tail difference is vLLM-kernel
+  noise (p99 0.043 / 0.067 / 0.066 across runs, max up to 0.21 on 3K-token states;
+  the official package is identical run to run), so the p99 bound is dropped; at least
+  99 % of confident official answers must keep their top option (0/309 and 1/309
+  flipped). vLLM runs batch-invariant (`VLLM_BATCH_INVARIANT=1`): 20 repeats alone and
+  under load gave identical probabilities (0.0026 spread without), at about 10 %
+  latency (1 question 0.225 -> 0.251 s, 32 questions 0.60 -> 0.66 s).
 
 ## Checklist
 
