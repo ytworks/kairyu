@@ -1,0 +1,404 @@
+name: kairyu-deepseek-v4-1-quyet-8gpu
+services:
+  # One DeepSeek-V4.1-Flash replica on GPUs 0-5 with the six-GPU example's L1
+  # (DP6 / EP6, SM120 overlay, Engram on the host, DSpark 5). Unlike that
+  # example there is no server-wide thinking default: each L2 role decides
+  # (the V4.1 encoder ORs `thinking` into every request otherwise).
+  deepseek:
+    image: ${DEEPSEEK_VLLM_IMAGE}
+    ipc: host
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      VLLM_NO_USAGE_STATS: '1'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: '1'
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      TILELANG_CACHE_DIR: /root/.cache/tilelang
+      TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
+      VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+      VLLM_USE_RUST_FRONTEND: '0'
+    command:
+    - /models/deepseek-v4.1-flash
+    - --served-model-name
+    - deepseek-v4.1-flash
+    - --max-model-len
+    - '1048576'
+    - --trust-remote-code
+    - --tokenizer-mode
+    - deepseek_v41
+    - --tensor-parallel-size
+    - '1'
+    - --data-parallel-size
+    - '6'
+    - --data-parallel-backend
+    - mp
+    - --enable-expert-parallel
+    - --moe-backend
+    - marlin
+    - --engram-config
+    - '{"cpu_offload":true}'
+    - --attention-config
+    - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4"}'
+    - --kv-cache-dtype
+    - fp8
+    - --block-size
+    - '64'
+    - --enable-prefix-caching
+    - --gpu-memory-utilization
+    - '0.92'
+    - --max-num-seqs
+    - '128'
+    - --max-num-batched-tokens
+    - '4096'
+    - --speculative-config
+    - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+    - --reasoning-parser
+    - deepseek_v41
+    - --structured-outputs-config
+    - '{"backend":"xgrammar","disable_any_whitespace":true}'
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - deepseek_v41
+    - --override-generation-config
+    - '{"temperature":1.0,"top_p":0.95}'
+    - --limit-mm-per-prompt
+    - '{"image":8}'
+    - --disable-uvicorn-access-log
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 1440
+      start_period: 30s
+    restart: unless-stopped
+    cpuset: ${DEEPSEEK_CPUSET}
+    # Loopback only: the launcher's L1 probes and the paired direct rows.
+    ports:
+    - 127.0.0.1:${DEEPSEEK_L1_PORT:-8014}:8000
+    volumes:
+    - type: bind
+      source: ${DEEPSEEK_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    - type: bind
+      source: ${DEEPSEEK_CACHE_PATH}
+      target: /root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '0'
+            - '1'
+            - '2'
+            - '3'
+            - '4'
+            - '5'
+            capabilities:
+            - gpu
+  # Quyet-1.0-Large (bf16), two replicas served as in quyet-1.0-large-1gpu:
+  # stock vLLM v0.31.0 holds the model (internal), and an adapter answers
+  # System One with the quyet package's prompt and calibration.
+  # GPU 6: the route judge (profile_judge) only.
+  quyet-route-vllm:
+    image: ${QUYET_VLLM_IMAGE}
+    ipc: host
+    cpuset: ${QUYET_ROUTE_CPUSET}
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      VLLM_NO_USAGE_STATS: '1'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: '1'
+      # Every compile cache on NVMe and no bytecode: nothing grows the
+      # container layer on the root disk.
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      # Batch-invariant kernels: a read's answer does not depend on what else runs.
+      VLLM_BATCH_INVARIANT: "${VLLM_BATCH_INVARIANT}"
+    command:
+    - /models/quyet-1.0-large
+    - --served-model-name
+    - quyet-1.0-large
+    - --dtype
+    - bfloat16
+    # Quyet's longest prompt is 8,000 tokens; the KV cache goes to parallel reads.
+    - --max-model-len
+    - "${VLLM_MAX_MODEL_LEN}"
+    - --max-num-seqs
+    - "${VLLM_MAX_NUM_SEQS}"
+    - --gpu-memory-utilization
+    - "${VLLM_GPU_MEMORY_UTILIZATION}"
+    # The state opens every question's prompt: its prefill is read once.
+    - --enable-prefix-caching
+    # Quyet reads text only.
+    - --limit-mm-per-prompt
+    - '{"image": 0, "video": 0}'
+    - --disable-uvicorn-access-log
+    volumes:
+    - type: bind
+      source: ${QUYET_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    - type: bind
+      source: ${QUYET_ROUTE_CACHE_PATH}
+      target: /root/.cache
+    # Loopback only: the launcher's L1 probes.
+    ports:
+    - 127.0.0.1:${QUYET_ROUTE_VLLM_L1_PORT}:8000
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",
+        timeout=3)
+      interval: 5s
+      timeout: 4s
+      retries: 720
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '6'
+            capabilities:
+            - gpu
+  # Its System One adapter: the quyet package's prompt and calibration, with
+  # the forward pass read from quyet-route-vllm (quyet_systemone.py). CPU only.
+  quyet-route:
+    image: ${QUYET_SYSTEMONE_IMAGE}
+    environment:
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      QUYET_MODEL_DIR: /models/quyet-1.0-large
+      QUYET_UPSTREAM: http://quyet-route-vllm:8000
+      QUYET_UPSTREAM_MODEL: quyet-1.0-large
+      QUYET_ALIASES: quyet-latest
+      QUYET_MAX_INFLIGHT: "${QUYET_MAX_INFLIGHT}"
+      QUYET_MAX_QUEUE: "${QUYET_MAX_QUEUE}"
+      QUYET_READ_WORKERS: "${QUYET_READ_WORKERS}"
+      QUYET_MAX_QUESTIONS: "${QUYET_MAX_QUESTIONS}"
+      QUYET_PORT: '8092'
+      # No bytecode, and scratch in memory: nothing grows the container layer.
+      PYTHONDONTWRITEBYTECODE: '1'
+    tmpfs:
+    - /tmp
+    volumes:
+    - type: bind
+      source: ${QUYET_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    depends_on:
+      quyet-route-vllm:
+        condition: service_healthy
+    # Loopback only: the launcher's L1 probes and the gates' direct reads.
+    ports:
+    - 127.0.0.1:${QUYET_ROUTE_L1_PORT}:8092
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8092/health",
+        timeout=4)
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+  # GPU 7: the verified tool route's judgments and form check only.
+  quyet-judge-vllm:
+    image: ${QUYET_VLLM_IMAGE}
+    ipc: host
+    cpuset: ${QUYET_JUDGE_CPUSET}
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      VLLM_NO_USAGE_STATS: '1'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: '1'
+      # Every compile cache on NVMe and no bytecode: nothing grows the
+      # container layer on the root disk.
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      # Batch-invariant kernels: a read's answer does not depend on what else runs.
+      VLLM_BATCH_INVARIANT: "${VLLM_BATCH_INVARIANT}"
+    command:
+    - /models/quyet-1.0-large
+    - --served-model-name
+    - quyet-1.0-large
+    - --dtype
+    - bfloat16
+    # Quyet's longest prompt is 8,000 tokens; the KV cache goes to parallel reads.
+    - --max-model-len
+    - "${VLLM_MAX_MODEL_LEN}"
+    - --max-num-seqs
+    - "${VLLM_MAX_NUM_SEQS}"
+    - --gpu-memory-utilization
+    - "${VLLM_GPU_MEMORY_UTILIZATION}"
+    # The state opens every question's prompt: its prefill is read once.
+    - --enable-prefix-caching
+    # Quyet reads text only.
+    - --limit-mm-per-prompt
+    - '{"image": 0, "video": 0}'
+    - --disable-uvicorn-access-log
+    volumes:
+    - type: bind
+      source: ${QUYET_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    - type: bind
+      source: ${QUYET_JUDGE_CACHE_PATH}
+      target: /root/.cache
+    # Loopback only: the launcher's L1 probes.
+    ports:
+    - 127.0.0.1:${QUYET_JUDGE_VLLM_L1_PORT}:8000
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",
+        timeout=3)
+      interval: 5s
+      timeout: 4s
+      retries: 720
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '7'
+            capabilities:
+            - gpu
+  # Its System One adapter: the quyet package's prompt and calibration, with
+  # the forward pass read from quyet-judge-vllm (quyet_systemone.py). CPU only.
+  quyet-judge:
+    image: ${QUYET_SYSTEMONE_IMAGE}
+    environment:
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      QUYET_MODEL_DIR: /models/quyet-1.0-large
+      QUYET_UPSTREAM: http://quyet-judge-vllm:8000
+      QUYET_UPSTREAM_MODEL: quyet-1.0-large
+      QUYET_ALIASES: quyet-latest
+      QUYET_MAX_INFLIGHT: "${QUYET_MAX_INFLIGHT}"
+      QUYET_MAX_QUEUE: "${QUYET_MAX_QUEUE}"
+      QUYET_READ_WORKERS: "${QUYET_READ_WORKERS}"
+      QUYET_MAX_QUESTIONS: "${QUYET_MAX_QUESTIONS}"
+      QUYET_PORT: '8092'
+      # No bytecode, and scratch in memory: nothing grows the container layer.
+      PYTHONDONTWRITEBYTECODE: '1'
+    tmpfs:
+    - /tmp
+    volumes:
+    - type: bind
+      source: ${QUYET_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    depends_on:
+      quyet-judge-vllm:
+        condition: service_healthy
+    # Loopback only: the launcher's L1 probes and the gates' direct reads.
+    ports:
+    - 127.0.0.1:${QUYET_JUDGE_L1_PORT}:8092
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8092/health",
+        timeout=4)
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: '1'
+    image: ${KAIRYU_IMAGE:-local/kairyu:deepseek-v41-quyet-example}
+    command:
+    - /etc/kairyu/kairyu.yaml
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+    volumes:
+    - type: bind
+      source: ${PLACEMENT_LOG_PATH}
+      target: /var/lib/kairyu/placement
+    - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+    - ./verified-tool.yaml:/etc/kairyu/verified-tool.yaml:ro
+    depends_on:
+      deepseek:
+        condition: service_healthy
+      quyet-route:
+        condition: service_healthy
+      quyet-judge:
+        condition: service_healthy
+    ports:
+    - 127.0.0.1:${API_PORT:-8013}:8000
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+  # Open WebUI: kairyu-verified-tool (Quyet routes per request).
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      DEFAULT_MODELS: kairyu-verified-tool
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":262144,"stream_response":true}'
+      ENABLE_PERSISTENT_CONFIG: 'false'
+      RESET_CONFIG_ON_START: 'true'
+      ENABLE_SIGNUP: 'false'
+      ENABLE_LOGIN_FORM: 'false'
+      WEBUI_AUTH: 'false'
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3012}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: 'false'
+      ENABLE_EVALUATION_ARENA_MODELS: 'false'
+      RAG_EMBEDDING_ENGINE: ''
+    volumes:
+    - type: bind
+      source: ${WEBUI_STORAGE_PATH}
+      target: /app/backend/data
+    depends_on:
+      kairyu:
+        condition: service_healthy
+    ports:
+    - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3012}:8080
+    restart: unless-stopped

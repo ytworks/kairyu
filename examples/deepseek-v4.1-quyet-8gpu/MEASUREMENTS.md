@@ -1,10 +1,22 @@
-# deepseek-v4.1-winnow-8gpu evidence
+# deepseek-v4.1-quyet-8gpu evidence
 
 Host: 8 x RTX PRO 6000 Blackwell Server Edition (SM120), PCIe. DeepSeek-V4.1
 DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
-overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
-`winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
-(judgments only).
+overlay); two Quyet-1.0-Large replicas (stock vLLM v0.31.0 bf16 plus this
+example's System One adapter): `quyet-route` on GPU 6 (route judge only),
+`quyet-judge` on GPU 7 (judgments and form check).
+Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
+
+## Quyet layout and the rebuilt verified tool route (VCO-D21, VCO-D22)
+
+Status: GPU verification pending (plan
+`docs/superpowers/plans/2026-10-11-deepseek-v4.1-quyet-8gpu.md`).
+
+## Earlier layout: two Winnow-12B replicas (`deepseek-v4.1-winnow-8gpu`)
+
+The sections below were measured before VCO-D21, when the example was
+`deepseek-v4.1-winnow-8gpu`: two Winnow-12B Q8_0 replicas (winnow-server
+`77d1458` + f072b10), `winnow-route` on GPU 6 and `winnow-judge` on GPU 7.
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/`.
 The verified tool route: `*-20261009T07*` to `T09*` (rerun, gate log
 `gates-20261009-verified-tool-5.log`) and `*-20261009T04*` to `T06*` (gate log
