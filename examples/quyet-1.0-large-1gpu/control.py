@@ -461,85 +461,10 @@ def chat_answer_error(body: dict, *, expected: str | None = None) -> str | None:
 
 ARITHMETIC = "What is 17 * 19? Reply with only the integer."
 
-BASH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": "Run a shell command and return its output.",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string", "description": "The command to run."}},
-            "required": ["command"],
-        },
-    },
-}
 
-
-def tool_call_error(body: dict, name: str = "bash") -> str | None:
-    """Why a response is not an executable call of tool ``name``, or None."""
-
-    try:
-        choice = body["choices"][0]
-        calls = choice["message"].get("tool_calls") or []
-        arguments = json.loads(calls[0]["function"]["arguments"]) if calls else {}
-    except (KeyError, IndexError, TypeError, ValueError) as error:
-        return f"malformed tool-call response: {error}"
-    if (
-        choice.get("finish_reason") != "tool_calls"
-        or not calls
-        or calls[0]["function"].get("name") != name
-        or not isinstance(arguments, dict)
-        or not arguments
-    ):
-        return (
-            f"no executable {name} tool call (finish_reason={choice.get('finish_reason')!r}, "
-            f"tool_calls={json.dumps(calls)[:300]}, "
-            f"content={str(choice['message'].get('content'))[:120]!r})"
-        )
-    return None
-
-
-def tool_request(**overrides) -> dict:
-    payload = {
-        "model": SERVED,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an agent operating a computer shell. Use the bash tool.",
-            },
-            {"role": "user", "content": "List the files in the current directory."},
-        ],
-        "tools": [BASH_TOOL],
-        "max_tokens": 1024,
-    }
-    payload.update(overrides)
-    return payload
-
-
-# A 64x64 solid-red PNG, so readiness exercises the image path once.
-PROBE_IMAGE_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PQQkAAAgEsItz/fMY"
-    "xgi+hcEKLNO+FgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGB"
-    "ywLzk8EPlvGqjQAAAABJRU5ErkJggg=="
-)
-
-
-def image_request(
-    image_url: str, text: str = "What single color fills this image? Answer with one word."
-) -> dict:
-    return {
-        "model": SERVED,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": text},
-                ],
-            }
-        ],
-        "max_tokens": 64,
-    }
+def chat_request() -> dict:
+    messages = [{"role": "user", "content": ARITHMETIC}]
+    return {"model": SERVED, "max_tokens": 256, "messages": messages}
 
 
 SYSTEMONE_STATE = "Everything is down and we have a demo with our biggest client at noon."
@@ -589,41 +514,16 @@ def systemone_answer_error(body: dict) -> str | None:
 
 
 def validate_serving(api_url: str) -> None:
-    """Readiness: pool state, chat, a tool call, an image, and System One under every name."""
+    """Readiness: pool state, a plain chat answer, and System One under every name."""
 
     validate_ready(api_url)
-    chat = {
-        "model": SERVED,
-        "max_tokens": 256,
-        "messages": [{"role": "user", "content": ARITHMETIC}],
-    }
-    error = chat_answer_error(
-        post_json(f"{api_url}/v1/chat/completions", chat, timeout_s=600), expected="323"
-    )
+    body = post_json(f"{api_url}/v1/chat/completions", chat_request(), timeout_s=600)
+    error = chat_answer_error(body, expected="323")
     if error:
         raise SystemExit(f"chat probe: {error}")
-    error = tool_call_error(
-        post_json(f"{api_url}/v1/chat/completions", tool_request(), timeout_s=600)
-    )
-    if error:
-        raise SystemExit(f"tool-calling probe: {error}")
-    body = post_json(
-        f"{api_url}/v1/chat/completions",
-        image_request(f"data:image/png;base64,{PROBE_IMAGE_PNG_BASE64}"),
-        timeout_s=600,
-    )
-    error = chat_answer_error(body)
-    if error is None and not re.search(
-        r"\bred\b", body["choices"][0]["message"]["content"], re.IGNORECASE
-    ):
-        content = body["choices"][0]["message"]["content"]
-        error = f"the answer does not name the image's color: {content[:80]!r}"
-    if error:
-        raise SystemExit(f"image probe: {error}")
     for name in (SYSTEMONE["model"], *SYSTEMONE["aliases"]):
-        error = systemone_answer_error(
-            post_json(f"{api_url}/v1/systemone", systemone_request(model=name), timeout_s=120)
-        )
+        body = post_json(f"{api_url}/v1/systemone", systemone_request(model=name), timeout_s=120)
+        error = systemone_answer_error(body)
         if error:
             raise SystemExit(f"System One probe ({name}): {error}")
 

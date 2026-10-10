@@ -184,9 +184,6 @@ def test_served_config_matches_example_json():
     assert options["model_revision"] == spec["model"]["revision"]
     assert options["max_model_len"] == spec["vllm"]["settings"]["VLLM_MAX_MODEL_LEN"]
     assert options["container_image_digest"] == spec["vllm"]["image_id"]
-    assert (
-        options["image_input_policy"]["max_images"] == spec["vllm"]["settings"]["VLLM_MAX_IMAGES"]
-    )
 
 
 def test_reference_comparison_catches_a_flipped_decision(monkeypatch):

@@ -14,6 +14,10 @@ services:
       VLLM_NO_USAGE_STATS: "1"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       SAFETENSORS_FAST_GPU: "1"
+      # Every compile cache on NVMe, none in the container layer on the root disk.
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
     volumes:
       - type: bind
         source: ${MODEL_STORAGE_PATH}
@@ -35,12 +39,11 @@ services:
       - --gpu-memory-utilization
       - "${VLLM_GPU_MEMORY_UTILIZATION}"
       - --enable-prefix-caching
+      # Text only: like Jev, Quyet reads text, and the chat side serves the
+      # playground's plain answers (no images, no tool calls).
       - --limit-mm-per-prompt
       - '{"image": ${VLLM_MAX_IMAGES}, "video": 0}'
-      # Gemma 4's own tool-call and thought formats (the checkpoint's template).
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - gemma4
+      # A thought the model opens on its own goes to reasoning_content.
       - --reasoning-parser
       - gemma4
       # The checkpoint's generation_config.json (temperature 1.0, top_k 64,

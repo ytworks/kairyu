@@ -2,8 +2,8 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
-  # Chat generations at once. vLLM runs up to 64 sequences, so the System One
-  # reads (QUYET_READ_WORKERS = 32 in flight) always have room beside chat.
+  # Chat generations at once (text only). vLLM runs up to 64 sequences, so the
+  # System One reads (QUYET_READ_WORKERS = 32 in flight) always have room.
   max_concurrency: 8
   admission_wait_timeout_s: 600
   max_chat_body_bytes: 33554432
@@ -19,21 +19,9 @@ pools:
         api_key_env: null
         timeout_s: 1800
         upstream: vllm
-        capabilities:
-          allow_prompt_kinds:
-          - multimodal
-        image_input_policy:
-          max_images: 4
-          max_image_bytes: 8388608
-          max_total_image_bytes: 16777216
-          max_image_pixels: 4194304
-          max_total_image_pixels: 16777216
-          max_image_dimension: 4096
-          max_image_aspect_ratio: 200
-          max_processed_prompt_tokens: 65536
         container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
         model_revision: 9a0f051112ba4301f6e4c8b87fc088ce00b11aae
-        max_model_len: 65536
+        max_model_len: 32768
         quantization_format: bf16
         tensor_parallel_size: 1
     unhealthy_after: 1

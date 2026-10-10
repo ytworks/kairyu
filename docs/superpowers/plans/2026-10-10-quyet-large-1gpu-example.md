@@ -71,26 +71,33 @@ Tests: `tests/unit/test_quyet_1gpu_example.py`; one entry in the example list of
 Quyet one-GPU amendment in `docs/design/frontier-native-runtime.md`,
 `PROGRESS.md`.
 
-## Verification
+## Verification (rebuilt 2026-10-10)
 
-CPU: ruff and the changed tests only. Tests cover the adapter's refusals
-(unsupported options, 11 options, wrong shape) and overload (529) against a fake
-vLLM, and that Kairyu's System One forwarding bound stays at or below what the
-adapter accepts. Base/head collection counts are reported.
+The first gate list checked chat features (tool calls, images, chat throughput).
+That is not how a Jev-family model is used, and the decision fine-tune does not
+write Gemma 4 tool calls. On the owner's instruction the gates were rebuilt from
+TypeSafe's documentation (docs.typesafe.ai): a System One model is a decision API
+for software, with typed answers, calibrated probabilities, many questions per call,
+consistent answers and an official SDK; JevBench is the independent benchmark for
+Jev-compatible systems (Quyet-1.0-Large is first on its open-weights board).
+Chat stays plain text for the playground; tools and images are not offered.
 
-GPU gates, in order; stop and report at the first failure (about 50 minutes
-after the download):
+CPU: ruff and the changed tests only (adapter refusals and overload against a fake
+vLLM, the kairyu.yaml / example.json contract, the parity comparison).
+
+GPU gates, in order; stop and report at the first failure:
 
 | Gate | Claim | Pass criteria |
 |---|---|---|
-| `reference` | official answers exist | before the stack starts, the `quyet` CLI (transformers, GPU) answers the 48 requests of `systemone-reference.jsonl` |
-| `attest` | the pinned stack runs | vLLM version and image, every checkpoint file hash, served name, context, generation defaults, `quyet` version, temperatures, adapter image ID match `example.json` |
-| `systemone` | Kairyu's answers match the official package | per request identical `usage.input_tokens` and `truncated` flags; same top option wherever the official top-two gap is at least 0.05; absolute probability difference median <= 0.005 and max <= 0.06; aliases and error shapes through Kairyu |
-| `tool-calling` | chat tools work | auto, named, tool-result turn and streamed calls |
-| `vision` | chat reads images | PNG and WebP colors named correctly |
-| `serving` | chat completes under load | 1K-in / 256-out (`ignore_eos`) at c1/4/8, 32 requests each, all complete |
-| `systemone-serving` | decisions are fast | cache-busted 1K-token states, 3 questions, c1/16/32/64, all valid; c1 p50 <= 1.0 s |
-| `systemone-isolation` | a decision burst does not break chat | 640 reads with 8 chats: reads only 200 or 429, chats answer correctly, the chat replica stays healthy |
+| `reference` | official answers exist | stack down; the `quyet` CLI (transformers, GPU) answers the 48 authored requests and JevBench's 231 public items (pinned revision, hash-checked) |
+| `attest` | the pinned stack runs | images, checkpoint re-hash, vLLM settings and version, sampling defaults, context rule, adapter calibration, Kairyu model lists |
+| `systemone` | Kairyu's answers are the official package's | all 279: same input tokens and truncation; same top option where the official top-two gap is >= 0.05; probability difference median <= 0.005, max <= 0.06; aliases; error shapes |
+| `jevbench` | Jev-standard quality and speed | JevBench's runner (typesafe adapter, sequential) on Kairyu: 100 % valid; per split correct within 1 item of official, Brier and ECE within 0.01; p50 <= 0.5 s |
+| `fanout` | many questions per call | 1/8/32 questions on one 1K-token state all answered; 32 questions <= 4x one |
+| `consistency` | same request, same answer | 10 alone + 10 under load: top answers stable, probabilities within 0.01 |
+| `sdk` | the official client works | typesafe-sdk 0.7.4: typed answers under jev-latest / quyet-latest / full name; 11 options -> TypeSafeBadRequestError |
+| `systemone-serving` | bulk decisions | states ~50/2,000/6,000 tokens, 3 questions, c1/16/32/64 x 64: all answered; req/s, p50/p95 |
+| `systemone-isolation` | a decision burst does not break chat | 640 reads + 8 chats: reads 200 or 429 only, chats answer, replica healthy |
 
 ## Checklist
 

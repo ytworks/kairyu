@@ -6,7 +6,7 @@
 |---|---|---|
 | [`qwen3.8-27b-1gpu`](qwen3.8-27b-1gpu/README.md) | one selected RTX PRO 6000 Blackwell | official FP8, 262,144 tokens |
 | [`openjev-diffusiongemma-26b-1gpu`](openjev-diffusiongemma-26b-1gpu/README.md) | OpenJev (DiffusionGemma 26B-A4B NVFP4 on vLLM), one replica on one selected RTX PRO 6000 Blackwell | text + image, OpenAI tools, every answer thinks first (fixed 512-token thought); ReplicaPool/API/UI structure |
-| [`quyet-1.0-large-1gpu`](quyet-1.0-large-1gpu/README.md) | Quyet-1.0-Large (Gemma-4-31B-it decision fine-tune, bf16) on vLLM, one selected RTX PRO 6000 Blackwell | calibrated typed decisions on `/v1/systemone` (the `quyet` package's prompt and calibration, read on the same vLLM) plus text + image chat with OpenAI tools; Jev-style playground |
+| [`quyet-1.0-large-1gpu`](quyet-1.0-large-1gpu/README.md) | Quyet-1.0-Large (Gemma-4-31B-it decision fine-tune, bf16) on vLLM, one selected RTX PRO 6000 Blackwell | calibrated typed decisions on `/v1/systemone` (the `quyet` package's prompt and calibration, read on the same vLLM), verified with JevBench and TypeSafe's SDK; plain text chat; Jev-style playground |
 | [`deepseek-v4-flash-0731-8gpu`](deepseek-v4-flash-0731-8gpu/README.md) | TP8 + EP8 on eight RTX PRO 6000 Blackwell cards | mixed FP4/FP8, 1,048,576 tokens |
 | [`qwen3.8-deepseek-v4-8gpu`](qwen3.8-deepseek-v4-8gpu/README.md) | Qwen TP1 x 4 replicas + DeepSeek TP4/EP4 | Qwen-judged five-route Kairyu L2 (four direct routes + verifier-gated ensemble DAG) |
 | [`qwen3.8-deepseek-v4.1-8gpu`](qwen3.8-deepseek-v4.1-8gpu/README.md) | DeepSeek-V4.1 DP6/EP6 (GPU 0-5) + Qwen TP1 x 2 replicas (GPU 6, 7) | the same judged five-route L2 with native image input on every route (no Qwen image-description stage) |

@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""GPU verification gates for Quyet-1.0-Large on one GPU (vLLM chat + System One adapter)."""
+"""GPU verification gates for Quyet-1.0-Large on one GPU, built around how Jev is used.
+
+A System One model is a decision API for software (docs.typesafe.ai): typed questions
+about a state, calibrated probabilities, many questions per call, consistent answers,
+called through TypeSafe's SDK. The gates check those properties through Kairyu, against
+the quyet package's own run and JevBench, the independent benchmark for Jev-compatible
+systems. The chat side is only the playground's plain answer and is checked as such.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import concurrent.futures
 import hashlib
+import io
 import json
 import math
 import os
@@ -15,11 +22,11 @@ import re
 import statistics
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -30,24 +37,27 @@ import control  # noqa: E402
 
 SPEC = control.SPEC
 RESULTS_ROOT = ROOT / "verification/results/examples" / SPEC["environment"]
-PYTHON = str(ROOT / ".venv/bin/python")
 SERVED = control.SERVED
 SYSTEMONE = control.SYSTEMONE
-DATASET = HERE / SPEC["verification"]["reference"]["dataset"]
+CHECKS = SPEC["verification"]
+AUTHORED = HERE / CHECKS["reference"]["dataset"]
+REFERENCE_REQUESTS = "reference-requests.jsonl"
 REFERENCE_ANSWERS = "reference-answers.jsonl"
 SERVED_CONFIG_FILES = ("compose.yaml", "kairyu.yaml", "example.json", "quyet_systemone.py")
-WEATHER_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a city.",
-        "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string", "description": "City name"}},
-            "required": ["city"],
-        },
+FANOUT_QUESTIONS = [
+    {"type": "noul", "instructions": "The customer is asking for a refund."},
+    {"type": "noul", "instructions": "The customer mentions a deadline."},
+    {
+        "type": "choice",
+        "instructions": "Which team should handle it?",
+        "criteria": {"outage": "service down", "billing": "charges", "feature": "how-to"},
     },
-}
+    {
+        "type": "score",
+        "instructions": "How upset is the customer?",
+        "criteria": ["calm", "annoyed", "furious"],
+    },
+]
 
 
 def _api() -> str:
@@ -60,6 +70,14 @@ def _vllm() -> str:
 
 def _adapter() -> str:
     return f"http://127.0.0.1:{SYSTEMONE['host_port']}"
+
+
+def _scratch() -> Path:
+    """Large, disposable verification files live on NVMe, never on the root disk."""
+
+    path = control.environment_storage() / "bench-tmp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _http(method: str, url: str, payload: object | None = None, timeout: float = 900.0):
@@ -82,23 +100,27 @@ def _json(method: str, url: str, payload: object | None = None, timeout: float =
         return status, body, headers
 
 
-def _run(command: list[str], *, log: Path, stdout: Path | None = None) -> int:
+def _systemone(payload: dict, timeout: float = 300):
+    return _json(
+        "POST", f"{_api()}/v1/systemone", {"model": SYSTEMONE["model"], **payload}, timeout
+    )
+
+
+def _run(command: list[str], *, log: Path, stdout: Path | None = None, env=None) -> int:
     print("+ " + " ".join(command[:6]) + (" ..." if len(command) > 6 else ""), flush=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as errors:
         if stdout is None:
             return subprocess.run(
-                command, cwd=ROOT, text=True, stdout=errors, stderr=subprocess.STDOUT
+                command, cwd=ROOT, text=True, stdout=errors, stderr=subprocess.STDOUT, env=env
             ).returncode
         with stdout.open("w", encoding="utf-8") as out:
             return subprocess.run(
-                command, cwd=ROOT, text=True, stdout=out, stderr=errors
+                command, cwd=ROOT, text=True, stdout=out, stderr=errors, env=env
             ).returncode
 
 
-def _report(
-    run_dir: Path, gate: str, cases: dict[str, str | None], extra: dict | None = None
-) -> int:
+def _report(run_dir: Path, gate: str, cases: dict[str, str | None], extra: dict | None = None):
     failed = {name: error for name, error in cases.items() if error}
     record = {"gate": gate, "cases": cases, "passed": not failed, **(extra or {})}
     (run_dir / f"{gate}.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -107,23 +129,110 @@ def _report(
     return 1 if failed else 0
 
 
-def _dataset_sha256() -> str:
-    return hashlib.sha256(DATASET.read_bytes()).hexdigest()
+def _nearest_rank(values: list[float], fraction: float) -> float | None:
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)] if ordered else None
 
 
-def _dataset() -> list[dict]:
-    return [
-        json.loads(line)
-        for line in DATASET.read_text(encoding="utf-8").splitlines()
+# --- JevBench --------------------------------------------------------------------------------
+
+
+def jevbench_checkout() -> Path:
+    """JevBench at the pinned revision, on NVMe, with its public splits hash-checked."""
+
+    config = CHECKS["jevbench"]
+    target = _scratch() / f"jevbench-{config['revision'][:12]}"
+    if not (target / "jevbench").is_dir():
+        url = f"https://codeload.github.com/fstandhartinger/jevbench/tar.gz/{config['revision']}"
+        with urllib.request.urlopen(url, timeout=120) as response:
+            archive = response.read()
+        staging = target.with_suffix(".partial")
+        staging.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+            bundle.extractall(staging, filter="data")
+        (root,) = staging.iterdir()
+        root.rename(target)
+        staging.rmdir()
+    for name, split in config["splits"].items():
+        digest = hashlib.sha256((target / split["path"]).read_bytes()).hexdigest()
+        if digest != split["sha256"]:
+            raise RuntimeError(f"JevBench {name} split hash {digest} differs from example.json")
+    return target
+
+
+def _jevbench_modules(checkout: Path):
+    if str(checkout) not in sys.path:
+        sys.path.insert(0, str(checkout))
+    from jevbench import scoring, summarize, tasks
+    from jevbench.adapters.base import build_question
+
+    return tasks, scoring, summarize, build_question
+
+
+def _jevbench_tasks(checkout: Path) -> dict[str, list]:
+    tasks, _, _, _ = _jevbench_modules(checkout)
+    return {
+        name: tasks.load_jsonl(str(checkout / split["path"]))
+        for name, split in CHECKS["jevbench"]["splits"].items()
+    }
+
+
+def _reference_requests(checkout: Path) -> list[dict]:
+    """The authored edge cases, then every public JevBench item as its typesafe adapter asks it."""
+
+    _, _, _, build_question = _jevbench_modules(checkout)
+    rows = [
+        {"id": f"authored-{index}", **json.loads(line)}
+        for index, line in enumerate(AUTHORED.read_text(encoding="utf-8").splitlines())
         if line.strip()
     ]
+    for name, items in _jevbench_tasks(checkout).items():
+        for task in items:
+            rows.append(
+                {
+                    "id": f"jevbench-{name}:{task.id}",
+                    "state": task.state,
+                    "questions": {"decision": build_question(task)},
+                }
+            )
+    return rows
 
 
-# --- reference -----------------------------------------------------------------------------
+def _probabilities(answer: dict) -> dict[str, float]:
+    """JevBench's typesafe adapter mapping: noul -> yes/no, choice and score as returned."""
+
+    if answer["type"] == "noul":
+        return {"yes": float(answer["noul"]), "no": 1.0 - float(answer["noul"])}
+    return {key: float(value) for key, value in answer["probabilities"].items()}
+
+
+def _official_records(checkout: Path, items: list, answers: dict[str, dict], split: str):
+    """The official package's answers, scored by JevBench's own scorer."""
+
+    _, scoring, _, _ = _jevbench_modules(checkout)
+    records = []
+    for task in items:
+        answer = answers[f"jevbench-{split}:{task.id}"]["answers"]["decision"]
+        scored = scoring.score_task(_probabilities(answer), task)
+        records.append(
+            {
+                "task_id": task.id, "family": task.family, "split": task.split,
+                "group": task.group, "ok": True, "valid": scored["valid"],
+                "correct": scored["correct"], "predicted": scored.get("predicted"),
+                "probs": scored.get("probs"), "strict_valid": scored.get("strict_valid", False),
+                "renormalized": scored.get("renormalized", False), "latency_s": None,
+                "cost_usd": None, "cost_basis": "official_package_reference",
+                "probs_source": "native", "model": "quyet-package",
+            }
+        )  # fmt: skip
+    return records
+
+
+# --- reference -------------------------------------------------------------------------------
 
 
 def reference(run_dir: Path) -> int:
-    """The official package (transformers, bf16, GPU) answers the reference set, stack down."""
+    """The official package (transformers, bf16, GPU) answers every reference request."""
 
     env = control.compose_env()
     if control._vllm_holds(int(env["GPU_ID"])):
@@ -132,57 +241,65 @@ def reference(run_dir: Path) -> int:
     row = control.selected_gpu(env, allow_own=False)
     control.ensure_images()
     control.ensure_model(env)
-    work = run_dir / "reference"
+    requests = _reference_requests(jevbench_checkout())
+    work = _scratch() / f"reference-{run_dir.name}"
     work.mkdir(parents=True, exist_ok=True)
-    (work / DATASET.name).write_bytes(DATASET.read_bytes())
+    (work / REFERENCE_REQUESTS).write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests), encoding="utf-8"
+    )
+    (run_dir / REFERENCE_REQUESTS).write_bytes((work / REFERENCE_REQUESTS).read_bytes())
+    cpus = control._node_cpulist(control.numa_node(str(row["pci_bus_id"])))
     started = time.perf_counter()
     code = _run(
-        ["docker", "run", "--rm", "--gpus", f"device={env['GPU_ID']}",
-         "--cpuset-cpus", control._node_cpulist(control.numa_node(str(row["pci_bus_id"]))),
+        ["docker", "run", "--rm", "--gpus", f"device={env['GPU_ID']}", "--cpuset-cpus", cpus,
          "--env", "HF_HUB_OFFLINE=1", "--volume", f"{env['MODEL_STORAGE_PATH']}:/models:ro",
          "--volume", f"{work}:/work:ro", "--entrypoint", "python3", env["QUYET_SYSTEMONE_IMAGE"],
          "-m", "quyet", "predict", f"/models/{SPEC['model']['slug']}",
-         "--input", f"/work/{DATASET.name}", "--device", "cuda"],
+         "--input", f"/work/{REFERENCE_REQUESTS}", "--device", "cuda"],
         log=run_dir / "reference.log",
         stdout=run_dir / REFERENCE_ANSWERS,
     )  # fmt: skip
     wall = time.perf_counter() - started
     lines = (run_dir / REFERENCE_ANSWERS).read_text(encoding="utf-8").splitlines()
     answers = [json.loads(line) for line in lines if line.strip()]
-    expected = len(_dataset())
     errors = [answer["error"] for answer in answers if "error" in answer]
     cases = {
         "exit": None if code == 0 else f"exit {code} (see reference.log)",
         "answers": None
-        if len(answers) == expected and not errors
-        else f"{len(answers)}/{expected}, errors {errors[:3]}",
+        if len(answers) == len(requests) and not errors
+        else f"{len(answers)}/{len(requests)}, errors {errors[:3]}",
         "truncation_exercised": None
         if any(answer.get("warnings") for answer in answers)
         else "no request was truncated",
     }
-    return _report(
-        run_dir, "reference", cases, {"dataset_sha256": _dataset_sha256(), "wall_s": wall}
-    )
+    extra = {"requests": len(requests), "wall_s": wall, "jevbench": CHECKS["jevbench"]["revision"]}
+    return _report(run_dir, "reference", cases, extra)
 
 
-def _reference_answers(run_dir: Path) -> tuple[list[dict], Path]:
-    """This run's reference answers, else the newest earlier run's for the same dataset."""
+def _reference(run_dir: Path) -> tuple[list[dict], dict[str, dict], Path]:
+    """This run's reference, else the newest passed one for the same request set."""
 
+    expected = [r["id"] for r in _reference_requests(jevbench_checkout())]
     candidates = [run_dir] + sorted(
-        (path for path in RESULTS_ROOT.iterdir() if path.is_dir() and path != run_dir), reverse=True
+        (path for path in RESULTS_ROOT.iterdir() if path.is_dir() and path != run_dir),
+        reverse=True,
     )
     for candidate in candidates:
-        record = candidate / "reference.json"
-        if not record.exists():
+        record, requests_file = candidate / "reference.json", candidate / REFERENCE_REQUESTS
+        if not record.exists() or not requests_file.exists():
             continue
-        meta = json.loads(record.read_text())
-        if meta.get("passed") and meta.get("dataset_sha256") == _dataset_sha256():
-            lines = (candidate / REFERENCE_ANSWERS).read_text(encoding="utf-8").splitlines()
-            return [json.loads(line) for line in lines if line.strip()], candidate
-    raise RuntimeError("no passed reference run for this dataset; run `verify.sh reference` first")
+        if not json.loads(record.read_text()).get("passed"):
+            continue
+        requests = [json.loads(line) for line in requests_file.read_text().splitlines() if line]
+        if [r["id"] for r in requests] != expected:
+            continue
+        lines = (candidate / REFERENCE_ANSWERS).read_text(encoding="utf-8").splitlines()
+        answers = [json.loads(line) for line in lines if line.strip()]
+        return requests, dict(zip(expected, answers, strict=True)), candidate
+    raise RuntimeError("no passed reference run for this request set; run `verify.sh reference`")
 
 
-# --- attest --------------------------------------------------------------------------------
+# --- attest ----------------------------------------------------------------------------------
 
 
 def _container(name: str) -> dict:
@@ -235,9 +352,9 @@ def attest(run_dir: Path) -> int:
         ["docker", "logs", control.VLLM_CONTAINER], capture_output=True, text=True
     )
     text = logs.stdout + logs.stderr
-    (run_dir / "vllm.log").write_text(text, encoding="utf-8")
+    (_scratch() / f"vllm-{run_dir.name}.log").write_text(text, encoding="utf-8")
     defaults = SPEC["model"]["generation_defaults"]
-    sampling = re.findall(r"default (?:chat )?sampling params from model: (\{.*\})", text)
+    sampling = re.findall(r"generation_config\.json`: `(\{[^`]*\})`", text)
     cases["generation_defaults"] = (
         None
         if sampling
@@ -249,11 +366,13 @@ def attest(run_dir: Path) -> int:
     )
     kv_tokens = re.findall(r"GPU KV cache size: ([\d,]+) tokens", text)
     capacity = float(concurrency[-1][1]) if concurrency else None
-    # The plan's context rule: 65,536 only while the KV cache holds 8 such sequences.
-    cases["kv_capacity"] = (
+    tokens = int(kv_tokens[-1].replace(",", "")) if kv_tokens else None
+    # The plan's context rule: 65,536 while the KV cache holds 8 such sequences, else 32,768.
+    chosen = None if tokens is None else (65536 if tokens / 65536 >= 8 else 32768)
+    cases["context_rule"] = (
         None
-        if capacity is not None and capacity >= 8
-        else f"{capacity}x at {settings['VLLM_MAX_MODEL_LEN']} tokens"
+        if chosen == int(settings["VLLM_MAX_MODEL_LEN"])
+        else f"KV cache {tokens} tokens selects {chosen}, served {settings['VLLM_MAX_MODEL_LEN']}"
     )
     status, health, _ = _json("GET", f"{_adapter()}/health")
     health = health if isinstance(health, dict) else {}
@@ -297,14 +416,14 @@ def attest(run_dir: Path) -> int:
     extra = {
         "vllm_image": vllm["Image"],
         "systemone_image": adapter["Image"],
-        "kv_cache_tokens": kv_tokens[-1] if kv_tokens else None,
+        "kv_cache_tokens": tokens,
         "max_concurrency_at_context": capacity,
         "adapter_health": health,
     }
     return _report(run_dir, "attest", cases, extra)
 
 
-# --- systemone -----------------------------------------------------------------------------
+# --- systemone: the official package's answers -----------------------------------------------
 
 
 def _distribution(answer: dict) -> dict[str, float]:
@@ -343,37 +462,32 @@ def compare_answers(official: dict, served: dict, margin: float) -> tuple[list[f
 
 
 def systemone(run_dir: Path) -> int:
-    """Kairyu's System One answers vs the official package, plus names and error shapes."""
+    """Kairyu's System One answers vs the official package on every reference request, plus
+    the model names and the error shapes TypeSafe documents."""
 
-    config = SPEC["verification"]["reference"]
-    official, source = _reference_answers(run_dir)
-    requests = _dataset()
+    config = CHECKS["reference"]
+    requests, official, source = _reference(run_dir)
     cases: dict[str, str | None] = {}
-    served_rows, diffs, problems = [], [], []
 
     def read(row):
-        return _json(
-            "POST", f"{_api()}/v1/systemone", {"model": SYSTEMONE["model"], **row}, timeout=300
-        )
+        return _systemone({"state": row["state"], "questions": row["questions"]})
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(read, requests))
-    for index, ((status, body, headers), expected) in enumerate(
-        zip(results, official, strict=True)
-    ):
-        served_rows.append(
-            {"status": status, "body": body, "server_timing": headers.get("server-timing")}
-        )
+    served_rows, diffs, problems = [], [], []
+    for row, (status, body, headers) in zip(requests, results, strict=True):
+        served_rows.append({"id": row["id"], "status": status, "body": body,
+                            "server_timing": headers.get("server-timing")})  # fmt: skip
         if status != 200 or not isinstance(body, dict):
-            problems.append(f"request {index}: HTTP {status} {str(body)[:200]}")
+            problems.append(f"{row['id']}: HTTP {status} {str(body)[:200]}")
             continue
         row_diffs, row_problems = compare_answers(
-            expected, body, float(config["top_choice_margin"])
+            official[row["id"]], body, float(config["top_choice_margin"])
         )
         diffs.extend(row_diffs)
-        problems.extend(f"request {index}: {problem}" for problem in row_problems)
+        problems.extend(f"{row['id']}: {problem}" for problem in row_problems)
     (run_dir / "systemone-served.jsonl").write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in served_rows), encoding="utf-8"
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in served_rows), encoding="utf-8"
     )
     median = statistics.median(diffs) if diffs else math.inf
     worst = max(diffs) if diffs else math.inf
@@ -390,237 +504,124 @@ def systemone(run_dir: Path) -> int:
     )
     cases["server_timing"] = (
         None
-        if all(row["server_timing"] for row in served_rows if row["status"] == 200)
+        if all(r["server_timing"] for r in served_rows if r["status"] == 200)
         else "missing Server-Timing"
     )
     probe = {"state": control.SYSTEMONE_STATE, "questions": control.SYSTEMONE_QUESTIONS}
     for name in SYSTEMONE["aliases"]:
         status, body, _ = _json("POST", f"{_api()}/v1/systemone", {"model": name, **probe})
-        error = control.systemone_answer_error(body) if status == 200 else f"HTTP {status}"
-        cases[f"alias_{name}"] = error
+        cases[f"alias_{name}"] = (
+            control.systemone_answer_error(body) if status == 200 else f"HTTP {status}"
+        )
     eleven = {f"o{i}": None for i in range(11)}
     refusals = {
         "eleven_options": (
-            {"q": {"type": "choice", "instructions": "Pick one.", "criteria": eleven}},
-            {},
-            400,
+            {"q": {"type": "choice", "instructions": "Pick.", "criteria": eleven}}, {}, 400
         ),
         "images": (control.SYSTEMONE_QUESTIONS, {"images": ["data:image/png;base64,AAAA"]}, 400),
         "think": (control.SYSTEMONE_QUESTIONS, {"think": 64}, 400),
         "unknown_type": ({"q": {"type": "rank", "instructions": "x"}}, {}, 400),
-        "wrong_shape": ("not an object", {}, 422),
-    }
+        "malformed": ("not an object", {}, 422),
+    }  # fmt: skip
     for case, (questions, options, expected) in refusals.items():
-        payload = {
-            "model": SYSTEMONE["model"],
-            "state": "Hello.",
-            "questions": questions,
-            **options,
-        }
-        status, body, _ = _json("POST", f"{_api()}/v1/systemone", payload)
-        shape_ok = isinstance(body, dict) and "detail" in body
+        status, body, _ = _systemone({"state": "Hello.", "questions": questions, **options})
+        shaped = isinstance(body, dict) and "detail" in body
         cases[f"refuses_{case}"] = (
-            None if status == expected and shape_ok else f"HTTP {status} {str(body)[:200]}"
+            None if status == expected and shaped else f"HTTP {status} {str(body)[:200]}"
         )
     status, body, _ = _json("POST", f"{_api()}/v1/systemone", {**probe, "model": "no-such-model"})
     cases["refuses_unknown_model"] = None if status == 400 else f"HTTP {status} {str(body)[:200]}"
-    status, body, _ = _json(
-        "POST", f"{_api()}/v1/systemone", {"model": SYSTEMONE["model"], **probe}
-    )
+    status, body, _ = _systemone(probe)
     cases["reads_after_refusals"] = (
         control.systemone_answer_error(body) if status == 200 else f"HTTP {status}"
     )
-    extra = {
-        "reference_run": source.name,
-        "probabilities_compared": len(diffs),
-        "median_abs_diff": median,
-        "max_abs_diff": worst,
-    }
+    extra = {"reference_run": source.name, "requests": len(requests),
+             "probabilities_compared": len(diffs), "median_abs_diff": median,
+             "max_abs_diff": worst}  # fmt: skip
     print(f"compared {len(diffs)} probabilities: median {median:.5f}, max {worst:.5f}")
     return _report(run_dir, "systemone", cases, extra)
 
 
-# --- chat ----------------------------------------------------------------------------------
+# --- jevbench --------------------------------------------------------------------------------
 
 
-def _chat(payload: dict, timeout: float = 600):
-    return _json("POST", f"{_api()}/v1/chat/completions", {"model": SERVED, **payload}, timeout)
+def _headline(summary: dict) -> dict:
+    """The numbers the gate compares; JevBench reports ECE with its bins."""
+
+    ece = summary.get("ece")
+    return {**summary, "ece": ece.get("ece") if isinstance(ece, dict) else ece}
 
 
-def _weather_call_error(status: int, body: object) -> str | None:
-    if status != 200 or not isinstance(body, dict):
-        return f"HTTP {status}: {str(body)[:200]}"
-    message = body["choices"][0]["message"]
-    calls = message.get("tool_calls") or []
-    if not calls or calls[0]["function"]["name"] != "get_weather":
-        return f"expected a get_weather call, got {json.dumps(message)[:300]}"
-    try:
-        arguments = json.loads(calls[0]["function"]["arguments"])
-    except (TypeError, ValueError):
-        return "tool arguments are not JSON"
-    return None if isinstance(arguments.get("city"), str) else f"arguments {arguments}"
+def jevbench(run_dir: Path) -> int:
+    """JevBench's own runner against Kairyu (typesafe adapter, one request at a time, as the
+    board measures), scored beside the official package's answers on the same items."""
 
-
-def _stream_weather_call_error(status: int, sse: str) -> str | None:
-    """Assemble streamed tool-call deltas the way an OpenAI client does."""
-
-    if status != 200:
-        return f"HTTP {status}: {sse[-300:]}"
-    events = [line[5:].strip() for line in sse.splitlines() if line.startswith("data:")]
-    if not events or events[-1] != "[DONE]":
-        return f"stream did not end with [DONE]: {sse[-300:]}"
-    calls: dict[int, dict[str, str]] = {}
-    finish_reason = None
-    for event in events[:-1]:
-        try:
-            chunk = json.loads(event)
-            if "error" in chunk:
-                return f"stream error: {event[:300]}"
-            for choice in chunk.get("choices") or []:
-                finish_reason = choice.get("finish_reason") or finish_reason
-                for delta in (choice.get("delta") or {}).get("tool_calls") or []:
-                    call = calls.setdefault(delta["index"], {"name": "", "arguments": ""})
-                    function = delta.get("function") or {}
-                    call["name"] += function.get("name") or ""
-                    call["arguments"] += function.get("arguments") or ""
-        except (AttributeError, KeyError, TypeError, ValueError):
-            return f"malformed stream chunk: {event[:300]}"
-    if finish_reason != "tool_calls":
-        return f"finish_reason {finish_reason!r}, tool calls {calls}"
-    message = {"tool_calls": [{"function": calls[index]} for index in sorted(calls)]}
-    return _weather_call_error(200, {"choices": [{"message": message}]})
-
-
-def tool_calling(run_dir: Path) -> int:
-    """OpenAI tool calls through Kairyu: auto, named, a tool-result turn and a stream."""
-
-    ask = [{"role": "user", "content": "What is the weather in Paris right now? Use the tool."}]
+    config = CHECKS["jevbench"]
+    checkout = jevbench_checkout()
+    _, _, summarize, _ = _jevbench_modules(checkout)
+    _, official, source = _reference(run_dir)
+    all_tasks = _jevbench_tasks(checkout)
+    out = run_dir / "jevbench"
+    out.mkdir(exist_ok=True)
+    raw = _scratch() / f"jevbench-raw-{run_dir.name}"
+    env = {**os.environ, "PYTHONPATH": str(checkout)}
     cases: dict[str, str | None] = {}
-    status, body, _ = _chat({"messages": ask, "tools": [WEATHER_TOOL], "max_tokens": 512})
-    cases["auto"] = _weather_call_error(status, body)
-    status, body, _ = _chat({
-        "messages": ask, "tools": [WEATHER_TOOL], "max_tokens": 512,
-        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
-    })  # fmt: skip
-    cases["named"] = _weather_call_error(status, body)
-    turn = ask + [
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "call_1", "type": "function",
-             "function": {"name": "get_weather", "arguments": json.dumps({"city": "Paris"})}}]},
-        {"role": "tool", "tool_call_id": "call_1",
-         "content": json.dumps({"city": "Paris", "temp_c": 17, "sky": "rain"})},
-    ]  # fmt: skip
-    status, body, _ = _chat({"messages": turn, "tools": [WEATHER_TOOL], "max_tokens": 512})
-    if status != 200 or not isinstance(body, dict):
-        cases["result_turn"] = f"HTTP {status}: {str(body)[:200]}"
-    else:
-        content = body["choices"][0]["message"].get("content") or ""
-        cases["result_turn"] = (
-            None if "17" in content else f"answer does not use the tool result: {content[:200]!r}"
-        )
-    status, sse, _ = _http(
-        "POST",
-        f"{_api()}/v1/chat/completions",
-        {
-            "model": SERVED,
-            "messages": ask,
-            "tools": [WEATHER_TOOL],
-            "max_tokens": 512,
-            "stream": True,
-        },
-    )
-    cases["stream"] = _stream_weather_call_error(status, sse)
-    return _report(run_dir, "tool-calling", cases)
-
-
-def _image_url(fmt: str, color: tuple[int, int, int]) -> str:
-    from PIL import Image
-
-    output = BytesIO()
-    Image.new("RGB", (256, 256), color).save(output, format=fmt)
-    mime = {"PNG": "image/png", "WEBP": "image/webp"}[fmt]
-    return f"data:{mime};base64,{base64.b64encode(output.getvalue()).decode()}"
-
-
-def vision(run_dir: Path) -> int:
-    """Image chat through Kairyu: a PNG and a WebP image."""
-
-    cases: dict[str, str | None] = {}
-    for fmt, color, word in (("PNG", (220, 20, 20), "red"), ("WEBP", (20, 60, 220), "blue")):
-        status, body, _ = _chat(
-            control.image_request(_image_url(fmt, color)) | {"temperature": 0.0}
-        )
-        if status != 200 or not isinstance(body, dict):
-            cases[fmt.lower()] = f"HTTP {status}: {str(body)[:200]}"
-            continue
-        answer = body["choices"][0]["message"].get("content") or ""
-        usage = body.get("usage") or {}
-        cases[fmt.lower()] = (
-            None
-            if word in answer.lower() and usage.get("prompt_tokens", 0) > 0
-            else f"answer {answer!r}, usage {usage}"
-        )
-    return _report(run_dir, "vision", cases)
-
-
-def _serving_dataset(path: Path, requests: int, approximate_tokens: int) -> None:
-    words = ("river", "stone", "cloud", "field", "signal", "lantern", "harbor", "orbit")
-    rows = []
-    for request in range(requests):
-        text = " ".join(
-            words[(request * 3 + i * 5) % len(words)] for i in range(approximate_tokens)
-        )
-        rows.append(
-            {
-                "conversations": [
-                    {"from": "human", "value": f"Case {request}: continue this list. {text}"}
-                ]
-            }
-        )
-    path.write_text(json.dumps(rows), encoding="utf-8")
-
-
-def _serving_row_error(row_dir: Path, requests: int, output_tokens: int) -> str | None:
-    artifacts = list(row_dir.glob("*-serving.json"))
-    if len(artifacts) != 1:
-        return f"{len(artifacts)} result files"
-    result = json.loads(artifacts[0].read_text(encoding="utf-8"))
-    summary, samples = result["summary"], result["samples"]
-    complete = (
-        summary.get("requests") == requests
-        and summary.get("completion_tokens_total") == requests * output_tokens
-        and len(samples) == requests
-        and all(sample.get("completion_tokens") == output_tokens for sample in samples)
-    )
-    return None if complete else f"incomplete evidence: {summary}"
-
-
-def serving(run_dir: Path) -> int:
-    """Fixed-length chat (1K in, 256 out with ignore_eos) through Kairyu at c1/4/8."""
-
-    config = SPEC["verification"]["serving"]
-    requests, output_tokens = int(config["requests_per_concurrency"]), int(config["output_tokens"])
-    dataset = run_dir / "serving.json"
-    _serving_dataset(dataset, requests, int(config["prompt_tokens_approx"]))
-    cases: dict[str, str | None] = {}
-    for concurrency in config["concurrency"]:
-        row_dir = run_dir / f"serving-c{concurrency}"
+    rows = {}
+    for name, items in all_tasks.items():
+        results = out / f"{name}-results.jsonl"
+        if results.exists():
+            results.unlink()
         code = _run(
-            [PYTHON, str(ROOT / "verification/l1/performance/serving_bench.py"),
-             "--base-url", f"{_api()}/v1", "--model", SERVED, "--dataset", str(dataset),
-             "--num-requests", str(requests), "--concurrency", str(concurrency),
-             "--max-tokens", str(output_tokens), "--ignore-eos", "--temperature", "1.0",
-             "--seed", "0", "--timeout", "3600", "--results-dir", str(row_dir),
-             "--tensor-parallel", "1", "--dp-replicas", "1"],
-            log=run_dir / f"serving-c{concurrency}.log",
+            [sys.executable, "-m", "jevbench.cli", "run",
+             "--tasks", str(checkout / config["splits"][name]["path"]),
+             "--adapter", "typesafe", "--endpoint", _api(), "--key-env", "",
+             "--model", SYSTEMONE["model"], "--results", str(results),
+             "--raw-dir", str(raw / name), "--ledger", str(raw / f"{name}-ledger.jsonl"),
+             "--reserve-usd", "0", "--cost-basis", "self_hosted_no_tariff",
+             "--run-label", f"kairyu-{run_dir.name}"],
+            log=out / f"{name}-run.log", env=env,
         )  # fmt: skip
-        cases[f"c{concurrency}"] = (
-            f"exit {code}" if code else _serving_row_error(row_dir, requests, output_tokens)
-        )
-    return _report(run_dir, "serving", cases)
+        served = [json.loads(line) for line in results.read_text().splitlines() if line.strip()]
+        reference_records = _official_records(checkout, items, official, name)
+        served_summary = summarize.summarize(items, served)
+        official_summary = summarize.summarize(items, reference_records)
+        rows[name] = {"served": served_summary, "official": official_summary}
+        (out / f"{name}-summary.json").write_text(json.dumps(rows[name], indent=2) + "\n")
+        s, o = _headline(served_summary), _headline(official_summary)
+        problems = []
+        if code != 0 or s["n_attempted"] != len(items):
+            problems.append(f"runner exit {code}, {s['n_attempted']}/{len(items)} attempted")
+        if s["schema_validity"] != 1.0:
+            problems.append(f"schema validity {s['schema_validity']}")
+        if abs(s["n_correct"] - o["n_correct"]) > int(config["max_accuracy_items_off"]):
+            problems.append(f"correct {s['n_correct']} vs official {o['n_correct']}")
+        for metric, limit in (("brier_mean", "max_brier_diff"), ("ece", "max_ece_diff")):
+            if s[metric] is None or abs(s[metric] - o[metric]) > float(config[limit]):
+                problems.append(f"{metric} {s[metric]} vs official {o[metric]}")
+        cases[name] = "; ".join(problems) or None
+        if s["accuracy"] is not None:
+            print(
+                f"jevbench {name}: accuracy {s['accuracy']:.3f} (official {o['accuracy']:.3f}), "
+                f"brier {s['brier_mean']:.4f} ({o['brier_mean']:.4f}), ece {s['ece']:.4f} "
+                f"({o['ece']:.4f}), p50 {s['latency']['p50_s']:.3f} s",
+                flush=True,
+            )
+    latencies = [
+        json.loads(line)["latency_s"]
+        for name in all_tasks
+        for line in (out / f"{name}-results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    p50 = statistics.median(latencies) if latencies else math.inf
+    cases["sequential_p50"] = (
+        None if p50 <= float(config["p50_limit_s"]) else f"{p50:.3f} s > {config['p50_limit_s']} s"
+    )
+    extra = {"reference_run": source.name, "p50_s": p50, "splits": rows,
+             "jevbench_revision": config["revision"]}  # fmt: skip
+    return _report(run_dir, "jevbench", cases, extra)
 
 
-# --- System One load -----------------------------------------------------------------------
+# --- fan-out and consistency -----------------------------------------------------------------
 
 
 def _long_state(namespace: str, index: int, approximate_tokens: int) -> str:
@@ -631,9 +632,163 @@ def _long_state(namespace: str, index: int, approximate_tokens: int) -> str:
         "Their admin tried clearing the cache and switching browsers without success.",
     )
     body = " ".join(
-        sentences[(index + i) % len(sentences)] for i in range(approximate_tokens // 14)
+        sentences[(index + i) % len(sentences)] for i in range(max(1, approximate_tokens // 14))
     )
     return f"[{namespace}-{index}] {body}"
+
+
+def _questions(count: int) -> dict:
+    return {f"q{i}": FANOUT_QUESTIONS[i % len(FANOUT_QUESTIONS)] for i in range(count)}
+
+
+def fanout(run_dir: Path) -> int:
+    """Many questions in one call (TypeSafe's speculative fan-out): the state is read once and
+    the questions in parallel, so 32 questions cost far less than 32 calls."""
+
+    config = CHECKS["fanout"]
+    rows, cases = {}, {}
+    for count in config["questions"]:
+        latencies, errors = [], []
+        for index in range(int(config["requests_per_size"])):
+            state = _long_state(f"{run_dir.name}-fan{count}", index, config["state_tokens_approx"])
+            started = time.perf_counter()
+            status, body, _ = _systemone({"state": state, "questions": _questions(count)})
+            latencies.append(time.perf_counter() - started)
+            answered = isinstance(body, dict) and set(body.get("answers", {})) == set(
+                _questions(count)
+            )
+            if status != 200 or not answered:
+                errors.append(f"HTTP {status} {str(body)[:120]}")
+        rows[count] = {"p50_s": statistics.median(latencies), "errors": errors}
+        cases[f"q{count}_answered"] = errors[0] if errors else None
+        print(f"fanout {count} questions: p50 {rows[count]['p50_s']:.3f} s", flush=True)
+    smallest, largest = min(config["questions"]), max(config["questions"])
+    ratio = rows[largest]["p50_s"] / rows[smallest]["p50_s"]
+    limit = float(config["max_ratio_32_to_1"])
+    cases["one_call_beats_separate_calls"] = (
+        None if ratio <= limit else f"{largest} questions take {ratio:.1f}x one question"
+    )
+    return _report(run_dir, "fanout", cases, {"rows": rows, "ratio": ratio})
+
+
+def consistency(run_dir: Path) -> int:
+    """The same request answers the same way: repeated alone, and while other reads load vLLM."""
+
+    config = CHECKS["consistency"]
+    repeats = int(config["repeats"])
+    request = {"state": control.SYSTEMONE_STATE, "questions": control.SYSTEMONE_QUESTIONS}
+    alone = [_systemone(request) for _ in range(repeats)]
+    load_level = int(config["load_concurrency"])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as single:
+        load = single.submit(
+            asyncio.run,
+            _systemone_burst(_api(), SYSTEMONE["model"], load_level * 8, load_level,
+                             f"{run_dir.name}-load", 1024),
+        )  # fmt: skip
+        loaded = [_systemone(request) for _ in range(repeats)]
+        load.result()
+    bodies = [body for status, body, _ in alone + loaded if status == 200]
+    cases: dict[str, str | None] = {
+        "all_answered": None if len(bodies) == 2 * repeats else f"{len(bodies)}/{2 * repeats}"
+    }
+    spread = 0.0
+    for qid in control.SYSTEMONE_QUESTIONS:
+        dists = [_distribution(body["answers"][qid]) for body in bodies]
+        tops = [max(d, key=d.get) for d in dists]
+        cases[f"{qid}_top_stable"] = None if len(set(tops)) == 1 else f"top answers {tops}"
+        for key in dists[0] if dists else ():
+            values = [d[key] for d in dists]
+            spread = max(spread, max(values) - min(values))
+    limit = float(config["max_abs_diff"])
+    cases["probability_spread"] = None if spread <= limit else f"{spread:.4f} > {limit}"
+    print(f"consistency: probability spread {spread:.5f} over {len(bodies)} reads", flush=True)
+    return _report(run_dir, "consistency", cases, {"spread": spread})
+
+
+# --- TypeSafe's SDK --------------------------------------------------------------------------
+
+_SDK_PROGRAM = r"""
+import json, sys
+from typesafe_sdk import Choice, Noul, RetryPolicy, Score, TypeSafeClient
+base = sys.argv[1]
+state = {"message": "Everything is down and we have a demo with our biggest client at noon."}
+questions = {
+    "team": Choice(instructions="Which team should handle it?",
+                   criteria={"outage": "service down", "billing": "charges", "feature": "how-to"}),
+    "urgent": Noul(instructions="Does the customer need a reply within the hour?"),
+    "tone": Score(instructions="How upset is the customer?",
+                  criteria=["calm", "annoyed", "furious"]),
+}
+out = {}
+for model in (None, "quyet-latest", "quyet-1.0-large-systemone"):
+    with TypeSafeClient(api_key="unused", base_url=base, model=model,
+                        retry=RetryPolicy(max_retries=0)) as client:
+        try:
+            r = client.system_one(state=state, questions=questions)
+            out[str(model)] = {"model": r.model, "choice": r.choices["team"].choice,
+                               "probabilities": r.choices["team"].probabilities,
+                               "noul": r.nouls["urgent"].noul, "score": r.scores["tone"].score}
+        except Exception as error:
+            out[str(model)] = {"error": f"{type(error).__name__}: {error}"[:300]}
+with TypeSafeClient(api_key="unused", base_url=base, retry=RetryPolicy(max_retries=0)) as client:
+    try:
+        client.system_one(state="x", questions={"q": Choice(instructions="Pick one.",
+                          criteria={f"o{i}": None for i in range(11)})})
+        out["eleven_options"] = "no error"
+    except Exception as error:
+        out["eleven_options"] = type(error).__name__
+    try:
+        out["models_list"] = [m.name for m in client.models.list().models]
+    except Exception as error:
+        out["models_list"] = f"{type(error).__name__}: {error}"[:300]
+print(json.dumps(out))
+"""
+
+
+def sdk(run_dir: Path) -> int:
+    """TypeSafe's Python SDK, pinned, used the way its docs show, against Kairyu."""
+
+    config = CHECKS["sdk"]
+    scratch = _scratch()
+    venv = scratch / f"sdk-{config['version']}"
+    env = {**os.environ, "UV_CACHE_DIR": str(scratch / "uv-cache")}
+    python = venv / "bin/python"
+    if not python.exists():
+        subprocess.run(["uv", "venv", "-q", "--python", "3.12", str(venv)], check=True, env=env)
+        subprocess.run(
+            ["uv", "pip", "install", "-q", "--python", str(python),
+             f"{config['package']}=={config['version']}"],
+            check=True, env=env,
+        )  # fmt: skip
+    result = subprocess.run(
+        [str(python), "-c", _SDK_PROGRAM, _api()], capture_output=True, text=True, timeout=600
+    )
+    (run_dir / "sdk.log").write_text(result.stdout + result.stderr)
+    try:
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return _report(run_dir, "sdk", {"ran": f"exit {result.returncode}: {result.stderr[-300:]}"})
+    cases: dict[str, str | None] = {}
+    for model in ("None", "quyet-latest", "quyet-1.0-large-systemone"):
+        answer = out.get(model, {})
+        cases[f"system_one_{model}"] = (
+            None
+            if "error" not in answer
+            and answer.get("choice") in ("outage", "billing", "feature")
+            and 0 <= answer.get("noul", -1) <= 1
+            and 0 <= answer.get("score", -1) <= 2
+            else str(answer)[:300]
+        )
+    cases["eleven_options_is_bad_request"] = (
+        None
+        if out.get("eleven_options") == "TypeSafeBadRequestError"
+        else out.get("eleven_options")
+    )
+    # Recorded, not gated: Kairyu's Jev model list (m11 D8) carries no release_date.
+    return _report(run_dir, "sdk", cases, {"sdk": out, "version": config["version"]})
+
+
+# --- throughput and isolation ----------------------------------------------------------------
 
 
 async def _systemone_burst(
@@ -664,57 +819,46 @@ async def _systemone_burst(
         return rows, time.perf_counter() - start
 
 
-def _nearest_rank(values: list[float], fraction: float) -> float | None:
-    ordered = sorted(values)
-    return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)] if ordered else None
-
-
 def systemone_serving(run_dir: Path) -> int:
-    """Cache-busted 1K-token states with 3 questions: req/s and p50/p95 at c1/16/32/64."""
+    """Throughput by state length (OpenJev's method): cache-busted states, 3 questions."""
 
-    config = SPEC["verification"]["systemone_serving"]
-    requests, state_tokens = (
-        int(config["requests_per_concurrency"]),
-        int(config["state_tokens_approx"]),
-    )
-    asyncio.run(
-        _systemone_burst(_api(), SYSTEMONE["model"], 8, 8, f"{run_dir.name}-warmup", state_tokens)
-    )
-    # The adapter directly, at c1 only: Kairyu's own overhead. Above its queue it answers 529.
-    targets = [("kairyu", _api(), SYSTEMONE["model"], level) for level in config["concurrency"]]
-    targets.append(("direct", _adapter(), SYSTEMONE["upstream_model"], 1))
+    config = CHECKS["systemone_serving"]
+    requests = int(config["requests_per_level"])
+    asyncio.run(_systemone_burst(_api(), SYSTEMONE["model"], 8, 8, f"{run_dir.name}-warm", 50))
     rows, cases = [], {}
-    for target, url, model, level in targets:
-        name = f"{target}-c{level}"
-        results, wall = asyncio.run(
-            _systemone_burst(url, model, requests, level, f"{run_dir.name}-{name}", state_tokens)
-        )
-        latencies = [elapsed for status, elapsed, _ in results if status == 200]
-        bad = [(status, error) for status, _, error in results if status != 200 or error]
-        row = {
-            "row": name, "requests": requests, "ok": requests - len(bad), "wall_s": wall,
-            "requests_per_s": len(latencies) / wall,
-            "p50_s": _nearest_rank(latencies, 0.5), "p95_s": _nearest_rank(latencies, 0.95),
-        }  # fmt: skip
-        rows.append(row)
-        print(json.dumps(row), flush=True)
-        cases[name] = f"{len(bad)} failed: {bad[:3]}" if bad else None
-    limit = float(config["c1_p50_limit_s"])
-    c1 = next(row for row in rows if row["row"] == "kairyu-c1")
-    cases["kairyu_c1_p50"] = (
-        None if c1["p50_s"] is not None and c1["p50_s"] <= limit else f"{c1['p50_s']} s > {limit} s"
-    )
+    for tokens in config["state_tokens"]:
+        for level in config["concurrency"]:
+            name = f"state{tokens}-c{level}"
+            results, wall = asyncio.run(
+                _systemone_burst(_api(), SYSTEMONE["model"], requests, level,
+                                 f"{run_dir.name}-{name}", int(tokens))
+            )  # fmt: skip
+            latencies = [elapsed for status, elapsed, _ in results if status == 200]
+            bad = [(status, error) for status, _, error in results if status != 200 or error]
+            row = {
+                "row": name, "state_tokens": tokens, "concurrency": level, "requests": requests,
+                "ok": requests - len(bad), "wall_s": wall,
+                "requests_per_s": len(latencies) / wall,
+                "p50_s": _nearest_rank(latencies, 0.5), "p95_s": _nearest_rank(latencies, 0.95),
+            }  # fmt: skip
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+            cases[name] = f"{len(bad)} failed: {bad[:3]}" if bad else None
     (run_dir / "systemone-serving-rows.json").write_text(json.dumps(rows, indent=2) + "\n")
     return _report(run_dir, "systemone-serving", cases)
+
+
+def _chat(payload: dict, timeout: float = 600):
+    return _json("POST", f"{_api()}/v1/chat/completions", {"model": SERVED, **payload}, timeout)
 
 
 def systemone_isolation(run_dir: Path) -> int:
     """A System One burst past every limit gets Kairyu's 429, never the adapter's 529, while
     chat keeps answering and the chat replica stays healthy."""
 
-    config = SPEC["verification"]["isolation"]
+    config = CHECKS["isolation"]
     reads, chats = int(config["reads"]), int(config["chats"])
-    chat = {"max_tokens": 256, "messages": [{"role": "user", "content": control.ARITHMETIC}]}
+    chat = {k: v for k, v in control.chat_request().items() if k != "model"}
     with concurrent.futures.ThreadPoolExecutor(max_workers=chats) as pool:
         chat_results = [pool.submit(_chat, chat) for _ in range(chats)]
         burst, wall = asyncio.run(
@@ -749,24 +893,16 @@ def systemone_isolation(run_dir: Path) -> int:
 GATES = {
     "reference": (
         reference,
-        "the official quyet package (transformers, GPU) answers the reference set; stack down",
+        "the quyet package itself (GPU, stack down) answers 48 + 231 requests",
     ),
-    "attest": (
-        attest,
-        "images, checkpoint re-hash, vLLM settings and KV capacity, adapter calibration, models",
-    ),
-    "systemone": (
-        systemone,
-        "Kairyu's System One answers vs the official package; names; error shapes",
-    ),
-    "tool-calling": (tool_calling, "auto/named/result-turn/stream tool calls through Kairyu"),
-    "vision": (vision, "PNG and WebP image chat through Kairyu"),
-    "serving": (serving, "1K-input/256-output chat at c1/4/8"),
-    "systemone-serving": (systemone_serving, "cache-busted decisions at c1/16/32/64; c1 p50 limit"),
-    "systemone-isolation": (
-        systemone_isolation,
-        "a 640-read burst gets 429s, never 529, while chat answers",
-    ),
+    "attest": (attest, "images, checkpoint re-hash, vLLM settings, context rule, calibration"),
+    "systemone": (systemone, "Kairyu's answers vs the official package; names; error shapes"),
+    "jevbench": (jevbench, "JevBench's runner on Kairyu, scored beside the official answers"),
+    "fanout": (fanout, "1/8/32 questions per call: the state read once, questions in parallel"),
+    "consistency": (consistency, "the same request answers the same way, alone and under load"),
+    "sdk": (sdk, "TypeSafe's Python SDK against Kairyu: typed answers and a bad request"),
+    "systemone-serving": (systemone_serving, "req/s and p50/p95 by state length and concurrency"),
+    "systemone-isolation": (systemone_isolation, "a 640-read burst gets 429s, never 529"),
 }
 
 
@@ -781,9 +917,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("verification", choices=(*GATES, "all", "list"))
     parser.add_argument("--run-id")
-    parser.add_argument(
-        "--no-start", action="store_true", help="do not run control.py up before stack gates"
-    )
+    parser.add_argument("--no-start", action="store_true", help="do not run control.py up")
     args = parser.parse_args()
     if args.verification == "list":
         for name, (_gate, summary) in GATES.items():
@@ -798,7 +932,6 @@ def main() -> None:
         "started_at": datetime.now(UTC).isoformat(),
         "requested": selected,
         "served_config_sha256": _served_config_sha256(),
-        "dataset_sha256": _dataset_sha256(),
         "spec": SPEC,
         "exit_codes": {},
     }
