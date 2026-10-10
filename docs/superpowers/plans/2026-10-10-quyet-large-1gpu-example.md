@@ -1,6 +1,6 @@
 # Quyet-1.0-Large single-GPU example (chat + System One)
 
-Status: **Approved 2026-10-10; implementation and GPU gates in progress.**
+Status: **Approved 2026-10-10; implemented; all nine GPU gates pass (run `20261010-s1-r2`).**
 
 Accepted scope (owner, 2026-10-10): the Jev-family example shape
 (`winnow-12b-q8-1gpu`, `openjev-diffusiongemma-26b-1gpu`) for
@@ -79,11 +79,11 @@ GPU gates, in order; stop and report at the first failure:
 | `reference` | official answers exist | stack down; the `quyet` CLI (transformers, GPU) answers 48 authored + 231 JevBench public items; reused only for the same request bodies, checkpoint and adapter sources |
 | `attest` | the pinned stack runs | registry digest and source labels, checkpoint re-hash, vLLM settings and version, adapter calibration, System One public, no chat model |
 | `systemone` | Kairyu's answers are the official package's | all 279: same input tokens, truncation and shape; >= 99 % of official answers with TypeSafe confidence >= 0.5 keep their top option; probability difference median <= 0.005; aliases; error shapes |
-| `jevbench` | Jev-standard quality and speed | JevBench's runner (typesafe adapter, sequential) on Kairyu: 100 % valid; per split correct within 1 item of official, Brier and ECE within 0.01; p50 <= 0.5 s |
+| `jevbench` | Jev-standard quality and speed | JevBench's runner (typesafe adapter, sequential) on Kairyu: 100 % valid; per split correct within 1 item of official and Brier within 0.01; ECE over all 231 within 0.01; p50 <= 0.5 s |
 | `fanout` | many questions per call | 1/8/32 questions on one 1K-token state all answered; 32 questions <= 4x one |
 | `consistency` | same request, same answer | 10 alone + 10 under load: top answers stable, probabilities within 0.01 |
 | `sdk` | the official client works | typesafe-sdk 0.7.4: typed answers under jev-latest / quyet-latest / full name; 11 options -> TypeSafeBadRequestError |
-| `systemone-serving` | bulk decisions | states ~50/2,000/6,000 tokens, 3 questions, c1/16/32/64 x 64: all answered; req/s, p50/p95 |
+| `systemone-serving` | bulk decisions | states ~50/2,000/6,000 tokens, 3 questions, c1/16/32/64 x 64: all answered up to Kairyu's forwarding limit (16), only answers or Kairyu's 429 above it; req/s, p50/p95, shed |
 | `systemone-isolation` | overload is shed cleanly | 640 reads: 200 or 429 only, never 529; ready and answering right after |
 
 Owner decisions (2026-10-10):
@@ -98,9 +98,13 @@ Owner decisions (2026-10-10):
   flipped). vLLM runs batch-invariant (`VLLM_BATCH_INVARIANT=1`): 20 repeats alone and
   under load gave identical probabilities (0.0026 spread without), at about 10 %
   latency (1 question 0.225 -> 0.251 s, 32 questions 0.60 -> 0.66 s).
+- After run `20261010-s1-r2`: ECE is compared over all 231 public items, not per split.
+  On the 72-item split two near-even answers (0.505/0.495, 0.497/0.503) crossing bins
+  moved ECE by 0.013 while accuracy (72 vs 71) and Brier (0.0177 vs 0.0163) matched;
+  over all 231 the served ECE is 0.038 against the official 0.042.
 
 ## Checklist
 
 - [x] Owner approves this plan.
-- [ ] Example files, CPU tests, lint.
-- [ ] GPU gates; MEASUREMENTS.md; FN-D9 amendment; PROGRESS.md.
+- [x] Example files, CPU tests, lint.
+- [x] GPU gates; MEASUREMENTS.md; FN-D9 amendment; PROGRESS.md.

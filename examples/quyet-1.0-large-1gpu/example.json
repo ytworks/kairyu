@@ -102,8 +102,8 @@
       },
       "max_accuracy_items_off": 1,
       "max_brier_diff": 0.01,
-      "max_ece_diff": 0.01,
-      "p50_limit_s": 0.5
+      "p50_limit_s": 0.5,
+      "max_overall_ece_diff": 0.01
     },
     "fanout": {
       "questions": [

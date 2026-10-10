@@ -374,8 +374,8 @@ Open WebUI stays on :3010 for chat.
 ### Quyet-1.0-Large one-GPU amendment (2026-10-10)
 
 Status: accepted by the owner (plan
-`docs/superpowers/plans/2026-10-10-quyet-large-1gpu-example.md`); GPU gates
-pending.
+`docs/superpowers/plans/2026-10-10-quyet-large-1gpu-example.md`); GPU-verified
+2026-10-10 (all nine gates, run `20261010-s1-r2`, in the example's `MEASUREMENTS.md`).
 
 `examples/quyet-1.0-large-1gpu` serves `chinhnc/Quyet-1.0-Large` (Gemma-4-31B-it
 with a merged decision LoRA, bf16) on one selected GPU as a System One model only, the

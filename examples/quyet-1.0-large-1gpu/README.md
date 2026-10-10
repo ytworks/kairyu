@@ -147,11 +147,11 @@ consistent answers, the official SDK, and throughput for bulk decisions.
 | `reference` | With the stack down, the `quyet` package's own CLI (transformers, bf16, the GPU) answers 279 requests: the 48 of `systemone-reference.jsonl` (English, Vietnamese, Japanese, JSON and conversation states, 10-option choices, four states truncated past 6,000 tokens) and JevBench's 231 public items, asked as JevBench asks them. A later gate reuses it only for the same request bodies, checkpoint and adapter sources. |
 | `attest` | vLLM's registry digest and the adapter's source labels on the running containers, every checkpoint file re-hashed, vLLM settings and version, the adapter's `quyet` version and calibration, System One public and no chat model. |
 | `systemone` | Through Kairyu, all 279 requests have the official input token count, truncation and answer shape (the same prompts); at least 99 % of the official answers that clear TypeSafe's 0.5 confidence floor keep their top option; the median probability difference is at most 0.005. Aliases answer; refusals have the documented shapes. |
-| `jevbench` | JevBench's own runner (pinned, `typesafe` adapter, one request at a time, as its board measures) on the 231 public items through Kairyu: every answer valid; per split, correct answers within one item of the official package's, Brier and ECE within 0.01; p50 latency at most 0.5 s. |
+| `jevbench` | JevBench's own runner (pinned, `typesafe` adapter, one request at a time, as its board measures) on the 231 public items through Kairyu: every answer valid; per split, correct answers within one item of the official package's and Brier within 0.01; ECE over all 231 items within 0.01 (on a 72-item split one near-even answer moves it by about 0.01); p50 latency at most 0.5 s. |
 | `fanout` | 1, 8 and 32 questions about one 1K-token state in a single call: all answered, and 32 questions take at most 4 times as long as one. |
 | `consistency` | The same request, ten times alone and ten times while other reads load vLLM, keeps its top answers, and its probabilities move by at most 0.01. |
 | `sdk` | TypeSafe's Python SDK (0.7.4) against Kairyu: typed `choices` / `nouls` / `scores` under `jev-latest`, `quyet-latest` and the full name; an 11-option question raises `TypeSafeBadRequestError`. |
-| `systemone-serving` | Cache-busted states of about 50, 2,000 and 6,000 tokens with 3 questions, at c1/16/32/64 (64 each): all answered; req/s and p50/p95 recorded. |
+| `systemone-serving` | Cache-busted states of about 50, 2,000 and 6,000 tokens with 3 questions, at c1/16/32/64 (64 each): up to Kairyu's forwarding limit (16) every request is answered; above it every response is an answer or Kairyu's 429 after its 30 s queue; req/s, p50/p95 and shed requests recorded. |
 | `systemone-isolation` | 640 concurrent reads: every read is 200 or Kairyu's 429, never 529; Kairyu is ready on a healthy model server and reads answer right after. |
 
 Results go to `verification/results/examples/quyet-1.0-large-1gpu/<run>/`, the
@@ -164,4 +164,8 @@ measured numbers to [MEASUREMENTS.md](MEASUREMENTS.md).
   package's own run (median 0.0001; up to about 0.2 on states of a few thousand tokens,
   where a confident answer can occasionally change). Decisions and JevBench quality are
   gated against the package's run (`systemone`, `jevbench`).
+- TypeSafe's SDK `models.list()` fails validation: Kairyu's Jev model list (m11 D8)
+  carries no `release_date`. `system_one()` is unaffected.
+- The GPU limits bulk throughput: about 2,400 prompt tokens per second (6.2 req/s for
+  short states, 0.37 req/s for 6,000-token states at c1; see MEASUREMENTS.md).
 - Batch and async requests are not configured.

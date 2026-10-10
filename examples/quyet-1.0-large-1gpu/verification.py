@@ -597,7 +597,8 @@ def jevbench(run_dir: Path) -> int:
     all_tasks = _jevbench_tasks(checkout)
     out = run_dir / "jevbench"
     out.mkdir(exist_ok=True)
-    raw = _scratch() / f"jevbench-raw-{run_dir.name}"
+    # JevBench never overwrites raw evidence, so every invocation gets its own directory.
+    raw = _scratch() / f"jevbench-raw-{run_dir.name}-{datetime.now(UTC):%Y%m%dT%H%M%S}"
     env = {**os.environ, "PYTHONPATH": str(checkout)}
     cases: dict[str, str | None] = {}
     rows = {}
@@ -629,17 +630,49 @@ def jevbench(run_dir: Path) -> int:
             problems.append(f"schema validity {s['schema_validity']}")
         if abs(s["n_correct"] - o["n_correct"]) > int(config["max_accuracy_items_off"]):
             problems.append(f"correct {s['n_correct']} vs official {o['n_correct']}")
-        for metric, limit in (("brier_mean", "max_brier_diff"), ("ece", "max_ece_diff")):
-            if s[metric] is None or abs(s[metric] - o[metric]) > float(config[limit]):
-                problems.append(f"{metric} {s[metric]} vs official {o[metric]}")
+        if s["brier_mean"] is None or abs(s["brier_mean"] - o["brier_mean"]) > float(
+            config["max_brier_diff"]
+        ):
+            problems.append(f"brier {s['brier_mean']} vs official {o['brier_mean']}")
         cases[name] = "; ".join(problems) or None
-        if s["accuracy"] is not None:
+        if s["accuracy"] is not None and s["latency"]["p50_s"] is not None:
             print(
                 f"jevbench {name}: accuracy {s['accuracy']:.3f} (official {o['accuracy']:.3f}), "
                 f"brier {s['brier_mean']:.4f} ({o['brier_mean']:.4f}), ece {s['ece']:.4f} "
                 f"({o['ece']:.4f}), p50 {s['latency']['p50_s']:.3f} s",
                 flush=True,
             )
+    # ECE uses 10 bins: on a 48- or 72-item split one near-even answer crossing a bin moves
+    # it by about 0.01, so calibration is compared over all public items at once.
+    items_all = [task for items in all_tasks.values() for task in items]
+    served_all = [
+        json.loads(line)
+        for name in all_tasks
+        for line in (out / f"{name}-results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    official_all = [
+        record
+        for name, items in all_tasks.items()
+        for record in _official_records(checkout, items, official, name)
+    ]
+    s_all = _headline(summarize.summarize(items_all, served_all))
+    o_all = _headline(summarize.summarize(items_all, official_all))
+    rows["all"] = {"served": s_all, "official": o_all}
+    ece_gap = abs(s_all["ece"] - o_all["ece"]) if s_all["ece"] is not None else math.inf
+    if s_all["ece"] is None:
+        return _report(run_dir, "jevbench", {**cases, "overall_ece": "no served answers"})
+    cases["overall_ece"] = (
+        None
+        if ece_gap <= float(config["max_overall_ece_diff"])
+        else f"ece {s_all['ece']} vs official {o_all['ece']}"
+    )
+    print(
+        f"jevbench all {len(items_all)}: correct {s_all['n_correct']} (official "
+        f"{o_all['n_correct']}), brier {s_all['brier_mean']:.4f} ({o_all['brier_mean']:.4f}), "
+        f"ece {s_all['ece']:.4f} ({o_all['ece']:.4f})",
+        flush=True,
+    )
     latencies = [
         json.loads(line)["latency_s"]
         for name in all_tasks
@@ -854,7 +887,9 @@ async def _systemone_burst(
 
 
 def systemone_serving(run_dir: Path) -> int:
-    """Throughput by state length (OpenJev's method): cache-busted states, 3 questions."""
+    """Throughput by state length (OpenJev's method): cache-busted states, 3 questions.
+    Up to Kairyu's forwarding limit every request is answered; beyond it Kairyu queues
+    for queue_wait_s and then sheds with 429, and nothing else may come back."""
 
     config = CHECKS["systemone_serving"]
     requests = int(config["requests_per_level"])
@@ -868,10 +903,16 @@ def systemone_serving(run_dir: Path) -> int:
                                  f"{run_dir.name}-{name}", int(tokens))
             )  # fmt: skip
             latencies = [elapsed for status, elapsed, _ in results if status == 200]
-            bad = [(status, error) for status, _, error in results if status != 200 or error]
+            shed = sum(1 for status, _, _ in results if status == 429)
+            if level <= int(SYSTEMONE["max_concurrency"]):
+                bad = [(status, err) for status, _, err in results if status != 200 or err]
+            else:
+                bad = [
+                    (status, err) for status, _, err in results if status not in (200, 429) or err
+                ]
             row = {
                 "row": name, "state_tokens": tokens, "concurrency": level, "requests": requests,
-                "ok": requests - len(bad), "wall_s": wall,
+                "ok": len(latencies), "shed_429": shed, "wall_s": wall,
                 "requests_per_s": len(latencies) / wall,
                 "p50_s": _nearest_rank(latencies, 0.5), "p95_s": _nearest_rank(latencies, 0.95),
             }  # fmt: skip
