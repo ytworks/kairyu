@@ -16,10 +16,10 @@
     "model": "glm-5.3-flash",
     "gpu_ids": [0, 1, 2, 3, 4, 5],
     "replicas": 1,
-    "tensor_parallel_size": 1,
-    "data_parallel_size": 6,
+    "tensor_parallel_size": 2,
+    "data_parallel_size": 3,
     "expert_parallel_size": 6,
-    "dp_rank_gpu_ids": [[0], [1], [2], [3], [4], [5]]
+    "dp_rank_gpu_ids": [[0, 1], [2, 3], [4, 5]]
   },
   "pool": {
     "queue_depth_threshold": 0,
@@ -47,14 +47,17 @@
     "image": "vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
     "repo_digest": "vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
     "flashinfer_version": "0.7.0.post1",
-    "tensor_parallel_size": 1,
-    "data_parallel_size": 6,
+    "tensor_parallel_size": 2,
+    "data_parallel_size": 3,
     "expert_parallel_size": 6,
     "kv_cache_dtype": "fp8",
-    "max_num_seqs": 16,
+    "max_num_seqs": 32,
     "max_num_batched_tokens": 8192,
     "gpu_memory_utilization": 0.95,
-    "mtp_enabled": false
+    "mtp_enabled": true,
+    "kv_cache_memory_bytes": 17985175552,
+    "mtp_speculative_tokens": 3,
+    "custom_all_reduce": false
   },
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",

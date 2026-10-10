@@ -1,15 +1,19 @@
 name: kairyu-glm-5.3-flash-6gpu
 services:
-  # One GLM-5.3-Flash replica on GPUs 0-5: attention data parallel DP6
-  # (TP1 per rank) with EP6 over the 288 routed experts (48 per rank). The
-  # official FP8 checkpoint does not fit one TP4 replica on four 96 GB cards
-  # with a 1M-token KV pool (fit probe in MEASUREMENTS.md), so the experts are
-  # split over six cards and every rank keeps its own attention, KDA and
-  # vision weights. Stock vLLM v0.31.0 (registry digest pinned, no overlay);
-  # FP8 KV is the recipe's Blackwell setting and the only layout the SM120
-  # sparse-MLA backend accepts. Sampling (temperature 1.0, top_p 0.95) comes
-  # from the checkpoint's generation_config.json; the effort default (max)
-  # from its chat template.
+  # One GLM-5.3-Flash replica on GPUs 0-5: TP2 pairs on NUMA-local GPUs
+  # (0,1)(2,3)(4,5), attention data parallel DP3, EP6 over the 288 routed
+  # experts (48 per GPU). The official FP8 checkpoint does not fit one TP4
+  # replica on four 96 GB cards with a 1M-token KV pool (fit probe in
+  # MEASUREMENTS.md), so it spans six. Stock vLLM v0.31.0 (registry digest
+  # pinned, no overlay). Measured choices (MEASUREMENTS.md): TP2 x DP3 over
+  # DP6 (c1 +12 %, c16 +11 %), the checkpoint's MTP layer drafting 3 tokens
+  # (c1 x2; MTP does not fit beside a 1M KV pool on DP6), NCCL instead of the
+  # custom all-reduce (which fails while the drafter's CUDA graphs are
+  # captured), and a pinned KV pool (2.0M tokens per engine). FP8 KV is the
+  # recipe's Blackwell setting and the only layout the SM120 sparse-MLA
+  # backend accepts. Sampling (temperature 1.0, top_p 0.95) comes from the
+  # checkpoint's generation_config.json; the effort default (max) from its
+  # chat template.
   glm:
     image: ${GLM_VLLM_IMAGE:-vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3}
     ipc: host
@@ -32,22 +36,27 @@ services:
     - --served-model-name
     - glm-5.3-flash
     - --tensor-parallel-size
-    - '1'
+    - '2'
     - --data-parallel-size
-    - '6'
+    - '3'
     - --data-parallel-backend
     - mp
     - --enable-expert-parallel
+    - --disable-custom-all-reduce
     - --kv-cache-dtype
     - fp8
     - --max-model-len
     - '1048576'
     - --max-num-seqs
-    - '16'
+    - '32'
     - --max-num-batched-tokens
     - '8192'
     - --gpu-memory-utilization
     - '0.95'
+    - --kv-cache-memory
+    - '17985175552'
+    - --speculative-config
+    - '{"method":"mtp","num_speculative_tokens":3}'
     - --enable-prefix-caching
     - --reasoning-parser
     - glm47

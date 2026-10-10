@@ -40,9 +40,28 @@ CANDIDATES: dict[str, dict[str, object]] = {
     # TP2 pairs on NUMA-local GPUs (0,1)(2,3)(4,5), DP3, still EP6: attention
     # and KDA weights halve per GPU at the cost of a PCIe all-reduce per layer.
     "tp2-dp3": {"--tensor-parallel-size": "2", "--data-parallel-size": "3"},
+    # The same shape at the same total L1 capacity (3 engines x 32 = 96, as
+    # 6 x 16): tp2-dp3 alone queues above 48 concurrent requests.
+    "tp2-dp3-seqs-32": {
+        "--tensor-parallel-size": "2",
+        "--data-parallel-size": "3",
+        "--max-num-seqs": "32",
+    },
 }
+# MTP does not fit beside a 1M-token KV pool on DP6 (mtp-3 / mtp-5 fail at
+# start); TP2 x DP3 halves the attention weights per GPU, so try it there.
+for _depth in (3, 5):
+    CANDIDATES[f"tp2-dp3-seqs-32-mtp-{_depth}"] = {
+        **CANDIDATES["tp2-dp3-seqs-32"],
+        "--speculative-config": CANDIDATES[f"mtp-{_depth}"]["--speculative-config"],
+    }
+# The TP2 custom all-reduce fails while the MTP drafter's CUDA graphs are
+# captured (custom_all_reduce.cuh:164 'invalid argument'); vLLM's own switch
+# falls back to NCCL. Measured with and without MTP to separate the two.
+for _name in ("tp2-dp3-seqs-32", "tp2-dp3-seqs-32-mtp-3", "tp2-dp3-seqs-32-mtp-5"):
+    CANDIDATES[f"{_name}-nccl"] = {**CANDIDATES[_name], "--disable-custom-all-reduce": True}
 CANDIDATE_ENVIRONMENT: dict[str, dict[str, str]] = {}
-BARE_FLAGS = {"--enable-expert-parallel", "--enable-prefix-caching"}
+BARE_FLAGS = {"--enable-expert-parallel", "--enable-prefix-caching", "--disable-custom-all-reduce"}
 
 
 def candidate_command(command: list[str], name: str) -> list[str]:

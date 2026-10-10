@@ -2,7 +2,7 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
-  # Admit exactly what L1 runs at once: 6 DP engines x --max-num-seqs 16.
+  # Admit exactly what L1 runs at once: 3 DP engines x --max-num-seqs 32.
   max_concurrency: 96
   # A bounded queue wait fails a stuck request fast instead of parking it
   # (issue #495 rationale, shared with the sibling examples).
@@ -11,7 +11,7 @@ server:
   # bounds them to 64 MiB total, so the body cap must clear that.
   max_chat_body_bytes: 100663296
 
-# One pool, one DP6 / EP6 replica. Kairyu L2 does no orchestration here: it only
+# One pool, one TP2 x DP3 / EP6 replica. Kairyu L2 does no orchestration here: it only
 # places each request on the replica.
 pools:
   glm-5.3-flash:
@@ -48,10 +48,10 @@ pools:
         quantization_format: fp8
         cache_descriptor:
           family: glm-5.3-flash-hybrid-kda-nope-sparse-mla
-        tensor_parallel_size: 1
+        tensor_parallel_size: 2
         expert_parallel_size: 6
-        attention_data_parallel_size: 6
-        mtp_enabled: false
+        attention_data_parallel_size: 3
+        mtp_enabled: true
         container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
     unhealthy_after: 1
     queue_depth_threshold: 0

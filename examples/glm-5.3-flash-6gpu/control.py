@@ -707,7 +707,7 @@ def up() -> None:
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
     print(
         f"Chat model: {SPEC['model']['served_name']} "
-        "(one DP6 / EP6 replica on GPUs 0-5; text + image input; thinking max by default)"
+        "(one TP2 x DP3 / EP6 replica on GPUs 0-5; text + image input; thinking max by default)"
     )
     print(
         "Reasoning effort: Chat Controls -> Valves -> Reasoning Effort "
