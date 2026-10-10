@@ -1,7 +1,7 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
 Status: **Implemented** (2026-07-03; D2 amended 2026-08-04; D3 amended
-2026-08-05). Reviewed — APPROVE-WITH-AMENDMENTS
+2026-08-05; D1 amended 2026-10-10). Reviewed — APPROVE-WITH-AMENDMENTS
 (2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
@@ -56,6 +56,33 @@ token-granularity TPOT, results files).
   `stream_options: {"include_usage": true}` from upstreams and parse the
   empty-choices usage chunk (it iterates `choices` only today and would drop
   it); a config flag tolerates upstreams that 400 on `stream_options`.
+- **Token-count amendment (2026-10-10, issue #621, PR #643, owner
+  authorization):** `/v1/messages/count_tokens` and `/v1/responses/input_tokens`
+  pass the `GenerationRequest` generation would dispatch (built by
+  `validate_chat_request_async`) to `backend_count_prompt_tokens_async`, and
+  each backend counts its own wire input. Native, process and mock backends
+  count the same tool-intent text as before. For `upstream: vllm` the
+  `/tokenize` body comes from the dispatch payload: the completion prompt for a
+  Kairyu-rendered template, otherwise `messages`, `tools`,
+  `add_generation_prompt`, `continue_final_message` and `chat_template_kwargs`,
+  with `reasoning_effort` / `enable_thinking` merged as vLLM's chat request
+  merges them (its tokenize request does not). Before, the routes counted a
+  rendered string as a raw completion prompt: without the chat template's
+  delimiters, and with a tool-intent suffix the `openai` backend never sends.
+  Image prompts and llama.cpp (LCP-D3) stay declined. Limit: `/tokenize` cannot
+  carry `tool_choice` / `response_format`, which vLLM's Kimi K3 and Cohere
+  renderers read.
+  GPU evidence (2026-10-10): on `qwen3.8-27b-1gpu` (vLLM v0.23.0) and
+  `deepseek-v4.1-flash-8gpu` (ReplicaPool, DeepSeek encoder), seven cases each
+  (Messages: text, system+three tools, tool transcript, effort high; Responses:
+  the first three) count exactly the billed input tokens (difference 0); the
+  main build undercounted the same cases by 12-234 (Qwen) and 30-212 (DeepSeek).
+  Review amendment (PR #643, owner authorization): `ReplicaPool` counts on its
+  placeable replicas only, like generation, so a draining replica's contract
+  cannot reject a generatable input; vLLM chat requests with tools under
+  `tool_choice: none` are declined, because `--exclude-tools-when-tool-choice-none`
+  removes them from generation but not from `/tokenize` and Kairyu cannot see
+  the flag.
 
 ### D2 — HF Jinja chat templates; role concatenation is explicit-only
 

@@ -3,6 +3,7 @@ import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -3262,38 +3263,50 @@ def test_template_kwargs_rejected_on_pre_rendered_prompt():
 
 
 @pytest.mark.parametrize(
-    ("upstream", "status", "payload", "expected"),
+    ("upstream", "status", "payload"),
     [
-        pytest.param("vllm", 200, {"count": 42}, 42, id="vllm-count"),
-        pytest.param("vllm", 404, {"count": 42}, None, id="non-200"),
-        pytest.param("vllm", 200, {"count": "42"}, None, id="non-int"),
-        pytest.param("openai", 200, {"count": 42}, None, id="non-vllm-declines"),
+        pytest.param("vllm", 404, {"count": 42}, id="non-200"),
+        pytest.param("vllm", 200, {"count": "42"}, id="non-int"),
+        pytest.param("openai", 200, {"count": 42}, id="non-vllm-declines"),
     ],
 )
-async def test_count_prompt_tokens_via_vllm_tokenize(
-    upstream, status, payload, expected
-):
-    # /v1/messages/count_tokens network boundary: exact counts come from a
-    # vLLM upstream's POST /tokenize and every failure mode fails soft to
-    # None (the route then uses the same approximation billing would).
-    captured: dict = {}
-
-    def handler(http_request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(http_request.url)
-        captured["body"] = json.loads(http_request.content)
-        return httpx.Response(status, json=payload)
-
+async def test_count_prompt_tokens_fails_soft_to_none(upstream, status, payload):
+    # Token-count network boundary: exact counts come only from a vLLM
+    # upstream's POST /tokenize; every failure mode declines with None (the
+    # route then answers 404 rather than an estimate).
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
         model="m",
         api_key_env=None,
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(
+            lambda http_request: httpx.Response(status, json=payload)
+        ),
         upstream=upstream,
     )
-    assert await backend.count_prompt_tokens_async("some prompt") == expected
-    if expected is not None:
-        assert captured["url"] == "https://api.example.com/tokenize"
-        assert captured["body"] == {"model": "m", "prompt": "some prompt"}
+    assert await backend.count_prompt_tokens_async(_request("some prompt")) is None
+
+
+async def test_count_prompt_tokens_declines_tools_under_tool_choice_none():
+    # PR #643 review: vLLM's --exclude-tools-when-tool-choice-none drops the
+    # tools from generation but not from /tokenize, and the flag is invisible.
+    calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda http_request: calls.append(http_request)
+            or httpx.Response(200, json={"count": 42})
+        ),
+        upstream="vllm",
+    )
+    request = replace(
+        _request("x"),
+        tools=({"type": "function", "function": {"name": "add", "parameters": {}}},),
+        tool_choice="none",
+    )
+    assert await backend.count_prompt_tokens_async(request) is None
+    assert calls == []
 
 
 async def test_count_prompt_tokens_transport_error_is_none():
@@ -3307,7 +3320,7 @@ async def test_count_prompt_tokens_transport_error_is_none():
         transport=httpx.MockTransport(handler),
         upstream="vllm",
     )
-    assert await backend.count_prompt_tokens_async("x") is None
+    assert await backend.count_prompt_tokens_async(_request("x")) is None
 
 
 _LLAMACPP_FIXTURES = Path(__file__).parents[1] / "fixtures" / "llamacpp"

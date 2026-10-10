@@ -381,7 +381,7 @@ def render_tool_intent(
     A pre-tokenized prompt is caller-owned: adding a text suffix would silently
     mix two tokenizer owners. Multimodal prompts likewise cannot be flattened
     into text without dropping modality data. Pure function of its arguments:
-    billing, admission, and /v1/messages/count_tokens all hash the same bytes.
+    native billing, admission, and token counting all hash the same bytes.
     """
 
     if not tools or tools_in_prompt or tool_choice == "none":
@@ -433,18 +433,20 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
 
 
 async def backend_count_prompt_tokens_async(
-    backend: object, prompt: str
+    backend: object, request: GenerationRequest
 ) -> int | None:
-    """Probe-count prompt tokens for ``/v1/messages/count_tokens``.
+    """Count the prompt tokens generation of ``request`` would bill.
 
-    ``None`` is a first-class "declined" answer for backends that cannot
-    provide an authoritative count.
+    The backend receives the request generation would dispatch, because only
+    it knows what it sends (a rendered string, or chat messages and tools for
+    an upstream chat template). ``None`` is a first-class "declined" answer
+    for backends that cannot provide an authoritative count.
     """
 
     counter = getattr(backend, "count_prompt_tokens_async", None)
     if not callable(counter):
         return None
-    count = await counter(prompt)
+    count = await counter(request)
     if count is None:
         return None
     if type(count) is not int or count < 0:

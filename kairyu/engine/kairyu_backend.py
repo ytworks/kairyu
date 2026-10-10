@@ -59,6 +59,7 @@ from kairyu.engine.engine_loop import (
 from kairyu.engine.prompt import (
     TemplatedPrompt,
     prompt_kind,
+    prompt_text,
     supplied_prompt_token_ids,
 )
 from kairyu.engine.registry import register_backend
@@ -1718,8 +1719,14 @@ class KairyuBackend:
             continuation,
         )
 
-    async def count_prompt_tokens_async(self, prompt: str) -> int:
-        """Exact prompt-token count for ``/v1/messages/count_tokens``."""
+    async def count_prompt_tokens_async(
+        self, request: GenerationRequest
+    ) -> int | None:
+        """Exact count of the tool-intent prompt generation tokenizes."""
+
+        prompt = prompt_text(prompt_with_tool_intent(request))
+        if prompt is None:
+            return None
 
         def count() -> int:
             return len(self._loop.tokenize_prompt(prompt))

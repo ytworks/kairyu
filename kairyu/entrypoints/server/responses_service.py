@@ -26,13 +26,11 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound_async,
     backend_count_prompt_tokens_async,
     prepare_backend_request,
-    render_tool_intent,
 )
-from kairyu.engine.prompt import prompt_text
+from kairyu.engine.prompt import MultimodalPrompt
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     chat_error_from_upstream_client_error,
-    validate_chat_input_async,
     validate_chat_request_async,
 )
 from kairyu.entrypoints.server.errors import (
@@ -530,27 +528,28 @@ def add_responses_route(
             chat_request = _to_chat_request(
                 request, items, compaction_codec=compaction_codec, owner=owner
             )
-            validated_input = await validate_chat_input_async(
+            validated = await validate_chat_request_async(
                 chat_request,
+                engines,
                 chat_templates,
-                allow_multimodal=True,
+                request_id=(
+                    getattr(http_request.state, "request_id", None)
+                    or f"resp-{uuid.uuid4().hex[:12]}"
+                ),
                 legacy_chat_models=legacy_chat_models,
             )
-            text = prompt_text(
-                render_tool_intent(
-                    validated_input.prompt,
-                    tools=tuple(chat_request.tools or ()),
-                    tool_choice=chat_request.tool_choice,
-                    tools_in_prompt=validated_input.tools_in_prompt,
-                )
-            )
-            if text is None:
+            if isinstance(validated.generation_request.prompt, MultimodalPrompt):
                 raise ResponsesError(
                     "input token counting is not available for image input",
                     param="input",
                     code="unsupported_value",
                 )
-            input_tokens = await backend_count_prompt_tokens_async(engine, text)
+            try:
+                input_tokens = await backend_count_prompt_tokens_async(
+                    validated.engine, validated.generation_request
+                )
+            except UpstreamClientError as error:
+                raise chat_error_from_upstream_client_error(error) from error
             if input_tokens is None:
                 raise ResponsesError(
                     f"model {request.model!r} does not support token counting",

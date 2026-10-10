@@ -13,6 +13,7 @@ from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
+from tests.server._fake_vllm import fake_vllm_backend
 from tests.server._legacy_chat import create_legacy_app
 
 _ENVELOPE_KEYS = {"message", "type", "param", "code"}
@@ -157,33 +158,38 @@ def test_stored_responses_are_invisible_to_other_tenants(tmp_path, monkeypatch):
         assert _sdk(http, "key-a").responses.retrieve(created.id).id == created.id
 
 
-def test_input_tokens_counts_the_rendered_prompt(tmp_path):
-    class CountingBackend(MockBackend):
-        def __init__(self):
-            super().__init__()
-            self.counted: list[str] = []
-
-        async def count_prompt_tokens_async(self, prompt: str) -> int:
-            self.counted.append(prompt)
-            return len(prompt)
-
-    backend = CountingBackend()
+def test_input_tokens_count_the_billed_prompt(tmp_path):
+    # Issue #621: on a vLLM upstream the count tokenizes the chat body
+    # generation sends (messages and tools through vLLM's template).
+    tier = MockBackend()
     app = _app(
         tmp_path,
-        backend,
-        orchestrators={"kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})},
+        fake_vllm_backend(),
+        orchestrators={"kairyu-auto": Orchestrator({"tier1": tier, "tier2": tier})},
     )
+    request = {
+        "model": "m",
+        "input": "count these words",
+        "instructions": "be brief",
+        "tools": [
+            {
+                "type": "function",
+                "name": "add",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"a": {"type": "integer"}},
+                },
+            }
+        ],
+    }
     with TestClient(app) as http:
-        counted = _sdk(http).responses.input_tokens.count(
-            model="m", input="count these words", instructions="be brief"
-        )
+        billed = _sdk(http).responses.create(**request).usage.input_tokens
+        counted = _sdk(http).responses.input_tokens.count(**request)
         auto = http.post(
             "/v1/responses/input_tokens", json={"model": "kairyu-auto", "input": "x"}
         )
 
-    assert counted.input_tokens == len(backend.counted[-1])
-    assert "count these words" in backend.counted[-1]
-    assert "be brief" in backend.counted[-1]
+    assert counted.input_tokens == billed
     assert auto.status_code == 400
     assert auto.json()["error"]["param"] == "model"
 
