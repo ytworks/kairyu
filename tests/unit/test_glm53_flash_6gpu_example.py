@@ -165,12 +165,53 @@ def test_tuning_candidates_edit_only_their_flags(example):
     tune = example("tune")
     base = _command()
     assert tune.candidate_command(base, "baseline") == base
-    tp2 = tune.candidate_command(base, "tp2-dp3")
-    assert tp2[tp2.index("--tensor-parallel-size") + 1] == "2"
-    assert tp2[tp2.index("--data-parallel-size") + 1] == "3"
-    assert "--enable-expert-parallel" in tp2 and len(tp2) == len(base)
-    mtp = tune.candidate_command(base, "mtp-3")
-    assert json.loads(mtp[mtp.index("--speculative-config") + 1])["num_speculative_tokens"] == 3
+    no_mtp = tune.candidate_command(base, "no-mtp")
+    assert "--speculative-config" not in no_mtp and len(no_mtp) == len(base) - 2
+    dp6 = tune.candidate_command(base, "dp6")
+    assert dp6[dp6.index("--data-parallel-size") + 1] == "6"
+    assert "--speculative-config" not in dp6 and "--disable-custom-all-reduce" not in dp6
     batch = tune.candidate_command(base, "batch-4k")
     assert batch[batch.index("--max-num-batched-tokens") + 1] == "4096"
-    assert len(batch) == len(base)
+    # A candidate that collapses onto the committed command measures nothing.
+    changed = {
+        name: tuple(tune.candidate_command(base, name))
+        for name in tune.CANDIDATES
+        if name not in {"baseline", "baseline-repeat"}
+    }
+    assert len(set(changed.values())) == len(changed) and tuple(base) not in changed.values()
+
+
+def test_api_check_follows_the_bind_address(example):
+    control = example("control")
+    assert control.api_check_url({"API_PORT": "8015"}) == "http://127.0.0.1:8015"
+    assert (
+        control.api_check_url({"API_BIND_ADDRESS": "192.0.2.10", "API_PORT": "8015"})
+        == "http://192.0.2.10:8015"
+    )
+
+
+_CALL = {"index": 0, "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+
+
+@pytest.mark.parametrize(
+    "events,error",
+    [
+        ([{"tool_calls": [_CALL]}, "tool_calls", "[DONE]"], None),
+        ([{"tool_calls": [_CALL]}, "tool_calls", {"error": {"message": "x"}}], "stream error"),
+        ([{"tool_calls": [_CALL]}, "tool_calls"], "terminal markers"),
+    ],
+)
+def test_streamed_tool_call_gate_rejects_broken_streams(example, events, error):
+    lines = []
+    for event in events:
+        if event == "[DONE]":
+            body = "[DONE]"
+        elif event == "tool_calls":
+            body = json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+        elif "error" in event:
+            body = json.dumps(event)
+        else:
+            body = json.dumps({"choices": [{"delta": event}]})
+        lines.append(f"data: {body}")
+    result = example("verification").streamed_tool_call_error("\n".join(lines))
+    assert (result is None) if error is None else (error in result)

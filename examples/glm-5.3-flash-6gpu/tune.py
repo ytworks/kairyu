@@ -23,43 +23,46 @@ import yaml
 
 import verification
 
-# Flag -> value (None removes the flag, True adds a bare flag).
+# Flag -> value (None removes the flag, True adds a bare flag). Every
+# candidate is a change against the committed (selected) command and names
+# each flag it changes, so a candidate never silently equals the baseline.
+# The exploration that selected this command ran against the DP6 command
+# under the earlier names (tp2-dp3-seqs-32-mtp-3-nccl and the rest); each
+# run's selection.json and MEASUREMENTS.md keep their exact commands.
+_MTP_5 = '{"method":"mtp","num_speculative_tokens":5}'
+# The pinned KV pool fits the selected shape only; other shapes size their
+# pool from --gpu-memory-utilization.
+_UNPINNED = {"--kv-cache-memory": None}
+_DP6 = {
+    "--tensor-parallel-size": "1",
+    "--data-parallel-size": "6",
+    "--max-num-seqs": "16",
+    "--disable-custom-all-reduce": None,
+    **_UNPINNED,
+}
 CANDIDATES: dict[str, dict[str, object]] = {
     "baseline": {},
     # The committed command after a fresh restart: run-to-run variation of a
     # single trial, measured the same way as every other candidate.
     "baseline-repeat": {},
-    # The checkpoint's MTP layer: the recipe's depth (5) and a shallower one.
-    # Adopted only with exact answers behind a cached prefix (vllm#53912
-    # corrupted prefix-cached MTP output on another hybrid linear-attention model).
-    "mtp-3": {"--speculative-config": '{"method":"mtp","num_speculative_tokens":3}'},
-    "mtp-5": {"--speculative-config": '{"method":"mtp","num_speculative_tokens":5}'},
+    # MTP: off, and the recipe's depth (5) instead of 3. Adopted only with
+    # exact answers behind a cached prefix (vllm#53912 corrupted
+    # prefix-cached MTP output on another hybrid linear-attention model).
+    "no-mtp": {"--speculative-config": None},
+    "mtp-5": {"--speculative-config": _MTP_5, **_UNPINNED},
+    # vLLM's custom all-reduce instead of NCCL: fails while the MTP drafter's
+    # CUDA graphs are captured (custom_all_reduce.cuh:164); without MTP it
+    # measured no different from NCCL.
+    "custom-all-reduce": {"--disable-custom-all-reduce": None},
+    "custom-all-reduce-no-mtp": {"--disable-custom-all-reduce": None, "--speculative-config": None},
+    # DP6 (TP1 per GPU, 6 x 16 = the same 96 sequences), without and with MTP;
+    # with MTP no 1M-token KV pool fits.
+    "dp6": {**_DP6, "--speculative-config": None},
+    "dp6-mtp-3": _DP6,
     # Scheduler chunk (official tuning order: one parameter at a time).
-    "batch-4k": {"--max-num-batched-tokens": "4096"},
-    "batch-16k": {"--max-num-batched-tokens": "16384"},
-    # TP2 pairs on NUMA-local GPUs (0,1)(2,3)(4,5), DP3, still EP6: attention
-    # and KDA weights halve per GPU at the cost of a PCIe all-reduce per layer.
-    "tp2-dp3": {"--tensor-parallel-size": "2", "--data-parallel-size": "3"},
-    # The same shape at the same total L1 capacity (3 engines x 32 = 96, as
-    # 6 x 16): tp2-dp3 alone queues above 48 concurrent requests.
-    "tp2-dp3-seqs-32": {
-        "--tensor-parallel-size": "2",
-        "--data-parallel-size": "3",
-        "--max-num-seqs": "32",
-    },
+    "batch-4k": {"--max-num-batched-tokens": "4096", **_UNPINNED},
+    "batch-16k": {"--max-num-batched-tokens": "16384", **_UNPINNED},
 }
-# MTP does not fit beside a 1M-token KV pool on DP6 (mtp-3 / mtp-5 fail at
-# start); TP2 x DP3 halves the attention weights per GPU, so try it there.
-for _depth in (3, 5):
-    CANDIDATES[f"tp2-dp3-seqs-32-mtp-{_depth}"] = {
-        **CANDIDATES["tp2-dp3-seqs-32"],
-        "--speculative-config": CANDIDATES[f"mtp-{_depth}"]["--speculative-config"],
-    }
-# The TP2 custom all-reduce fails while the MTP drafter's CUDA graphs are
-# captured (custom_all_reduce.cuh:164 'invalid argument'); vLLM's own switch
-# falls back to NCCL. Measured with and without MTP to separate the two.
-for _name in ("tp2-dp3-seqs-32", "tp2-dp3-seqs-32-mtp-3", "tp2-dp3-seqs-32-mtp-5"):
-    CANDIDATES[f"{_name}-nccl"] = {**CANDIDATES[_name], "--disable-custom-all-reduce": True}
 CANDIDATE_ENVIRONMENT: dict[str, dict[str, str]] = {}
 BARE_FLAGS = {"--enable-expert-parallel", "--enable-prefix-caching", "--disable-custom-all-reduce"}
 
@@ -123,7 +126,7 @@ def main() -> None:
     original = yaml.safe_load((control.HERE / "compose.yaml").read_text())["services"]["glm"][
         "command"
     ]
-    api = f"http://127.0.0.1:{env['API_PORT']}"
+    api = control.api_check_url(env)
     reports: list[dict] = []
     try:
         for index, name in enumerate(args.candidates):

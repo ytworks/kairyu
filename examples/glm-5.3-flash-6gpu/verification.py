@@ -46,7 +46,7 @@ REQUEST_LOG: Path | None = None
 
 
 def _api_url() -> str:
-    return f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}"
+    return control.api_check_url(os.environ)
 
 
 def _run_id() -> str:
@@ -595,19 +595,40 @@ def tool_call_error(message: dict, finish_reason: object) -> str | None:
 
 
 def _stream_tool_message(sse: str) -> tuple[dict, object]:
+    """Assemble streamed tool-call deltas; an error event or a missing or
+    repeated terminal marker means the stream broke, whatever came before."""
     calls: dict[int, dict[str, str]] = {}
     finish: object = None
+    done = 0
     for line in sse.splitlines():
-        if not line.startswith("data: ") or line == "data: [DONE]":
+        if not line.startswith("data: "):
             continue
-        for choice in json.loads(line[6:]).get("choices", ()):
+        raw = line[6:].strip()
+        if raw == "[DONE]":
+            done += 1
+            continue
+        if done:
+            raise ValueError("JSON after the terminal SSE marker")
+        chunk = json.loads(raw)
+        if "error" in chunk:
+            raise ValueError(f"stream error: {chunk['error']}")
+        for choice in chunk.get("choices", ()):
             finish = choice.get("finish_reason") or finish
             for delta in (choice.get("delta") or {}).get("tool_calls") or ():
                 slot = calls.setdefault(delta.get("index", 0), {"name": "", "arguments": ""})
                 function = delta.get("function") or {}
                 slot["name"] += function.get("name") or ""
                 slot["arguments"] += function.get("arguments") or ""
+    if done != 1:
+        raise ValueError(f"stream ended with {done} terminal markers, expected 1")
     return {"tool_calls": [{"function": slot} for _, slot in sorted(calls.items())] or None}, finish
+
+
+def streamed_tool_call_error(sse: str) -> str | None:
+    try:
+        return tool_call_error(*_stream_tool_message(sse))
+    except ValueError as error:
+        return str(error)
 
 
 def _chat_case(payload: dict, *, timeout_s: float = 1800) -> tuple[dict | None, str | None]:
@@ -658,7 +679,7 @@ def tool_calling(run_dir: Path) -> int:
         )
     status, body, _ = post_chat(_tool_request(stream=True), timeout_s=1800)
     cases["streamed_tool_call"] = (
-        tool_call_error(*_stream_tool_message(body)) if status == 200 else f"HTTP {status}"
+        streamed_tool_call_error(body) if status == 200 else f"HTTP {status}"
     )
     for effort in SPEC["model"]["reasoning_efforts"]:
         choice, failure = _chat_case(_tool_request(reasoning_effort=effort))
@@ -798,7 +819,7 @@ def _stream(payload: dict, *, timeout_s: float = 1800) -> dict:
     start = time.monotonic()
     first_content = None
     content = trace = ""
-    finish = usage = None
+    finish = usage = error = None
     done = False
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for line in response:
@@ -809,6 +830,9 @@ def _stream(payload: dict, *, timeout_s: float = 1800) -> dict:
                 done = True
                 break
             chunk = json.loads(data)
+            if "error" in chunk:
+                error = chunk["error"]
+                continue
             usage = chunk.get("usage") or usage
             for choice in chunk.get("choices", []):
                 delta = choice.get("delta", {})
@@ -820,6 +844,7 @@ def _stream(payload: dict, *, timeout_s: float = 1800) -> dict:
                 finish = choice.get("finish_reason") or finish
     return {
         "done": done,
+        "error": error,
         "finish_reason": finish,
         "content": content,
         "reasoning_chars": len(trace),
@@ -847,6 +872,7 @@ def reasoning(run_dir: Path) -> int:
         row = {"effort": effort or "default", **_stream(payload)}
         row["passed"] = (
             row["done"]
+            and row["error"] is None
             and row["finish_reason"] == "stop"
             and row["content"].strip() == "323"
             and row["reasoning_chars"] > 0

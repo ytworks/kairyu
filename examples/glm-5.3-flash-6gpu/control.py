@@ -380,6 +380,13 @@ def _ensure_model(env: dict[str, str]) -> None:
     _run(command)
 
 
+def api_check_url(env) -> str:
+    """Where this host reaches the API: loopback when it listens on every interface."""
+    bind = env.get("API_BIND_ADDRESS", "0.0.0.0")
+    host = "127.0.0.1" if bind == "0.0.0.0" else bind
+    return f"http://{host}:{env.get('API_PORT', SPEC['api_port'])}"
+
+
 def _json_url(url: str) -> dict:
     with urllib.request.urlopen(url, timeout=5) as response:
         return json.loads(response.read())
@@ -696,8 +703,7 @@ def up() -> None:
     _ensure_vllm_image(env)
     _ensure_model(env)
     _compose(["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"], env=env)
-    local_api = f"http://127.0.0.1:{env['API_PORT']}"
-    validate_serving(local_api)
+    validate_serving(api_check_url(env))
     ui_bind = env["CHAT_UI_BIND_ADDRESS"]
     _provision_chat_ui_effort_selector(
         f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{env['CHAT_UI_PORT']}"
