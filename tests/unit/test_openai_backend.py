@@ -3,6 +3,7 @@ import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -3283,6 +3284,29 @@ async def test_count_prompt_tokens_fails_soft_to_none(upstream, status, payload)
         upstream=upstream,
     )
     assert await backend.count_prompt_tokens_async(_request("some prompt")) is None
+
+
+async def test_count_prompt_tokens_declines_tools_under_tool_choice_none():
+    # PR #643 review: vLLM's --exclude-tools-when-tool-choice-none drops the
+    # tools from generation but not from /tokenize, and the flag is invisible.
+    calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda http_request: calls.append(http_request)
+            or httpx.Response(200, json={"count": 42})
+        ),
+        upstream="vllm",
+    )
+    request = replace(
+        _request("x"),
+        tools=({"type": "function", "function": {"name": "add", "parameters": {}}},),
+        tool_choice="none",
+    )
+    assert await backend.count_prompt_tokens_async(request) is None
+    assert calls == []
 
 
 async def test_count_prompt_tokens_transport_error_is_none():

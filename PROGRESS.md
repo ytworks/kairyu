@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-10 — [amendment] Token-count review fixes (m9 D1, PR #643 review)
+- What: `ReplicaPool` counts tokens on placeable replicas only; vLLM chat counts decline tools under `tool_choice: none`.
+- Why: a drained replica with an older config turned count_tokens/input_tokens into 400 for inputs the pool generates; vLLM's `--exclude-tools-when-tool-choice-none` drops those tools from generation but not from `/tokenize`, and Kairyu cannot see the flag.
+- Refs: m9 D1 amendment 2026-10-10; `kairyu/orchestration/replica.py`, `kairyu/engine/openai_backend.py`
+
 ### 2026-10-10 — [progress] Token counts equal billed prompt tokens on live vLLM stacks (#621, PR #643)
 - What: V1 `qwen3.8-27b-1gpu` and V2 `deepseek-v4.1-flash-8gpu`: count_tokens / input_tokens equal the billed input tokens in all 14 cases (text, system+tools, tool transcript, effort high); the main build undercounted them by 12-234 and 30-212 tokens.
 - Refs: m9 D1 amendment 2026-10-10; PR #643

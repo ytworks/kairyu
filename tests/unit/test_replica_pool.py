@@ -283,6 +283,29 @@ def test_admission_excludes_draining_replicas() -> None:
     assert draining.admission_calls == 0
 
 
+class CountingBackend(FlakyBackend):
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+        self.count_calls = 0
+
+    async def count_prompt_tokens_async(self, request: GenerationRequest) -> int:
+        self.count_calls += 1
+        return self.count
+
+
+async def test_token_count_excludes_draining_replicas() -> None:
+    # PR #643 review: a draining replica's contract could reject (400) an
+    # input the pool still generates on its placeable replicas.
+    draining = CountingBackend(4096)
+    active = CountingBackend(128)
+    pool = ReplicaPool({"draining": draining, "active": active})
+    pool.drain("draining")
+
+    assert await pool.count_prompt_tokens_async(make_request("x")) == 128
+    assert draining.count_calls == 0
+
+
 async def test_cached_ring_preserves_exact_hrw_and_membership_order() -> None:
     replica_ids = ("replica:one", "レプリカ-二", "replica-three")
     pool = ReplicaPool(

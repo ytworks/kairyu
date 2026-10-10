@@ -77,6 +77,12 @@ token-granularity TPOT, results files).
   (Messages: text, system+three tools, tool transcript, effort high; Responses:
   the first three) count exactly the billed input tokens (difference 0); the
   main build undercounted the same cases by 12-234 (Qwen) and 30-212 (DeepSeek).
+  Review amendment (PR #643, owner authorization): `ReplicaPool` counts on its
+  placeable replicas only, like generation, so a draining replica's contract
+  cannot reject a generatable input; vLLM chat requests with tools under
+  `tool_choice: none` are declined, because `--exclude-tools-when-tool-choice-none`
+  removes them from generation but not from `/tokenize` and Kairyu cannot see
+  the flag.
 
 ### D2 — HF Jinja chat templates; role concatenation is explicit-only
 

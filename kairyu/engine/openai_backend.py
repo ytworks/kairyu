@@ -1099,6 +1099,8 @@ class OpenAICompatBackend:
         ):
             return None
         body = await run_prompt_work(self._tokenize_body, request)
+        if body is None:
+            return None
         root = (
             self._base_url[: -len("/v1")]
             if self._base_url.endswith("/v1")
@@ -1122,7 +1124,7 @@ class OpenAICompatBackend:
         count = payload.get("count") if isinstance(payload, dict) else None
         return count if type(count) is int and count >= 0 else None
 
-    def _tokenize_body(self, request: GenerationRequest) -> dict[str, object]:
+    def _tokenize_body(self, request: GenerationRequest) -> dict[str, object] | None:
         """Map the dispatch body onto ``/tokenize`` with the same rendering.
 
         A Kairyu-rendered prompt goes to ``/completions`` and is counted as
@@ -1131,7 +1133,10 @@ class OpenAICompatBackend:
         unless the caller set it) into the template kwargs, which its tokenize
         request does not, so the merge is repeated here. ``tool_choice`` and
         ``response_format`` cannot be carried; vLLM's Kimi K3 and Cohere
-        renderers read them.
+        renderers read them. Tools under ``tool_choice: none`` are declined
+        (``None``): vLLM's ``--exclude-tools-when-tool-choice-none`` drops them
+        from generation but not from ``/tokenize``, and the flag is not
+        visible here.
         """
 
         payload = self._payload(
@@ -1141,6 +1146,8 @@ class OpenAICompatBackend:
         )
         if "prompt" in payload:
             return {"model": self._model, "prompt": payload["prompt"]}
+        if "tools" in payload and payload.get("tool_choice") == "none":
+            return None
         body: dict[str, object] = {
             key: payload[key]
             for key in (
