@@ -72,6 +72,11 @@ token-granularity TPOT, results files).
   Image prompts and llama.cpp (LCP-D3) stay declined. Limit: `/tokenize` cannot
   carry `tool_choice` / `response_format`, which vLLM's Kimi K3 and Cohere
   renderers read.
+  GPU evidence (2026-10-10): on `qwen3.8-27b-1gpu` (vLLM v0.23.0) and
+  `deepseek-v4.1-flash-8gpu` (ReplicaPool, DeepSeek encoder), seven cases each
+  (Messages: text, system+three tools, tool transcript, effort high; Responses:
+  the first three) count exactly the billed input tokens (difference 0); the
+  main build undercounted the same cases by 12-234 (Qwen) and 30-212 (DeepSeek).
 
 ### D2 — HF Jinja chat templates; role concatenation is explicit-only
 

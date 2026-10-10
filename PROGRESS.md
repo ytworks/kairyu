@@ -113,6 +113,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-10 — [progress] Token counts equal billed prompt tokens on live vLLM stacks (#621, PR #643)
+- What: V1 `qwen3.8-27b-1gpu` and V2 `deepseek-v4.1-flash-8gpu`: count_tokens / input_tokens equal the billed input tokens in all 14 cases (text, system+tools, tool transcript, effort high); the main build undercounted them by 12-234 and 30-212 tokens.
+- Refs: m9 D1 amendment 2026-10-10; PR #643
+
 ### 2026-10-10 — [amendment] Token counts tokenize what generation sends (m9 D1, #621, PR #643)
 - What: `/v1/messages/count_tokens` and `/v1/responses/input_tokens` pass the generation `GenerationRequest` to the backend; vLLM upstreams build the `/tokenize` chat body from the dispatch payload (messages, tools, template kwargs incl. vLLM's `reasoning_effort`/`enable_thinking` merge). Native/mock counts unchanged; images and llama.cpp stay declined.
 - Why: on vLLM upstreams without a Kairyu template the count tokenized a rendered string without the chat template (too low) and with a tool-intent suffix generation never sends (either direction); clients sizing context from it got a wrong budget.

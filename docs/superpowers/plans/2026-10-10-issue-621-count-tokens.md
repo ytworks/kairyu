@@ -1,7 +1,8 @@
 # Issue #621: token counts equal billed prompt tokens on vLLM upstreams
 
 Status: **Approved 2026-10-10 (owner: exact count, request-based count
-interface, image counts declined); implemented, GPU verification pending.**
+interface, image counts declined); implemented; V1 and V2 pass (difference 0
+on all 14 cases).**
 
 ## Problem
 
