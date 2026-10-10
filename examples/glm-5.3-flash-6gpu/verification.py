@@ -993,7 +993,8 @@ def retrieval_error(content: object, key: str) -> str | None:
     """
     if not isinstance(content, str):
         return f"no answer text: {content!r}"
-    keys = set(re.findall(r"K[0-9A-F]{24}", content))
+    # Whole identifiers only: a longer token is a different key, not a match.
+    keys = set(re.findall(r"(?<![0-9A-Za-z])K[0-9A-Fa-f]{12,}(?![0-9A-Za-z])", content))
     if keys != {key}:
         return f"answer names {sorted(keys)}, expected {key}"
     return None

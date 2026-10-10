@@ -114,6 +114,9 @@ def test_chat_ui_filter_sends_only_the_public_effort():
         ("The archive key is **KAB12CD34EF56AB12CD34EF56**.", True),
         ("KAB12CD34EF56AB12CD34EF57", False),
         ("KAB12CD34EF56AB12CD34EF56 or KAB12CD34EF56AB12CD34EF57", False),
+        ("KAB12CD34EF56AB12CD34EF56A", False),
+        ("KAB12CD34EF56AB12CD34EF56A or KAB12CD34EF56AB12CD34EF56B", False),
+        ("64 KB of log, then KAB12CD34EF56AB12CD34EF56", True),
         (None, False),
     ],
 )
