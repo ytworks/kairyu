@@ -6,7 +6,7 @@ rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
-Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), GPU gates pending**
+Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), 8 of 9 GPU gates pass 2026-10-11 (`verified-tool-route` fails on routing)**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -820,6 +820,12 @@ Owner decision. Plan: `docs/superpowers/plans/2026-10-11-deepseek-v4.1-quyet-8gp
 - Routing (question, choices, fallback, 60 s) and the think route are
   unchanged. The example is renamed `examples/deepseek-v4.1-quyet-8gpu`.
 - `kairyu/` is unchanged.
+
+GPU-verified 2026-10-11 (example `MEASUREMENTS.md`): 8 of 9 gates pass;
+`verified-tool-route` fails 2 of 12 (`own-check` routed THINK) and the route
+replay misroutes 11 of 64 real DeepSWE turns (Winnow: 1), all final turns
+before the submit command. Judgments fixed during the run: a question's
+instructions go to Quyet as one string (the candidate in its text).
 
 Why: the owner moves the decisions to Quyet (JevBench open-weights first, a
 calibrated System One model). On DeepSWE turns
