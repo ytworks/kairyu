@@ -225,11 +225,20 @@ def test_reference_comparison_fails_only_flipped_confident_decisions(example):
 
 def test_reference_is_reused_only_for_the_same_requests(example, monkeypatch, tmp_path):
     """A stored reference answers only the requests it was made from: an edited request
-    body with an unchanged id must force a new reference run, not pass on old answers."""
+    body with an unchanged id, including options merely reordered (the package letters
+    them in order), must force a new reference run, not pass on old answers."""
 
     verification = example("verification")
+    team = {"type": "choice", "instructions": "Which team?"}
     old = [{"id": "authored-0", "state": "Old state", "questions": QUESTIONS}]
     new = [{"id": "authored-0", "state": "New state", "questions": QUESTIONS}]
+    billing_first = [{"id": "authored-0", "state": "Old state", "questions": {
+        "team": {**team, "criteria": {"billing": None, "outage": None}}}}]  # fmt: skip
+    outage_first = [{"id": "authored-0", "state": "Old state", "questions": {
+        "team": {**team, "criteria": {"outage": None, "billing": None}}}}]  # fmt: skip
+    assert verification.reference_fingerprint(billing_first) != verification.reference_fingerprint(
+        outage_first
+    )
     stored = tmp_path / "20261010-old"
     stored.mkdir()
     (stored / "reference.json").write_text(

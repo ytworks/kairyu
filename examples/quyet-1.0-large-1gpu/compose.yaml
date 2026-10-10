@@ -15,7 +15,9 @@ services:
       VLLM_NO_USAGE_STATS: "1"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       SAFETENSORS_FAST_GPU: "1"
-      # Every compile cache on NVMe, none in the container layer on the root disk.
+      # Every compile cache on NVMe and no bytecode: nothing grows the container
+      # layer on the root disk.
+      PYTHONDONTWRITEBYTECODE: "1"
       XDG_CACHE_HOME: /root/.cache
       TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
       TRITON_CACHE_DIR: /root/.cache/triton
@@ -79,6 +81,10 @@ services:
       QUYET_READ_WORKERS: ${QUYET_READ_WORKERS}
       QUYET_MAX_QUESTIONS: ${QUYET_MAX_QUESTIONS}
       QUYET_PORT: "8092"
+      # No bytecode, and scratch in memory: nothing grows the container layer on the root disk.
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp
     volumes:
       - type: bind
         source: ${MODEL_STORAGE_PATH}

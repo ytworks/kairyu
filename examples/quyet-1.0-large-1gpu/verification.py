@@ -233,15 +233,18 @@ def _official_records(checkout: Path, items: list, answers: dict[str, dict], spl
 
 def reference_fingerprint(requests: list[dict]) -> str:
     """Everything a reference answer depends on: each request body, the checkpoint, the
-    package and the image it ran in, and the JevBench revision the items came from."""
+    package and the image it ran in, and the JevBench revision the items came from.
 
-    material = {
-        "requests": requests,
-        "model": [SPEC["model"]["revision"], SPEC["model"]["tree_sha256"]],
-        "image": control.adapter_labels(),
-        "jevbench": CHECKS["jevbench"]["revision"],
-    }
-    canonical = json.dumps(material, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    Key order is kept, not sorted: the package letters a question's options in the
+    order its criteria arrive, so reordering them is a different prompt."""
+
+    material = [
+        requests,
+        [SPEC["model"]["revision"], SPEC["model"]["tree_sha256"]],
+        list(control.adapter_labels().items()),
+        CHECKS["jevbench"]["revision"],
+    ]
+    canonical = json.dumps(material, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
