@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-07 — [amendment] Verified replies target the next step; drafts carry structured tool calls (PR #641)
+- What: drafts/requirements/answer define the reply as the next assistant message (on agent turns, the move needed now); each draft carries `tool_calls` and reads the caller's tools; judgments also read the conversation; stage reports leave `reasoning_content`. DeepSWE on the two-Winnow layout stopped at 0/113 scored. All nine GPU gates pass.
+- Why: drafts wrote tool calls as text and the answer copied it (3/47 turns rejected by the agent); requirements read the task as the request every turn, so agents re-explored instead of stepping; replayed stage reports grew every request.
+- Refs: VCO-D19 amendment 2026-10-07 (next step); example `verified.yaml`
+
+### 2026-10-07 — [amendment] Verdict waits validated across exclusions; two-Winnow layout GPU-verified (PR #641)
+- What: review fixes to the m1 D8 wait-for-a-parallel-branch amendment: waits join the cycle check; a waited unit's dependencies must precede the target on every request; a dependency counts as done only if, for each head/image exclusion combination, it precedes the target or is excluded (otherwise it is waited for). All nine GPU gates pass on DeepSeek max requirements with `winnow-route`/`winnow-judge`.
+- Why: four review findings: verdicts waiting on each other's targets, and image-conditional or head exclusions shifting waves, hung runs or let verdicts read missing outputs.
+- Refs: m1 D8 amendment 2026-10-06 (extended); VCO-D19 amendment 2026-10-07; example `MEASUREMENTS.md`
+
+### 2026-10-07 — [amendment] Verified requirements on DeepSeek max; Qwen replaced by a second Winnow (PR #641)
+- What: `requirements` moves from Qwen (low) to DeepSeek (max, full conversation). Qwen leaves the example (renamed `deepseek-v4.1-winnow-8gpu`); GPU 6 hosts a second Winnow-12B: `winnow-route` judges only the route, `winnow-judge` (GPU 7) only the judgments. The `{conversation_without_reasoning}` placeholder is withdrawn (no user left). GPU gates pending.
+- Why: owner decision after DeepSWE r1 (8 of 24 scored, stopped): Qwen requirements was the wave-1 bottleneck (median 107 s vs drafts 36 s); separate replicas keep judgments from queueing the route decision.
+- Refs: VCO-D19 amendment 2026-10-07; m1 D8 withdrawal note; supersedes the two entries below
+
+### 2026-10-07 — [amendment] Correction: Winnow keeps replayed reasoning (PR #641)
+- What: corrects the entry below: only Qwen `requirements` drops replayed `reasoning_content`; DeepSeek and Winnow (route judge and `judgments` as configured) are unchanged.
+- Why: owner decision: do not drop the reasoning for Winnow.
+- Refs: entry below; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
+
+### 2026-10-07 — [amendment] Qwen requirements reads the conversation without replayed reasoning (PR #641)
+- What: new role placeholder `{conversation_without_reasoning}` (`{conversation}` minus assistant `reasoning_content`); the example's Qwen `requirements` uses it, DeepSeek roles keep the full conversation.
+- Why: DeepSWE r1 replayed Kairyu's stage reports; Qwen `requirements` overflowed 262,144 tokens and 87/160 VERIFIED turns had no Winnow judgment. Owner: only Qwen and Winnow do without reasoning; DeepSeek needs it.
+- Refs: m1 D8 amendment 2026-10-07; VCO-D19 amendment 2026-10-07; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
+
 ### 2026-10-06 — [design] Verified route in three waves; verifiers may wait for a parallel branch (VCO-D19, PR #641)
 - What: VERIFIED = wave 1 DeepSeek five drafts (one call, caller's effort) beside Qwen requirements (MECE, ≤16, low effort); wave 2 one Winnow read per draft (adoptable?) and per draft x requirement (met?); wave 3 DeepSeek (caller's effort) writes the best answer from all of them critically. Framework: a verifier may read a unit running beside its target; the verdict waits for it (deadlock-free validation).
 - Why: owner design; without the framework change wave 1 could not run in parallel (owner authorized the change).
