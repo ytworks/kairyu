@@ -1,0 +1,2874 @@
+{
+ "tools": {
+  "calendar": [
+   {
+    "type": "function",
+    "function": {
+     "name": "list_events",
+     "description": "List the user's calendar events on a date (YYYY-MM-DD).",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "date": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "date"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "create_event",
+     "description": "Create a calendar event. start and end are ISO 8601 local times.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "title": {
+        "type": "string"
+       },
+       "start": {
+        "type": "string"
+       },
+       "end": {
+        "type": "string"
+       },
+       "attendees": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      },
+      "required": [
+       "title",
+       "start",
+       "end"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "send_email",
+     "description": "Send an email from the user's account.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "to": {
+        "type": "string"
+       },
+       "subject": {
+        "type": "string"
+       },
+       "body": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "to",
+       "subject",
+       "body"
+      ]
+     }
+    }
+   }
+  ],
+  "code": [
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "files": [
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file and return its content.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "write_file",
+     "description": "Write a text file, replacing its whole content.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "content": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "content"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "ops": [
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "finish",
+     "description": "End the task and report a summary to the user.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "summary": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "summary"
+      ]
+     }
+    }
+   }
+  ],
+  "web": [
+   {
+    "type": "function",
+    "function": {
+     "name": "http_get",
+     "description": "Fetch a URL and return the HTTP status and body.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "url": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "url"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "web_search",
+     "description": "Search the web and return the top results.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ "items": [
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Rename the function `load_cfg` to `load_config` everywhere in the project and keep the tests passing."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "What's on my calendar on 2026-10-14?"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Schedule a 30-minute call titled 'Budget review' with ana@example.com on 2026-10-15 at 14:00."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Is https://status.example.org reporting an outage right now?"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "What is the latest stable release of PostgreSQL as of today, and when was it released?"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "How many data rows does /data/orders.csv have, not counting the header?"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_first_move",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Add the line LOG_LEVEL=debug to /data/app.env and leave every other line as it is."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    },
+    {
+     "role": "assistant",
+     "content": "Running the failing test first.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "FAILED tests/test_dates.py::test_parse_iso - AssertionError: assert parse_iso('2026-10-09T12:00:00Z') == datetime(2026, 10, 9, 12, 0, tzinfo=UTC)\nE   +  where None = parse_iso('2026-10-09T12:00:00Z')\n1 failed, 41 passed in 0.92s"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Rename the function `load_cfg` to `load_config` everywhere in the project and keep the tests passing."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -rn 'load_cfg' --include='*.py' .\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "./app/config.py:12:def load_cfg(path):\n./app/main.py:3:from app.config import load_cfg\n./app/main.py:20:    cfg = load_cfg(args.config)\n./tests/test_config.py:1:from app.config import load_cfg\n./tests/test_config.py:8:    assert load_cfg('x.toml')['name'] == 'x'"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Book the earliest free hour between 09:00 and 17:00 on 2026-10-16 for a 'Design sync' with bob@example.com."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-16\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Standup\", \"start\": \"2026-10-16T09:00\", \"end\": \"2026-10-16T09:30\"}, {\"title\": \"1:1 Carla\", \"start\": \"2026-10-16T09:30\", \"end\": \"2026-10-16T10:30\"}, {\"title\": \"Lunch\", \"start\": \"2026-10-16T12:00\", \"end\": \"2026-10-16T13:00\"}]"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "What is the latest stable release of PostgreSQL as of today, and when was it released?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"PostgreSQL latest stable release\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "1. PostgreSQL: Versioning Policy - postgresql.org/support/versioning\n2. PostgreSQL 18 Released! - postgresql.org/about/news/...\n3. Release notes index - postgresql.org/docs/release/"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "How many orders in /data/orders.csv have a total above 100?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"head -3 /data/orders.csv\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "order_id,customer,total,currency\n1001,acme,250.00,EUR\n1002,globex,80.50,EUR"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Add type hints to every function in app/mathutil.py."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cat /app/app/mathutil.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "def clamp(x, low, high):\n    return max(low, min(x, high))\n\n\ndef mean(values):\n    return sum(values) / len(values)\n"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Email everyone invited to tomorrow's 'Kickoff' that it moves to 11:00."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-14\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Kickoff\", \"start\": \"2026-10-14T10:00\", \"end\": \"2026-10-14T11:00\", \"attendees\": [\"dana@example.com\", \"eli@example.com\"]}]"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Get the EUR rate from https://api.example.com/v1/rates."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://api.example.com/v1/rates\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 301 Moved Permanently\nLocation: https://api.example.com/v2/rates"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Find the commit that made slugify('Ä') return an empty string."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git log --oneline -S'normalize' -- app/text.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "9c1e2aa use NFKD normalization in slugify\n41b07d3 add slugify\n"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_mid_task",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Merge /data/a.csv and /data/b.csv into /data/all.csv with a single header."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"head -1 /data/a.csv /data/b.csv; wc -l /data/a.csv /data/b.csv\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "==> /data/a.csv <==\nid,name,score\n\n==> /data/b.csv <==\nid,name,score\n  501 /data/a.csv\n  301 /data/b.csv\n  802 total"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Run the project's tests and fix whatever fails."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && npm test\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "sh: 1: npm: not found"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "FAILED tests/test_dates.py::test_parse_iso - AssertionError: assert parse_iso('2026-10-09T12:00:00Z') == datetime(2026, 10, 9, 12, 0, tzinfo=UTC)\nE   +  where None = parse_iso('2026-10-09T12:00:00Z')\n1 failed, 41 passed in 0.92s"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -n 30,50p app/dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "def parse_iso(text):\n    match = ISO_RE.match(text)\n    if not match:\n        return None\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/ISO_RE = re.compile(r\\\"^(\\\\\\\\d{4})-(\\\\\\\\d{2})-(\\\\\\\\d{2})T(\\\\\\\\d{2}):(\\\\\\\\d{2}):(\\\\\\\\d{2})$\\\")/ISO_RE = re.compile(r\\\"^(\\\\\\\\d{4})-(\\\\\\\\d{2})-(\\\\\\\\d{2})T(\\\\\\\\d{2}):(\\\\\\\\d{2}):(\\\\\\\\d{2})(Z)?$\\\"/' app/dates.py && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "E     File \"/app/app/dates.py\", line 12\nE       ISO_RE = re.compile(r\"^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(Z)?$\"\nE                         ^\nE   SyntaxError: '(' was never closed\n1 error in 0.11s"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Summarise the changelog at https://example.org/project/CHANGELOG.md."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://example.org/project/CHANGELOG.md\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 404 Not Found"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Convert /data/config.yaml to JSON at /data/config.json."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /data && python3 -c \\\"import yaml, json; json.dump(yaml.safe_load(open('config.yaml')), open('config.json', 'w'))\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'yaml'"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Schedule a 30-minute call titled 'Budget review' with ana@example.com on 2026-10-15 at 14:00."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "create_event",
+        "arguments": "{\"title\": \"Budget review\", \"start\": \"2026-10-15T14:30\", \"end\": \"2026-10-15T14:00\", \"attendees\": [\"ana@example.com\"]}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "Error: end must be after start"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_error",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Commit the new file docs/usage.md with the message 'docs: usage'."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git commit -m 'docs: usage'\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "On branch main\nUntracked files:\n  docs/usage.md\n\nnothing added to commit but untracked files present (use \"git add\" to track)"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Make `python cli.py --json` print valid JSON. tests/test_cli.py must pass."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -n 'json' cli.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "14:    if args.json:\n15:        print(str(result))"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i '15s/print(str(result))/print(json.dumps(result))/' cli.py && sed -i '1i import json' cli.py && sed -n 1,3p cli.py && sed -n 15,17p cli.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "import json\nimport argparse\nimport sys\n    if args.json:\n        print(json.dumps(result))\n"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Rename the function `load_cfg` to `load_config` everywhere in the project and keep the tests passing."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -rln 'load_cfg' --include='*.py' . | xargs sed -i 's/load_cfg/load_config/g' && grep -rn 'load_cfg' . ; echo exit=$?\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "exit=1"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Merge /data/a.csv and /data/b.csv into /data/all.csv with a single header, and check that no rows were lost."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /data && (cat a.csv; tail -n +2 b.csv) > all.csv; echo done\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "done"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "Fix the off-by-one in paginate() and add an entry for it under 'Unreleased' in CHANGELOG.md."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/start = page \\\\* size + 1/start = page * size/' app/pages.py && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "57 passed in 1.31s"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Add a `timeout` keyword argument to fetch() in app/net.py. CI runs pytest and mypy; keep both green."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -n 1,12p app/net.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import urllib.request\n\n\ndef fetch(url: str) -> bytes:\n    with urllib.request.urlopen(url) as response:\n        return response.read()\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/def fetch(url: str) -> bytes:/def fetch(url: str, timeout: float = 10.0) -> bytes:/; s/urlopen(url)/urlopen(url, timeout=timeout)/' app/net.py && sed -n 4,6p app/net.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "def fetch(url: str, timeout: float = 10.0) -> bytes:\n    with urllib.request.urlopen(url, timeout=timeout) as response:\n        return response.read()"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "23 passed in 0.88s"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_verify_pending",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Create a 'Quarterly planning' event on 2026-10-20 from 10:00 to 12:00 with dana@example.com and eli@example.com, and email them the agenda: goals, budget, hiring."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "create_event",
+        "arguments": "{\"title\": \"Quarterly planning\", \"start\": \"2026-10-20T10:00\", \"end\": \"2026-10-20T12:00\", \"attendees\": [\"dana@example.com\", \"eli@example.com\"]}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "{\"id\": \"evt_412\", \"status\": \"created\"}"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_finish_call",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "FAILED tests/test_dates.py::test_parse_iso - AssertionError: assert parse_iso('2026-10-09T12:00:00Z') == datetime(2026, 10, 9, 12, 0, tzinfo=UTC)\nE   +  where None = parse_iso('2026-10-09T12:00:00Z')\n1 failed, 41 passed in 0.92s"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/(\\\\\\\\d{2})\\\\$\\\"/(\\\\\\\\d{2})(Z)?\\\\$\\\"/' app/dates.py && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "42 passed in 0.97s"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git diff --stat\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": " app/dates.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_finish_call",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "Rename the function `load_cfg` to `load_config` everywhere in the project and keep the tests passing."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -rln 'load_cfg' --include='*.py' . | xargs sed -i 's/load_cfg/load_config/g' && grep -rn 'load_cfg' . ; echo exit=$?\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "exit=1"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "64 passed in 2.10s"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_finish_call",
+   "tools": "ops",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an operations agent. Use bash to do the work. When everything is done and checked, call the finish tool with a short summary."
+    },
+    {
+     "role": "user",
+     "content": "Rotate the log file /var/log/app.log: move it to /var/log/app.log.1 and create an empty app.log owned by appuser."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"mv /var/log/app.log /var/log/app.log.1 && install -o appuser -g appuser -m 644 /dev/null /var/log/app.log && ls -l /var/log/app.log*\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "-rw-r--r-- 1 appuser appuser       0 Oct 13 09:12 /var/log/app.log\n-rw-r--r-- 1 appuser appuser 4812331 Oct 13 09:11 /var/log/app.log.1"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_finish_call",
+   "tools": "ops",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an operations agent. Use bash to do the work. When everything is done and checked, call the finish tool with a short summary."
+    },
+    {
+     "role": "user",
+     "content": "Free disk space on /srv by deleting the build caches under /srv/ci/cache older than 7 days, and report how much was freed."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"du -sh /srv/ci/cache\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "38G\t/srv/ci/cache"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"find /srv/ci/cache -type f -mtime +7 -delete && du -sh /srv/ci/cache\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "11G\t/srv/ci/cache"
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "FAILED tests/test_dates.py::test_parse_iso - AssertionError: assert parse_iso('2026-10-09T12:00:00Z') == datetime(2026, 10, 9, 12, 0, tzinfo=UTC)\nE   +  where None = parse_iso('2026-10-09T12:00:00Z')\n1 failed, 41 passed in 0.92s"
+    },
+    {
+     "role": "assistant",
+     "content": "The regex does not accept the trailing Z. I will now update ISO_RE and rerun the test."
+    },
+    {
+     "role": "user",
+     "content": "Your last reply did not call a tool. Every reply must call exactly one tool."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Rename the function `load_cfg` to `load_config` everywhere in the project and keep the tests passing."
+    },
+    {
+     "role": "assistant",
+     "content": "I can replace load_cfg in the four files that use it and then run the tests. Shall I go ahead?"
+    },
+    {
+     "role": "user",
+     "content": "Yes, go ahead."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_text",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Draft an email to dana@example.com asking to move our 1:1 to Thursday."
+    },
+    {
+     "role": "assistant",
+     "content": "Here is a draft:\n\nSubject: Moving our 1:1\n\nHi Dana, could we move our 1:1 to Thursday this week? Same time works for me. Thanks!\n\nShould I send it?"
+    },
+    {
+     "role": "user",
+     "content": "Looks good, send it."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_after_text",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Add the line LOG_LEVEL=debug to /data/app.env and leave every other line as it is."
+    },
+    {
+     "role": "assistant",
+     "content": "I'll append the line to /data/app.env now."
+    },
+    {
+     "role": "user",
+     "content": "You did not make any change. Please do it."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_new_request",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "What's on my calendar on 2026-10-14?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-14\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Kickoff\", \"start\": \"2026-10-14T10:00\", \"end\": \"2026-10-14T11:00\"}]"
+    },
+    {
+     "role": "assistant",
+     "content": "On 2026-10-14 you have one event: Kickoff, 10:00-11:00."
+    },
+    {
+     "role": "user",
+     "content": "Add a 15-minute 'Prep kickoff' event right before it."
+    }
+   ]
+  },
+  {
+   "label": "TOOL",
+   "category": "tool_new_request",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Is https://status.example.org reporting an outage right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://status.example.org\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 200\n<h1>All systems operational</h1>"
+    },
+    {
+     "role": "assistant",
+     "content": "No. https://status.example.org reports all systems operational."
+    },
+    {
+     "role": "user",
+     "content": "And https://status.example.net?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "How many data rows does /data/orders.csv have, not counting the header?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"wc -l /data/orders.csv\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "1201 /data/orders.csv"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "What's on my calendar on 2026-10-14?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-14\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Kickoff\", \"start\": \"2026-10-14T10:00\", \"end\": \"2026-10-14T11:00\"}, {\"title\": \"Dentist\", \"start\": \"2026-10-14T16:30\", \"end\": \"2026-10-14T17:15\"}]"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Is https://status.example.org reporting an outage right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://status.example.org\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 200\n<h1>Partial outage</h1><p>EU-West API: elevated error rates since 08:40 UTC. Other regions operational.</p>"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Which Python versions does this project support?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -n 'requires-python' pyproject.toml\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "7:requires-python = \">=3.11,<3.14\""
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Schedule a 30-minute call titled 'Budget review' with ana@example.com on 2026-10-15 at 14:00."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "create_event",
+        "arguments": "{\"title\": \"Budget review\", \"start\": \"2026-10-15T14:00\", \"end\": \"2026-10-15T14:30\", \"attendees\": [\"ana@example.com\"]}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "{\"id\": \"evt_77\", \"status\": \"created\", \"invites_sent\": [\"ana@example.com\"]}"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_final_text",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "What is the latest stable release of PostgreSQL as of today, and when was it released?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"PostgreSQL latest stable release\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "1. PostgreSQL 18.1, 17.7 ... Released - postgresql.org/about/news/...\n2. Versioning Policy - postgresql.org/support/versioning"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://www.postgresql.org/support/versioning/\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "HTTP 200\nCurrent minor: 18.1, released 2026-08-14. Supported: 18, 17, 16, 15, 14."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "In one paragraph, what does `git rebase --onto` do?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "What's on my calendar on 2026-10-14?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-14\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Kickoff\", \"start\": \"2026-10-14T10:00\", \"end\": \"2026-10-14T11:00\"}]"
+    },
+    {
+     "role": "assistant",
+     "content": "On 2026-10-14 you have one event: Kickoff, 10:00-11:00."
+    },
+    {
+     "role": "user",
+     "content": "Great, thanks. That's all for today!"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Here is a small table:\n\nitem,qty\napples,3\npears,5\nplums,4\n\nWhat is the total quantity?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Translate 'good morning' into Japanese."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Why does this raise KeyError?\n\n```python\ncounts = {}\nfor word in ['a', 'b', 'a']:\n    counts[word] += 1\n```"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Write two polite sentences declining a meeting invitation; I'll send them myself."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "What is the capital of Australia?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Give me a regular expression that matches ISO dates such as 2026-10-09."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_direct_text",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "What does the -h flag of du do?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "tools_ask_user",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Email my landlord about the leak in the bathroom."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Derive the solution of the 1D heat equation on [0, L] with u(0,t)=u(L,t)=0 and u(x,0)=f(x), and state the conditions under which the Fourier series converges uniformly."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Our Kubernetes StatefulSet with a PostgreSQL primary/replica pair loses writes after a node drain. Explain the likely failure modes around fencing and synchronous_commit, and give a corrected configuration."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "IFRS 16 と ASC 842 で、セール・アンド・リースバック取引の会計処理がどう異なるか、売却の要件判定から利得の認識まで具体的に説明してください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Prove that every finite integral domain is a field, then show where the argument fails for infinite integral domains."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Explain why this lock-free queue has an ABA problem and rewrite it safely in C++20:\n\nstruct Node{int v; Node* next;};\nstd::atomic<Node*> head;\nvoid push(Node* n){ n->next = head.load(); while(!head.compare_exchange_weak(n->next, n)); }\nNode* pop(){ Node* h = head.load(); while(h && !head.compare_exchange_weak(h, h->next)); return h; }"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "量子化誤差を考慮した上で、INT8 の GEMM で FP16 と同等の精度を保つためのスケーリング戦略（per-channel / per-token）を、数式を使って比較してください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Compare the asymptotic behaviour of the Akra–Bazzi method and the master theorem for T(n)=2T(n/3)+T(n/4)+n log n and give the tight bound."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "expert",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What are the exact differences between TLS 1.2 and TLS 1.3 key schedules, and why does 0-RTT data lose forward secrecy?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a product announcement for our note-taking app. Requirements: 1) exactly 3 paragraphs, 2) under 180 words, 3) mention offline sync and end-to-end encryption, 4) no exclamation marks, 5) end with a call to action that includes the URL notes.example.com, 6) written for a business audience."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "社内向けの障害報告書を書いてください。条件：①時系列は表形式、②原因・影響・暫定対応・恒久対策の4節、③影響ユーザー数は 1,240 人と明記、④敬体、⑤全体で800字以内、⑥最後に再発防止のチェックリストを箇条書きで5項目。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Create a weekly meal plan: 7 days, 3 meals each, vegetarian, no nuts, under 2,000 kcal per day with the calories listed per meal, a shopping list grouped by aisle, and no ingredient repeated more than three times in the week."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Draft an API design for a booking service: REST endpoints for create/read/cancel, idempotency keys, pagination with cursors, error codes as an RFC 7807 table, rate limits per tenant, and an OpenAPI 3.1 snippet for the create endpoint."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a Python function that parses ISO 8601 durations. It must support years through seconds, reject negative values, return a datetime.timedelta, raise ValueError with the offending token, include type hints and docstring, and come with pytest tests covering 8 cases."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "採用面接の質問リストを作って：エンジニア職、技術質問10問・行動面接5問、各質問に評価観点を1行、日本語、Markdown の表、難易度を3段階で付ける。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize the attached quarterly results for the board in five bullet points, each under 20 words, include revenue, gross margin and churn with their quarter-over-quarter change, and finish with one risk and one opportunity.\n\nQ3: revenue $12.4M (Q2 $11.1M), gross margin 71% (Q2 69%), churn 2.9% (Q2 3.4%), new logos 41, net retention 112%."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "many_requirements",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Translate this privacy notice into formal Japanese, keep every section number, keep all legal terms consistent, do not translate product names, and add a glossary of five key terms at the end.\n\n1. Data we collect: account data, usage data.\n2. Purpose: providing the Service, security.\n3. Retention: 24 months after account closure.\n4. Your rights: access, rectification, erasure."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the deadline for filing a US federal tax return for 2024?"
+    },
+    {
+     "role": "assistant",
+     "content": "It is March 15, 2025."
+    },
+    {
+     "role": "user",
+     "content": "That's the corporate S-corp date, not individuals. Please give me the correct deadline for individuals and the extension date."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Convert 72 °F to Celsius."
+    },
+    {
+     "role": "assistant",
+     "content": "72 °F is 25 °C."
+    },
+    {
+     "role": "user",
+     "content": "No, that's wrong. Redo the calculation and show the steps."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "このSQLを直して: SELECT name, COUNT(*) FROM users GROUP BY id;"
+    },
+    {
+     "role": "assistant",
+     "content": "SELECT name, COUNT(*) FROM users;"
+    },
+    {
+     "role": "user",
+     "content": "それだと集計がおかしいです。さっきも間違えていたので、今度は正しく動くものをお願いします。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Which Python version introduced match statements?"
+    },
+    {
+     "role": "assistant",
+     "content": "Python 3.8."
+    },
+    {
+     "role": "user",
+     "content": "Wrong. Check again."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Give me the Big-O of building a binary heap from n elements."
+    },
+    {
+     "role": "assistant",
+     "content": "O(n log n)."
+    },
+    {
+     "role": "user",
+     "content": "My professor says that's not tight. Please correct it and justify."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many business days are between 2025-03-03 and 2025-03-31 inclusive?"
+    },
+    {
+     "role": "assistant",
+     "content": "There are 21 business days."
+    },
+    {
+     "role": "user",
+     "content": "I counted differently. Recount carefully, I'm putting this in a contract."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "翻訳して: 'The invoice is payable within 30 days of receipt.'"
+    },
+    {
+     "role": "assistant",
+     "content": "請求書は30日以内に支払われます。"
+    },
+    {
+     "role": "user",
+     "content": "「受領から」が抜けています。契約書に載るので正確に訳し直してください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "error_feedback",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What does git rebase --onto main feature~3 feature do?"
+    },
+    {
+     "role": "assistant",
+     "content": "It moves the last three commits of main onto feature."
+    },
+    {
+     "role": "user",
+     "content": "You have it backwards. Explain it properly this time."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I've asked three times now and the script still crashes. I need a version that actually runs on Python 3.11 today, no more guesses:\n\nimport json\ndata = json.load(open('cfg.json'))\nprint(data['servers'][0]['host'])"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "もう何回目ですか。本番が止まっていて上司に詰められています。nginx の 502 の原因の切り分け手順を、今度こそ正確に教えてください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Seriously, this is the last chance before my client meeting in 20 minutes. Give me the correct formula for compound annual growth rate and apply it to 2.1M → 3.4M over 4 years."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Your previous answers wasted my whole afternoon. I need the exact steps to rotate an AWS access key without downtime."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "いい加減にしてほしい。Excel で重複行を削除して最新日付だけ残す方法、ちゃんと動くやつを教えて。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I'm really stressed — my thesis is due tomorrow and the citation format keeps coming out wrong. APA 7 reference for a journal article with 3 authors and a DOI, please get it exactly right."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Stop giving me vague answers. What exact command lists listening TCP ports with the owning process on Ubuntu 22.04?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "frustration",
+   "messages": [
+    {
+     "role": "user",
+     "content": "This is urgent and I can't afford another mistake: what's the correct way to undo a pushed commit on a shared main branch?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "My 4-year-old (16 kg) has a fever. What is the correct single dose of children's ibuprofen (100 mg/5 mL), and how often can it be given?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "賃貸契約の更新拒絶について、貸主側から正当事由なしに更新を拒めるのか、借地借家法の条文に沿って教えてください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I'm wiring a 240 V circuit for an EV charger at 32 A continuous. What breaker and copper wire gauge does the NEC require?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is it legal for my employer in California to withhold my final paycheck because I didn't return my laptop?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "How should I set file permissions and ownership for SSH private keys and authorized_keys so sshd accepts them and nothing leaks?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "確定申告で、医療費控除の対象になる費用とならない費用を、具体例付きで正確に教えてください。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What are the drug interactions between warfarin and common over-the-counter painkillers?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "high_stakes",
+   "messages": [
+    {
+     "role": "user",
+     "content": "We're about to run a database migration that drops a column used by billing. What's a safe rollout plan with rollback?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Double-check every number before answering: what were the populations of Tokyo, Delhi and Shanghai in the UN's 2018 World Urbanization Prospects?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "このプレスリリースはそのまま公開します。誤字・事実誤認がないか全部確認して修正版を出してください：\n弊社は2024年4月1日に設立10周年を迎えました。創業以来、累計導入社数は1,2000社を突破しています。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I'm sending this email to the CEO in five minutes, it must be flawless: rewrite 'we has decided to postpone the launch to Q3 due to supplier issue' professionally."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Cite your sources: what is the current FDA-recommended maximum daily intake of acetaminophen for healthy adults?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Give me the exact command I can paste into production to delete files older than 30 days in /var/log/app without touching subdirectories."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "論文に載せるので正確に：Transformer の原論文のタイトル・著者・発表年・会議名を教えて。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Verify this calculation for an invoice: 37 hours at $85/h plus 8.25% tax. What's the total?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "explicit_accuracy",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I'll sign this tomorrow. Does this clause let them terminate without notice? 'Either party may terminate this Agreement upon written notice if the other party materially breaches and fails to cure within thirty (30) days.'"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi! How are you today?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "おはよう！今日もよろしく。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Tell me a fun fact about octopuses."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the capital of Canada?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "日本で一番高い山は？"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Give me five name ideas for a coffee shop."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Rephrase this to sound friendlier: 'Send me the file.'"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Translate 'good morning' into Spanish."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What does HTTP stand for?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Explain what a black hole is in simple terms."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "週末の暇つぶしのアイデアを3つちょうだい。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a haiku about autumn."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the difference between a list and a tuple in Python, briefly?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize the plot of Cinderella in two sentences."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many legs does a spider have?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Suggest a title for my blog post about houseplants."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Can you make this sentence shorter: 'I am writing in order to let you know that I will be late.'"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's a good stretching routine for the morning?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "猫と犬、どっちが飼いやすい？ざっくりでいいよ。"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Tell me a joke about programmers."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What year did the first iPhone come out?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Brainstorm three themes for a birthday party."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is tomato a fruit or a vegetable?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Recommend a classic novel to read on vacation."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "「ありがとう」を英語でカジュアルに言うと？"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the boiling point of water in Fahrenheit?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Give me a random motivational quote."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Explain what an API is to a 10-year-old."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What should I name my goldfish?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Describe the color blue to someone in one sentence."
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "How do I say 'cheers' in German?"
+    }
+   ]
+  },
+  {
+   "label": "THINK",
+   "category": "everyday",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a short limerick about a cat."
+    }
+   ]
+  }
+ ]
+}

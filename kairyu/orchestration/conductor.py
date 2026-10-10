@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from kairyu.async_thread import run_prompt_work
@@ -28,6 +28,7 @@ from kairyu.engine.prompt import (
     MultimodalPrompt,
     TemplatedPrompt,
     derive_multimodal_prompt,
+    extend_multimodal_prompt,
     prompt_kind,
     prompt_text,
 )
@@ -92,7 +93,13 @@ def chars_cost_model(usd_per_1k_chars: float) -> CostModel:
             raise ValueError("character cost estimation supports text prompts only")
         text = prompt_text(request.prompt)
         assert text is not None
-        chars = len(text) + sum(len(c.text) for c in result.completions)
+        # A native conversation is prompt input too (PR #641 review).
+        prefix = (
+            len(json.dumps(list(request.conversation_prefix), ensure_ascii=False))
+            if request.conversation_prefix
+            else 0
+        )
+        chars = len(text) + prefix + sum(len(c.text) for c in result.completions)
         return chars / 1000 * usd_per_1k_chars
 
     return estimate
@@ -222,8 +229,33 @@ class RoleSpec:
     # template is rendered over the role outputs plus {previous} and
     # {feedback}.
     refine_prompt: str = ""
+    # A publisher that answers the caller's turn itself: its worker receives
+    # the caller's conversation as native chat messages (tool calls and tool
+    # results included) and the rendered prompt as one final user message,
+    # omitted when empty (m1 D8 amendment 2026-10-09).
+    native_conversation: bool = False
 
     def __post_init__(self) -> None:
+        if self.native_conversation:
+            if self.role_type != "publisher":
+                raise ValueError(
+                    f"role {self.name!r}: native_conversation is for a publisher role"
+                )
+            if self.prompt_suffix or self.prompt_headless or self.reasoning_closed or (
+                self.reasoning_close_tag and self.reasoning_continuation != "chat"
+            ):
+                # Text scaffolds assume the prompt is the whole model input.
+                raise ValueError(
+                    f"role {self.name!r}: native_conversation cannot combine with "
+                    "prompt_suffix, prompt_headless, reasoning_closed or a prefix "
+                    "reasoning continuation"
+                )
+            for template in (self.prompt, self.refine_prompt):
+                if "{query}" in template or "{conversation}" in template:
+                    raise ValueError(
+                        f"role {self.name!r}: a native_conversation prompt cannot use "
+                        "{query} or {conversation}; the conversation is sent natively"
+                    )
         if isinstance(self.prompt, TemplatedPrompt):
             raise ValueError(
                 "Conductor role templates cannot be tokenizer-owned pre-rendered "
@@ -572,6 +604,9 @@ class _RunState:
     # Each role's latest public completions, so an unverified fallback
     # publishes its source's choice metadata (finish_reason).
     role_completions: dict[str, tuple[CompletionOutput, ...]] = field(default_factory=dict)
+    # Set when a unit has run (or failed, or was excluded): a verifier that
+    # reads a unit running beside its target waits on it before the verdict.
+    settled: dict[str, asyncio.Event] = field(default_factory=dict)
 
 
 class _BudgetRefused(Exception):
@@ -631,6 +666,7 @@ class Conductor:
         reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
         decision_workers: Mapping[str, DecisionBackend] | None = None,
+        conversation: Sequence[Mapping[str, object]] = (),
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -666,6 +702,9 @@ class Conductor:
         self._affinity_key = affinity_key
         self._expose_intermediate_outputs = expose_intermediate_outputs
         self._multimodal_prompt = multimodal_prompt
+        # The caller's role-tagged messages, sent natively to a
+        # native_conversation publisher (m1 D8 amendment 2026-10-09).
+        self._conversation = tuple(dict(message) for message in conversation)
         self._chat_template_kwargs = (
             None if chat_template_kwargs is None else dict(chat_template_kwargs)
         )
@@ -720,6 +759,9 @@ class Conductor:
             and role.name not in self._inline_executor_target
         )
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
+        # Units a verifier reads that run beside its target (not before it):
+        # the target's verdict waits for them (_validate_verdict_waits).
+        self._verdict_waits: dict[str, frozenset[str]] = {}
         self._validate()
 
     def _selected_final_unit(self) -> RoleSpec:
@@ -1056,6 +1098,28 @@ class Conductor:
             frontier.update(self._unit_deps.get(dep, frozenset()))
         return closure
 
+    def _exclusion_cases(self) -> list[set[str]]:
+        """The unit sets a request may exclude: the head (caller intent) and
+        the image-conditional units (no image) drop out independently."""
+
+        head = {unit.name for unit in self._units if unit.role_type == "head"}
+        image = {unit.name for unit in self._units if unit.requires == "image"}
+        return [set(), head, image, head | image]
+
+    def _closure_without(self, name: str, excluded: set[str]) -> set[str]:
+        """What precedes unit ``name`` when ``excluded`` drops out: an
+        excluded unit leaves its dependents' dependencies at run time."""
+
+        closure: set[str] = set()
+        frontier = set(self._unit_deps.get(name, frozenset())) - excluded
+        while frontier:
+            dep = frontier.pop()
+            if dep in closure:
+                continue
+            closure.add(dep)
+            frontier.update(self._unit_deps.get(dep, frozenset()) - excluded)
+        return closure
+
     def _validate(self) -> None:
         if len(self._by_name) != len(self._roles):
             raise ValueError("duplicate role names")
@@ -1100,26 +1164,9 @@ class Conductor:
                     raise ValueError(
                         f"verifier {role.name!r} must depend on its target {role.verifies!r}"
                     )
-                # a verifier runs INLINE right after its target, so any OTHER
-                # dependency must also be the target's dependency (else it may not
-                # have run yet and _SafeDict would render it as "" → a silent
-                # wrong PASS/FAIL). Catch the misconfiguration loudly (M1).
-                # An executor dependency is re-run inline before each verdict;
-                # its own inputs must be complete before the target generates.
-                target = self._by_name[role.verifies]
-                available = set(target.depends_on) | {role.verifies}
-                for dep in role.depends_on:
-                    dep_role = self._by_name[dep]
-                    if dep_role.role_type == "executor" or dep in self._inline_executor_target:
-                        continue
-                    if dep != role.verifies and dep not in available:
-                        raise ValueError(
-                            f"verifier {role.name!r} depends on {dep!r}, which is not "
-                            f"available when it runs inline after {role.verifies!r}; "
-                            f"add {dep!r} to {role.verifies!r}'s depends_on"
-                        )
         self._validate_head()
         self._check_acyclic()
+        self._validate_verdict_waits()
         self._validate_inline_executors()
         self._validate_checklists()
         if self._units:
@@ -1175,13 +1222,89 @@ class Conductor:
         if len(self._units) < 2:
             raise ValueError("a head role requires at least one downstream unit")
 
+    def _validate_verdict_waits(self) -> None:
+        """A verifier may also read units that run beside its target.
+
+        The verifier runs inline right after its target. A dependency the
+        target does not share is waited for before the verdict, so the judge
+        never reads it missing (_SafeDict would render ""). It must become
+        ready no later than the target: its own dependencies complete before
+        the target generates, so the wave scheduler runs it in the target's
+        wave or earlier, also when a request excludes an image-conditional
+        unit or the head. Two verdicts in one wave may still wait on each
+        other's targets, so the waits join the cycle check. After
+        _check_acyclic so the closure walk terminates.
+        """
+
+        for verifier in self._verifier_for.values():
+            target = verifier.verifies
+            if target is None:
+                continue
+            # A dependency is complete when the target is judged if, for
+            # every combination of exclusions, it precedes the target or is
+            # excluded (read as missing). Any other one can run beside the
+            # target, so it is waited for; what it waits on must precede the
+            # target even when everything excludable drops out.
+            cases = self._exclusion_cases()
+            unconditional = self._closure_without(target, cases[-1])
+            done = set.intersection(
+                *(self._closure_without(target, excluded) | excluded for excluded in cases)
+            )
+            waits = set()
+            for name in verifier.depends_on:
+                if name in self._inline_executor_target:
+                    continue
+                dep_role = self._by_name[name]
+                # A dependency on a verifier is one on its target.
+                dep = (
+                    dep_role.verifies
+                    if dep_role.role_type == "verifier" and dep_role.verifies
+                    else name
+                )
+                if dep == target or dep in done:
+                    continue
+                if dep not in self._unit_deps or dep == self._selected_final_unit().name:
+                    # The final unit streams after the rest of the DAG.
+                    raise ValueError(
+                        f"verifier {verifier.name!r} depends on {dep!r}, which is not "
+                        f"a unit that can run beside {target!r}; add {dep!r} to "
+                        f"{target!r}'s depends_on"
+                    )
+                if not self._unit_deps[dep] <= unconditional:
+                    # Checked against what precedes the target on every
+                    # request: an excluded unit moves the target to an
+                    # earlier wave, and the waited unit must not fall behind.
+                    raise ValueError(
+                        f"verifier {verifier.name!r} depends on {dep!r}, which may not "
+                        f"be ready before {target!r} is judged: {dep!r}'s dependencies "
+                        f"must complete before {target!r} generates on every request "
+                        "(not only through an image-conditional unit or the head)"
+                    )
+                waits.add(dep)
+            if waits:
+                self._verdict_waits[target] = frozenset(waits)
+        if self._verdict_waits:
+            # A target settles only after its verdict, which waits for these
+            # units to settle: the waits are edges of the same graph.
+            self._check_acyclic(
+                {
+                    name: set(deps) | self._verdict_waits.get(name, frozenset())
+                    for name, deps in self._unit_deps.items()
+                },
+                kind="role DAG with verifier waits",
+            )
+
     def _validate_checklists(self) -> None:
         for verifier in self._verifier_for.values():
             config = verifier.checklist
             if config is None or verifier.verifies is None:
                 continue
             target = verifier.verifies
-            available = self._transitive_unit_closure(target) | {target}
+            available = (
+                self._transitive_unit_closure(target)
+                | {target}
+                | self._verdict_waits.get(target, frozenset())
+            )
             for name in config.referenced_roles():
                 if name not in available:
                     raise ValueError(
@@ -1227,12 +1350,15 @@ class Conductor:
                     "public prefix"
                 )
 
-    def _check_acyclic(self) -> None:
-        remaining = {name: set(deps) for name, deps in self._unit_deps.items()}
+    def _check_acyclic(
+        self, graph: Mapping[str, set[str]] | None = None, *, kind: str = "role DAG"
+    ) -> None:
+        source = self._unit_deps if graph is None else graph
+        remaining = {name: set(deps) for name, deps in source.items()}
         while remaining:
             ready = [name for name, deps in remaining.items() if not deps]
             if not ready:
-                raise ValueError(f"role DAG contains a cycle among: {sorted(remaining)}")
+                raise ValueError(f"{kind} contains a cycle among: {sorted(remaining)}")
             for name in ready:
                 del remaining[name]
             for deps in remaining.values():
@@ -1295,7 +1421,33 @@ class Conductor:
             "multimodal",
         ):
             return text
+        if spec.native_conversation:
+            # The caller's own image conversation, then the role's prompt.
+            return extend_multimodal_prompt(self._multimodal_prompt, text)
         return derive_multimodal_prompt(self._multimodal_prompt, text)
+
+    def _conversation_prefix(
+        self,
+        spec: RoleSpec,
+        prompt: object,
+    ) -> tuple[Mapping[str, object], ...]:
+        """The caller's messages a native_conversation role sends before its
+        prompt (an image prompt already carries the caller's messages)."""
+
+        if not spec.native_conversation or isinstance(prompt, MultimodalPrompt):
+            return ()
+        return self._conversation
+
+    def final_intent_conversation_prefix(
+        self,
+        prompt: object,
+    ) -> tuple[Mapping[str, object], ...]:
+        """The conversation the final unit's dispatch carries for ``prompt``,
+        for an exact preflight contract."""
+
+        if not self._units:
+            return ()
+        return self._conversation_prefix(self._selected_final_unit(), prompt)
 
     def _worker_chat_template_kwargs(
         self,
@@ -1423,6 +1575,7 @@ class Conductor:
                         parallel_tool_calls=parallel_tool_calls,
                         tool_call_protocol=tool_call_protocol,
                         reasoning_effort=self._role_reasoning_effort(spec),
+                        conversation_prefix=self._conversation_prefix(spec, role_prompt),
                     ),
                 )
             )
@@ -1472,6 +1625,7 @@ class Conductor:
             tool_call_protocol=tool_call_protocol,
             reasoning_effort=self._role_reasoning_effort(spec),
             assistant_prefill=assistant_prefill,
+            conversation_prefix=self._conversation_prefix(spec, request_prompt),
         )
         if attempt != 0:
             return candidate
@@ -2711,6 +2865,8 @@ class Conductor:
             await self._emit_intermediate(event_sink, intermediate)
             if verifier is None:
                 break
+            for name in self._verdict_waits.get(spec.name, ()):
+                await self._settled(run, name).wait()
             if verifier.checklist is not None:
                 finished = await self._checklist_round(
                     run,
@@ -3183,6 +3339,10 @@ class Conductor:
                 return candidate
         return None
 
+    @staticmethod
+    def _settled(run: _RunState, name: str) -> asyncio.Event:
+        return run.settled.setdefault(name, asyncio.Event())
+
     def _terminal_units(self) -> list[RoleSpec]:
         dependents: set[str] = set()
         for deps in self._unit_deps.values():
@@ -3201,20 +3361,26 @@ class Conductor:
         pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
         for deps in pending.values():
             deps.difference_update(exclude)
+        for name in exclude:
+            # An excluded unit never runs: a verdict waiting on it reads it
+            # as missing instead of waiting forever.
+            self._settled(run, name).set()
+
+        async def settle(name: str) -> None:
+            try:
+                await self._run_unit_safe(
+                    run,
+                    session,
+                    query,
+                    self._by_name[name],
+                    event_sink=event_sink,
+                )
+            finally:
+                self._settled(run, name).set()
+
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
-            await asyncio.gather(
-                *(
-                    self._run_unit_safe(
-                        run,
-                        session,
-                        query,
-                        self._by_name[name],
-                        event_sink=event_sink,
-                    )
-                    for name in ready
-                )
-            )
+            await asyncio.gather(*(settle(name) for name in ready))
             for name in ready:
                 del pending[name]
             for deps in pending.values():

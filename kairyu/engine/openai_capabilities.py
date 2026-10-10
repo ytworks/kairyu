@@ -109,6 +109,9 @@ class OpenAIRequestCapabilities:
     # The upstream chat template can continue a final assistant message
     # (``continue_final_message``) instead of opening a new generation prompt.
     assistant_prefill: bool = False
+    # The upstream chat template renders a caller's conversation (tool calls
+    # and tool results included) sent as native messages before the prompt.
+    conversation_prefix: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -130,6 +133,8 @@ class OpenAIRequestCapabilities:
             raise ValueError("parallel_tool_calls capability must be a boolean")
         if type(self.assistant_prefill) is not bool:
             raise ValueError("assistant_prefill capability must be a boolean")
+        if type(self.conversation_prefix) is not bool:
+            raise ValueError("conversation_prefix capability must be a boolean")
         if self.repetition_penalty_wire_name not in {
             "repetition_penalty",
             "repeat_penalty",
@@ -203,6 +208,7 @@ _PROFILES = {
         parallel_tool_calls=True,
         priority=True,
         assistant_prefill=True,
+        conversation_prefix=True,
     ),
     # llama.cpp ``llama-server``: the controls its request schema executes.
     # Unknown JSON keys are silently ignored upstream, so ``min_tokens``,

@@ -122,6 +122,25 @@ token-granularity TPOT, results files).
   `create_app` and `BatchWorker` (batch and HTTP must render identical prompts);
   `app.py` renders AFTER model resolution. Tool schemas render in-template;
   the `<tool_call>` output-side parse stays.
+- **Amendment (2026-10-09, PR #641, owner authorization):** on the generic
+  protocol, a reply whose text ends with DeepSeek's DSML call written without
+  its marker tokens (`<invoke name="...">` with `<parameter name="...">`
+  children, optionally in a markerless `<tool_calls>` or `<function_calls>`
+  wrapper) is returned as tool calls when every invoke names a declared tool
+  and its parameters satisfy that tool's schema (typed as for Qwen's XML
+  parameters; a `string` attribute decides only the decoding, and the value
+  must still have a declared type (PR #641 review); required present, no
+  unknown name when `additionalProperties` is false). The prose before the block stays as
+  `content`; any other shape, trailing prose, or a call the tool choice
+  forbids leaves the whole text as content.
+  Why (framework boundary): (1) the OpenAI-wire contract returns a declared
+  call as `tool_calls`, but vLLM's DeepSeek parser and the generic parse both
+  missed this shape, so the caller got the call as text; (2) no extension
+  point post-processes a reply, and prompts already forbid writing calls as
+  text; (3) any DeepSeek-V4.x deployment served through vLLM with tools shows
+  it (verified-tool gate 1 of 12 at effort max; DeepSWE 1 of 1,410 and 5 of
+  77 replies); (4) only this structure, only at the end, only for declared
+  tools with schema-valid arguments; no example policy enters the parse.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and

@@ -938,6 +938,12 @@ class OpenAICompatBackend:
                     "does not support chat_template_kwargs: "
                     + ", ".join(sorted(unsupported)),
                 )
+        if request.conversation_prefix and not self._capabilities.conversation_prefix:
+            raise _client_error(
+                self._capabilities.upstream,
+                "does not support conversation_prefix (a caller conversation sent as "
+                "native chat messages)",
+            )
         if request.assistant_prefill is not None and (
             not self._capabilities.assistant_prefill
             or isinstance(request.prompt, TemplatedPrompt)
@@ -1566,7 +1572,9 @@ class OpenAICompatBackend:
                     "prompt": text,
                     **completion_args,
                 }
-            messages = [{"role": "user", "content": text}]
+            messages = [dict(message) for message in request.conversation_prefix]
+            if text or not messages:
+                messages.append({"role": "user", "content": text})
         if request.assistant_prefill is not None:
             # The upstream template renders this final assistant turn and
             # vLLM continues it instead of opening a new generation prompt.

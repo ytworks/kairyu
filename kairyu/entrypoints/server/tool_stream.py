@@ -27,6 +27,9 @@ Documented divergences from the OpenAI-wire parse (``_parse_tool_calls``):
   (progressive streaming) invalidates the whole parse: the stream errors and
   the unary fold downgrades everything to text, where pre-progressive
   behavior flushed only that envelope. Pathological output only.
+- The OpenAI wire returns DeepSeek's DSML call written without its marker
+  tokens as tool calls (m9 D2 amendment 2026-10-09); these scanners keep it
+  as text.
 """
 
 from __future__ import annotations

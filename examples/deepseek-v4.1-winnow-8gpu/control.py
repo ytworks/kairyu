@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """One-command lifecycle for routed DeepSeek-V4.1 answers.
 
-DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; Qwen3.8-27B
-(GPU 6) is served as an internal pool; Winnow-12B (GPU 7, llama.cpp) routes
-each request through System One to the verified route (max effort) or to one
-answer at the caller's effort.
+DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two Winnow-12B
+replicas (llama.cpp) judge through System One: winnow-route (GPU 6) routes each
+request to the verified tool route (the next reply needs a tool call) or to one
+answer at the caller's effort, and winnow-judge (GPU 7) judges the verified
+tool route's drafts.
 """
 
 from __future__ import annotations
@@ -26,19 +27,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 ROOT = HERE.parents[1]
-PROJECT = "kairyu-deepseek-v4-1-qwen3-8-winnow-8gpu"
+PROJECT = "kairyu-deepseek-v4-1-winnow-8gpu"
 DEEPSEEK = SPEC["allocation"]["deepseek"]
 DEEPSEEK_GPU_IDS: list[int] = [int(index) for index in DEEPSEEK["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in DEEPSEEK["dp_rank_gpu_ids"]]
-QWEN_GPU_IDS: list[int] = [int(index) for index in SPEC["allocation"]["qwen"]["gpu_ids"]]
-WINNOW_GPU_IDS: list[int] = [int(index) for index in SPEC["allocation"]["winnow"]["gpu_ids"]]
-L1_SERVICES = ("deepseek", "qwen", "winnow")
+WINNOW = SPEC["allocation"]["winnow"]
+WINNOW_GPU_IDS: list[int] = [int(index) for index in WINNOW["gpu_ids"]]
+# One Winnow replica per System One use: the route judge, the judgments.
+WINNOW_REPLICAS: list[dict] = list(WINNOW["replicas"])
+WINNOW_SERVICES: list[str] = [replica["service"] for replica in WINNOW_REPLICAS]
+L1_SERVICES = ("deepseek", *WINNOW_SERVICES)
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified: Winnow routes per request; kairyu-verified-always: always
-# the verified route.
-ROUTED_MODEL, ALWAYS_MODEL = PUBLIC_MODELS
+# kairyu-verified-tool: Winnow routes per request (TOOL or THINK).
+(MODEL,) = PUBLIC_MODELS
 DEEPSEEK_SERVED = SPEC["deepseek"]["served_name"]
-QWEN_SERVED = SPEC["qwen"]["served_name"]
 WINNOW_SERVED = SPEC["winnow"]["model"]["served_name"]
 
 
@@ -46,20 +48,19 @@ def _check_allocation() -> None:
     tp = int(DEEPSEEK["tensor_parallel_size"])
     dp = int(DEEPSEEK["data_parallel_size"])
     flat = [index for group in DP_RANK_GPU_IDS for index in group]
-    every = DEEPSEEK_GPU_IDS + QWEN_GPU_IDS + WINNOW_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + WINNOW_GPU_IDS
     if (
         len(DP_RANK_GPU_IDS) != dp
         or any(len(group) != tp for group in DP_RANK_GPU_IDS)
         or flat != DEEPSEEK_GPU_IDS
         or int(DEEPSEEK["expert_parallel_size"]) != tp * dp
         or len(set(every)) != len(every)
-        or len(QWEN_GPU_IDS) != 1
-        or len(WINNOW_GPU_IDS) != 1
+        or [int(replica["gpu_id"]) for replica in WINNOW_REPLICAS] != WINNOW_GPU_IDS
         or len(every) != int(SPEC["hardware"]["gpu_count"])
     ):
         raise SystemExit(
             "example.json allocation is inconsistent (DeepSeek TP x DP must tile its "
-            "GPUs; Qwen and Winnow take one distinct GPU each)"
+            "GPUs; each Winnow replica takes one distinct GPU)"
         )
 
 
@@ -105,10 +106,8 @@ def _storage_paths() -> dict[str, Path]:
     environment = environment_storage()
     paths = {
         "deepseek_models": environment / "models" / "deepseek",
-        "qwen_models": environment / "models" / "qwen",
         "winnow_models": environment / "models" / "winnow",
         "deepseek_cache": environment / "compile-cache" / "deepseek",
-        "qwen_cache": environment / "compile-cache" / "qwen",
         "placement_log": environment / "placement-log",
         "webui": environment / "webui-data",
     }
@@ -118,6 +117,17 @@ def _storage_paths() -> dict[str, Path]:
         except OSError as error:
             raise SystemExit(f"cannot prepare NVMe storage {path}: {error}") from error
     return paths
+
+
+def _winnow_variable(replica: dict, suffix: str) -> str:
+    """WINNOW_ROUTE_<suffix> / WINNOW_JUDGE_<suffix> for a Winnow replica."""
+
+    return f"{replica['service'].upper().replace('-', '_')}_{suffix}"
+
+
+def winnow_l1_url(env: dict[str, str], service: str) -> str:
+    replica = next(item for item in WINNOW_REPLICAS if item["service"] == service)
+    return f"http://127.0.0.1:{env[_winnow_variable(replica, 'L1_PORT')]}"
 
 
 def _compose_env() -> dict[str, str]:
@@ -133,29 +143,31 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_PROJECT_NAME": PROJECT,
             "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["deepseek_models"]),
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
-            "QWEN_MODEL_STORAGE_PATH": str(paths["qwen_models"]),
-            "QWEN_CACHE_PATH": str(paths["qwen_cache"]),
             "WINNOW_MODEL_STORAGE_PATH": str(paths["winnow_models"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["deepseek"]["image"]),
-            "QWEN_VLLM_IMAGE": os.environ.get("QWEN_VLLM_IMAGE", SPEC["qwen"]["image"]),
             "WINNOW_IMAGE": os.environ.get("WINNOW_IMAGE", SPEC["winnow"]["runtime"]["image"]),
-            "PLAYGROUND_IMAGE": os.environ.get("PLAYGROUND_IMAGE", SPEC["playground"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
             "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
-            "PLAYGROUND_PORT": os.environ.get("PLAYGROUND_PORT", str(SPEC["playground"]["port"])),
-            "PLAYGROUND_BIND_ADDRESS": os.environ.get("PLAYGROUND_BIND_ADDRESS", "0.0.0.0"),
             "DEEPSEEK_L1_PORT": os.environ.get("DEEPSEEK_L1_PORT", "8014"),
-            "QWEN_L1_PORT": os.environ.get("QWEN_L1_PORT", "8015"),
-            "WINNOW_L1_PORT": os.environ.get("WINNOW_L1_PORT", "8016"),
+            **{
+                _winnow_variable(replica, "L1_PORT"): os.environ.get(
+                    _winnow_variable(replica, "L1_PORT"), str(replica["l1_port"])
+                )
+                for replica in WINNOW_REPLICAS
+            },
             # Render-safe defaults for down/status/logs; `up` replaces them
             # with the GPUs' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
-            "QWEN_CPUSET": os.environ.get("QWEN_CPUSET", "0"),
-            "WINNOW_CPUSET": os.environ.get("WINNOW_CPUSET", "0"),
+            **{
+                _winnow_variable(replica, "CPUSET"): os.environ.get(
+                    _winnow_variable(replica, "CPUSET"), "0"
+                )
+                for replica in WINNOW_REPLICAS
+            },
         }
     )
     return env
@@ -264,7 +276,7 @@ def _preflight(env: dict[str, str]) -> None:
         ).stdout
     )
     expected = SPEC["hardware"]
-    every = DEEPSEEK_GPU_IDS + QWEN_GPU_IDS + WINNOW_GPU_IDS
+    every = DEEPSEEK_GPU_IDS + WINNOW_GPU_IDS
     missing = [index for index in every if index not in rows]
     if missing:
         raise SystemExit(f"GPUs {missing} are not present; this example uses GPUs {every}")
@@ -293,14 +305,16 @@ def _preflight(env: dict[str, str]) -> None:
                 f"host has {available} GiB available; the pinned Engram tables need {required} GiB"
             )
     placement = {}
-    for name, gpus in (
-        ("DEEPSEEK", DEEPSEEK_GPU_IDS),
-        ("QWEN", QWEN_GPU_IDS),
-        ("WINNOW", WINNOW_GPU_IDS),
+    for variable, name, gpus in (
+        ("DEEPSEEK_CPUSET", "DeepSeek", DEEPSEEK_GPU_IDS),
+        *(
+            (_winnow_variable(replica, "CPUSET"), replica["service"], [int(replica["gpu_id"])])
+            for replica in WINNOW_REPLICAS
+        ),
     ):
         nodes = [numa_node(str(rows[index]["pci_bus_id"])) for index in gpus]
-        env[f"{name}_CPUSET"] = ",".join(_node_cpulist(node) for node in dict.fromkeys(nodes))
-        placement[name.capitalize()] = f"GPUs {gpus} (NUMA {sorted(set(nodes))})"
+        env[variable] = ",".join(_node_cpulist(node) for node in dict.fromkeys(nodes))
+        placement[name] = f"GPUs {gpus} (NUMA {sorted(set(nodes))})"
     print(
         "hardware: " + "; ".join(f"{name} on {where}" for name, where in placement.items()),
         flush=True,
@@ -351,31 +365,6 @@ def _ensure_deepseek_image(env: dict[str, str]) -> None:
             f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
             f"{source['image_id']} (update both to this build before serving)"
         )
-
-
-def _ensure_qwen_image(env: dict[str, str]) -> None:
-    """Pull the pinned upstream vLLM release by digest and attest it.
-
-    The pin is the registry digest. The containerd image store reports it as
-    the image ID; the classic store reports the config digest as the ID and
-    keeps the registry digest in RepoDigests, so either match attests it.
-    """
-
-    image = env["QWEN_VLLM_IMAGE"]
-    if _image_id(image) is None:
-        if image != SPEC["qwen"]["image"]:
-            raise SystemExit(f"QWEN_VLLM_IMAGE does not exist locally: {image}")
-        _run(["docker", "pull", image])
-    inspected = _run(
-        ["docker", "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image],
-        capture=True,
-    ).stdout.strip()
-    actual, _, digests = inspected.partition(" ")
-    pinned = SPEC["qwen"]["image_id"]
-    if actual != pinned and not any(
-        digest.endswith(f"@{pinned}") for digest in json.loads(digests or "null") or ()
-    ):
-        raise SystemExit(f"Qwen vLLM image {image} ({actual}) is not the pinned image {pinned}")
 
 
 def _ensure_winnow_image(env: dict[str, str]) -> None:
@@ -638,16 +627,15 @@ def validate_ready(api_url: str) -> None:
         models = {row["id"] for row in listed["data"]}
         metrics = _text_url(f"{api_url}/metrics")
         healthy = {
-            pool: _healthy_replicas(metrics, pool)
-            for pool in (DEEPSEEK_SERVED, QWEN_SERVED, WINNOW_SERVED)
+            pool: _healthy_replicas(metrics, pool) for pool in (DEEPSEEK_SERVED, WINNOW_SERVED)
         }
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
     if ready.get("status") != "ready" or models != set(PUBLIC_MODELS):
         raise SystemExit(f"Kairyu must serve exactly {PUBLIC_MODELS!r}, got {sorted(models)!r}")
-    unhealthy = {pool: count for pool, count in healthy.items() if count != 1}
-    if unhealthy:
-        raise SystemExit(f"every pool must report 1 healthy replica, got {unhealthy!r}")
+    expected = {DEEPSEEK_SERVED: 1, WINNOW_SERVED: len(WINNOW_REPLICAS)}
+    if healthy != expected:
+        raise SystemExit(f"healthy replicas must be {expected!r}, got {healthy!r}")
 
 
 # Readiness checks grammar-constrained JSON in both thinking and non-thinking
@@ -719,15 +707,11 @@ def _validate_deepseek(l1_url: str) -> None:
 
 
 def chat_probe(model: str) -> dict:
-    payload: dict = {
+    return {
         "model": model,
         "messages": [{"role": "user", "content": "What is 17 * 19? Reply with the number only."}],
         "max_tokens": 2048,
     }
-    if model == QWEN_SERVED:
-        # Without an explicit mode the qwen3 parser returns the reply as reasoning.
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
-    return payload
 
 
 def chat_answer_error(body: dict) -> str | None:
@@ -784,8 +768,8 @@ def _validate_systemone(l1_url: str) -> None:
         raise SystemExit(f"Winnow System One probe failed: {error}")
 
 
-def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> dict:
-    """A chat request; the always-verified model unless ``model`` says otherwise."""
+def routed_request(content: str, *, model: str = MODEL, **overrides) -> dict:
+    """A chat request to the public model unless ``model`` says otherwise."""
 
     payload = {
         "model": model,
@@ -797,18 +781,36 @@ def routed_request(content: str, *, model: str = ALWAYS_MODEL, **overrides) -> d
     return payload
 
 
-def validate_verified_answer(api_url: str) -> None:
+# A caller tool for the serving probe: the next reply must call it.
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+def validate_tool_answer(api_url: str) -> None:
+    """The public model answers a tool turn with a structured tool call."""
+
     body = post_json(
         f"{api_url}/v1/chat/completions",
-        routed_request("Name the capital of France in one word."),
+        routed_request("What is the weather in Paris right now?", tools=[WEATHER_TOOL]),
         timeout_s=1800,
     )
     try:
-        content = body["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError) as error:
-        raise SystemExit(f"verified-route probe failed: {str(body)[:200]}") from error
-    if "paris" not in content.lower():
-        raise SystemExit(f"verified-route probe failed: {content[:200]!r}")
+        call = body["choices"][0]["message"]["tool_calls"][0]["function"]
+        city = json.loads(call["arguments"]).get("city", "")
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise SystemExit(f"tool-call probe failed: {str(body)[:300]}") from error
+    if call.get("name") != "get_weather" or "paris" not in str(city).lower():
+        raise SystemExit(f"tool-call probe failed: {call!r}")
 
 
 _CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
@@ -830,7 +832,7 @@ def _webui_api(ui_url: str, path: str, *, token: str | None = None, payload: dic
 
 
 def provision_chat_ui(ui_url: str) -> None:
-    """Install the Reasoning Effort dropdown and check both models are offered."""
+    """Install the Reasoning Effort dropdown and check the public model is offered."""
 
     filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
     base = f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}"
@@ -845,7 +847,7 @@ def provision_chat_ui(ui_url: str) -> None:
             "id": _CHAT_UI_EFFORT_FILTER_ID,
             "name": "Reasoning Effort",
             "content": filter_source,
-            "meta": {"description": "Reasoning effort for the think route."},
+            "meta": {"description": "DeepSeek reasoning effort."},
         }
         if existing is None:
             state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
@@ -874,10 +876,10 @@ def validate_serving(env: dict[str, str]) -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_ready(api_url)
     _validate_deepseek(f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}")
-    _validate_chat(f"http://127.0.0.1:{env['QWEN_L1_PORT']}", QWEN_SERVED)
-    _validate_chat(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}", WINNOW_SERVED)
-    _validate_systemone(f"http://127.0.0.1:{env['WINNOW_L1_PORT']}")
-    validate_verified_answer(api_url)
+    for service in WINNOW_SERVICES:
+        _validate_chat(winnow_l1_url(env, service), WINNOW_SERVED)
+        _validate_systemone(winnow_l1_url(env, service))
+    validate_tool_answer(api_url)
 
 
 _NO_PUBLIC_HOST = "cannot discover an externally reachable UI host; set PUBLIC_HOST"
@@ -903,12 +905,11 @@ def _public_ui_host() -> str:
 
 def up() -> None:
     env = _compose_env()
-    bind = env["PLAYGROUND_BIND_ADDRESS"]
+    bind = env["CHAT_UI_BIND_ADDRESS"]
     ui_host = _public_ui_host() if bind == "0.0.0.0" else bind
     env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     _ensure_deepseek_image(env)
-    _ensure_qwen_image(env)
     _ensure_winnow_image(env)
     _ensure_model(
         env["DEEPSEEK_MODEL_STORAGE_PATH"],
@@ -916,23 +917,18 @@ def up() -> None:
         env["DEEPSEEK_VLLM_IMAGE"],
         "DEEPSEEK_MODEL_SEED",
     )
-    _ensure_model(
-        env["QWEN_MODEL_STORAGE_PATH"],
-        SPEC["qwen"],
-        env["QWEN_VLLM_IMAGE"],
-        "QWEN_MODEL_SEED",
-    )
     _ensure_winnow_model(env)
+    # --remove-orphans: an update from a release that still defined a service
+    # (the answer page before VCO-D20) stops and removes its old container.
     _compose(
-        ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"],
+        ["up", "--build", "--detach", "--wait", "--wait-timeout", "7200", "--remove-orphans"],
         env=env,
     )
     validate_serving(env)
     provision_chat_ui(f"http://127.0.0.1:{env['CHAT_UI_PORT']}")
     print("\nEnvironment is ready.")
     print(f"Chat UI:     http://{ui_host}:{env['CHAT_UI_PORT']} (Open WebUI, no authentication)")
-    print(f"Answer page: http://{ui_host}:{env['PLAYGROUND_PORT']} ({ALWAYS_MODEL})")
-    print(f"OpenAI API:  http://{ui_host}:{env['PLAYGROUND_PORT']}/v1 (models {PUBLIC_MODELS})")
+    print(f"OpenAI API:  http://127.0.0.1:{env['API_PORT']}/v1 (model {MODEL})")
 
 
 def main() -> None:
@@ -942,7 +938,7 @@ def main() -> None:
     if args.action == "up":
         up()
     elif args.action == "down":
-        _compose(["down"])
+        _compose(["down", "--remove-orphans"])
     elif args.action == "status":
         _compose(["ps"])
     else:

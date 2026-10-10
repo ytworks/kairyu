@@ -206,6 +206,11 @@ class GenerationRequest:
     # public-output floor on chat-template workers whose reasoning span the
     # template itself opens (DTO-D15).
     assistant_prefill: str | None = None
+    # The caller's conversation as role-tagged chat messages, sent before the
+    # prompt text so the upstream chat template renders it natively instead of
+    # a JSON transcript inside one message (m1 D8 amendment 2026-10-09). The
+    # prompt text follows as one final user message, omitted when empty.
+    conversation_prefix: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
@@ -237,6 +242,22 @@ class GenerationRequest:
                 dict(self.chat_template_kwargs),
             )
         kind = prompt_kind(self.prompt)
+        if self.conversation_prefix:
+            if isinstance(self.conversation_prefix, (str, bytes)) or any(
+                not isinstance(message, Mapping) or not isinstance(message.get("role"), str)
+                for message in self.conversation_prefix
+            ):
+                raise TypeError("conversation_prefix must be role-tagged message mappings")
+            if kind != "text" or isinstance(self.prompt, TemplatedPrompt):
+                raise ValueError(
+                    "conversation_prefix requires an upstream-templated text chat prompt, "
+                    "not a pre-rendered, token or multimodal prompt"
+                )
+            object.__setattr__(
+                self,
+                "conversation_prefix",
+                tuple(dict(message) for message in self.conversation_prefix),
+            )
         if self.assistant_prefill is not None:
             if not isinstance(self.assistant_prefill, str) or not self.assistant_prefill:
                 raise ValueError("assistant_prefill must be a non-empty string or null")
@@ -278,6 +299,11 @@ def validate_backend_request(backend: object, request: GenerationRequest) -> Non
     if validate is not None:
         validate(request)
         return
+    if request.conversation_prefix:
+        raise ValueError(
+            f"{type(backend).__name__} does not declare support for conversation_prefix; "
+            "backends without validate_request are legacy-string text-only"
+        )
     if type(request.prompt) is not str:
         kind = prompt_kind(request.prompt)
         variant = (
@@ -606,6 +632,8 @@ def validate_native_request_surface_before_prepare(
         unsupported.append("chat_template_kwargs")
     if request.assistant_prefill is not None:
         unsupported.append("assistant_prefill")
+    if request.conversation_prefix:
+        unsupported.append("conversation_prefix")
     if not isinstance(params.extra_args, Mapping):
         unsupported.append("extra_args")
     if unsupported:
@@ -692,9 +720,17 @@ def admission_upper_bound(
         # templates. Supplied prompt, tool schemas, and response schema are
         # counted explicitly above.
         fixed_template_envelope = 256
+        # The caller's conversation sent before the prompt counts as
+        # prompt input too (its JSON bounds the rendered messages).
+        prefix = (
+            json.dumps(list(request.conversation_prefix), ensure_ascii=False)
+            if request.conversation_prefix
+            else ""
+        )
         prompt_upper = max(
             1,
             len(text.encode("utf-8"))
+            + len(prefix.encode("utf-8"))
             + len(metadata.encode("utf-8"))
             + fixed_template_envelope,
         )

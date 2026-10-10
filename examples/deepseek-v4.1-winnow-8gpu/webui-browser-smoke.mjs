@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI (VCO-D18): both public models are
- * offered and each answers a request. The guarantee is not checked until it
- * is rebuilt.
+ * Browser gate for this example's Open WebUI (VCO-D18, VCO-D20): the public
+ * model is offered and answers a request.
  */
 
 import { chromium } from 'playwright';
@@ -12,7 +11,7 @@ const baseUrl = new URL(process.env.WEBUI_SMOKE_BASE_URL ?? 'http://127.0.0.1:30
 const actionTimeoutMs = 20_000;
 const navigationTimeoutMs = 30_000;
 const responseTimeoutMs = Number(process.env.WEBUI_SMOKE_RESPONSE_TIMEOUT_MS ?? 1_800_000);
-const models = ['kairyu-verified', 'kairyu-verified-always'];
+const models = ['kairyu-verified-tool'];
 
 let browser;
 let page;
@@ -27,9 +26,21 @@ async function step(name, operation) {
 	return operation();
 }
 
-// Open WebUI's corner notices (bottom-right) can cover the model selector;
-// they are informational, so the gate records and closes them before clicking.
+// Open WebUI's corner notices (bottom-right) and its first-run "what's new"
+// dialog can cover the model selector; they are informational, so the gate
+// records and closes them before clicking.
 async function dismissNotices() {
+	const dialogs = page.locator('div[role="dialog"][aria-modal="true"]');
+	for (let attempt = 0; attempt < 3 && (await dialogs.count()) > 0; attempt += 1) {
+		const dialog = dialogs.first();
+		console.log(JSON.stringify({ dialog: (await dialog.innerText()).trim().slice(0, 200) }));
+		await page.keyboard.press('Escape');
+		await dialog.waitFor({ state: 'detached', timeout: 2_000 }).catch(() => {});
+		if ((await dialogs.count()) > 0) {
+			await dialog.locator('button').last().click({ timeout: actionTimeoutMs }).catch(() => {});
+			await dialog.waitFor({ state: 'detached', timeout: 2_000 }).catch(() => {});
+		}
+	}
 	const notices = page.locator('div.absolute.bottom-8.right-8.z-50');
 	for (const notice of await notices.all()) {
 		console.log(JSON.stringify({ notice: (await notice.innerText()).trim().slice(0, 200) }));
@@ -82,7 +93,7 @@ async function main() {
 		await page.goto(baseUrl.href, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
 		await page.locator('#chat-input').waitFor({ state: 'visible', timeout: navigationTimeoutMs });
 	});
-	await step('both models offered', async () => {
+	await step('the public model offered', async () => {
 		const ids = await page.evaluate(async () => {
 			const response = await fetch('/api/models', {
 				headers: { Authorization: `Bearer ${localStorage.token}` }
@@ -91,14 +102,8 @@ async function main() {
 		});
 		invariant(JSON.stringify(ids) === JSON.stringify(models), `models offered: ${JSON.stringify(ids)}`);
 	});
-	await step('routed model answers an everyday request', async () => {
-		await send('kairyu-verified', 'Tell me a fun fact about octopuses.');
-	});
-	await step('always-verified model answers', async () => {
-		await send(
-			'kairyu-verified-always',
-			'List three primary colors as a comma-separated line, nothing else.'
-		);
+	await step('the routed model answers an everyday request', async () => {
+		await send('kairyu-verified-tool', 'Tell me a fun fact about octopuses.');
 	});
 	console.log('WEBUI BROWSER SMOKE PASS');
 }

@@ -864,3 +864,236 @@ async def test_a_failed_checklist_target_leaves_the_run_unguaranteed():
     assert result.final_text == "It is 42."
     assert result.verification.guaranteed is False
     assert result.verification.reason == "checklist_unavailable"
+
+
+def test_verifiers_waiting_on_each_others_targets_are_rejected():
+    # va judges a but waits for b; vb judges b but waits for a. Each target
+    # settles only after its verdict, so the run would wait forever.
+    roles = (
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}"),
+        RoleSpec(name="b", worker="gen", prompt="[b] {query}"),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {b}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "b"),
+        ),
+        RoleSpec(
+            name="vb",
+            worker="gen",
+            prompt="[vb] {b} {a}",
+            role_type="verifier",
+            verifies="b",
+            depends_on=("b", "a"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {vb}",
+            depends_on=("va", "vb"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="verifier waits contains a cycle"):
+        Conductor(roles, {"gen": RoutedBackend({})})
+
+
+def test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected():
+    # p -> image (requires image) -> a, and p -> b; va judges a and waits
+    # for b. Without an image, image is excluded and a runs beside p, while b
+    # still waits for p's wave: a's verdict would wait for b forever.
+    roles = (
+        RoleSpec(name="p", worker="gen", prompt="[p] {query}"),
+        RoleSpec(
+            name="image", worker="gen", prompt="[image] {p}", depends_on=("p",), requires="image"
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {image}", depends_on=("image",)),
+        RoleSpec(name="b", worker="gen", prompt="[b] {p}", depends_on=("p",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {b}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "b"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {b}",
+            depends_on=("va", "b"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="on every request"):
+        Conductor(roles, {"gen": RoutedBackend({})})
+
+
+async def test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_without_an_image():
+    # p -> image (requires image) -> a; va judges a and reads p. Without an
+    # image, image is excluded and a runs beside p: va must wait for p
+    # instead of reading it missing.
+    a_done = asyncio.Event()
+
+    class SlowP(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[p]"):
+                await asyncio.wait_for(a_done.wait(), timeout=5)
+            result = await super().generate(request)
+            if str(request.prompt).startswith("[a]"):
+                a_done.set()
+            return result
+
+    backend = SlowP({"p": ["P-OUT"], "a": ["A-OUT"], "va": ["PASS"], "final": ["done"]})
+    roles = (
+        RoleSpec(name="p", worker="gen", prompt="[p] {query}"),
+        RoleSpec(
+            name="image", worker="gen", prompt="[image] {p}", depends_on=("p",), requires="image"
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}", depends_on=("image",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {p}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "p"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va} {p}",
+            depends_on=("va", "p"),
+        ),
+    )
+
+    result = await Conductor(roles, {"gen": backend}).run("q", budget=Budget(max_steps=12))
+
+    assert result.final_text == "done"
+    (verdict_prompt,) = [prompt for prompt in backend.prompts if prompt.startswith("[va]")]
+    assert verdict_prompt == "[va] A-OUT P-OUT"
+
+
+async def test_a_verdict_waits_for_a_head_that_runs_beside_its_target_without_an_image():
+    # head -> image (requires image) -> a; va judges a and reads the head.
+    # Without an image only image drops out, so the head (still enabled)
+    # runs beside a: va must wait for it instead of reading it missing.
+    a_done = asyncio.Event()
+
+    class SlowHead(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[head]"):
+                await asyncio.wait_for(a_done.wait(), timeout=5)
+            result = await super().generate(request)
+            if str(request.prompt).startswith("[a]"):
+                a_done.set()
+            return result
+
+    backend = SlowHead({"head": ["H-OUT"], "a": ["A-OUT"], "va": ["PASS"], "final": ["done"]})
+    roles = (
+        RoleSpec(name="head", worker="gen", role_type="head", prompt="[head] {query}"),
+        RoleSpec(
+            name="image",
+            worker="gen",
+            prompt="[image] {head}",
+            depends_on=("head",),
+            requires="image",
+        ),
+        RoleSpec(name="a", worker="gen", prompt="[a] {query}", depends_on=("image",)),
+        RoleSpec(
+            name="va",
+            worker="gen",
+            prompt="[va] {a} {head}",
+            role_type="verifier",
+            verifies="a",
+            depends_on=("a", "head"),
+        ),
+        RoleSpec(
+            name="final",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[final] {va}",
+            depends_on=("va",),
+        ),
+    )
+    conductor = Conductor(
+        roles, {"gen": backend}, final_sampling_params=SamplingParams(max_tokens=64)
+    )
+
+    await conductor.run("q", budget=Budget(max_steps=12))
+
+    (verdict_prompt,) = [prompt for prompt in backend.prompts if prompt.startswith("[va]")]
+    assert verdict_prompt == "[va] A-OUT H-OUT"
+
+
+async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it():
+    # The drafts and the points run at once; the drafts' verdict waits for
+    # the points it reads, and the final answer reads the verdict.
+    drafts_started = asyncio.Event()
+
+    class Gated(RoutedBackend):
+        async def generate(self, request):
+            if str(request.prompt).startswith("[drafts]"):
+                drafts_started.set()
+            else:
+                await asyncio.wait_for(drafts_started.wait(), timeout=5)
+            return await super().generate(request)
+
+    backend = Gated(
+        {
+            "drafts": ['{"drafts": [{"id": "D1", "answer": "42"}]}'],
+            "points": ['{"points": [{"id": "R1", "point": "states 42"}]}'],
+            "answer": ["The answer is 42."],
+        }
+    )
+    judge = FakeSystemOne(lambda state, question: 0.3)
+    roles = (
+        RoleSpec(name="drafts", worker="gen", prompt="[drafts] {query}"),
+        RoleSpec(name="points", worker="gen", prompt="[points] {query}"),
+        RoleSpec(
+            name="judgments",
+            worker="judge",
+            prompt="",
+            role_type="verifier",
+            verifies="drafts",
+            depends_on=("drafts", "points"),
+            checklist=ChecklistConfig(
+                questions=(
+                    ChecklistQuestion(
+                        id="D1-{item[id]}",
+                        proposition="{item[point]}",
+                        foreach=ItemSource("points", "points"),
+                        ask="Does draft D1 meet this point?",
+                    ),
+                ),
+                state=(StateSection("drafts", "drafts"),),
+                threshold=1.0,
+                max_refinements=0,
+                on_unavailable="publish_unverified",
+            ),
+        ),
+        RoleSpec(
+            name="answer",
+            worker="gen",
+            role_type="synthesizer",
+            prompt="[answer] {drafts}\n{points}\n{judgments}",
+            depends_on=("judgments", "points"),
+        ),
+    )
+    conductor = Conductor(roles, {"gen": backend}, decision_workers={"judge": judge})
+
+    result = await conductor.run("What is six times seven?", budget=Budget(max_steps=12))
+
+    assert result.final_text == "The answer is 42."
+    (body,) = judge.bodies
+    assert body["state"] == {"drafts": {"drafts": [{"id": "D1", "answer": "42"}]}}
+    (question,) = body["questions"].values()
+    assert question["instructions"] == "Does draft D1 meet this point?"
+    answer_prompt = backend.prompts[-1]
+    assert answer_prompt.startswith("[answer]")
+    assert "- [D1-R1] states 42 (p=0.30)" in answer_prompt

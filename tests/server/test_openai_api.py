@@ -2361,6 +2361,73 @@ async def test_text_written_with_tool_calls_reaches_the_client(stream):
     )
 
 
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    },
+}
+_BARE_INVOKE = (
+    '<invoke name="bash">\n<parameter name="command">npx tsc --noEmit</parameter>\n'
+    '<parameter name="timeout">60</parameter>\n</invoke>'
+)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # DeepSeek wrote its DSML call without the marker tokens (verified-tool
+        # gate 2026-10-09): the declared call is returned as a call.
+        (
+            f"Run the type check first.\n\n{_BARE_INVOKE}",
+            ("Run the type check first.", ["bash"], "tool_calls"),
+        ),
+        (f"<tool_calls>\n{_BARE_INVOKE}\n</tool_calls>", (None, ["bash"], "tool_calls")),
+        # Anything else stays text: an undeclared tool, a missing required or
+        # unknown parameter, or prose after the block.
+        ('<invoke name="sh"><parameter name="command">ls</parameter></invoke>', None),
+        ('<invoke name="bash"><parameter name="timeout">5</parameter></invoke>', None),
+        ('<invoke name="bash"><parameter name="cmd">ls</parameter></invoke>', None),
+        (f"{_BARE_INVOKE}\nThen I will commit.", None),
+        # The string attribute decides decoding, never the declared type.
+        (
+            '<invoke name="bash"><parameter name="command">ls</parameter>'
+            '<parameter name="timeout" string="true">oops</parameter></invoke>',
+            None,
+        ),
+        (
+            '<invoke name="bash"><parameter name="command" string="false">42</parameter>'
+            "</invoke>",
+            None,
+        ),
+    ],
+)
+async def test_deepseek_call_without_markers_is_returned_as_a_call(stream, text, expected):
+    engine = StubBackend(text=text, finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body("check", tools=[_BASH_TOOL], stream=stream)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert _tool_response_contract(response, stream) == (expected or (text, [], "stop"))
+    if expected and not stream:
+        (call,) = response.json()["choices"][0]["message"]["tool_calls"]
+        assert json.loads(call["function"]["arguments"]) == {
+            "command": "npx tsc --noEmit",
+            "timeout": 60,
+        }
+
+
 @pytest.mark.parametrize("stream", [False, True])
 async def test_auto_suppresses_undeclared_model_function_names(stream):
     text = '<tool_call>{"name":"undeclared","arguments":{}}</tool_call>'
@@ -4197,6 +4264,78 @@ async def test_auto_best_of_is_forwarded_only_to_the_final_engine(
     assert len(transport_payloads) > 1
     assert all("best_of" not in payload for payload in transport_payloads[:-1])
     assert transport_payloads[-1]["best_of"] == 2
+
+
+async def test_native_conversation_publisher_keeps_a_legacy_chat_prompt():
+    # PR #641 review: a legacy-rendered chat has no L2 transcript, so a
+    # native_conversation publisher must receive the rendered prompt, never
+    # an empty conversation.
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.router import RuleRouter
+
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "4"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    upstream = OpenAICompatBackend(
+        base_url="https://native.example/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+    )
+
+    multi_step = (
+        "First, research the options. Then design a plan. After that, implement it. "
+        "Finally, verify everything works end to end."
+    )
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+    orchestrator = Orchestrator(
+        {"tier1": upstream, "tier2": upstream},
+        roles=(
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                prompt="",
+                native_conversation=True,
+            ),
+        ),
+        router=MultiAgentRouter(),
+    )
+    app = create_legacy_app(engines={}, orchestrators={"auto": orchestrator})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions", json=_chat_body("What is 2 + 2?", model="auto")
+        )
+
+    assert response.status_code == 200
+    (sent,) = payloads
+    assert len(sent["messages"]) == 1
+    assert "What is 2 + 2?" in sent["messages"][0]["content"]
 
 
 # --- Issue #496: OpenAI compatibility for output limits, model retrieve, ---

@@ -87,16 +87,28 @@ def _fit_message(message: object, limit: int) -> object:
     )
 
 
+def _is_request(message: object, index: int, latest_user: int | None) -> bool:
+    """Whether a message belongs to the request: a system or developer message,
+    or the latest user message."""
+
+    return index == latest_user or (
+        isinstance(message, dict) and message.get("role") in {"system", "developer"}
+    )
+
+
 def bounded_conversation(
     messages: list[object],
     max_chars: int,
 ) -> tuple[list[object], int]:
     """At most ``max_chars`` characters of JSON for a role-tagged conversation.
 
-    The newest message (the request being served) gets up to half, the first
-    message (the task) up to half of the rest, and the newest of the others
-    fill what remains; oversized kept messages are cut. Returns the messages
-    and how many were omitted from the middle.
+    The newest message (the request being served) gets up to half. The first
+    message and the request's other messages (every system and developer
+    message and the latest user message) share up to half of the rest, so an
+    agent's task survives behind a short system prompt (m1 D9 amendment
+    2026-10-09). The newest of the others fill what remains. Kept messages
+    stay in conversation order; oversized ones are cut, and one that cannot
+    fit even cut is left out. Returns the messages and how many were omitted.
     """
 
     if max_chars < MIN_CONVERSATION_CHARS:
@@ -106,17 +118,42 @@ def bounded_conversation(
     budget = max_chars - 2  # the list brackets
     if len(messages) == 1:
         return [_fit_message(messages[0], budget)], 0
-    last = _fit_message(messages[-1], budget // 2)
-    budget -= _json_chars(last)
-    first = _fit_message(messages[0], (budget - 2) // 2)
-    budget -= _json_chars(first) + 2  # with its ", " separator
-    middle: list[object] = []
-    index = len(messages) - 2
-    while index >= 1 and _json_chars(messages[index]) + 2 <= budget:
+    newest = len(messages) - 1
+    kept: dict[int, object] = {newest: _fit_message(messages[newest], budget // 2)}
+    budget -= _json_chars(kept[newest])
+    latest_user = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict) and message.get("role") == "user"
+        ),
+        default=None,
+    )
+    pinned = [
+        index
+        for index in range(newest)
+        if index == 0 or _is_request(messages[index], index, latest_user)
+    ]
+    # Half of the rest for the pinned messages, each with its ", " separator;
+    # the smallest are fitted first so a short one leaves its share to the
+    # others.
+    remaining = allowance = max(0, (budget - 2 * len(pinned)) // 2)
+    order = sorted(pinned, key=lambda index: _json_chars(messages[index]))
+    for position, index in enumerate(order):
+        share = remaining // (len(order) - position)
+        fitted = _fit_message(messages[index], share)
+        if _json_chars(fitted) <= share:
+            kept[index] = fitted
+            remaining -= _json_chars(fitted)
+    budget -= allowance - remaining + 2 * (len(kept) - 1)
+    for index in range(newest - 1, -1, -1):
+        if index in kept:
+            continue
+        if _json_chars(messages[index]) + 2 > budget:
+            break
+        kept[index] = messages[index]
         budget -= _json_chars(messages[index]) + 2
-        middle.append(messages[index])
-        index -= 1
-    return [first, *reversed(middle), last], index
+    return [kept[index] for index in sorted(kept)], len(messages) - len(kept)
 
 
 def bounded_text(text: str, max_chars: int) -> str:
@@ -179,9 +216,25 @@ class OrchestrationRequest:
     # None means the judge was deterministically skipped, not that a dispatched
     # call necessarily failed to return a verdict.
     role_profile_judge_event: TraceEvent | None = None
+    # The caller's validated chat messages, sent natively to a
+    # native_conversation publisher (m1 D8 amendment 2026-10-09). None for a
+    # plain prompt, which such a role receives as one user message; it is
+    # never parsed out of ``prompt`` text (PR #641 review).
+    conversation: tuple[Mapping[str, object], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
+        if self.conversation is not None:
+            if isinstance(self.conversation, (str, bytes)) or any(
+                not isinstance(message, Mapping) or not isinstance(message.get("role"), str)
+                for message in self.conversation
+            ):
+                raise TypeError("conversation must be role-tagged message mappings")
+            object.__setattr__(
+                self,
+                "conversation",
+                tuple(dict(message) for message in self.conversation),
+            )
         sampling_format = self.sampling_params.extra_args.get("response_format")
         if self.response_format != sampling_format:
             raise ValueError("response_format intent must match sampling_params.extra_args")

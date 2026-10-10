@@ -1333,6 +1333,11 @@ class Orchestrator:
                         tool_call_protocol=call.tool_call_protocol,
                         reasoning_effort=reasoning_effort,
                         chat_template_kwargs=chat_template_kwargs,
+                        conversation_prefix=(
+                            conductor.final_intent_conversation_prefix(prompt)
+                            if conductor is not None
+                            else ()
+                        ),
                     ),
                 )
             )
@@ -2059,7 +2064,25 @@ class Orchestrator:
             reasoning_effort=self._effective_reasoning_effort(call),
             public_output_floor=self._profile_output_floor(roles),
             decision_workers=self._decision_workers,
+            conversation=self._native_conversation(call, roles),
         )
+
+    @staticmethod
+    def _native_conversation(
+        call: OrchestrationRequest,
+        roles: tuple[RoleSpec, ...],
+    ) -> tuple[Mapping[str, object], ...]:
+        """The caller's messages for a native_conversation publisher: the
+        chat request's validated messages, or a plain prompt as one user
+        message, never parsed out of the prompt text (m1 D8 amendment
+        2026-10-09, PR #641 review)."""
+
+        if not any(role.native_conversation for role in roles):
+            return ()
+        if not call.conversation:
+            # No chat messages (or none recorded): the prompt is the request.
+            return ({"role": "user", "content": call.prompt},)
+        return call.conversation
 
     def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:
         if call.reasoning_effort is not None:

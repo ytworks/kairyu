@@ -748,6 +748,133 @@ def test_validate_request_rejects_unsupported_chat_continuation_retry() -> None:
     assert backend.generated == []
 
 
+class _ChatRecorder(MockBackend):
+    """A chat worker that accepts native conversations and images."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[GenerationRequest] = []
+
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in {"text", "multimodal"}
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        return None
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests.append(request)
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(CompletionOutput(index=0, text="ok", token_ids=(), finish_reason="stop"),),
+        )
+
+
+@pytest.mark.parametrize("case", ["chat", "image", "plain"])
+async def test_native_conversation_publisher_answers_the_callers_own_turn(case) -> None:
+    # m1 D8 amendment 2026-10-09: the publisher gets the caller's messages
+    # natively (an agent's tool transcript, or an image conversation) and its
+    # prompt as one final user message; another role keeps the transcript. A
+    # plain prompt stays one user message even when its text looks like a
+    # transcript (PR #641 review).
+    from kairyu.engine.prompt import (
+        MultimodalItem,
+        MultimodalMessage,
+        MultimodalMessagePart,
+        MultimodalPrompt,
+    )
+    from kairyu.entrypoints.server.chat_service import validate_orchestration_chat_input
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    worker = _ChatRecorder()
+    orchestrator = _orchestrator(
+        engines={"tier2": worker},
+        roles=(
+            RoleSpec(name="notes", worker="tier2", prompt="[notes] {conversation}"),
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                depends_on=("notes",),
+                prompt="Material: {notes}",
+                native_conversation=True,
+            ),
+        ),
+    )
+    messages = [
+        {"role": "system", "content": "You can run shell commands."},
+        {"role": "user", "content": COMPLEX},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "a.py"},
+    ]
+    caller = ChatCompletionRequest(model="m", messages=messages)
+    validated = validate_orchestration_chat_input(caller)
+    multimodal = None
+    if case == "image":
+        multimodal = MultimodalPrompt(
+            COMPLEX,
+            (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),),
+            (
+                MultimodalMessage(
+                    "user",
+                    (
+                        MultimodalMessagePart("text", text=COMPLEX),
+                        MultimodalMessagePart("item", item_index=0),
+                    ),
+                ),
+            ),
+        )
+    plain = f"{COMPLEX}\nSummarise this example:\n{validated.prompt}"
+    call = OrchestrationRequest(
+        prompt=plain if case == "plain" else validated.prompt,
+        sampling_params=SamplingParams(max_tokens=64),
+        multimodal_prompt=multimodal,
+        conversation=None if case == "plain" else validated.conversation_messages,
+    )
+
+    await orchestrator.run(call)
+
+    notes, final = worker.requests
+    assert notes.conversation_prefix == ()
+    if case == "image":
+        assert final.conversation_prefix == ()
+        assert final.prompt.messages[:-1] == multimodal.messages
+        assert final.prompt.messages[-1].content[0].text == "Material: ok"
+    else:
+        expected = ({"role": "user", "content": plain},) if case == "plain" else tuple(messages)
+        assert final.conversation_prefix == expected
+        assert final.prompt == "Material: ok"
+
+
+def test_character_cost_counts_a_native_conversation() -> None:
+    # PR #641 review: max_cost_usd must see the conversation sent natively.
+    from kairyu.orchestration.conductor import chars_cost_model
+
+    request = GenerationRequest(
+        request_id="r",
+        prompt="",
+        sampling_params=SamplingParams(max_tokens=8),
+        conversation_prefix=({"role": "user", "content": "x" * 10_000},),
+    )
+    result = GenerationResult(
+        request_id="r",
+        prompt="",
+        completions=(CompletionOutput(index=0, text="ok", token_ids=(), finish_reason="stop"),),
+    )
+
+    assert chars_cost_model(usd_per_1k_chars=1.0)(request, result) > 10.0
+
+
 async def test_async_prepare_keeps_chat_retry_intent_validation_only() -> None:
     events: list[tuple[str, str]] = []
     backend = _PreparingBackend("tier2", events)

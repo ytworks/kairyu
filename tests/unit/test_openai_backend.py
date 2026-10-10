@@ -961,6 +961,69 @@ async def test_generate_continues_assistant_prefill_on_chat(upstream):
     await backend.shutdown()
 
 
+_CALLER_TURN = (
+    {"role": "system", "content": "You can run shell commands."},
+    {"role": "user", "content": "Fix the failing test."},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command": "pytest -q"}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "1 failed"},
+)
+
+
+@pytest.mark.parametrize(("prompt", "appended"), [("Material.", True), ("", False)])
+async def test_generate_sends_the_callers_conversation_as_native_messages(prompt, appended):
+    """m1 D8 amendment 2026-10-09: a publisher answering the caller's turn gets
+    the conversation as chat messages, its prompt as one final user message."""
+
+    import dataclasses
+
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream="vllm",
+    )
+
+    await backend.generate(
+        dataclasses.replace(_request(prompt), conversation_prefix=_CALLER_TURN)
+    )
+
+    tail = [{"role": "user", "content": prompt}] if appended else []
+    assert captured["body"]["messages"] == [*map(dict, _CALLER_TURN), *tail]
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize("upstream", ["llamacpp", "kairyu"])
+async def test_conversation_prefix_fails_closed_without_upstream_support(upstream):
+    import dataclasses
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport({}),
+        upstream=upstream,
+        max_model_len=4096,
+    )
+
+    with pytest.raises(ValueError, match="conversation_prefix"):
+        backend.validate_request(
+            dataclasses.replace(_request(), conversation_prefix=_CALLER_TURN)
+        )
+    await backend.shutdown()
+
+
 @pytest.mark.parametrize("upstream", ["openai", "kairyu", "vllm"])
 async def test_generate_forwards_typed_parallel_tool_calls_to_supported_upstream(
     upstream,

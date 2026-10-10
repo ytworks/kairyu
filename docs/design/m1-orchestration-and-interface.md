@@ -222,6 +222,11 @@ budget accounting are unchanged. Supporting mechanisms:
   `response_format` to it too. Internal prompts may render `{conversation}`,
   `{response_format}` and `{tools}` (the caller's tool definitions, counted in
   admission bounds); the final unit still carries only the caller's intent.
+  Amended 2026-10-07 (PR #641): `{conversation_without_reasoning}` renders
+  the same messages without assistant `reasoning_content`, for a role whose
+  worker should not read replayed reasoning (the example chooses the role).
+  Withdrawn the same day (PR #641): its only user, Qwen `requirements`, moved
+  to DeepSeek, which needs the replayed reasoning; the placeholder is removed.
 - **Refinement prompt.** `refine_prompt` renders a refinement from
   `{previous}` and `{feedback}` (and any upstream output) instead of the
   appended default. `checklist.max_refinements` bounds one verifier below
@@ -266,12 +271,73 @@ contracts onto a non-final role. Added with the acceptance read: no repair
 without a failing item (a repair with nothing to fix rewrote sound DeepSWE
 agent turns).
 
+Amendment (2026-10-06, PR #641, owner authorization): a verifier may read units
+that run beside its target, not only the target's own dependencies. Before,
+validation rejected such a dependency, so judging one branch against criteria
+an independent branch produces (drafts against separately listed
+requirements) forced the two branches to run one after the other. Now the
+target's verdict waits for those units (each unit sets a per-run settled
+event when it has run, failed or been excluded; a missing output reads as
+unavailable, as before). Validation keeps the wait deadlock-free under the
+wave scheduler: the waited unit's own dependencies must complete before the
+target generates, and it cannot be the final unit, which streams after the
+rest of the DAG. Since a target settles only after its verdict, the waits
+are edges of the unit graph: two verdicts waiting on each other's targets are
+rejected at construction as a cycle (PR #641 review, 2026-10-07). The
+waited unit's dependencies must precede the target on every request: units a
+request may exclude (image-conditional units without an image, the head) and
+what precedes the target only through them do not count, since excluding them
+moves the target to an earlier wave (same review). For the same reason a
+dependency counts as complete only if, for each combination of exclusions
+(the head and the image-conditional units drop out independently), it
+precedes the target or is itself excluded; any other one, such as an ancestor
+reached only through an image-conditional unit or a head still running beside
+the target, is waited for. Policy
+(which branches, questions, thresholds) stays in the example. Code:
+`Conductor._validate_verdict_waits`, `_run_pending`; tests:
+`test_a_verifier_judges_its_target_against_a_branch_running_beside_it`,
+`test_verifiers_waiting_on_each_others_targets_are_rejected`,
+`test_a_wait_reachable_only_through_an_image_conditional_unit_is_rejected`,
+`test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_without_an_image`,
+`test_a_verdict_waits_for_a_head_that_runs_beside_its_target_without_an_image`.
+
+Amendment (2026-10-09, PR #641, owner authorization): a publisher role may
+declare `native_conversation`. Its worker then receives the caller's
+conversation as native chat messages (tool calls and tool results included)
+followed by the role's rendered prompt as one final user message, omitted
+when the prompt is empty; an image request sends the caller's own image
+conversation the same way. Every other role keeps the role-tagged JSON
+transcript. The chat route passes its validated messages as
+`OrchestrationRequest.conversation`; a plain prompt (no chat messages,
+including a legacy-rendered chat) is sent as one user message and is never
+parsed for a transcript (PR #641 review).
+The worker request carries the messages in
+`GenerationRequest.conversation_prefix`; only an OpenAI-compatible worker
+whose upstream declares the capability (vLLM) accepts it, and every other
+backend rejects it. The prompt cannot use `{query}` or `{conversation}`, nor
+the text scaffolds (`prompt_suffix`, `prompt_headless`, `reasoning_closed`, a
+prefix reasoning continuation). Admission and the character cost model count
+the messages as prompt input (PR #641 review).
+Why (framework boundary): (1) a publisher answering an agent's tool turn
+received the conversation only as a JSON transcript inside one user message,
+and DeepSeek-V4.1 at max effort then wrote its calls as JSON text (11 of 12
+on a think route, 6 of 12 on the verified tool route) while the same turns
+sent natively gave 0 of 12; (2) no extension point sends a caller's tool
+transcript natively (image prompts reject tool transcripts); (3) any DSL whose
+publisher answers tool turns hits it; (4) the mechanism only moves the
+caller's own messages into the worker request; which role uses it and its
+prompt stay in the example. Code: `RoleSpec.native_conversation`,
+`Conductor._conversation_prefix`, `OpenAICompatBackend._payload`; tests:
+`test_native_conversation_publisher_answers_the_callers_own_turn`,
+`test_generate_sends_the_callers_conversation_as_native_messages`,
+`test_conversation_prefix_fails_closed_without_upstream_support`.
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/unit/test_profile_judge_systemone.py`; GPU evidence in
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b` (`routing`);
-Winnow as the judge: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (VCO-D18).
+Winnow as the judge: `examples/deepseek-v4.1-winnow-8gpu/` (VCO-D18).
 
 A `profile_judge` whose `worker` is a `systemone_ref` worker routes by System
 One probabilities instead of a generated label. Kairyu sends the
@@ -295,6 +361,23 @@ Additions in the same change: generation trace events record their
 checklist appends a "Verification" section to exposed internal work (PR #616
 review). `max_conversation_chars` bounds the judge's conversation as a whole
 so a long agent conversation still fits the judge (issue #617).
+
+Amendment (2026-10-09, PR #641, owner authorization): when
+`bounded_conversation` cuts a conversation to its bound, it keeps the
+request's messages (every system and developer message and the latest user
+message, the definition the checklist `request` source already uses) beside
+the first and the newest message; the newest of the others fill the rest,
+in conversation order. Before, only the first message was kept as "the
+task", so an agent whose run starts with a one-line system prompt lost its
+task and protocol from long conversations.
+Why (framework boundary): (1) the bound serves the route judge (D9) and
+checklist `query`/`request` sections (D8) and dropped the request whenever a
+system prompt came first; (2) no setting chooses which messages survive, and
+larger sizes cannot hold a long run; (3) replaying 64 DeepSWE agent turns
+through the route judge, 20 were misrouted with the task dropped and 1 once
+it was kept; any DSL routing or judging a long agent run with a system
+prompt shows the same loss; (4) the mechanism only pins messages: sizes,
+questions and criteria stay in the example.
 
 ## 3. Out of scope for M1 (deferred with reasons)
 

@@ -301,6 +301,11 @@ class RoleNodeSpec(BaseModel):
     # Refinement prompt over the role outputs plus {previous} and {feedback};
     # empty keeps the default appended-feedback refinement.
     refine_prompt: str = ""
+    # A publisher answering the caller's turn itself: the caller's
+    # conversation goes to the worker as native chat messages and the prompt
+    # (which may be empty) as one final user message (m1 D8 amendment
+    # 2026-10-09).
+    native_conversation: bool = False
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -332,7 +337,7 @@ class RoleNodeSpec(BaseModel):
                     f"executor role {self.name!r} references roles outside its "
                     f"depends_on: {sorted(missing)}"
                 )
-        elif not self.prompt and self.checklist is None:
+        elif not self.prompt and self.checklist is None and not self.native_conversation:
             raise ValueError(f"role {self.name!r} requires a prompt")
         if self.checklist is not None and self.role_type != "verifier":
             raise ValueError(f"role {self.name!r}: only a verifier can declare a checklist")

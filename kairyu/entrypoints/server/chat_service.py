@@ -85,6 +85,14 @@ _DSML_PARAMETER_PATTERN = re.compile(
     r"(.*?)</｜DSML｜parameter>",
     re.DOTALL,
 )
+# DeepSeek's DSML call written without its marker tokens (m9 D2 amendment
+# 2026-10-09): `<invoke name=...>` / `<parameter name=...>` blocks, optionally
+# inside a markerless `<tool_calls>` or `<function_calls>` wrapper.
+_BARE_INVOKE_PATTERN = re.compile(r'<invoke name="([^"\n]+)">(.*?)</invoke>', re.DOTALL)
+_BARE_PARAMETER_PATTERN = re.compile(
+    r'<parameter name="([^"\n]+)"(?: string="(true|false)")?>(.*?)</parameter>', re.DOTALL
+)
+_BARE_WRAPPERS = ("tool_calls", "function_calls")
 _SINGLE_TOOL_CONSTRAINT = "Call at most one function in this response."
 logger = logging.getLogger(__name__)
 
@@ -139,6 +147,10 @@ class ValidatedChatInput:
     # distinguishes tasks that share a long agent-harness preamble while
     # keeping appended turns on the same replica.
     conversation_affinity_key: str | None = None
+    # The validated role-tagged messages the L2 transcript carries, for a
+    # publisher that receives the conversation natively (m1 D8 amendment).
+    # None when the prompt is not an L2 transcript (legacy chat rendering).
+    conversation_messages: tuple[Mapping[str, object], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -977,6 +989,7 @@ def validate_orchestration_chat_input(
             for message in prepared.messages
         ),
         conversation_affinity_key=_conversation_affinity_key(prepared),
+        conversation_messages=tuple(messages),
     )
 
 
@@ -1467,6 +1480,121 @@ def _parse_tool_calls(
     return [call] if call is not None else []
 
 
+def _fits_schema_types(value: object, schema: object) -> bool:
+    """Whether a decoded parameter value has one of the schema's types."""
+
+    if not isinstance(schema, Mapping):
+        return True
+    kinds = _schema_types(schema)
+    if not kinds:
+        return True
+    checks = {
+        "null": lambda v: v is None,
+        "string": lambda v: isinstance(v, str),
+        "boolean": lambda v: isinstance(v, bool),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+    }
+    return any(checks.get(kind, lambda _v: False)(value) for kind in kinds)
+
+
+def _bare_invoke_arguments(body: str, schema: Mapping[str, object]) -> dict[str, object]:
+    """The arguments of one markerless DSML invoke, typed and checked by the
+    tool's schema (as for Qwen's XML parameters)."""
+
+    if schema.get("type", "object") != "object":
+        raise ValueError("tool parameters schema must describe an object")
+    properties = schema.get("properties", {})
+    required = schema.get("required", ())
+    additional = schema.get("additionalProperties", True)
+    if (
+        not isinstance(properties, Mapping)
+        or not isinstance(required, Sequence)
+        or isinstance(required, (str, bytes))
+        or not isinstance(additional, (bool, Mapping))
+    ):
+        raise ValueError("invalid tool parameters schema")
+    arguments: dict[str, object] = {}
+    cursor = 0
+    for match in _BARE_PARAMETER_PATTERN.finditer(body):
+        if body[cursor : match.start()].strip():
+            raise ValueError("unexpected text between tool parameters")
+        name, is_string, value = match.groups()
+        if name in arguments:
+            raise ValueError("duplicated tool parameter")
+        parameter_schema = properties.get(name)
+        if parameter_schema is None:
+            if additional is False:
+                raise ValueError("unknown tool parameter")
+            parameter_schema = additional if isinstance(additional, Mapping) else {}
+        if is_string is None:
+            arguments[name] = _qwen_parameter_value(value, parameter_schema)
+            cursor = match.end()
+            continue
+        decoded = value if is_string == "true" else _strict_json_loads(value)
+        # The attribute decides the decoding, never the type: the value must
+        # still fit the declared schema (PR #641 review).
+        if not _fits_schema_types(decoded, parameter_schema):
+            raise ValueError("tool parameter does not match its schema")
+        arguments[name] = decoded
+        cursor = match.end()
+    if body[cursor:].strip():
+        raise ValueError("unexpected text after tool parameters")
+    if not set(required).issubset(arguments):
+        raise ValueError("required tool parameter is missing")
+    return arguments
+
+
+def _bare_invoke_calls(
+    text: str,
+    tools: Sequence[Mapping[str, object]],
+) -> tuple[list[ToolCall], str | None] | None:
+    """DeepSeek's DSML call written without its marker tokens, so the upstream
+    parser left it as text: one or more ``<invoke name=...>`` blocks that end
+    the reply, each naming a declared tool with schema-valid arguments.
+    Returns the calls and the prose before them, or None (the text stays)."""
+
+    if not tools:
+        return None
+    first = text.find('<invoke name="')
+    if first < 0:
+        return None
+    prose, block = text[:first], text[first:].strip()
+    for wrapper in _BARE_WRAPPERS:
+        opening = f"<{wrapper}>"
+        if prose.rstrip().endswith(opening):
+            closing = f"</{wrapper}>"
+            if not block.endswith(closing):
+                return None
+            prose = prose.rstrip()[: -len(opening)]
+            block = block[: -len(closing)].strip()
+            break
+    calls: list[ToolCall] = []
+    cursor = 0
+    try:
+        for invoke in _BARE_INVOKE_PATTERN.finditer(block):
+            if block[cursor : invoke.start()].strip():
+                return None
+            name = invoke.group(1).strip()
+            schema = _tool_parameters_schema(tools, name)
+            if schema is None:
+                return None
+            call = _tool_call_from_payload(
+                {"name": name, "arguments": _bare_invoke_arguments(invoke.group(2), schema)}
+            )
+            if call is None:
+                return None
+            calls.append(call)
+            cursor = invoke.end()
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not calls or block[cursor:].strip():
+        return None
+    return calls, prose.strip() or None
+
+
 def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
     return [
         LogprobEntry(
@@ -1540,19 +1668,27 @@ def _build_choice(
             reasoning_content, text = candidate.split("</think>", 1)
         elif has_opening:
             reasoning_content, text = candidate, ""
+    def allowed(call: ToolCall) -> bool:
+        return call.function.name in tool_choice.allowed_names and (
+            tool_choice.named is None or call.function.name == tool_choice.named
+        )
+
     tool_calls = []
+    content: str | None = None
     if tool_choice.mode != "none":
         tool_calls = [
-            call
-            for call in _parse_tool_calls(text, tools, tool_call_protocol)
-            if call.function.name in tool_choice.allowed_names
-            and (tool_choice.named is None or call.function.name == tool_choice.named)
+            call for call in _parse_tool_calls(text, tools, tool_call_protocol) if allowed(call)
         ]
+        content = _text_beside_calls(text)
+        if not tool_calls and tool_call_protocol is ToolCallProtocol.GENERIC:
+            recovered = _bare_invoke_calls(text, tools)
+            if recovered is not None and all(allowed(call) for call in recovered[0]):
+                tool_calls, content = recovered
     if tool_calls:
         return Choice(
             index=index,
             message=ResponseMessage(
-                content=_text_beside_calls(text),
+                content=content,
                 reasoning_content=reasoning_content,
                 tool_calls=tool_calls,
             ),

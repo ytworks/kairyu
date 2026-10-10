@@ -524,20 +524,23 @@ async def test_diamond_dag_runs_middle_wave_concurrently():
     assert result.final_text == result.outputs["synth"]
 
 
-def test_verifier_with_unavailable_dependency_rejected_at_init():
-    # M1: a verifier runs inline after its target, so a dependency the target
-    # doesn't have (here "planner", scheduled in a parallel wave) would render
-    # as "" at verify time — reject it loudly instead of a silent wrong verdict.
+def test_verifier_with_a_dependency_not_ready_before_its_verdict_rejected_at_init():
+    # M1: a verifier runs inline after its target. A unit running beside the
+    # target is waited for (m1 D8 amendment 2026-10-06), but "late" needs the
+    # target itself, so waiting for it could never end: reject it loudly.
     roles = (
-        RoleSpec(name="planner", worker="w", prompt="plan: {query}"),
         RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(name="late", worker="w", prompt="after {worker}", depends_on=("worker",)),
         RoleSpec(
             name="checker", worker="w", role_type="verifier", verifies="worker",
-            prompt="check {worker} against {planner}",
-            depends_on=("worker", "planner"),  # planner is NOT a dep of worker
+            prompt="check {worker} against {late}",
+            depends_on=("worker", "late"),
+        ),
+        RoleSpec(
+            name="final", worker="w", prompt="{worker} {late}", depends_on=("checker", "late")
         ),
     )
-    with pytest.raises(ValueError, match="not.*available when it runs inline"):
+    with pytest.raises(ValueError, match="may not be ready before 'worker' is judged"):
         Conductor(roles=roles, workers={"w": MockBackend()})
 
 

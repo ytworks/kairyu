@@ -2,11 +2,16 @@
 
 Status: **Accepted 2026-10-01; redesigned 2026-10-02 (VCO-D15); agent turns
 verified as steps 2026-10-03 (VCO-D16), replaced by a verified-tool route 2026-10-04 (VCO-D17, PR #619);
-rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06**
-(evidence: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
+rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640), all nine GPU gates pass 2026-10-06;
+DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
+next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
+one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09**
+(evidence: `examples/deepseek-v4.1-winnow-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
-Applies to: `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` (renamed from
-`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18). Framework
+Applies to: `examples/deepseek-v4.1-winnow-8gpu/` (renamed from
+`examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18 and from
+`examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
+2026-10-07). Framework
 mechanisms: m1 D8 (checklist verifiers, unused since VCO-D18), m1 D9 and the
 m11 D8 replica amendment.
 
@@ -610,6 +615,191 @@ Owner decision. The example is rebuilt on main as
 Why: the owner restarts the verified route from a plain max-effort DeepSeek
 answer on an eight-GPU layout that also hosts Qwen and Winnow, keeping the
 previous routing conditions and serving levels as the verification baseline.
+
+### VCO-D19 — Verified route in three waves (2026-10-06, PR #641)
+
+Owner decision. The VERIFIED route (both public models) becomes:
+
+- Wave 1, in parallel: DeepSeek writes five complete answers D1..D5 from
+  viewpoints as different as possible, in one call at the caller's effort
+  (default high; JSON with fixed keys, so each draft sees the others'
+  viewpoints); Qwen (thinking at low, whatever the caller sends)
+  lists the requirements an answer must meet, necessary and sufficient and
+  MECE, at most 16 (JSON).
+- Wave 2: one Winnow System One request with the request and the drafts in
+  the state: per draft, can it be adopted as is as the final reply (D1..D5);
+  per requirement x draft, is it met (Dk-Rn). Winnow never repairs; threshold
+  1.0 lists every judgment below certainty with its probability for wave 3.
+  An unreadable judgment leaves wave 3 without judgments.
+- Wave 3: DeepSeek at the caller's effort reads the request, the drafts, the
+  requirements and the judgments, treats all of them critically, and writes
+  the best reply (the final unit, with the caller's tools and format).
+- No answer carries `kairyu_verification`: the judgments inform the answer.
+- Wave-1 parallelism uses the m1 D8 amendment of 2026-10-06 (a verifier may
+  wait for a unit running beside its target).
+- GPU-verified 2026-10-06: all nine gates pass (example `MEASUREMENTS.md`).
+- Gates: effort expects drafts and answer at the caller's effort and Qwen at
+  low; verified-route checks the
+  four stages, wave-1 overlap and 5 + 5 x N judgment items; all gates re-run.
+
+Why: the owner rebuilds the verified route as diverse drafts judged by
+Winnow against independently listed requirements, then a critical synthesis.
+
+**Amendment (2026-10-07, PR #641).** Owner decision: Qwen `requirements`
+reads `{conversation_without_reasoning}`; DeepSeek `drafts` and `answer` keep
+the replayed `reasoning_content`; Winnow `judgments` reads `request` (no
+assistant turn). Why: DeepSWE r1 replayed Kairyu's stage reports in
+`reasoning_content` (189,953 of 240,650 Qwen tokens on one turn), so Qwen's
+262,144-token context overflowed and 87 of 160 VERIFIED turns had no Winnow
+judgment; without it the failed turns measured 30,330-96,837 tokens.
+
+**Amendment (2026-10-07, PR #641): DeepSeek requirements, two Winnow
+replicas.** Owner decision; supersedes the amendment above.
+
+- `requirements` is written by DeepSeek at max effort, whatever the caller
+  sends (same sampling as the other DeepSeek roles, output cap 131,072), and
+  reads `{conversation}` with the replayed reasoning.
+- Qwen leaves the example: no worker, pool, compose service or template. The
+  example is renamed `examples/deepseek-v4.1-winnow-8gpu`.
+- GPU 6 hosts a second Winnow-12B replica. Each replica serves one System One
+  use: `winnow-route` (GPU 6, `winnow-route-systemone`) only the route judge,
+  `winnow-judge` (GPU 7, `winnow-judge-systemone`) only the judgments. Both
+  stay in the internal `winnow-12b` chat pool.
+- Gates: effort expects drafts and answer at the caller's effort and
+  requirements at max, and the route judged on `winnow-route`;
+  verified-route expects the judgments on `winnow-judge`; fallback stops
+  each replica alone (route down: think route while judgments still run;
+  judge down: still routed, answer without judgments).
+- GPU-verified 2026-10-07: all nine gates pass (example `MEASUREMENTS.md`);
+  verified-route p50 141.6 s (Qwen layout 162.7 s), serving c1/c16 p50
+  98.3/151.4 s (Qwen layout 51.5/118.6 s).
+
+Why: DeepSWE r1 of the three waves (24 of 113 tasks scored, 8 passed) showed
+Qwen `requirements` as the wave-1 bottleneck (median 107 s against 36 s for
+the drafts). Separate Winnow replicas keep a burst of judgments from queueing
+the next request's route decision. With Qwen gone, the m1 D8 placeholder
+`{conversation_without_reasoning}` has no user and is withdrawn.
+
+**Amendment (2026-10-07, PR #641): the next step, structured tool calls,
+no stage reports.** Owner decision after the content of DeepSWE turns on the
+two-Winnow layout (stopped at 0 of 113 scored).
+
+- The drafts, the requirements and the answer define the reply as the next
+  assistant message. When the conversation ends with tool results or the
+  assistant's own turns, the reply is the next step of that work: the move
+  needed now, not the request's final result and not a step whose result
+  the conversation already shows. The requirements list what that next step
+  must meet; the request's final goal is context.
+- Each draft carries `tool_calls` (name, JSON arguments) and reads the
+  caller's tools; its text never holds a call. The answer makes calls
+  through the tool-calling interface only.
+- The judgments read the whole conversation as well (each message cut at
+  4,000 characters, the whole at 120,000, as for the route judge) and the
+  caller's tools (PR #641 review), and ask whether each draft (text and tool
+  calls) can be adopted as the next reply.
+- `expose_intermediate_outputs: false`: stage reports leave
+  `reasoning_content`; the answer page's "Internal stages" panel is empty.
+- GPU-verified 2026-10-07: all nine gates pass; replayed DeepSWE turns return
+  structured tool calls (10/10) and next-step requirements (example
+  `MEASUREMENTS.md`). Verified-route p50 181.6 s (141.6 s before).
+
+Why: the drafts wrote calls as text (`[Makes bash tool call with ...]`, 35 of
+54 verified turns) and the answer copied it in 3 of 47, so the agent rejected
+the turn (one 639-second implementation was lost; r1 had 19 of 655). The
+requirements read the latest user message, which in an agent conversation is
+always the task, so they listed the whole task every turn; the judgments
+failed nearly all 85 items and the agent re-explored instead of taking the
+next step (owner's problem definition: choose the move needed now). The
+replayed stage reports (40,000-130,000 characters per turn) grew every
+request and let the next turn read last turn's drafts.
+
+### VCO-D20 — The verified tool route (2026-10-09, PR #641)
+
+Owner decision after DeepSWE `deepswe-verified-3wave-nextstep-4w-20261007-r1`
+(stopped at 75 of 113 scored, 35 passed). Plan:
+`docs/superpowers/plans/2026-10-09-verified-tool-route.md`.
+
+- One public model, `kairyu-verified-tool` (spec `verified-tool.yaml`);
+  `kairyu-verified`, `kairyu-verified-always` and `verified-always.yaml` are
+  removed, and so is the answer page (`playground/`). Open WebUI stays.
+- The route judge asks whether the next reply needs to call one of the
+  caller's tools: `TOOL` takes the three waves (profile `primary`), `THINK`
+  takes `deepseek_think`; fallback stays `deepseek_think`. The judge state
+  already carries `tool_calling` beside the conversation. The VERIFIED route
+  for requests without tools is gone; the think route serves them.
+- The DSL stays: the same roles, workers, efforts and schemas. Only prompts
+  change, kept generic for any tool-calling agent:
+  - drafts and requirements share one reply definition: the call(s) for the
+    one move needed now with at most a short text; the finishing move only
+    once tool results show the request done;
+  - requirements read the tools and, from the request's literal words and
+    the current position, cover exact names and public entry points, checks
+    taken from the request (the request wins over a check), verification
+    through the public path, build mode and type checks that existing checks
+    use ("all" checked on more than one case), must-not behaviour, and order
+    and finishing (finish alone, after success is shown);
+  - drafts: five different moves; near the end, one checks the work against
+    the request before finishing; never announce a call without making it;
+  - judgments: adoptable means the move needed now, calls that fit the tools
+    and the protocol, and text that matches its calls;
+  - answer: makes every call it announces; the finishing move goes alone,
+    after tool results show success.
+- Gates: `routing` uses `datasets/tool-routing-set.json` (40 TOOL turns; 96
+  THINK: the 80 earlier chats without tools and 16 tool-declared turns whose
+  next reply is text), TOOL miss rate < 10 % on both halves and THINK
+  precision >= 90 %; `verified-route` becomes `verified-tool-route` on
+  `datasets/tool-turns.json` (24 agent turns), which also needs a structured
+  call to a declared tool; `serving` runs those turns and `serving-routed`
+  the routing set; `l1` ends with one tool-call answer; the browser gate
+  checks Open WebUI only. The InFoBench serving set is dropped.
+
+Why: the 75 scored tasks failed on the public surface differing from what the
+request names (about 9), on checks that encode the agent's misreading (about
+8), on verification at an internal layer instead of the tests' path or type
+check (5), on missing must-not behaviour (3), and on a finishing action
+batched with an unseen failing step (2); 9 replies announced a call without
+making it. Running tests did not separate passes from failures; what was
+checked did. The owner keeps the verified route for tool calls only and
+routes every other request to the think route.
+
+**Amendment (2026-10-09, PR #641): the route judge on long agent runs.**
+Owner decision after replaying DeepSWE turns before the GPU gates: 20 of 64
+real agent turns, each needing a tool call, were routed THINK, almost all
+near the end of the run; 4 of 6 concurrent long turns hit the 10 s cut; and
+the `routing` gate failed (TOOL miss 15 % on both halves).
+
+- The judge's question adds that when the conversation's instructions
+  require a tool call or command in every reply, or end the work with one,
+  every reply up to that final one needs a call; THINK applies only when
+  the conversation accepts a plain-text reply; TOOL names finishing calls.
+- The judge's conversation bound keeps the request's messages (m1 D9
+  amendment 2026-10-09), so the task and protocol stay visible.
+- `timeout_seconds` 10 -> 60 (the DSL maximum).
+- One authored routing item had no edit step before its check; it was fixed
+  (label unchanged).
+- Measured before the gates: real-turn misses 21 -> 1 of 64; authored set
+  TOOL misses 2 of 40 (one per half), THINK sent to TOOL 2 of 96.
+
+Why: the old THINK criterion "final report once the work is done" pulled an
+agent's last turns to the think route, whose replies then wrote the submit
+command as text or batched it with a commit: the failures this route is for.
+
+**Amendment (2026-10-09, PR #641): calls DeepSeek writes without markers.**
+Owner decision after `verified-tool-route` failed 1 of 12 (the type-check
+turn, streamed, effort max): the answer wrote DeepSeek's DSML call without
+its marker tokens, so vLLM returned it as text. Kairyu now returns such a
+trailing block for a declared tool with schema-valid arguments as a tool
+call (m9 D2 amendment 2026-10-09). The example's prompts are unchanged.
+
+**Amendment (2026-10-09, PR #641): both publishers get the caller's
+conversation natively.** Owner decision after the rerun failed 3 of 12: the
+answer wrote its calls as JSON text. On the same six turns at effort max,
+DeepSeek given the conversation natively made 0 of 12 such replies; the think
+route made 11 of 12 and the verified tool route 6 of 12, both handing it a
+JSON transcript. The `answer` role now declares `native_conversation` (m1 D8
+amendment 2026-10-09): the caller's messages, then its prompt without
+`{query}` as one final user message. `deepseek_think_answer` declares it with
+no prompt: the caller's conversation goes to DeepSeek as it was sent.
 
 ## Limitations
 

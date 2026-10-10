@@ -175,6 +175,10 @@ class VLLMBackend:
             raise ValueError(
                 "vLLM backend does not support request field assistant_prefill"
             )
+        if request.conversation_prefix:
+            raise ValueError(
+                "vLLM backend does not support request field conversation_prefix"
+            )
         if isinstance(prompt, MultimodalPrompt):
             raise ValueError(
                 "vLLM backend does not support multimodal prompts through "

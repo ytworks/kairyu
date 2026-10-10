@@ -83,7 +83,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - DeepSeek V4.1 Flash single-replica example (FN-D9 amendment, 2026-09-11) is GPU-verified on TP8/EP8 SM120 with the V4 ReplicaPool/API/UI structure and official thinking-high default; bounded L1 comparisons select DSpark 5, 16K batching and NCCL. The 320-request matrix, reasoning/tool/vision/cancellation, normal restart and retrieval through 1,039,909 prompt tokens pass; exact evidence and limitations are in its `MEASUREMENTS.md`.
 - DeepSeek V4.1 Flash six-GPU example (FN-D9 six-GPU amendment, 2026-09-30): one DP6/EP6 replica on GPUs 0–5 with the 8-GPU example's L2/L3 structure and its own scripts; official-first L1 (pinned vLLM nightly + SM120 overlay, Engram offload, 4K batch / 0.92 from the recipe's memory-bound arm, DSpark 5 with full verification). Serving 102 / 591 / 718 tok/s at c1/c32/c64; gate evidence in its `MEASUREMENTS.md`.
 - Qwen3.8 + DeepSeek-V4.1 ensemble example (DTO-D16/D17, 2026-10-01): V4.1 DP6/EP6 (GPU 0–5, the six-GPU example's L1) + Qwen TP1 × 2 (GPU 6, 7). A Qwen judge picks one of two routes: thinking DeepSeek, or the dual-track ensemble with two policies and a three-candidate synthesis. Every role takes images natively; DeepSeek uses the official V4.1 encoder with per-request effort, and the example's overlay continues the floor's assistant prefill. ENSEMBLE criteria loosened and judge fallback moved to `deepseek_think` (DTO-D17 amendments). GPU-verified 2026-10-01: all gates pass, including the ensemble TTFT gate at c1–c32 (c32 at 95.8 % of the limit); 4 of 128 coding requests exceed the 900 s turn envelope after two audit refinements.
-- Winnow-routed DeepSeek example (VCO-D18, 2026-10-06, PR #640; replaces the checklist-verified OpenJev example, whose evidence stays at `df109a6b`): DeepSeek-V4.1 DP6/EP6 (GPU 0-5), Qwen3.8-27B (GPU 6, unused by routes yet), Winnow-12B Q8_0 (GPU 7). Winnow routes each request through System One to VERIFIED (one DeepSeek call at max effort for now; the guarantee is rebuilt later) or THINK (the caller's effort). Open WebUI and the answer page carry over. All nine GPU gates pass (2026-10-06): routing miss 0 %, everyday to THINK 96.9 %, Winnow read p50 ≤ 0.25 s; output caps at the V4.1 card's 262,144; serving c1/c16 p50 23.5/24.6 s at 132/737 tok/s; evidence in its `MEASUREMENTS.md`.
+- Winnow-routed DeepSeek example `deepseek-v4.1-winnow-8gpu` (VCO-D18..D20, PRs #640/#641): DeepSeek-V4.1 DP6/EP6 (GPU 0-5), Winnow-12B Q8_0 x 2 (GPU 6 route judge, GPU 7 judgments). One public model `kairyu-verified-tool` since 2026-10-09 (VCO-D20): Winnow routes a turn whose next reply needs a tool call (TOOL) to the verified tool route, three waves (VCO-D19): five DeepSeek drafts of the next move with structured tool calls beside DeepSeek's max-effort requirements, one Winnow read judging each draft, then a critical DeepSeek answer that makes the call. Every other request goes to DeepSeek at the caller's effort (THINK). Prompts are tuned on DeepSWE failures and stay generic; the answer page is gone, Open WebUI stays. The route judge keeps an agent's task in long runs (m1 D9 amendment) and both publishers get the caller's conversation natively (m1 D8 amendment); All nine VCO-D20 GPU gates pass (2026-10-09, rerun after the review fixes at `2b4ae850`: verified-tool-route p50 122.1 s, serving c1/c16 p50 137.2/208.6 s, every serving reply a structured call); DeepSWE r2 is running; the previous verified route's DeepSWE run stopped at 35 passes of 75 scored. Evidence in its `MEASUREMENTS.md`.
 - GGUF via llama.cpp (LCP-D1..D6, 2026-10-04): `upstream: llamacpp` on the `openai` backend; CPU contract gate green on stock b11391; Winnow-12B Q8_0 examples (1 GPU, DP8 ReplicaPool + System One, System One playground) pass all GPU gates (2026-10-05) with llama.cpp's Gemma 4 `required` fix `f072b10` backported
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -112,57 +112,51 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-10-06 — [design] Verified example rebuilt as Winnow-routed answers (VCO-D18, PR #640)
-- What: `deepseek-v4.1-openjev-verified-8gpu` → `deepseek-v4.1-qwen3.8-winnow-8gpu`: DeepSeek GPU 0-5, Qwen3.8-27B GPU 6 (idle pool), Winnow-12B GPU 7. Winnow judges THINK/VERIFIED with the old criteria; VERIFIED = one max-effort DeepSeek call. Verified-tool route, checklist DAG, calibration and OpenJev removed; UIs kept; gates rebuilt with the c1/c4/c8/c16 plan.
-- Why: owner restarts the verified route from a plain max-effort answer on a layout that also hosts Qwen and Winnow.
-- Refs: VCO-D18 (supersedes VCO-D17), `docs/superpowers/plans/2026-10-06-deepseek-v41-winnow-routed-8gpu.md`
+### 2026-10-09 — [progress] Verified tool route: all nine GPU gates pass (PR #641)
+- What: at `8e85b30f`, l1, routing (TOOL miss 5 %/5 %, THINK precision 97.9 %), think-route, effort, verified-tool-route (12/12 structured calls, p50 131.7 s), fallback, serving (72/72, every reply a structured call), serving-routed and browser pass. 4 of 24 agent turns route THINK in serving.
+- Refs: example `MEASUREMENTS.md`; VCO-D20 and its amendments
 
-### 2026-10-05 — [amendment] OpenAI Responses compatibility in L3 (m11 D4)
-- What: `/v1/responses` follows the pinned OpenAI spec, so Codex 0.160 and the SDKs work unmodified. It adds:
-  - the OpenAI error envelope with `param` (400/404/405, `previous_response_not_found`, 503 `slow_down` for transient overload)
-  - omitted `max_output_tokens` meaning the remaining context
-  - live reasoning, text and tool-call streams with preamble and in-band gates
-  - `response.in_progress` snapshot heartbeats
-  - reasoning items with `krs1.` tokens, replayed into `reasoning_content`
-  - in-band `context_length_exceeded`
-  - retrieve, delete, `input_items`, `input_tokens`, cancel and `compact`
-  - input images and web-search declarations
+### 2026-10-09 — [amendment] Publishers can receive the caller's conversation natively (m1 D8, PR #641)
+- What: `native_conversation` on a publisher role sends the caller's messages (tool transcript included) natively via `GenerationRequest.conversation_prefix`, the role prompt as one final user message; vLLM upstreams accept it, other backends reject it. The example's `answer` and `deepseek_think_answer` (no prompt) use it.
+- Why: `verified-tool-route` failed 3/12 on calls written as JSON text; at effort max the same turns gave 0/12 sent natively vs 11/12 (think route) and 6/12 (verified tool route) as a JSON transcript.
+- Refs: m1 D8 amendment 2026-10-09; VCO-D20 amendment; `kairyu/orchestration/conductor.py`, `kairyu/engine/openai_backend.py`
 
-  Unsupported fields are typed 400s.
-- Why: Codex retried every 1024-capped turn, aborted on comment keep-alives, never compacted after an HTTP 400, and lost reasoning and preambles. An earlier attempt that widened into L1/L2 was closed, so this one only maps existing capabilities in L3.
-- Refs: m11 D4 amendment 2026-10-05; `kairyu/entrypoints/server/responses_*.py`; `tests/server/test_responses_{contract,stream,inputs}.py`
+### 2026-10-09 — [amendment] DeepSeek calls written without DSML markers become tool calls (PR #641)
+- What: on the generic protocol, a reply ending with `<invoke name=...>`/`<parameter name=...>` blocks (DeepSeek's DSML without its marker tokens) for declared tools with schema-valid arguments is returned as `tool_calls`; prose before it stays `content`; anything else stays text.
+- Why: `verified-tool-route` failed 1/12 (effort max): the answer wrote such a block, vLLM returned it as text and the agent saw no call; DeepSWE showed the same (1/1,410 and 5/77 replies).
+- Refs: m9 D2 amendment 2026-10-09; VCO-D20 amendment; `kairyu/entrypoints/server/chat_service.py`
 
-### 2026-10-05 — [amendment] llama.cpp `n` limited to 1; Winnow example fixes (PR #620 review)
-- What: `upstream: llamacpp` rejects `n > 1` before dispatch (`max_n=1`), and the contract gate's `n`-above-slots row is removed. In the Winnow examples, `down`/`status`/`logs` no longer need 30 GiB free; the playground sends WebP as PNG; the streaming tool-call gate assembles the deltas instead of searching for the `tool_calls` key.
-- Why: owner review. llama-server reports usage per candidate (the first candidate's when unary, one usage chunk per candidate when streaming), so Kairyu under-reported and under-billed completion tokens. System One forwards images untouched, and Winnow's build cannot decode WebP. Plain text chunks also carry `"tool_calls": null`.
-- Refs: LCP-D2 in `docs/design/llamacpp-upstream.md`; PR #620 review 5409395128
+### 2026-10-09 — [amendment] Route judge keeps an agent's task; TOOL covers protocol-required calls (VCO-D20, PR #641)
+- What: `bounded_conversation` also keeps system/developer messages and the latest user message when it cuts a conversation (m1 D9 amendment); the route judge's question and criteria count calls the conversation's protocol requires (including finishing) as TOOL; judge timeout 10 -> 60 s.
+- Why: DeepSWE replay before the gates: 20/64 real agent turns routed THINK (task dropped behind a system prompt, "final report" criterion), 4/6 concurrent long turns timed out, `routing` failed; with the changes 1/64 misrouted.
+- Refs: m1 D9 amendment 2026-10-09; VCO-D20 amendment; `kairyu/orchestration/request.py`
 
-### 2026-10-05 — [amendment] Winnow examples GPU-verified; Gemma 4 `required` backport (PR #620)
-- What: both Winnow-12B examples pass all six `verify.sh` gates on RTX PRO 6000 (1 GPU; DP8 on 8 GPUs). The examples add llama.cpp `f072b10` as a fifth winnow-server patch, registered in Winnow's own `runtime.lock.json`. They also add a Jev-style System One playground on `:3001`, and the UIs now listen on all interfaces. Kairyu code is unchanged.
-- Why: at b11036 the Gemma 4 grammar ignores `tool_choice: "required"`. The named-tool adaptation (LCP-D3) then got text, and Kairyu failed closed with 502. The source re-read had missed this. Owner approved the backport (example-owned runtime), the playground and the public binds.
-- Refs: LCP-D3 and the Winnow amendment in `docs/design/llamacpp-upstream.md`; `examples/winnow-12b-q8-*/MEASUREMENTS.md`
+### 2026-10-09 — [design] Verified tool route: one routed model, TOOL/THINK by Winnow (VCO-D20, PR #641)
+- What: `kairyu-verified-tool` (`verified-tool.yaml`) replaces `kairyu-verified` and `kairyu-verified-always`; Winnow routes TOOL (the next reply needs a tool call) to the three waves and THINK to DeepSeek at the caller's effort. Same DSL; prompts rewritten generically: exact names and public entry points, checks from the request's words, verification on the public path and type checks, must-not behaviour, finishing alone after success shown, every announced call made. Answer page removed; gates adapted with authored `tool-routing-set.json` and `tool-turns.json`.
+- Why: owner decision after DeepSWE nextstep r1 (35 passes of 75 scored): failures came from surface-name mismatches, misread self-checks, internal-layer verification, missing must-not behaviour, batched finishing and calls announced but not made.
+- Refs: VCO-D20; plan `docs/superpowers/plans/2026-10-09-verified-tool-route.md`
 
-### 2026-10-04 — [amendment] llama.cpp penalties, token counts and attest (PR #620 review)
-- What: `upstream: llamacpp` rejects frequency/presence penalties, sends `repeat_last_n` = `max_model_len` with `repetition_penalty`, requires `max_model_len`, and declines `/v1/messages/count_tokens`; the Winnow examples' `attest` fails on missing or non-numeric sampling defaults.
-- Why: owner review. llama.cpp penalizes prompt tokens with frequency/presence and only the last 64 tokens with repeat. `/tokenize` counts the string without the chat template generation applies. A missing default compared as NaN and passed.
-- Refs: LCP-D2/D3/D5 in `docs/design/llamacpp-upstream.md`; PR #620 review 5406980804
+### 2026-10-07 — [amendment] Verified replies target the next step; drafts carry structured tool calls (PR #641)
+- What: drafts/requirements/answer define the reply as the next assistant message (on agent turns, the move needed now); each draft carries `tool_calls` and reads the caller's tools; judgments also read the conversation; stage reports leave `reasoning_content`. DeepSWE on the two-Winnow layout stopped at 0/113 scored. All nine GPU gates pass.
+- Why: drafts wrote tool calls as text and the answer copied it (3/47 turns rejected by the agent); requirements read the task as the request every turn, so agents re-explored instead of stepping; replayed stage reports grew every request.
+- Refs: VCO-D19 amendment 2026-10-07 (next step); example `verified.yaml`
 
-### 2026-10-04 — [design] GGUF models through llama.cpp as an L1 worker (PR #620)
-- What: `backend: openai` + `upstream: llamacpp` attaches `llama-server` with no L2/L3 change: executed-field profile, `repeat_penalty`, `top_k` 0, named tool_choice → that tool + `required`, `top_logprobs` floor, assistant prefill, `/tokenize`, WebP→PNG; passthrough rejected. CPU contract gate `l1.correctness.llamacpp_upstream_contract` passes on stock b11391.
-- Why: llama-server silently ignores unknown keys and object tool_choice, drops logprobs at `top_logprobs: 0`, and reports undecodable images as HTTP 500 (would eject replicas); `generic` cannot express these.
-- Refs: LCP-D1..D6 in `docs/design/llamacpp-upstream.md`; plan `docs/superpowers/plans/2026-10-04-llamacpp-gguf-l1-upstream.md`
+### 2026-10-07 — [amendment] Verdict waits validated across exclusions; two-Winnow layout GPU-verified (PR #641)
+- What: review fixes to the m1 D8 wait-for-a-parallel-branch amendment: waits join the cycle check; a waited unit's dependencies must precede the target on every request; a dependency counts as done only if, for each head/image exclusion combination, it precedes the target or is excluded (otherwise it is waited for). All nine GPU gates pass on DeepSeek max requirements with `winnow-route`/`winnow-judge`.
+- Why: four review findings: verdicts waiting on each other's targets, and image-conditional or head exclusions shifting waves, hung runs or let verdicts read missing outputs.
+- Refs: m1 D8 amendment 2026-10-06 (extended); VCO-D19 amendment 2026-10-07; example `MEASUREMENTS.md`
 
-### 2026-10-04 — [design] Verified DAG drops agent-turn wording (PR #619)
-- What: extractors no longer read `{tools}` or target "this one message"; adoption asks "is this point necessary to answer the request?" without tools; the summary covers earlier turns; the repair has no tool-call instructions; extractor limits back to 32,768.
-- Why: owner decision: tool requests take the verified-tool route, so the guarantee route assumes a complete answer.
-- Refs: VCO-D17 in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+### 2026-10-07 — [amendment] Verified requirements on DeepSeek max; Qwen replaced by a second Winnow (PR #641)
+- What: `requirements` moves from Qwen (low) to DeepSeek (max, full conversation). Qwen leaves the example (renamed `deepseek-v4.1-winnow-8gpu`); GPU 6 hosts a second Winnow-12B: `winnow-route` judges only the route, `winnow-judge` (GPU 7) only the judgments. The `{conversation_without_reasoning}` placeholder is withdrawn (no user left). GPU gates pending.
+- Why: owner decision after DeepSWE r1 (8 of 24 scored, stopped): Qwen requirements was the wave-1 bottleneck (median 107 s vs drafts 36 s); separate replicas keep judgments from queueing the route decision.
+- Refs: VCO-D19 amendment 2026-10-07; m1 D8 withdrawal note; supersedes the two entries below
 
-### 2026-10-04 — [design] Verified example: tool route replaces step verification (PR #619)
-- What: Jev routes a request that requires a tool call to TOOL: one DeepSeek call at max effort with the caller's tools, unverified (kairyu-verified THINK/TOOL/VERIFIED; kairyu-verified-always TOOL/VERIFIED). The STEP route and `verified_step` profile are removed.
-- Why: owner decision. Verification failed correct intermediate agent steps and repairs jumped to the final move; step verification did not remove that risk.
-- Refs: VCO-D17 (supersedes VCO-D16) in `docs/design/example-verified-checklist-orchestration.md`; example `verified.yaml`, `verified-always.yaml`
+### 2026-10-07 — [amendment] Correction: Winnow keeps replayed reasoning (PR #641)
+- What: corrects the entry below: only Qwen `requirements` drops replayed `reasoning_content`; DeepSeek and Winnow (route judge and `judgments` as configured) are unchanged.
+- Why: owner decision: do not drop the reasoning for Winnow.
+- Refs: entry below; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
 
-### 2026-10-03 — [design] Verified example judges an agent turn as one step (PR #619 S3)
-- What: new profile `verified_step` and Jev route label STEP (kairyu-verified: THINK/STEP/VERIFIED; kairyu-verified-always: STEP/VERIFIED, no think route). Step points come from the task and the latest tool results; coverage and acceptance ask whether the reply is a sound next step (A0) over request, recent conversation (bounded `query`), summary and reply. Repairs in both profiles rewrite the same message in the draft's frame (B1); a step repair gets only points read below 0.5 (B2). Extractors may use 65,536 tokens (C2). STEP thresholds are placeholders until labelled DeepSWE turns (V3).
-- Why: complete-answer criteria failed sound mid-task turns and their repairs drifted to submission (closed PR #618: 73/83 turns hit the refinement limit).
-- Refs: PR #619; plan `docs/superpowers/plans/2026-10-03-jev-verified-minimal.md` (A0, B1, B2, C2); example `verified.yaml`, `verified-always.yaml`
+### 2026-10-07 — [amendment] Qwen requirements reads the conversation without replayed reasoning (PR #641)
+- What: new role placeholder `{conversation_without_reasoning}` (`{conversation}` minus assistant `reasoning_content`); the example's Qwen `requirements` uses it, DeepSeek roles keep the full conversation.
+- Why: DeepSWE r1 replayed Kairyu's stage reports; Qwen `requirements` overflowed 262,144 tokens and 87/160 VERIFIED turns had no Winnow judgment. Owner: only Qwen and Winnow do without reasoning; DeepSeek needs it.
+- Refs: m1 D8 amendment 2026-10-07; VCO-D19 amendment 2026-10-07; plan `docs/superpowers/plans/2026-10-07-verified-requirements-context.md`
