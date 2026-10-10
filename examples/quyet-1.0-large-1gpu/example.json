@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "environment": "quyet-1.0-large-1gpu",
+  "hardware": {
+    "gpu_count": 1,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000,
+    "maximum_idle_used_mib": 1024
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 80
+  },
+  "allocation": {
+    "model": "quyet-1.0-large",
+    "gpu_count": 1,
+    "replicas": 1
+  },
+  "pool": {
+    "max_concurrency": 8,
+    "queue_depth_threshold": 0,
+    "prefix_index": true,
+    "unhealthy_after": 1,
+    "placement_log": "/var/lib/kairyu/placement/quyet-1.0-large.jsonl"
+  },
+  "model": {
+    "repo": "chinhnc/Quyet-1.0-Large",
+    "revision": "9a0f051112ba4301f6e4c8b87fc088ce00b11aae",
+    "base_model": "google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475",
+    "tree_sha256": "8f287d9211df28043788d7bf85e8b32c72b70e5fe69820219bd1df20fb332a05",
+    "slug": "quyet-1.0-large",
+    "served_name": "quyet-1.0-large",
+    "max_context_tokens": 65536,
+    "quantization": "bf16",
+    "modalities": ["text", "image"],
+    "generation_defaults": {"temperature": 1.0, "top_k": 64, "top_p": 0.95}
+  },
+  "vllm": {
+    "release": "v0.31.0",
+    "image": "vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
+    "image_id": "sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
+    "host_port": 8094,
+    "settings": {
+      "VLLM_MAX_MODEL_LEN": 65536,
+      "VLLM_MAX_NUM_SEQS": 64,
+      "VLLM_GPU_MEMORY_UTILIZATION": 0.95,
+      "VLLM_MAX_IMAGES": 4
+    }
+  },
+  "systemone": {
+    "model": "quyet-1.0-large-systemone",
+    "upstream_model": "Quyet-1.0-Large",
+    "aliases": ["quyet-latest", "jev-latest", "jev-preview"],
+    "max_concurrency": 16,
+    "image": "local/quyet-systemone:1.0.2-vllm-v0.31.0",
+    "image_id": "sha256:b539b2f85541330b4f7473f775d66bbfbd903115b1a59ded2f97f0e97a7c7c82",
+    "dockerfile": "quyet-systemone.Dockerfile",
+    "quyet_version": "1.0.2",
+    "prompt_version": 2,
+    "temperatures": {"choice": 1.3007, "score": 1.3159, "noul": 1.4957},
+    "host_port": 8095,
+    "settings": {
+      "QUYET_MAX_INFLIGHT": 16,
+      "QUYET_MAX_QUEUE": 16,
+      "QUYET_READ_WORKERS": 32,
+      "QUYET_MAX_QUESTIONS": 32
+    }
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "port": 3014
+  },
+  "playground": {
+    "image": "nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
+    "port": 3015
+  },
+  "api_port": 8014,
+  "verification": {
+    "reference": {
+      "dataset": "systemone-reference.jsonl",
+      "top_choice_margin": 0.05,
+      "max_median_abs_diff": 0.005,
+      "max_abs_diff": 0.06
+    },
+    "serving": {
+      "concurrency": [1, 4, 8],
+      "requests_per_concurrency": 32,
+      "prompt_tokens_approx": 1024,
+      "output_tokens": 256
+    },
+    "systemone_serving": {
+      "concurrency": [1, 16, 32, 64],
+      "requests_per_concurrency": 64,
+      "state_tokens_approx": 1024,
+      "c1_p50_limit_s": 1.0
+    },
+    "isolation": {
+      "reads": 640,
+      "chats": 8
+    }
+  }
+}

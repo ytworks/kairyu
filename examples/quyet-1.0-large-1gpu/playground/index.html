@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quyet System One Playground</title>
+<style>
+  :root {
+    --bg: #f6f6f3; --panel: #ffffff; --ink: #1c1c1a; --muted: #6a6a64; --line: #e2e1da;
+    --accent: #2b6cb0; --accent-soft: #d9e6f5; --warn: #a05a00;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1e1e1c; --ink: #ebeae4; --muted: #9a9992; --line: #33322e;
+      --accent: #7fb0ec; --accent-soft: #233650; --warn: #f0a640;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding: 14px 20px;
+           border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(320px, 440px) 1fr; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+  textarea, input, select { width: 100%; font: inherit; color: inherit; background: var(--bg);
+                            border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { resize: vertical; }
+  button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--panel);
+           color: inherit; padding: 6px 10px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > .small { flex: 0 0 auto; }
+  .q { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 8px; }
+  .muted { color: var(--muted); }
+  .results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-width: 0; }
+  @media (max-width: 1200px) { .results { grid-template-columns: 1fr; } }
+  .stats { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .stats b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+  .answer { border-top: 1px solid var(--line); padding: 8px 0; }
+  .answer h3 { margin: 0 0 6px; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; }
+  .answer h3 .val { font-family: var(--mono); color: var(--accent); }
+  .bar { display: grid; grid-template-columns: minmax(70px, 30%) 1fr 56px; gap: 8px; align-items: center;
+         font-size: 12px; margin: 3px 0; }
+  .bar .track { background: var(--accent-soft); border-radius: 4px; height: 14px; overflow: hidden; }
+  .bar .fill { background: var(--accent); height: 100%; }
+  .bar.top .name { font-weight: 600; }
+  .bar .p { font-family: var(--mono); text-align: right; }
+  .note { font-size: 12px; color: var(--muted); }
+  .warn { font-size: 12px; color: var(--warn); }
+  pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; margin: 0; }
+  .error { color: #c0392b; }
+  .check { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .check input { width: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quyet System One Playground</h1>
+  <span class="sub">Calibrated decisions from Quyet-1.0-Large (the quyet package's prompt and temperatures, read on
+  vLLM), next to the same model's chat answer. Served by Kairyu: <code>POST /v1/systemone</code> and
+  <code>/v1/chat/completions</code>.</span>
+</header>
+<main>
+  <section>
+    <h2>Request</h2>
+    <div class="row">
+      <div><label for="model">System One model</label><select id="model"></select></div>
+      <div><label for="preset">Example</label><select id="preset"></select></div>
+    </div>
+    <div class="row">
+      <div><label for="state-kind">State is</label>
+        <select id="state-kind"><option value="text">text</option><option value="json">JSON (object or conversation list)</option></select>
+      </div>
+    </div>
+    <label for="state">State (up to 6,000 tokens are read; a longer state is truncated)</label>
+    <textarea id="state" rows="6"></textarea>
+    <div class="row" style="margin-top:12px">
+      <h2 style="margin:0">Questions</h2>
+      <button class="small" id="add-noul">+ yes/no</button>
+      <button class="small" id="add-choice">+ choice</button>
+      <button class="small" id="add-score">+ score</button>
+    </div>
+    <div id="questions"></div>
+    <div class="note" style="margin-top:6px">At most 10 options per question. Text only.</div>
+    <label class="check"><input type="checkbox" id="compare" checked> Also ask the chat model</label>
+    <div class="row" style="margin-top:12px"><button class="primary" id="run">Run</button></div>
+  </section>
+  <div class="results">
+    <section>
+      <h2>System One</h2>
+      <div class="stats" id="s1-stats"></div>
+      <div id="s1-body" class="muted">Run a request to see each answer's distribution.</div>
+    </section>
+    <section>
+      <h2>Chat model</h2>
+      <div class="stats" id="chat-stats"></div>
+      <div id="chat-body" class="muted">The same state and questions, asked as a chat prompt.</div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const CHAT_MODEL = "quyet-1.0-large";
+const TRIAGE = {
+  urgent: {type: "noul", instructions: "Does the customer need a reply within the hour?"},
+  team: {type: "choice", instructions: "Which team should handle it?",
+         criteria: {outage: "service down", billing: "charges, refunds", feature: "requests, how-to"}},
+  tone: {type: "score", instructions: "How upset is the customer?", criteria: ["calm", "annoyed", "furious"]},
+};
+const PRESETS = {
+  "Support ticket": {kind: "text", state: "Everything is down and we have a demo with our biggest client at noon.", questions: TRIAGE},
+  "Invoice complaint": {kind: "text", state: "The invoice looks wrong again. Second time this quarter.", questions: TRIAGE},
+  "Lost card (Vietnamese)": {kind: "text", state: "Tôi bị mất thẻ hôm qua, làm ơn khóa thẻ ngay giúp tôi.", questions: {
+    intent: {type: "choice", instructions: "Khách hàng muốn gì?", criteria: {cancel: "khóa thẻ", limit: "đổi hạn mức", other: null}},
+    urgent: {type: "noul", instructions: "Yêu cầu này khẩn cấp."},
+  }},
+  "Order record (JSON)": {kind: "json", state: {order: 1043, paid: false, items: [{sku: "B-7", qty: 1, in_stock: true}],
+                                                 address: {city: "Hanoi", line1: "12 Hang Bai"}}, questions: {
+    ship: {type: "noul", instructions: "The order can ship today.",
+           criteria: {true: "paid, in stock and with a full address", false: "something blocks shipping"}},
+    risk: {type: "choice", instructions: "What is the main risk with this order?",
+           criteria: {none: "no risk", fraud: "payment or identity looks suspicious", stock: "items are not available",
+                      address: "address is incomplete or invalid", payment: "the order is not paid"}},
+  }},
+  "Agent turn (conversation)": {kind: "json", state: [
+    {role: "user", content: "Run the test suite and tell me how many tests fail."},
+    {role: "assistant", content: "Running `pytest -q`."},
+    {role: "tool", content: "== 3 failed, 412 passed in 41.2s =="}], questions: {
+    next: {type: "choice", instructions: "What should the assistant's next reply be?",
+           criteria: {tool: "a tool call that runs a command or reads a file", answer: "a final answer in text",
+                      question: "a clarifying question to the user"}},
+    done: {type: "noul", instructions: "The user's task is complete."},
+  }},
+};
+
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v; else if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  for (const child of children) node.append(child);
+  return node;
+}
+
+function criteriaText(q) {
+  if (q.type === "noul") return JSON.stringify(q.criteria || {}, null, 0);
+  if (Array.isArray(q.criteria)) return q.criteria.join("\n");
+  return Object.entries(q.criteria || {}).map(([k, v]) => v == null ? k : `${k}: ${v}`).join("\n");
+}
+
+function questionEditor(key, q) {
+  const box = el("div", {class: "q", "data-type": q.type});
+  const id = el("input", {value: key, title: "question id"});
+  const remove = el("button", {class: "small", text: "remove"});
+  remove.onclick = () => box.remove();
+  const help = {noul: 'optional {"true": "...", "false": "..."}', choice: "one option per line: label or label: description",
+                score: "one level per line, lowest first"}[q.type];
+  box.append(
+    el("div", {class: "row"}, el("b", {class: "small", text: q.type}), id, remove),
+    el("label", {text: "Instructions"}), el("textarea", {rows: "2", class: "instr"}),
+    el("label", {text: `Criteria (${help})`}), el("textarea", {rows: q.type === "noul" ? "1" : "4", class: "crit"}),
+  );
+  box.querySelector(".instr").value = q.instructions || "";
+  box.querySelector(".crit").value = q.type === "noul" && !q.criteria ? "" : criteriaText(q);
+  box.querySelector("input").className = "qid";
+  return box;
+}
+
+function loadPreset(name) {
+  const preset = PRESETS[name];
+  $("state-kind").value = preset.kind;
+  $("state").value = preset.kind === "json" ? JSON.stringify(preset.state, null, 1) : preset.state;
+  $("questions").replaceChildren(...Object.entries(preset.questions).map(([k, q]) => questionEditor(k, q)));
+}
+
+function unusedId(prefix) {
+  const used = new Set([...document.querySelectorAll(".qid")].map((n) => n.value));
+  let i = 1; while (used.has(`${prefix}${i}`)) i++; return `${prefix}${i}`;
+}
+
+function readQuestions() {
+  const out = {};
+  for (const box of document.querySelectorAll(".q")) {
+    const type = box.dataset.type, id = box.querySelector(".qid").value.trim();
+    const text = box.querySelector(".crit").value.trim();
+    const q = {type, instructions: box.querySelector(".instr").value.trim()};
+    if (type === "noul") { if (text) q.criteria = JSON.parse(text); }
+    else if (type === "score") q.criteria = text.split("\n").map((s) => s.trim()).filter(Boolean);
+    else {
+      q.criteria = {};
+      for (const line of text.split("\n").map((s) => s.trim()).filter(Boolean)) {
+        const at = line.indexOf(":");
+        if (at < 0) q.criteria[line] = null; else q.criteria[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+      }
+    }
+    if (!id) throw new Error("every question needs an id");
+    out[id] = q;
+  }
+  if (!Object.keys(out).length) throw new Error("add at least one question");
+  return out;
+}
+
+function readState() {
+  const text = $("state").value;
+  return $("state-kind").value === "json" ? JSON.parse(text) : text;
+}
+
+function stat(label, value) { return el("span", {}, `${label} `, el("b", {text: String(value)})); }
+
+function bar(name, p, top) {
+  const row = el("div", {class: "bar" + (top ? " top" : "")}, el("span", {class: "name", text: name}),
+                 el("div", {class: "track"}, el("div", {class: "fill"})), el("span", {class: "p", text: p.toFixed(4)}));
+  row.querySelector(".fill").style.width = `${Math.max(0, Math.min(1, p)) * 100}%`;
+  return row;
+}
+
+function renderAnswer(key, a) {
+  const box = el("div", {class: "answer"});
+  let value, dist;
+  if (a.type === "noul") { value = `P(true) ${a.noul.toFixed(4)}`; dist = {true: a.noul, false: 1 - a.noul}; }
+  else if (a.type === "score") { value = `score ${a.score.toFixed(2)}`; dist = a.probabilities; }
+  else { value = a.choice; dist = a.probabilities; }
+  box.append(el("h3", {}, el("span", {text: key}), el("span", {class: "val", text: value})));
+  const best = Math.max(...Object.values(dist));
+  for (const [name, p] of Object.entries(dist)) {
+    const label = a.type === "score" && a.legend ? `${name} ${a.legend[name]}` : name;
+    box.append(bar(label, p, p === best));
+  }
+  box.append(el("div", {class: "note", text: `confidence ${a.confidence.toFixed(4)}`}));
+  if (a.truncated) box.append(el("div", {class: "warn", text: "the state was truncated for this question"}));
+  return box;
+}
+
+async function runSystemOne(body) {
+  $("s1-body").replaceChildren(el("span", {class: "muted", text: "reading…"}));
+  $("s1-stats").replaceChildren();
+  const started = performance.now();
+  const response = await fetch("/v1/systemone", {method: "POST", headers: {"content-type": "application/json"},
+                                                 body: JSON.stringify(body)});
+  const elapsed = performance.now() - started;
+  const text = await response.text();
+  let data; try { data = JSON.parse(text); } catch { data = text; }
+  if (!response.ok) {
+    $("s1-body").replaceChildren(el("pre", {class: "error", text: `HTTP ${response.status}\n${JSON.stringify(data, null, 1)}`}));
+    return;
+  }
+  $("s1-stats").replaceChildren(stat("latency", `${elapsed.toFixed(0)} ms`), stat("input tokens", data.usage.input_tokens),
+                                stat("server-timing", response.headers.get("server-timing") || "-"));
+  const nodes = Object.entries(data.answers).map(([k, a]) => renderAnswer(k, a));
+  for (const w of data.warnings || []) nodes.unshift(el("div", {class: "warn", text: `${w.code}: ${w.state_tokens} state tokens, ${w.kept_tokens} kept (${w.kept})`}));
+  $("s1-body").replaceChildren(...nodes);
+}
+
+function chatPrompt(state, questions) {
+  const lines = ["Read the state, then answer each question. For each question give the id, your answer and one short reason.", "",
+                 "State:", typeof state === "string" ? state : JSON.stringify(state, null, 1), "", "Questions:"];
+  for (const [id, q] of Object.entries(questions)) {
+    let options;
+    if (q.type === "noul") options = "true or false";
+    else if (q.type === "score") options = `a level from 0 (${q.criteria[0]}) to ${q.criteria.length - 1} (${q.criteria[q.criteria.length - 1]})`;
+    else options = Object.entries(q.criteria).map(([k, v]) => v == null ? k : `${k} (${v})`).join(", ");
+    lines.push(`- ${id} [${q.type}]: ${q.instructions} Options: ${options}.`);
+  }
+  return lines.join("\n");
+}
+
+async function runChat(state, questions) {
+  const out = el("pre", {text: ""});
+  $("chat-body").replaceChildren(out);
+  $("chat-stats").replaceChildren();
+  const started = performance.now();
+  let first = null, tokens = null;
+  const response = await fetch("/v1/chat/completions", {method: "POST", headers: {"content-type": "application/json"},
+    body: JSON.stringify({model: CHAT_MODEL, stream: true, stream_options: {include_usage: true}, max_tokens: 1024,
+                          messages: [{role: "user", content: chatPrompt(state, questions)}]})});
+  if (!response.ok) { out.className = "error"; out.textContent = `HTTP ${response.status}\n${await response.text()}`; return; }
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    let cut;
+    while ((cut = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, cut).trim(); buffer = buffer.slice(cut + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") continue;
+      const chunk = JSON.parse(data);
+      if (chunk.usage) tokens = chunk.usage.completion_tokens;
+      const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+      if (delta && delta.content) { if (first === null) first = performance.now() - started; out.textContent += delta.content; }
+    }
+  }
+  const total = performance.now() - started;
+  $("chat-stats").replaceChildren(stat("first token", first === null ? "-" : `${first.toFixed(0)} ms`),
+                                  stat("total", `${total.toFixed(0)} ms`), stat("output tokens", tokens ?? "-"));
+}
+
+async function run() {
+  const button = $("run");
+  button.disabled = true;
+  try {
+    const state = readState(), questions = readQuestions();
+    const jobs = [runSystemOne({model: $("model").value, state, questions})];
+    if ($("compare").checked) jobs.push(runChat(state, questions));
+    else $("chat-body").replaceChildren(el("span", {class: "muted", text: "Chat comparison is off."}));
+    await Promise.allSettled(jobs);
+  } catch (error) {
+    $("s1-body").replaceChildren(el("pre", {class: "error", text: String(error.message || error)}));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function init() {
+  for (const name of Object.keys(PRESETS)) $("preset").append(el("option", {value: name, text: name}));
+  $("preset").onchange = () => loadPreset($("preset").value);
+  for (const [type, sample] of [["noul", {type: "noul", instructions: ""}],
+                                ["choice", {type: "choice", instructions: "", criteria: {a: null, b: null}}],
+                                ["score", {type: "score", instructions: "", criteria: ["low", "medium", "high"]}]]) {
+    $(`add-${type}`).onclick = () => $("questions").append(questionEditor(unusedId(type === "noul" ? "yes_no_" : `${type}_`), sample));
+  }
+  $("run").onclick = run;
+  loadPreset(Object.keys(PRESETS)[0]);
+  try {
+    const listing = await (await fetch("/v1/models")).json();
+    // Jev's list also names the chat model, which /v1/systemone does not serve.
+    const chat = new Set((listing.data || []).map((m) => m.id));
+    const names = (listing.models || []).map((m) => m.name).filter((n) => !chat.has(n));
+    for (const name of names.length ? names : ["quyet-1.0-large-systemone"]) $("model").append(el("option", {value: name, text: name}));
+  } catch {
+    $("model").append(el("option", {value: "quyet-1.0-large-systemone", text: "quyet-1.0-large-systemone"}));
+  }
+}
+init();
+</script>
+</body>
+</html>
