@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for Quyet-1.0-Large on one GPU: vLLM chat + System One adapter."""
+"""One-command lifecycle for Quyet-1.0-Large System One on one GPU (vLLM + adapter + Kairyu)."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,14 +41,13 @@ def _check_spec() -> None:
         # max_concurrency, so callers get Kairyu's 429 first.
         or int(SYSTEMONE["max_concurrency"])
         > int(adapter["QUYET_MAX_INFLIGHT"]) + int(adapter["QUYET_MAX_QUEUE"])
-        # Chat and the adapter's reads together fit vLLM's running sequences.
-        or int(SPEC["pool"]["max_concurrency"]) + int(adapter["QUYET_READ_WORKERS"])
-        > int(SPEC["vllm"]["settings"]["VLLM_MAX_NUM_SEQS"])
+        # Every read the adapter sends at once runs in vLLM at once.
+        or int(adapter["QUYET_READ_WORKERS"]) > int(SPEC["vllm"]["settings"]["VLLM_MAX_NUM_SEQS"])
     ):
         raise SystemExit(
             "example.json is inconsistent (one GPU and replica; context = max_model_len; "
-            "Kairyu's System One forwarding within the adapter's in-flight + queue; chat "
-            "plus adapter reads within vLLM's max_num_seqs)"
+            "Kairyu's System One forwarding within the adapter's in-flight + queue; "
+            "adapter reads within vLLM's max_num_seqs)"
         )
 
 
@@ -93,7 +93,6 @@ def storage_paths() -> dict[str, Path]:
     environment = environment_storage()
     paths = {
         "models": environment / "models",
-        "webui": environment / "webui-data",
         "placement_log": environment / "placement-log",
         "cache": environment / "vllm-cache",
     }
@@ -103,10 +102,6 @@ def storage_paths() -> dict[str, Path]:
         except OSError as error:
             raise SystemExit(f"cannot prepare NVMe storage {path}: {error}") from error
     return paths
-
-
-def systemone_image() -> str:
-    return os.environ.get("QUYET_SYSTEMONE_IMAGE", SYSTEMONE["image"])
 
 
 def compose_env() -> dict[str, str]:
@@ -124,18 +119,15 @@ def compose_env() -> dict[str, str]:
             "COMPOSE_PROJECT_NAME": PROJECT,
             "MODEL_STORAGE_PATH": str(paths["models"]),
             "VLLM_CACHE_PATH": str(paths["cache"]),
-            "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "VLLM_IMAGE": SPEC["vllm"]["image"],
             "VLLM_HOST_PORT": str(SPEC["vllm"]["host_port"]),
-            "QUYET_SYSTEMONE_IMAGE": systemone_image(),
+            "QUYET_SYSTEMONE_IMAGE": SYSTEMONE["image"],
             "SYSTEMONE_HOST_PORT": str(SYSTEMONE["host_port"]),
-            "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "PLAYGROUND_IMAGE": os.environ.get("PLAYGROUND_IMAGE", SPEC["playground"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
-            "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
             "PLAYGROUND_PORT": os.environ.get("PLAYGROUND_PORT", str(SPEC["playground"]["port"])),
-            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
+            "PLAYGROUND_BIND_ADDRESS": os.environ.get("PLAYGROUND_BIND_ADDRESS", "0.0.0.0"),
             "GPU_ID": os.environ.get("GPU_ID", "0"),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the selected GPU's NUMA-local CPUs.
@@ -260,50 +252,65 @@ def _preflight(env: dict[str, str]) -> None:
     )
 
 
-def image_id(image: str) -> str | None:
+def image_field(image: str, template: str) -> str | None:
     inspected = _run(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", image], capture=True, check=False
+        ["docker", "image", "inspect", "--format", template, image], capture=True, check=False
     )
     return inspected.stdout.strip() if inspected.returncode == 0 else None
 
 
+def vllm_image_matches(image: str) -> bool:
+    """The image is the pinned registry digest. An image ID is not compared: the classic
+    store reports the config digest, the containerd store the manifest-list digest."""
+
+    digests = json.loads(image_field(image, "{{json .RepoDigests}}") or "null") or []
+    return SPEC["vllm"]["repo_digest"] in digests
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def adapter_labels() -> dict[str, str]:
+    """What the adapter image is built from, recorded as labels on the image itself."""
+
+    return {
+        "org.kairyu.quyet.vllm": SPEC["vllm"]["repo_digest"],
+        "org.kairyu.quyet.version": SYSTEMONE["quyet_version"],
+        "org.kairyu.quyet.requirements-sha256": _sha256(HERE / "quyet-requirements.txt"),
+        "org.kairyu.quyet.dockerfile-sha256": _sha256(HERE / SYSTEMONE["dockerfile"]),
+        "org.kairyu.quyet.adapter-sha256": _sha256(HERE / "quyet_systemone.py"),
+    }
+
+
+def adapter_image_matches(image: str) -> bool:
+    labels = json.loads(image_field(image, "{{json .Config.Labels}}") or "null") or {}
+    return all(labels.get(key) == value for key, value in adapter_labels().items())
+
+
 def ensure_images() -> None:
-    """Pull the pinned vLLM image, build the System One adapter on it, attest both by ID."""
+    """Pull the pinned vLLM image; build the adapter on it whenever its sources changed."""
 
     vllm = SPEC["vllm"]
-    if image_id(vllm["image"]) is None:
+    if image_field(vllm["image"], "{{.Id}}") is None:
         _run(["docker", "pull", vllm["image"]])
-    actual = image_id(vllm["image"])
-    if actual != vllm["image_id"]:
-        raise SystemExit(
-            f"vLLM image {vllm['image']} has ID {actual}; example.json pins {vllm['image_id']}"
-        )
-    image = systemone_image()
-    actual = image_id(image)
-    if actual is None:
-        if image != SYSTEMONE["image"]:
-            raise SystemExit(f"QUYET_SYSTEMONE_IMAGE does not exist locally: {image}")
-        print("System One adapter image is absent; building it", flush=True)
-        _run(
-            ["docker", "build", "--file", str(HERE / SYSTEMONE["dockerfile"]),
-             "--build-arg", f"VLLM_IMAGE={vllm['image']}",
-             "--build-arg", f"QUYET_VERSION={SYSTEMONE['quyet_version']}",
-             "--tag", image, str(HERE)]
-        )  # fmt: skip
-        actual = image_id(image)
-    if os.environ.get("QUYET_ALLOW_UNPINNED_IMAGE") == "1":
-        print(f"WARNING: unpinned System One image {image} ({actual}); not evidence", flush=True)
+    if not vllm_image_matches(vllm["image"]):
+        raise SystemExit(f"local {vllm['image']} is not {vllm['repo_digest']}")
+    image = SYSTEMONE["image"]
+    if adapter_image_matches(image):
         return
-    if SYSTEMONE["image_id"] is None:
-        raise SystemExit(
-            f"System One image {image} ({actual}) is not pinned yet: record this ID as "
-            "example.json systemone.image_id, or set QUYET_ALLOW_UNPINNED_IMAGE=1 for an "
-            "unpinned (non-evidence) run"
-        )
-    if actual != SYSTEMONE["image_id"]:
-        raise SystemExit(
-            f"System One image {image} has ID {actual}; example.json pins {SYSTEMONE['image_id']}"
-        )
+    print("building the System One adapter image from the current sources", flush=True)
+    labels = [
+        arg for key, value in adapter_labels().items() for arg in ("--label", f"{key}={value}")
+    ]
+    _run(
+        ["docker", "build", "--file", str(HERE / SYSTEMONE["dockerfile"]),
+         "--build-arg", f"VLLM_IMAGE={vllm['image']}",
+         "--build-arg", f"QUYET_VERSION={SYSTEMONE['quyet_version']}",
+         *labels, "--tag", image, str(HERE)]
+    )  # fmt: skip
+    if not adapter_image_matches(image):
+        raise SystemExit(f"the built {image} does not carry the expected source labels")
 
 
 # Runs inside the adapter image (huggingface_hub is vLLM's). Downloads the pinned
@@ -380,7 +387,7 @@ def ensure_model(env: dict[str, str]) -> None:
     if os.environ.get("VERIFY_MODEL") == "1":
         command.extend(["--env", "VERIFY_MODEL=1"])
     command.extend(
-        [env["QUYET_SYSTEMONE_IMAGE"], "-c", _MODEL_PROGRAM, model["repo"], model["revision"],
+        [SYSTEMONE["image"], "-c", _MODEL_PROGRAM, model["repo"], model["revision"],
          model["slug"], str(model["tree_sha256"])]
     )  # fmt: skip
     _run(command)
@@ -423,48 +430,13 @@ def validate_ready(api_url: str) -> None:
     chat_models = {row["id"] for row in listing.get("data", [])}
     jev_models = {row["name"] for row in listing.get("models", [])}
     systemone_names = {SYSTEMONE["model"], *SYSTEMONE["aliases"]}
-    if (
-        ready.get("status") != "ready"
-        or chat_models != {SERVED}
-        or not systemone_names <= jev_models
-    ):
+    if ready.get("status") != "ready" or chat_models or not systemone_names <= jev_models:
         raise SystemExit(
-            f"Kairyu must serve exactly chat model {SERVED!r} and System One "
-            f"{sorted(systemone_names)}; "
+            f"Kairyu must publish System One {sorted(systemone_names)} and no chat model; "
             f"got {sorted(chat_models)} / {sorted(jev_models)}"
         )
     if healthy != 1:
         raise SystemExit(f"Kairyu pool {SERVED!r} must report 1 healthy replica, got {healthy!r}")
-
-
-def _bare(content: str) -> str:
-    return content.strip().strip("*`").strip().rstrip(".")
-
-
-def chat_answer_error(body: dict, *, expected: str | None = None) -> str | None:
-    """Why a chat response is not a completed answer, or None."""
-
-    try:
-        choice = body["choices"][0]
-        message = choice["message"]
-    except (KeyError, IndexError, TypeError):
-        return f"malformed response: {str(body)[:200]}"
-    if choice.get("finish_reason") != "stop":
-        return f"finish_reason is {choice.get('finish_reason')!r}"
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return "empty answer content"
-    if expected is not None and _bare(content) != expected:
-        return f"answer is {content.strip()[:80]!r}, expected {expected!r}"
-    return None
-
-
-ARITHMETIC = "What is 17 * 19? Reply with only the integer."
-
-
-def chat_request() -> dict:
-    messages = [{"role": "user", "content": ARITHMETIC}]
-    return {"model": SERVED, "max_tokens": 256, "messages": messages}
 
 
 SYSTEMONE_STATE = "Everything is down and we have a demo with our biggest client at noon."
@@ -514,13 +486,9 @@ def systemone_answer_error(body: dict) -> str | None:
 
 
 def validate_serving(api_url: str) -> None:
-    """Readiness: pool state, a plain chat answer, and System One under every name."""
+    """Readiness: Kairyu ready on a healthy model server, System One under every name."""
 
     validate_ready(api_url)
-    body = post_json(f"{api_url}/v1/chat/completions", chat_request(), timeout_s=600)
-    error = chat_answer_error(body, expected="323")
-    if error:
-        raise SystemExit(f"chat probe: {error}")
     for name in (SYSTEMONE["model"], *SYSTEMONE["aliases"]):
         body = post_json(f"{api_url}/v1/systemone", systemone_request(model=name), timeout_s=120)
         error = systemone_answer_error(body)
@@ -551,9 +519,8 @@ def public_ui_host() -> str:
 
 def up() -> None:
     env = compose_env()
-    bind = env["CHAT_UI_BIND_ADDRESS"]
+    bind = env["PLAYGROUND_BIND_ADDRESS"]
     ui_host = public_ui_host() if bind == "0.0.0.0" else bind
-    env.setdefault("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     ensure_images()
     ensure_model(env)
@@ -561,13 +528,11 @@ def up() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_serving(api_url)
     print("\nEnvironment is ready.")
-    print(f"OpenAI API: {api_url}/v1  (model {SERVED})")
     print(
         f"System One: {api_url}/v1/systemone  (model {SYSTEMONE['model']}, "
-        f"aliases {', '.join(SYSTEMONE['aliases'])})"
+        f"aliases {', '.join(SYSTEMONE['aliases'])}; TypeSafe SDK base_url {api_url})"
     )
-    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
-    print(f"Playground: http://{ui_host}:{env['PLAYGROUND_PORT']} (System One, no authentication)")
+    print(f"Playground: http://{ui_host}:{env['PLAYGROUND_PORT']} (no authentication)")
 
 
 def main() -> None:

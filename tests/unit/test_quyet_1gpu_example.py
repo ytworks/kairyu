@@ -1,4 +1,4 @@
-"""Contracts of the one-GPU Quyet-1.0-Large example (vLLM chat + System One adapter)."""
+"""Contracts of the one-GPU Quyet-1.0-Large System One example."""
 
 from __future__ import annotations
 
@@ -25,11 +25,25 @@ CONFIG = {
 QUESTIONS = {"q": {"type": "noul", "instructions": "The message is urgent."}}
 
 
+EXAMPLE_MODULES = ("control", "verification", "quyet_systemone")
+
+
 @pytest.fixture
-def adapter(monkeypatch):
+def example(monkeypatch):
+    """Import the example's top-level modules, then restore the module table: its
+    `verification` must not shadow the repository's `verification` package afterwards."""
+
+    saved = {name: sys.modules.pop(name) for name in EXAMPLE_MODULES if name in sys.modules}
     monkeypatch.syspath_prepend(str(EXAMPLE))
-    sys.modules.pop("quyet_systemone", None)
-    return importlib.import_module("quyet_systemone")
+    yield importlib.import_module
+    for name in EXAMPLE_MODULES:
+        sys.modules.pop(name, None)
+    sys.modules.update(saved)
+
+
+@pytest.fixture
+def adapter(example):
+    return example("quyet_systemone")
 
 
 class FakeModel:
@@ -165,8 +179,8 @@ def test_full_adapter_queue_answers_529(adapter, monkeypatch):
 
 
 def test_served_config_matches_example_json():
-    """kairyu.yaml must forward no more System One reads than the adapter accepts (else callers
-    see its 529) and describe the vLLM, checkpoint and chat admission example.json pins."""
+    """kairyu.yaml publishes System One only, forwards no more reads than the adapter accepts
+    (else callers see its 529), and describes the vLLM and checkpoint example.json pins."""
 
     spec = json.loads((EXAMPLE / "example.json").read_text())
     raw = yaml.safe_load((EXAMPLE / "kairyu.yaml").read_text())
@@ -177,34 +191,56 @@ def test_served_config_matches_example_json():
     assert systemone.max_questions <= adapter["QUYET_MAX_QUESTIONS"]
     assert systemone.upstream_model == spec["systemone"]["upstream_model"]
     assert set(systemone.aliases) == set(spec["systemone"]["aliases"])
-    assert raw["server"]["max_concurrency"] == spec["pool"]["max_concurrency"]
+    assert deployment.public_models == {spec["systemone"]["model"]}
     (replica,) = raw["pools"][spec["model"]["served_name"]]["replicas"]
     options = replica["options"]
     assert options["model"] == spec["model"]["served_name"]
     assert options["model_revision"] == spec["model"]["revision"]
     assert options["max_model_len"] == spec["vllm"]["settings"]["VLLM_MAX_MODEL_LEN"]
-    assert options["container_image_digest"] == spec["vllm"]["image_id"]
+    assert spec["vllm"]["repo_digest"].endswith("@" + options["container_image_digest"])
 
 
-def test_reference_comparison_catches_a_flipped_decision(monkeypatch):
-    """The systemone gate fails a served answer whose top option differs from the official one."""
+def test_reference_comparison_fails_only_flipped_confident_decisions(example):
+    """The systemone gate fails a served answer whose top option differs from a confident
+    official one, and tolerates a flip of a near-even official answer."""
 
-    monkeypatch.syspath_prepend(str(EXAMPLE))
-    for name in ("control", "verification"):
-        sys.modules.pop(name, None)
-    verification = importlib.import_module("verification")
-    official = {
-        "usage": {"input_tokens": 90},
-        "warnings": [],
-        "answers": {
-            "team": {"type": "choice", "choice": "a", "probabilities": {"a": 0.8, "b": 0.2}}
-        },
-    }
-    same = json.loads(json.dumps(official))
-    same["answers"]["team"]["probabilities"] = {"a": 0.79, "b": 0.21}
-    flipped = json.loads(json.dumps(official))
-    flipped["answers"]["team"]["probabilities"] = {"a": 0.3, "b": 0.7}
-    diffs, problems = verification.compare_answers(official, same, 0.05)
+    verification = example("verification")
+
+    def answer(a: float) -> dict:
+        return {
+            "usage": {"input_tokens": 90},
+            "warnings": [],
+            "answers": {
+                "team": {"type": "choice", "choice": "a", "probabilities": {"a": a, "b": 1 - a}}
+            },
+        }
+
+    diffs, problems = verification.compare_answers(answer(0.8), answer(0.79), 0.5)
     assert problems == [] and max(diffs) == pytest.approx(0.01)
-    _, problems = verification.compare_answers(official, flipped, 0.05)
+    _, problems = verification.compare_answers(answer(0.8), answer(0.3), 0.5)
     assert problems == ["team: top 'b' vs 'a'"]
+    _, problems = verification.compare_answers(answer(0.56), answer(0.47), 0.5)
+    assert problems == []
+
+
+def test_reference_is_reused_only_for_the_same_requests(example, monkeypatch, tmp_path):
+    """A stored reference answers only the requests it was made from: an edited request
+    body with an unchanged id must force a new reference run, not pass on old answers."""
+
+    verification = example("verification")
+    old = [{"id": "authored-0", "state": "Old state", "questions": QUESTIONS}]
+    new = [{"id": "authored-0", "state": "New state", "questions": QUESTIONS}]
+    stored = tmp_path / "20261010-old"
+    stored.mkdir()
+    (stored / "reference.json").write_text(
+        json.dumps({"passed": True, "fingerprint": verification.reference_fingerprint(old)})
+    )
+    (stored / verification.REFERENCE_ANSWERS).write_text(json.dumps({"answers": {}}) + "\n")
+    monkeypatch.setattr(verification, "RESULTS_ROOT", tmp_path)
+    monkeypatch.setattr(verification, "jevbench_checkout", lambda: tmp_path)
+    monkeypatch.setattr(verification, "_reference_requests", lambda _checkout: new)
+    with pytest.raises(RuntimeError, match="no passed reference"):
+        verification._reference(tmp_path / "20261010-new")
+    monkeypatch.setattr(verification, "_reference_requests", lambda _checkout: old)
+    requests, answers, source = verification._reference(tmp_path / "20261010-new")
+    assert requests == old and source == stored and list(answers) == ["authored-0"]

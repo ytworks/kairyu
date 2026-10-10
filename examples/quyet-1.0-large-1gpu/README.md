@@ -1,17 +1,15 @@
-# Quyet-1.0-Large on one RTX PRO 6000 Blackwell (System One + chat)
+# Quyet-1.0-Large System One on one RTX PRO 6000 Blackwell
 
 [Quyet-1.0-Large](https://huggingface.co/chinhnc/Quyet-1.0-Large) is a calibrated
 decision model in the Jev family. Like TypeSafe's Jev, it is a System One model: code
 sends a state and typed questions (choice, score, yes/no) and gets back typed answers
-with calibrated probabilities. It does not chat, call tools or write text for the
-decision; software branches, routes and gates on its answers. This example serves it
-from one GPU in the shape of the other Jev-family examples: one loaded model answers
-System One (`/v1/systemone`, the Jev wire format) and plain chat, behind Kairyu, with
-a Jev-style playground and Open WebUI.
+with calibrated probabilities, then branches, routes and gates on them. It does not
+chat, call tools or write text. This example serves it the way a Jev model is used:
+`POST /v1/systemone` (the Jev wire format) through Kairyu, for applications and
+TypeSafe's SDK, with a Jev-style playground.
 
 ```text
-Playground (:3015) -> Kairyu /v1/systemone -> quyet-systemone (CPU) -> vLLM v0.31.0: Quyet-1.0-Large bf16, one GPU
-Open WebUI (:3014) -> Kairyu (:8014)  --------------------------------> the same vLLM (plain text chat)
+apps / TypeSafe SDK / playground (:3015) -> Kairyu (:8014) /v1/systemone -> quyet-systemone (CPU) -> vLLM: Quyet-1.0-Large bf16, one GPU (internal)
 ```
 
 ## Model and runtime
@@ -25,23 +23,21 @@ Capability 81.7, Intelligence 73.4, Calibration 90.0, measured with `quyet` 1.0.
 process on an H100).
 
 **How Quyet decides.** Its runtime, the `quyet` package (1.0.2), reads one forward
-pass per question. The options are lettered A..J in a fixed chat prompt, and the
-answer is the softmax of those letters' next-token logits at a calibrated
-temperature per question type (choice 1.3007, score 1.3159, noul 1.4957). Nothing
-is generated. A state is truncated at 6,000 tokens (a conversation keeps its latest
-turns, anything else its beginning) with a `state_truncated` warning. Text only, at
-most 10 options per question.
+pass per question. The options are lettered A..J in a fixed prompt, and the answer is
+the softmax of those letters' next-token logits at a calibrated temperature per
+question type (choice 1.3007, score 1.3159, noul 1.4957). Nothing is generated. A
+state is truncated at 6,000 tokens (a conversation keeps its latest turns, anything
+else its beginning) with a `state_truncated` warning. Text only, at most 10 options
+per question.
 
-**System One (L1 adapter).** The package has no server, and its transformers forward
-pass would need a second copy of the weights beside vLLM, which one GPU cannot hold.
-`quyet_systemone.py` keeps the package's own code for the prompt, truncation,
-calibration and answer shape, and replaces only the forward pass: `QuyetOnVllm`
-subclasses `quyet.llm.runtime.LLMModel`, and vLLM's `/v1/completions` returns the
-letters' logprobs (`logprob_token_ids`) for the exact prompt token IDs the package
-built. A softmax over logprobs equals one over logits, so the calibration applies
-unchanged. OpenJev serves JevK5 (the same kind of model) this way. The questions of
-one request are read in parallel; the state comes first in every prompt, so vLLM's
-prefix cache reads it once.
+**System One adapter (L1).** The package has no server. `quyet_systemone.py` keeps
+the package's own code for the prompt, truncation, calibration and answer shape, and
+replaces only the forward pass: `QuyetOnVllm` subclasses `quyet.llm.runtime.LLMModel`,
+and vLLM's `/v1/completions` returns the letters' logprobs (`logprob_token_ids`) for
+the exact prompt token IDs the package built. A softmax over logprobs equals one over
+logits, so the calibration applies unchanged. OpenJev serves JevK5 (the same kind of
+model) this way. vLLM's kernels are not transformers', so the probabilities differ
+slightly from the package's own run; the `systemone` and `jevbench` gates bound that.
 
 The adapter answers like OpenJev's Jev-compatible server:
 
@@ -56,23 +52,21 @@ Quyet's answers are its package's: `confidence` is the top probability (TypeSafe
 derives it differently from the distribution), noul answers carry one too, and a
 truncated state adds `warnings` and `truncated`. TypeSafe's SDK reads them as is.
 
-**Chat (L1 vLLM).** The stock `vllm/vllm-openai:v0.31.0` image (digest-pinned, no
-overlay) serves the checkpoint as `quyet-1.0-large`, text only: bf16, 32,768-token
-context (the plan's rule: 65,536 only if the KV cache holds 8 such sequences; it holds
-104,535 tokens), 64 sequences, 95 % of GPU memory, prefix caching, the checkpoint's
-sampling defaults (temperature 1.0, top_k 64, top_p 0.95). Chat is there for the
-playground's side-by-side answer. The decision fine-tune does not write Gemma 4 tool
-calls and its thinking mode breaks down, so tools and images are not offered.
+**Model server (L1 vLLM, internal).** The stock `vllm/vllm-openai:v0.31.0` image
+(registry digest pinned, no overlay) holds the checkpoint: bf16, an 8,192-token
+context (Quyet's prompts stop at 8,000), 64 sequences, 95 % of GPU memory, prefix
+caching, text only. vLLM batches the reads of all requests together, and the state
+opens every question's prompt, so the questions of one request read it once.
 
 ## Kairyu
 
-- **System One.** `quyet-1.0-large-systemone`, aliases `quyet-latest`, `jev-latest`
-  and `jev-preview` (TypeSafe's SDK default is `jev-latest`). Kairyu forwards 16
-  reads at a time and queues 64 for up to 30 s, then answers 429. The adapter accepts
-  32, so callers never see its 529. Reads never pass through the chat pool.
-- **Chat.** Pool `quyet-1.0-large`, one vLLM replica, legacy text chat. Kairyu admits
-  8 chats at a time, so the adapter's 32 reads in flight always fit vLLM's 64
-  sequences.
+- **System One** is the only public model: `quyet-1.0-large-systemone`, aliases
+  `quyet-latest`, `jev-latest` and `jev-preview` (TypeSafe's SDK default is
+  `jev-latest`). Kairyu forwards 16 requests at a time and queues 64 for up to 30 s,
+  then answers 429; the adapter accepts 32, so callers never see its 529.
+- **The model server** is registered as a pool so that Kairyu reports ready only while
+  it is healthy. It is not public (`public_models`): `/v1/models` lists no chat model
+  and `/v1/chat/completions` answers 404.
 
 `kairyu/` is not changed for this example.
 
@@ -104,25 +98,23 @@ print(r.choices["team"].choice, r.nouls["urgent"].noul)
 
 1. checks the selected GPU (`GPU_ID`, default 0) and refuses one that another
    workload uses; vLLM is pinned to the GPU's NUMA-local CPUs;
-2. pulls the pinned vLLM image and builds the adapter image on it, then checks both
-   image IDs against `example.json` (a rebuilt adapter needs its new ID recorded, or
-   `QUYET_ALLOW_UNPINNED_IMAGE=1` for a run that is not evidence);
+2. pulls the vLLM image and checks its registry digest; builds the adapter image on it
+   whenever its sources change (the image carries the hashes of its sources as labels,
+   which is what is checked, not an image ID that differs between Docker's stores);
 3. downloads the checkpoint below
    `/mnt/nvme/kairyu/model-volumes/quyet-1.0-large-1gpu/models` and attests it;
-4. starts the stack and probes a plain chat answer and System One under every name.
+4. starts the stack and probes System One under every name.
 
 It then prints:
 
 ```text
-OpenAI API: http://127.0.0.1:8014/v1  (model quyet-1.0-large)
 System One: http://127.0.0.1:8014/v1/systemone  (model quyet-1.0-large-systemone, aliases ...)
-Chat UI:    http://<public host>:3014 (no authentication)
-Playground: http://<public host>:3015 (System One, no authentication)
+Playground: http://<public host>:3015 (no authentication)
 ```
 
-The Chat UI and the playground listen on all interfaces and are printed with the
-host's outward-facing address (`PUBLIC_HOST` to name it,
-`CHAT_UI_BIND_ADDRESS=127.0.0.1` to keep them local). The API stays host-local.
+The playground listens on all interfaces and is printed with the host's
+outward-facing address (`PUBLIC_HOST` to name it, `PLAYGROUND_BIND_ADDRESS=127.0.0.1`
+to keep it local). The API stays host-local.
 
 Storage: the checkpoint, every compile cache (vLLM, Triton, torch), logs and the
 verification scratch (JevBench, the SDK environment, raw responses) live on NVMe.
@@ -132,15 +124,14 @@ Only the Docker images sit on the root disk.
 
 `http://<public host>:3015` (`playground/index.html`, served by nginx with Kairyu's
 API on the same origin): a state (text, or JSON: an object or a conversation list)
-and yes/no, choice or score questions, with examples in English, Vietnamese, JSON
-and an agent turn. The left column shows each answer's distribution, confidence,
-input tokens, latency, `Server-Timing` and any truncation warning; the right column
-asks `quyet-1.0-large` the same questions as a chat.
+and yes/no, choice or score questions, with examples in English, Vietnamese, JSON and
+an agent turn. Each answer shows its distribution, confidence and any truncation, with
+the request's input tokens, latency and `Server-Timing`.
 
 ## Verification
 
 The gates follow how a System One model is used (TypeSafe's documentation): typed
-answers your code can branch on, calibrated probabilities, many questions per call,
+answers code can branch on, calibrated probabilities, many questions per call,
 consistent answers, the official SDK, and throughput for bulk decisions.
 
 ```sh
@@ -150,24 +141,22 @@ consistent answers, the official SDK, and throughput for bulk decisions.
 
 | Gate | What it proves |
 |---|---|
-| `reference` | With the stack down, the `quyet` package's own CLI (transformers, bf16, the GPU) answers 279 requests: the 48 of `systemone-reference.jsonl` (English, Vietnamese, Japanese, JSON and conversation states, 10-option choices, four states truncated past 6,000 tokens) and JevBench's 231 public items, asked as JevBench asks them. |
-| `attest` | Running images, every checkpoint file re-hashed, vLLM settings and version, the checkpoint's sampling defaults in vLLM's log, the context rule, the adapter's `quyet` version and calibration, Kairyu's model lists. |
-| `systemone` | Through Kairyu, all 279 requests have the official input token count and truncation, the official top option wherever the official top two differ by 0.05 or more, and probabilities within 0.005 (median) and 0.06 (max) of the official ones. Aliases answer; refusals have the documented shapes. |
+| `reference` | With the stack down, the `quyet` package's own CLI (transformers, bf16, the GPU) answers 279 requests: the 48 of `systemone-reference.jsonl` (English, Vietnamese, Japanese, JSON and conversation states, 10-option choices, four states truncated past 6,000 tokens) and JevBench's 231 public items, asked as JevBench asks them. A later gate reuses it only for the same request bodies, checkpoint and adapter sources. |
+| `attest` | vLLM's registry digest and the adapter's source labels on the running containers, every checkpoint file re-hashed, vLLM settings and version, the adapter's `quyet` version and calibration, System One public and no chat model. |
+| `systemone` | Through Kairyu, all 279 requests have the official input token count and truncation; the official top option wherever the official answer clears TypeSafe's 0.5 confidence floor; probability differences at most 0.005 at the median and 0.06 at the 99th percentile. Aliases answer; refusals have the documented shapes. |
 | `jevbench` | JevBench's own runner (pinned, `typesafe` adapter, one request at a time, as its board measures) on the 231 public items through Kairyu: every answer valid; per split, correct answers within one item of the official package's, Brier and ECE within 0.01; p50 latency at most 0.5 s. |
 | `fanout` | 1, 8 and 32 questions about one 1K-token state in a single call: all answered, and 32 questions take at most 4 times as long as one. |
 | `consistency` | The same request, ten times alone and ten times while other reads load vLLM, keeps its top answers, and its probabilities move by at most 0.01. |
 | `sdk` | TypeSafe's Python SDK (0.7.4) against Kairyu: typed `choices` / `nouls` / `scores` under `jev-latest`, `quyet-latest` and the full name; an 11-option question raises `TypeSafeBadRequestError`. |
 | `systemone-serving` | Cache-busted states of about 50, 2,000 and 6,000 tokens with 3 questions, at c1/16/32/64 (64 each): all answered; req/s and p50/p95 recorded. |
-| `systemone-isolation` | 640 concurrent reads beside 8 chats: every read is 200 or Kairyu's 429, the chats answer `323`, the chat replica stays healthy. |
+| `systemone-isolation` | 640 concurrent reads: every read is 200 or Kairyu's 429, never 529; Kairyu is ready on a healthy model server and reads answer right after. |
 
 Results go to `verification/results/examples/quyet-1.0-large-1gpu/<run>/`, the
 measured numbers to [MEASUREMENTS.md](MEASUREMENTS.md).
 
 ## Limitations
 
-- System One is text only and has no `think`, `samples`, `steps` or `sequential`.
+- Text only, with no `think`, `samples`, `steps` or `sequential`.
 - Probabilities differ slightly from the transformers run of the same package
   (bounded by the `systemone` and `jevbench` gates).
-- TypeSafe's SDK `models.list()` expects a `release_date` that Kairyu's Jev model list
-  does not carry; `system_one` itself is unaffected.
-- Chat is plain text; batch and async requests are not configured.
+- Batch and async requests are not configured.

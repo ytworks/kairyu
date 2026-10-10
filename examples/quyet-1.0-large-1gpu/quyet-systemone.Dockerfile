@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
-# This example's System One adapter: the same pinned vLLM image that serves chat,
-# plus the quyet package and quyet_systemone.py. The adapter itself runs on the
+# This example's System One adapter: the same pinned vLLM image that holds the
+# model, plus the quyet package and quyet_systemone.py. The adapter itself runs on the
 # CPU; `verify.sh reference` runs the package's own transformers reads from this
-# image on the GPU. control.py builds it and attests it by image ID.
+# image on the GPU. control.py builds it with its source hashes as labels and
+# checks those labels, not the image ID (which differs between Docker image stores).
 ARG VLLM_IMAGE
 FROM ${VLLM_IMAGE}
 ARG QUYET_VERSION

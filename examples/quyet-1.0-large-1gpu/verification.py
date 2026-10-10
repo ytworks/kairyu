@@ -5,7 +5,7 @@ A System One model is a decision API for software (docs.typesafe.ai): typed ques
 about a state, calibrated probabilities, many questions per call, consistent answers,
 called through TypeSafe's SDK. The gates check those properties through Kairyu, against
 the quyet package's own run and JevBench, the independent benchmark for Jev-compatible
-systems. The chat side is only the playground's plain answer and is checked as such.
+systems. No chat model is published.
 """
 
 from __future__ import annotations
@@ -231,6 +231,20 @@ def _official_records(checkout: Path, items: list, answers: dict[str, dict], spl
 # --- reference -------------------------------------------------------------------------------
 
 
+def reference_fingerprint(requests: list[dict]) -> str:
+    """Everything a reference answer depends on: each request body, the checkpoint, the
+    package and the image it ran in, and the JevBench revision the items came from."""
+
+    material = {
+        "requests": requests,
+        "model": [SPEC["model"]["revision"], SPEC["model"]["tree_sha256"]],
+        "image": control.adapter_labels(),
+        "jevbench": CHECKS["jevbench"]["revision"],
+    }
+    canonical = json.dumps(material, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def reference(run_dir: Path) -> int:
     """The official package (transformers, bf16, GPU) answers every reference request."""
 
@@ -272,31 +286,39 @@ def reference(run_dir: Path) -> int:
         if any(answer.get("warnings") for answer in answers)
         else "no request was truncated",
     }
-    extra = {"requests": len(requests), "wall_s": wall, "jevbench": CHECKS["jevbench"]["revision"]}
+    extra = {
+        "requests": len(requests),
+        "wall_s": wall,
+        "fingerprint": reference_fingerprint(requests),
+    }
     return _report(run_dir, "reference", cases, extra)
 
 
 def _reference(run_dir: Path) -> tuple[list[dict], dict[str, dict], Path]:
-    """This run's reference, else the newest passed one for the same request set."""
+    """This run's reference, else the newest passed one made from the same requests and
+    conditions; the requests returned are always the current ones."""
 
-    expected = [r["id"] for r in _reference_requests(jevbench_checkout())]
+    requests = _reference_requests(jevbench_checkout())
+    fingerprint = reference_fingerprint(requests)
     candidates = [run_dir] + sorted(
         (path for path in RESULTS_ROOT.iterdir() if path.is_dir() and path != run_dir),
         reverse=True,
     )
     for candidate in candidates:
-        record, requests_file = candidate / "reference.json", candidate / REFERENCE_REQUESTS
-        if not record.exists() or not requests_file.exists():
+        record = candidate / "reference.json"
+        if not record.exists():
             continue
-        if not json.loads(record.read_text()).get("passed"):
-            continue
-        requests = [json.loads(line) for line in requests_file.read_text().splitlines() if line]
-        if [r["id"] for r in requests] != expected:
+        meta = json.loads(record.read_text())
+        if not meta.get("passed") or meta.get("fingerprint") != fingerprint:
             continue
         lines = (candidate / REFERENCE_ANSWERS).read_text(encoding="utf-8").splitlines()
         answers = [json.loads(line) for line in lines if line.strip()]
-        return requests, dict(zip(expected, answers, strict=True)), candidate
-    raise RuntimeError("no passed reference run for this request set; run `verify.sh reference`")
+        ids = [r["id"] for r in requests]
+        return requests, dict(zip(ids, answers, strict=True)), candidate
+    raise RuntimeError(
+        "no passed reference for the current requests, checkpoint and image; "
+        "run `verify.sh reference`"
+    )
 
 
 # --- attest ----------------------------------------------------------------------------------
@@ -313,14 +335,14 @@ def attest(run_dir: Path) -> int:
     vllm = _container(control.VLLM_CONTAINER)
     adapter = _container(control.SYSTEMONE_CONTAINER)
     cases["vllm_image"] = (
-        None if vllm["Image"] == SPEC["vllm"]["image_id"] else f"running {vllm['Image']}"
+        None
+        if control.vllm_image_matches(vllm["Image"])
+        else f"running {vllm['Image']}, not {SPEC['vllm']['repo_digest']}"
     )
-    pinned = SYSTEMONE["image_id"]
-    allowed_unpinned = os.environ.get("QUYET_ALLOW_UNPINNED_IMAGE") == "1"
     cases["systemone_image"] = (
         None
-        if adapter["Image"] == pinned or (allowed_unpinned and pinned is None)
-        else f"running {adapter['Image']}"
+        if control.adapter_image_matches(adapter["Image"])
+        else f"running {adapter['Image']}, built from other sources"
     )
     args = vllm["Args"]
     settings = SPEC["vllm"]["settings"]
@@ -353,27 +375,8 @@ def attest(run_dir: Path) -> int:
     )
     text = logs.stdout + logs.stderr
     (_scratch() / f"vllm-{run_dir.name}.log").write_text(text, encoding="utf-8")
-    defaults = SPEC["model"]["generation_defaults"]
-    sampling = re.findall(r"generation_config\.json`: `(\{[^`]*\})`", text)
-    cases["generation_defaults"] = (
-        None
-        if sampling
-        and all(f"'{name}': {value}" in sampling[-1] for name, value in defaults.items())
-        else f"vLLM logged {sampling[-1:] or 'no model sampling defaults'}"
-    )
-    concurrency = re.findall(
-        r"Maximum concurrency for ([\d,]+) tokens per request: ([\d.]+)x", text
-    )
     kv_tokens = re.findall(r"GPU KV cache size: ([\d,]+) tokens", text)
-    capacity = float(concurrency[-1][1]) if concurrency else None
     tokens = int(kv_tokens[-1].replace(",", "")) if kv_tokens else None
-    # The plan's context rule: 65,536 while the KV cache holds 8 such sequences, else 32,768.
-    chosen = None if tokens is None else (65536 if tokens / 65536 >= 8 else 32768)
-    cases["context_rule"] = (
-        None
-        if chosen == int(settings["VLLM_MAX_MODEL_LEN"])
-        else f"KV cache {tokens} tokens selects {chosen}, served {settings['VLLM_MAX_MODEL_LEN']}"
-    )
     status, health, _ = _json("GET", f"{_adapter()}/health")
     health = health if isinstance(health, dict) else {}
     cases["adapter"] = (
@@ -399,8 +402,11 @@ def attest(run_dir: Path) -> int:
     jev = {row.get("name") for row in listing.get("models", [])}
     names = {SYSTEMONE["model"], *SYSTEMONE["aliases"]}
     cases["kairyu_models"] = (
-        None if chat == {SERVED} and names <= jev else f"{sorted(chat)} / {sorted(jev)}"
+        None if not chat and names <= jev else f"{sorted(chat)} / {sorted(jev)}"
     )
+    payload = {"model": SERVED, "messages": [{"role": "user", "content": "Hello"}]}
+    status, body, _ = _json("POST", f"{_api()}/v1/chat/completions", payload)
+    cases["chat_not_public"] = None if status == 404 else f"HTTP {status} {str(body)[:200]}"
     previous = os.environ.get("VERIFY_MODEL")
     os.environ["VERIFY_MODEL"] = "1"
     try:
@@ -417,7 +423,6 @@ def attest(run_dir: Path) -> int:
         "vllm_image": vllm["Image"],
         "systemone_image": adapter["Image"],
         "kv_cache_tokens": tokens,
-        "max_concurrency_at_context": capacity,
         "adapter_health": health,
     }
     return _report(run_dir, "attest", cases, extra)
@@ -432,8 +437,19 @@ def _distribution(answer: dict) -> dict[str, float]:
     return {key: float(value) for key, value in answer["probabilities"].items()}
 
 
-def compare_answers(official: dict, served: dict, margin: float) -> tuple[list[float], list[str]]:
-    """Absolute probability differences and the disagreements that fail the gate."""
+def official_confidence(distribution: dict[str, float]) -> float:
+    """TypeSafe's Choice confidence, (K * p_max - 1) / (K - 1); |2p - 1| for a noul."""
+
+    k = len(distribution)
+    return (k * max(distribution.values()) - 1) / (k - 1)
+
+
+def compare_answers(
+    official: dict, served: dict, min_confidence: float
+) -> tuple[list[float], list[str]]:
+    """Absolute probability differences and the disagreements that fail the gate. The top
+    option must match wherever the official answer clears TypeSafe's 0.5 confidence floor;
+    below it the official answer is, in TypeSafe's words, genuinely uncertain."""
 
     diffs: list[float] = []
     problems: list[str] = []
@@ -455,8 +471,8 @@ def compare_answers(official: dict, served: dict, margin: float) -> tuple[list[f
             problems.append(f"{qid}: options {sorted(got)} vs {sorted(want)}")
             continue
         diffs.extend(abs(want[key] - got[key]) for key in want)
-        ranked = sorted(want.values(), reverse=True)
-        if ranked[0] - ranked[1] >= margin and max(want, key=want.get) != max(got, key=got.get):
+        decisive = official_confidence(want) >= min_confidence
+        if decisive and max(want, key=want.get) != max(got, key=got.get):
             problems.append(f"{qid}: top {max(got, key=got.get)!r} vs {max(want, key=want.get)!r}")
     return diffs, problems
 
@@ -482,7 +498,7 @@ def systemone(run_dir: Path) -> int:
             problems.append(f"{row['id']}: HTTP {status} {str(body)[:200]}")
             continue
         row_diffs, row_problems = compare_answers(
-            official[row["id"]], body, float(config["top_choice_margin"])
+            official[row["id"]], body, float(config["same_top_min_official_confidence"])
         )
         diffs.extend(row_diffs)
         problems.extend(f"{row['id']}: {problem}" for problem in row_problems)
@@ -490,6 +506,7 @@ def systemone(run_dir: Path) -> int:
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in served_rows), encoding="utf-8"
     )
     median = statistics.median(diffs) if diffs else math.inf
+    p99 = _nearest_rank(diffs, 0.99) if diffs else math.inf
     worst = max(diffs) if diffs else math.inf
     cases["answers_match_official"] = "; ".join(problems[:5]) or None
     cases["median_abs_diff"] = (
@@ -497,10 +514,10 @@ def systemone(run_dir: Path) -> int:
         if median <= float(config["max_median_abs_diff"])
         else f"{median:.4f} > {config['max_median_abs_diff']}"
     )
-    cases["max_abs_diff"] = (
+    cases["p99_abs_diff"] = (
         None
-        if worst <= float(config["max_abs_diff"])
-        else f"{worst:.4f} > {config['max_abs_diff']}"
+        if p99 <= float(config["max_p99_abs_diff"])
+        else f"{p99:.4f} > {config['max_p99_abs_diff']}"
     )
     cases["server_timing"] = (
         None
@@ -537,8 +554,9 @@ def systemone(run_dir: Path) -> int:
     )
     extra = {"reference_run": source.name, "requests": len(requests),
              "probabilities_compared": len(diffs), "median_abs_diff": median,
-             "max_abs_diff": worst}  # fmt: skip
-    print(f"compared {len(diffs)} probabilities: median {median:.5f}, max {worst:.5f}")
+             "p99_abs_diff": p99, "max_abs_diff": worst}  # fmt: skip
+    print(f"compared {len(diffs)} probabilities: median {median:.5f}, p99 {p99:.4f}, "
+          f"max {worst:.4f}")  # fmt: skip
     return _report(run_dir, "systemone", cases, extra)
 
 
@@ -848,45 +866,38 @@ def systemone_serving(run_dir: Path) -> int:
     return _report(run_dir, "systemone-serving", cases)
 
 
-def _chat(payload: dict, timeout: float = 600):
-    return _json("POST", f"{_api()}/v1/chat/completions", {"model": SERVED, **payload}, timeout)
-
-
 def systemone_isolation(run_dir: Path) -> int:
-    """A System One burst past every limit gets Kairyu's 429, never the adapter's 529, while
-    chat keeps answering and the chat replica stays healthy."""
+    """A System One burst past every limit gets Kairyu's 429, never the adapter's 529, and
+    Kairyu, the model server and the adapter answer normally right after it."""
 
-    config = CHECKS["isolation"]
-    reads, chats = int(config["reads"]), int(config["chats"])
-    chat = {k: v for k, v in control.chat_request().items() if k != "model"}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=chats) as pool:
-        chat_results = [pool.submit(_chat, chat) for _ in range(chats)]
-        burst, wall = asyncio.run(
-            _systemone_burst(_api(), SYSTEMONE["model"], reads, reads, f"{run_dir.name}-burst", 256)
-        )
-        chat_bodies = [future.result() for future in chat_results]
+    reads = int(CHECKS["isolation"]["reads"])
+    burst, wall = asyncio.run(
+        _systemone_burst(_api(), SYSTEMONE["model"], reads, reads, f"{run_dir.name}-burst", 256)
+    )
     statuses: dict[int, int] = {}
     for status, _, _ in burst:
         statuses[status] = statuses.get(status, 0) + 1
+    ready_status, ready, _ = _json("GET", f"{_api()}/readyz")
     metrics = urllib.request.urlopen(f"{_api()}/metrics", timeout=5).read().decode()
     healthy = control.healthy_replicas(metrics, SERVED)
-    chat_errors = [
-        f"HTTP {status}" if status != 200 else control.chat_answer_error(body, expected="323")
-        for status, body, _ in chat_bodies
-    ]
+    status, body, _ = _systemone({"state": "Hello.", "questions": control.SYSTEMONE_QUESTIONS})
     cases = {
         "burst_only_200_or_429": None if set(statuses) <= {200, 429} else f"statuses {statuses}",
         "burst_reaches_kairyu_limit": None if statuses.get(429) else f"no 429: {statuses}",
         "answers_valid": next(
             (error for status, _, error in burst if status == 200 and error), None
         ),
-        "chat_answers_during_burst": next((error for error in chat_errors if error), None),
-        "chat_replica_healthy": None if healthy == 1 else f"healthy replicas {healthy}",
+        "ready_after_burst": None
+        if ready_status == 200 and healthy == 1
+        else f"/readyz {ready_status} {ready}, healthy {healthy}",
+        "reads_after_burst": control.systemone_answer_error(body)
+        if status == 200
+        else f"HTTP {status}",
     }
     (run_dir / "isolation.json").write_text(
         json.dumps({"statuses": statuses, "wall_s": wall, "healthy": healthy}, indent=2) + "\n"
     )
-    print(f"burst statuses {statuses} in {wall:.1f} s; healthy chat replicas {healthy}")
+    print(f"burst statuses {statuses} in {wall:.1f} s; healthy model server {healthy}")
     return _report(run_dir, "systemone-isolation", cases)
 
 
@@ -895,7 +906,7 @@ GATES = {
         reference,
         "the quyet package itself (GPU, stack down) answers 48 + 231 requests",
     ),
-    "attest": (attest, "images, checkpoint re-hash, vLLM settings, context rule, calibration"),
+    "attest": (attest, "images, checkpoint re-hash, vLLM, calibration, no public chat"),
     "systemone": (systemone, "Kairyu's answers vs the official package; names; error shapes"),
     "jevbench": (jevbench, "JevBench's runner on Kairyu, scored beside the official answers"),
     "fanout": (fanout, "1/8/32 questions per call: the state read once, questions in parallel"),

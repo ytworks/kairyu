@@ -40,8 +40,6 @@
   .row > .small { flex: 0 0 auto; }
   .q { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 8px; }
   .muted { color: var(--muted); }
-  .results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-width: 0; }
-  @media (max-width: 1200px) { .results { grid-template-columns: 1fr; } }
   .stats { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .stats b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
   .answer { border-top: 1px solid var(--line); padding: 8px 0; }
@@ -64,9 +62,9 @@
 <body>
 <header>
   <h1>Quyet System One Playground</h1>
-  <span class="sub">Calibrated decisions from Quyet-1.0-Large (the quyet package's prompt and temperatures, read on
-  vLLM), next to the same model's chat answer. Served by Kairyu: <code>POST /v1/systemone</code> and
-  <code>/v1/chat/completions</code>.</span>
+  <span class="sub">Calibrated decisions from Quyet-1.0-Large: a state and typed questions in, one probability
+  distribution per question out (the quyet package's prompt and temperatures, read on vLLM). Served by Kairyu:
+  <code>POST /v1/systemone</code>.</span>
 </header>
 <main>
   <section>
@@ -90,25 +88,16 @@
     </div>
     <div id="questions"></div>
     <div class="note" style="margin-top:6px">At most 10 options per question. Text only.</div>
-    <label class="check"><input type="checkbox" id="compare" checked> Also ask the chat model</label>
     <div class="row" style="margin-top:12px"><button class="primary" id="run">Run</button></div>
   </section>
-  <div class="results">
-    <section>
-      <h2>System One</h2>
-      <div class="stats" id="s1-stats"></div>
-      <div id="s1-body" class="muted">Run a request to see each answer's distribution.</div>
-    </section>
-    <section>
-      <h2>Chat model</h2>
-      <div class="stats" id="chat-stats"></div>
-      <div id="chat-body" class="muted">The same state and questions, asked as a chat prompt.</div>
-    </section>
-  </div>
+  <section>
+    <h2>Answers</h2>
+    <div class="stats" id="s1-stats"></div>
+    <div id="s1-body" class="muted">Run a request to see each answer's distribution.</div>
+  </section>
 </main>
 <script>
 "use strict";
-const CHAT_MODEL = "quyet-1.0-large";
 const TRIAGE = {
   urgent: {type: "noul", instructions: "Does the customer need a reply within the hour?"},
   team: {type: "choice", instructions: "Which team should handle it?",
@@ -260,61 +249,11 @@ async function runSystemOne(body) {
   $("s1-body").replaceChildren(...nodes);
 }
 
-function chatPrompt(state, questions) {
-  const lines = ["Read the state, then answer each question. For each question give the id, your answer and one short reason.", "",
-                 "State:", typeof state === "string" ? state : JSON.stringify(state, null, 1), "", "Questions:"];
-  for (const [id, q] of Object.entries(questions)) {
-    let options;
-    if (q.type === "noul") options = "true or false";
-    else if (q.type === "score") options = `a level from 0 (${q.criteria[0]}) to ${q.criteria.length - 1} (${q.criteria[q.criteria.length - 1]})`;
-    else options = Object.entries(q.criteria).map(([k, v]) => v == null ? k : `${k} (${v})`).join(", ");
-    lines.push(`- ${id} [${q.type}]: ${q.instructions} Options: ${options}.`);
-  }
-  return lines.join("\n");
-}
-
-async function runChat(state, questions) {
-  const out = el("pre", {text: ""});
-  $("chat-body").replaceChildren(out);
-  $("chat-stats").replaceChildren();
-  const started = performance.now();
-  let first = null, tokens = null;
-  const response = await fetch("/v1/chat/completions", {method: "POST", headers: {"content-type": "application/json"},
-    body: JSON.stringify({model: CHAT_MODEL, stream: true, stream_options: {include_usage: true}, max_tokens: 1024,
-                          messages: [{role: "user", content: chatPrompt(state, questions)}]})});
-  if (!response.ok) { out.className = "error"; out.textContent = `HTTP ${response.status}\n${await response.text()}`; return; }
-  const reader = response.body.getReader(), decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const {value, done} = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, {stream: true});
-    let cut;
-    while ((cut = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, cut).trim(); buffer = buffer.slice(cut + 1);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") continue;
-      const chunk = JSON.parse(data);
-      if (chunk.usage) tokens = chunk.usage.completion_tokens;
-      const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
-      if (delta && delta.content) { if (first === null) first = performance.now() - started; out.textContent += delta.content; }
-    }
-  }
-  const total = performance.now() - started;
-  $("chat-stats").replaceChildren(stat("first token", first === null ? "-" : `${first.toFixed(0)} ms`),
-                                  stat("total", `${total.toFixed(0)} ms`), stat("output tokens", tokens ?? "-"));
-}
-
 async function run() {
   const button = $("run");
   button.disabled = true;
   try {
-    const state = readState(), questions = readQuestions();
-    const jobs = [runSystemOne({model: $("model").value, state, questions})];
-    if ($("compare").checked) jobs.push(runChat(state, questions));
-    else $("chat-body").replaceChildren(el("span", {class: "muted", text: "Chat comparison is off."}));
-    await Promise.allSettled(jobs);
+    await runSystemOne({model: $("model").value, state: readState(), questions: readQuestions()});
   } catch (error) {
     $("s1-body").replaceChildren(el("pre", {class: "error", text: String(error.message || error)}));
   } finally {
@@ -334,9 +273,7 @@ async function init() {
   loadPreset(Object.keys(PRESETS)[0]);
   try {
     const listing = await (await fetch("/v1/models")).json();
-    // Jev's list also names the chat model, which /v1/systemone does not serve.
-    const chat = new Set((listing.data || []).map((m) => m.id));
-    const names = (listing.models || []).map((m) => m.name).filter((n) => !chat.has(n));
+    const names = (listing.models || []).map((m) => m.name);
     for (const name of names.length ? names : ["quyet-1.0-large-systemone"]) $("model").append(el("option", {value: name, text: name}));
   } catch {
     $("model").append(el("option", {value: "quyet-1.0-large-systemone", text: "quyet-1.0-large-systemone"}));

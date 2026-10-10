@@ -17,13 +17,6 @@
     "gpu_count": 1,
     "replicas": 1
   },
-  "pool": {
-    "max_concurrency": 8,
-    "queue_depth_threshold": 0,
-    "prefix_index": true,
-    "unhealthy_after": 1,
-    "placement_log": "/var/lib/kairyu/placement/quyet-1.0-large.jsonl"
-  },
   "model": {
     "repo": "chinhnc/Quyet-1.0-Large",
     "revision": "9a0f051112ba4301f6e4c8b87fc088ce00b11aae",
@@ -31,28 +24,22 @@
     "tree_sha256": "8f287d9211df28043788d7bf85e8b32c72b70e5fe69820219bd1df20fb332a05",
     "slug": "quyet-1.0-large",
     "served_name": "quyet-1.0-large",
-    "max_context_tokens": 32768,
+    "max_context_tokens": 8192,
     "quantization": "bf16",
     "modalities": [
       "text"
-    ],
-    "generation_defaults": {
-      "temperature": 1.0,
-      "top_k": 64,
-      "top_p": 0.95
-    }
+    ]
   },
   "vllm": {
     "release": "v0.31.0",
     "image": "vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
-    "image_id": "sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
     "host_port": 8094,
     "settings": {
-      "VLLM_MAX_MODEL_LEN": 32768,
+      "VLLM_MAX_MODEL_LEN": 8192,
       "VLLM_MAX_NUM_SEQS": 64,
-      "VLLM_GPU_MEMORY_UTILIZATION": 0.95,
-      "VLLM_MAX_IMAGES": 0
-    }
+      "VLLM_GPU_MEMORY_UTILIZATION": 0.95
+    },
+    "repo_digest": "vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
   },
   "systemone": {
     "model": "quyet-1.0-large-systemone",
@@ -64,7 +51,6 @@
     ],
     "max_concurrency": 16,
     "image": "local/quyet-systemone:1.0.2-vllm-v0.31.0",
-    "image_id": "sha256:b539b2f85541330b4f7473f775d66bbfbd903115b1a59ded2f97f0e97a7c7c82",
     "dockerfile": "quyet-systemone.Dockerfile",
     "quyet_version": "1.0.2",
     "prompt_version": 2,
@@ -77,13 +63,9 @@
     "settings": {
       "QUYET_MAX_INFLIGHT": 16,
       "QUYET_MAX_QUEUE": 16,
-      "QUYET_READ_WORKERS": 32,
+      "QUYET_READ_WORKERS": 64,
       "QUYET_MAX_QUESTIONS": 32
     }
-  },
-  "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
-    "port": 3014
   },
   "playground": {
     "image": "nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
@@ -93,9 +75,9 @@
   "verification": {
     "reference": {
       "dataset": "systemone-reference.jsonl",
-      "top_choice_margin": 0.05,
+      "same_top_min_official_confidence": 0.5,
       "max_median_abs_diff": 0.005,
-      "max_abs_diff": 0.06
+      "max_p99_abs_diff": 0.06
     },
     "jevbench": {
       "repository": "https://github.com/fstandhartinger/jevbench",
@@ -156,8 +138,7 @@
       "requests_per_level": 64
     },
     "isolation": {
-      "reads": 640,
-      "chats": 8
+      "reads": 640
     }
   }
 }

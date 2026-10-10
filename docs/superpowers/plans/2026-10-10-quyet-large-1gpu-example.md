@@ -29,75 +29,66 @@ RTX PRO 6000 Blackwell. Kairyu (`kairyu/`) is not changed.
    231 items: same top answer on all 231, same input tokens, probability
    difference 0.0012 median and 0.055 max.
 
-## Shape
+## Shape (rebuilt 2026-10-10: System One only)
+
+Jev-family models are decision APIs for software (docs.typesafe.ai): a state and
+typed questions in, calibrated probabilities out; no chat, no tools, no text. The
+first version of this plan copied the chat surfaces of the Winnow/OpenJev examples;
+the owner rejected that, and the example now serves System One only.
 
 ```text
-Open WebUI (:3014) -> Kairyu (:8014) -> vLLM: Quyet-1.0-Large bf16, one GPU       (chat)
-Playground (:3015) -> Kairyu /v1/systemone -> quyet-systemone (CPU) -> same vLLM   (System One)
+apps / TypeSafe SDK / playground (:3015) -> Kairyu (:8014) /v1/systemone -> quyet-systemone (CPU) -> vLLM (internal)
 ```
 
-- **L1 vLLM** (stock image, no overlay): bf16, prefix caching, Gemma 4 tool and
-  reasoning parsers, up to 4 images, the checkpoint's generation defaults
-  (temperature 1.0, top_k 64, top_p 0.95). Context 65,536 unless vLLM's KV cache
-  cannot hold 8 such sequences, then 32,768 (recorded in MEASUREMENTS.md).
-- **L1 quyet-systemone** (example-owned, CPU only): `quyet` 1.0.2 with only the
-  forward pass replaced. A subclass of `quyet.llm.runtime.LLMModel` overrides
-  `__init__` (tokenizer and config, no torch model) and `_letter_logits` (vLLM
-  `/v1/completions` with the exact prompt token IDs, one token,
-  `logprob_token_ids` = the option letters). Prompt, truncation, calibration and
-  the answer shape (`warnings`, `truncated`) are the package's own code. Jev
-  wire contract as OpenJev's: 422 for a wrong shape, 400 for a question it cannot
-  ask and for `images`/`think`/`samples`>1/`steps`>1/`sequential`, 529 when its
-  queue is full, `Server-Timing`. Startup refuses a different `quyet` version or
-  multi-token letters.
-- **L3 Kairyu** (configuration only): pool `quyet-1.0-large` (one vLLM replica,
-  legacy chat, multimodal admission) and `systemone: quyet-1.0-large-systemone`
-  (aliases `quyet-latest`, `jev-latest`, `jev-preview`). Chat admission leaves
-  vLLM room for reads; Kairyu forwards fewer System One requests than the
-  adapter accepts, so callers get Kairyu's 429, never the adapter's 529.
-- **UI**: Open WebUI for chat; a Jev-style playground (System One answers left,
-  the chat model's answer to the same questions right).
-- Chat quality is not claimed: the model is trained for decisions; gates prove
-  that chat, tools and images work.
+- **L1 vLLM** (stock `v0.31.0`, registry digest pinned): bf16, 8,192-token context
+  (Quyet's 8,000-token prompts), 64 sequences, prefix caching, text only. Internal.
+- **L1 quyet-systemone** (example-owned, CPU): `quyet` 1.0.2 with only the forward pass
+  replaced by vLLM letter logprobs; Jev error shapes as OpenJev; 529 past 16 running
+  and 16 waiting requests; the image carries its source hashes as labels.
+- **L3 Kairyu** (configuration only): `public_models` = the System One model (aliases
+  `quyet-latest`, `jev-latest`, `jev-preview`); forwards 16, queues 64, answers 429.
+  vLLM is a non-public pool so that readiness follows the model server (Kairyu requires
+  one engine; `kairyu/` is not changed).
+- **UI**: the Jev-style playground only. No Open WebUI.
+- **Storage**: checkpoint, compile caches, logs and verification scratch on NVMe.
 
 ## Files (all example-owned)
 
 `examples/quyet-1.0-large-1gpu/`: `README.md`, `MEASUREMENTS.md`, `example.json`,
 `compose.yaml`, `kairyu.yaml`, `run.sh`, `verify.sh`, `control.py`,
 `verification.py`, `quyet_systemone.py`, `quyet-systemone.Dockerfile`,
-`systemone-reference.jsonl`, `playground/{index.html,nginx.conf}`.
-Tests: `tests/unit/test_quyet_1gpu_example.py`; one entry in the example list of
-`tests/unit/test_frontier_examplectl.py`. Docs: `examples/README.md`, FN-D9
-Quyet one-GPU amendment in `docs/design/frontier-native-runtime.md`,
-`PROGRESS.md`.
+`quyet-requirements.txt`, `systemone-reference.jsonl`, `playground/{index.html,nginx.conf}`.
+Tests: `tests/unit/test_quyet_1gpu_example.py`; one entry in
+`tests/unit/test_frontier_examplectl.py`. Docs: `examples/README.md`, FN-D9 Quyet
+amendment in `docs/design/frontier-native-runtime.md`, `PROGRESS.md`.
 
 ## Verification (rebuilt 2026-10-10)
 
-The first gate list checked chat features (tool calls, images, chat throughput).
-That is not how a Jev-family model is used, and the decision fine-tune does not
-write Gemma 4 tool calls. On the owner's instruction the gates were rebuilt from
-TypeSafe's documentation (docs.typesafe.ai): a System One model is a decision API
-for software, with typed answers, calibrated probabilities, many questions per call,
-consistent answers and an official SDK; JevBench is the independent benchmark for
-Jev-compatible systems (Quyet-1.0-Large is first on its open-weights board).
-Chat stays plain text for the playground; tools and images are not offered.
+From TypeSafe's documentation: typed answers, calibrated probabilities, many
+questions per call, consistent answers, the official SDK, bulk throughput; JevBench
+is the independent benchmark for Jev-compatible systems.
 
-CPU: ruff and the changed tests only (adapter refusals and overload against a fake
-vLLM, the kairyu.yaml / example.json contract, the parity comparison).
+CPU: ruff and the changed tests (adapter refusals and overload against a fake vLLM,
+the kairyu.yaml / example.json contract, the parity rule, reference reuse).
 
 GPU gates, in order; stop and report at the first failure:
 
 | Gate | Claim | Pass criteria |
 |---|---|---|
-| `reference` | official answers exist | stack down; the `quyet` CLI (transformers, GPU) answers the 48 authored requests and JevBench's 231 public items (pinned revision, hash-checked) |
-| `attest` | the pinned stack runs | images, checkpoint re-hash, vLLM settings and version, sampling defaults, context rule, adapter calibration, Kairyu model lists |
-| `systemone` | Kairyu's answers are the official package's | all 279: same input tokens and truncation; same top option where the official top-two gap is >= 0.05; probability difference median <= 0.005, max <= 0.06; aliases; error shapes |
+| `reference` | official answers exist | stack down; the `quyet` CLI (transformers, GPU) answers 48 authored + 231 JevBench public items; reused only for the same request bodies, checkpoint and adapter sources |
+| `attest` | the pinned stack runs | registry digest and source labels, checkpoint re-hash, vLLM settings and version, adapter calibration, System One public, no chat model |
+| `systemone` | Kairyu's answers are the official package's | all 279: same input tokens and truncation; same top option where the official answer's TypeSafe confidence >= 0.5; probability difference median <= 0.005, 99th percentile <= 0.06; aliases; error shapes |
 | `jevbench` | Jev-standard quality and speed | JevBench's runner (typesafe adapter, sequential) on Kairyu: 100 % valid; per split correct within 1 item of official, Brier and ECE within 0.01; p50 <= 0.5 s |
 | `fanout` | many questions per call | 1/8/32 questions on one 1K-token state all answered; 32 questions <= 4x one |
 | `consistency` | same request, same answer | 10 alone + 10 under load: top answers stable, probabilities within 0.01 |
 | `sdk` | the official client works | typesafe-sdk 0.7.4: typed answers under jev-latest / quyet-latest / full name; 11 options -> TypeSafeBadRequestError |
 | `systemone-serving` | bulk decisions | states ~50/2,000/6,000 tokens, 3 questions, c1/16/32/64 x 64: all answered; req/s, p50/p95 |
-| `systemone-isolation` | a decision burst does not break chat | 640 reads + 8 chats: reads 200 or 429 only, chats answer, replica healthy |
+| `systemone-isolation` | overload is shed cleanly | 640 reads: 200 or 429 only, never 529; ready and answering right after |
+
+Owner decision (2026-10-10), after run `20261010-jev-r1` (median difference 0.0001,
+p99 0.043, max 0.12; one flip of an official 0.56/0.44 answer): the top option must
+match where the official answer clears TypeSafe's 0.5 confidence floor, and the tail
+bound is the 99th percentile.
 
 ## Checklist
 
