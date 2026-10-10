@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "environment": "glm-5.3-flash-6gpu",
+  "hardware": {
+    "gpu_count": 6,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000,
+    "maximum_idle_used_mib": 1024
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 400
+  },
+  "allocation": {
+    "model": "glm-5.3-flash",
+    "gpu_ids": [0, 1, 2, 3, 4, 5],
+    "replicas": 1,
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 6,
+    "expert_parallel_size": 6,
+    "dp_rank_gpu_ids": [[0], [1], [2], [3], [4], [5]]
+  },
+  "pool": {
+    "queue_depth_threshold": 0,
+    "prefix_index": true,
+    "unhealthy_after": 1,
+    "placement_log": "/var/lib/kairyu/placement/glm-5.3-flash.jsonl"
+  },
+  "model": {
+    "repo": "zai-org/GLM-5.3-Flash",
+    "revision": "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+    "tree_sha256": "ffc373d5dbd6f51183153bae96726694b913761480f2c0c43057b0383f051389",
+    "slug": "glm-5.3-flash",
+    "served_name": "glm-5.3-flash",
+    "max_context_tokens": 1048576,
+    "max_output_tokens": 131072,
+    "quantization": "fp8",
+    "modalities": ["text", "image"],
+    "reasoning_efforts": ["low", "high", "max"],
+    "default_reasoning_effort": "max",
+    "sampling": {"temperature": 1.0, "top_p": 0.95}
+  },
+  "vllm": {
+    "release": "v0.31.0",
+    "version": "0.31.0",
+    "image": "vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
+    "repo_digest": "vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3",
+    "flashinfer_version": "0.7.0.post1",
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 6,
+    "expert_parallel_size": 6,
+    "kv_cache_dtype": "fp8",
+    "max_num_seqs": 16,
+    "max_num_batched_tokens": 8192,
+    "gpu_memory_utilization": 0.95,
+    "mtp_enabled": false
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "port": 3016,
+    "reasoning_effort_levels": ["default", "low", "high", "max"]
+  },
+  "api_port": 8015,
+  "verification": {
+    "serving": {
+      "prompt_tokens_approx": 8192,
+      "output_tokens": 256,
+      "concurrency": [1, 8, 16, 32, 64],
+      "requests_per_concurrency": 64
+    },
+    "completed": {
+      "rows": [[1, 8], [16, 32]],
+      "max_tokens": 65536
+    },
+    "l1": {
+      "probes_per_variant": 16,
+      "variants": ["default", "low", "high", "max"]
+    },
+    "vision": {
+      "requests": 8,
+      "max_tokens": 8192
+    }
+  }
+}

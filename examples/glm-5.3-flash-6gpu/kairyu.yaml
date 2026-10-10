@@ -1,0 +1,66 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  # Admit exactly what L1 runs at once: 6 DP engines x --max-num-seqs 16.
+  max_concurrency: 96
+  # A bounded queue wait fails a stuck request fast instead of parking it
+  # (issue #495 rationale, shared with the sibling examples).
+  admission_wait_timeout_s: 600
+  # Base64 image parts ride inside the chat body; the image policy below
+  # bounds them to 64 MiB total, so the body cap must clear that.
+  max_chat_body_bytes: 100663296
+
+# One pool, one DP6 / EP6 replica. Kairyu L2 does no orchestration here: it only
+# places each request on the replica.
+pools:
+  glm-5.3-flash:
+    replicas:
+    - backend: openai
+      health_url: http://glm:8000/health
+      options:
+        base_url: http://glm:8000/v1
+        model: glm-5.3-flash
+        api_key_env: null
+        timeout_s: 1800
+        upstream: vllm
+        # vLLM owns the prompt: it renders the checkpoint's official chat
+        # template (tools, image placeholders, "Reasoning Effort: Low|High|Max")
+        # and parses GLM tool calls and reasoning, so Kairyu forwards messages,
+        # tools and reasoning_effort (low/high/max, the template's own values).
+        # clear_thinking is the model author's chat switch; the Chat UI sets it.
+        capabilities:
+          allow_prompt_kinds: [multimodal]
+          allow_chat_template_kwargs: [clear_thinking]
+        # The processor caps each image at 8,000 tokens; these are Kairyu-side
+        # admission bounds within vLLM's 8-image limit and the 1M context.
+        image_input_policy:
+          max_images: 8
+          max_image_bytes: 8388608
+          max_total_image_bytes: 67108864
+          max_image_pixels: 16777216
+          max_total_image_pixels: 134217728
+          max_image_dimension: 8192
+          max_image_aspect_ratio: 200
+          max_processed_prompt_tokens: 1048576
+        model_revision: eb9eb208eb0d988989d07a6a12d0fdeb5f52574a
+        max_model_len: 1048576
+        quantization_format: fp8
+        cache_descriptor:
+          family: glm-5.3-flash-hybrid-kda-nope-sparse-mla
+        tensor_parallel_size: 1
+        expert_parallel_size: 6
+        attention_data_parallel_size: 6
+        mtp_enabled: false
+        container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+    unhealthy_after: 1
+    queue_depth_threshold: 0
+    prefix_index: true
+    probe_interval_s: 2.0
+    # One JSONL row per placement; verify.sh reads it to count placements.
+    placement_log_path: /var/lib/kairyu/placement/glm-5.3-flash.jsonl
+
+# vLLM renders the chat template and parses tool calls, so Kairyu uses its
+# legacy chat path, as in the sibling single-replica examples.
+legacy_chat_models:
+- glm-5.3-flash

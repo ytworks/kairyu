@@ -1,0 +1,154 @@
+name: kairyu-glm-5.3-flash-6gpu
+services:
+  # One GLM-5.3-Flash replica on GPUs 0-5: attention data parallel DP6
+  # (TP1 per rank) with EP6 over the 288 routed experts (48 per rank). The
+  # official FP8 checkpoint does not fit one TP4 replica on four 96 GB cards
+  # with a 1M-token KV pool (fit probe in MEASUREMENTS.md), so the experts are
+  # split over six cards and every rank keeps its own attention, KDA and
+  # vision weights. Stock vLLM v0.31.0 (registry digest pinned, no overlay);
+  # FP8 KV is the recipe's Blackwell setting and the only layout the SM120
+  # sparse-MLA backend accepts. Sampling (temperature 1.0, top_p 0.95) comes
+  # from the checkpoint's generation_config.json; the effort default (max)
+  # from its chat template.
+  glm:
+    image: ${GLM_VLLM_IMAGE:-vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3}
+    ipc: host
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      VLLM_NO_USAGE_STATS: '1'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: '1'
+      # Every compile cache on NVMe and no bytecode: nothing grows the
+      # container layer on the root disk.
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+    command:
+    - /models/glm-5.3-flash
+    - --served-model-name
+    - glm-5.3-flash
+    - --tensor-parallel-size
+    - '1'
+    - --data-parallel-size
+    - '6'
+    - --data-parallel-backend
+    - mp
+    - --enable-expert-parallel
+    - --kv-cache-dtype
+    - fp8
+    - --max-model-len
+    - '1048576'
+    - --max-num-seqs
+    - '16'
+    - --max-num-batched-tokens
+    - '8192'
+    - --gpu-memory-utilization
+    - '0.95'
+    - --enable-prefix-caching
+    - --reasoning-parser
+    - glm47
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - glm47
+    - --limit-mm-per-prompt
+    - '{"image":8,"video":0}'
+    - --disable-uvicorn-access-log
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 1440
+      start_period: 30s
+    restart: unless-stopped
+    cpuset: ${GLM_CPUSET}
+    volumes:
+    - type: bind
+      source: ${GLM_MODEL_STORAGE_PATH}
+      target: /models
+      read_only: true
+    - type: bind
+      source: ${GLM_CACHE_PATH}
+      target: /root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '0'
+            - '1'
+            - '2'
+            - '3'
+            - '4'
+            - '5'
+            capabilities:
+            - gpu
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: '1'
+    image: ${KAIRYU_IMAGE:-local/kairyu:glm-5.3-flash-6gpu-example}
+    command:
+    - /etc/kairyu/kairyu.yaml
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+    volumes:
+    - type: bind
+      source: ${PLACEMENT_LOG_PATH}
+      target: /var/lib/kairyu/placement
+    - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+    depends_on:
+      glm:
+        condition: service_healthy
+    ports:
+    - ${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8015}:8000
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      DEFAULT_MODELS: glm-5.3-flash
+      # The model author's sampling and its 128K output limit.
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":131072,"temperature":1.0,"top_p":0.95}'
+      ENABLE_PERSISTENT_CONFIG: 'false'
+      RESET_CONFIG_ON_START: 'true'
+      ENABLE_SIGNUP: 'false'
+      ENABLE_LOGIN_FORM: 'false'
+      WEBUI_AUTH: 'false'
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3016}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: 'false'
+      ENABLE_EVALUATION_ARENA_MODELS: 'false'
+      RAG_EMBEDDING_ENGINE: ''
+    volumes:
+    - type: bind
+      source: ${WEBUI_STORAGE_PATH}
+      target: /app/backend/data
+    depends_on:
+      kairyu:
+        condition: service_healthy
+    ports:
+    - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3016}:8080
+    restart: unless-stopped
