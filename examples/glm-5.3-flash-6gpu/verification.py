@@ -638,6 +638,19 @@ def _chat_case(payload: dict, *, timeout_s: float = 1800) -> tuple[dict | None, 
     return body["choices"][0], None
 
 
+def chat_ui_body(payload: dict, effort: str) -> dict:
+    """``payload`` as the Chat UI sends it with the effort dropdown at ``effort``."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "glm_effort_filter", HERE / "webui-reasoning-effort-filter.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    flt = module.Filter()
+    return flt.inlet(dict(payload), {"valves": flt.UserValves(reasoning_effort=effort)})
+
+
 def tool_calling(run_dir: Path) -> int:
     """OpenAI tool contract: fan-out, tool-result turn, streaming, efforts, chat switch."""
     cases: dict[str, str | None] = {}
@@ -686,14 +699,15 @@ def tool_calling(run_dir: Path) -> int:
         if failure:
             cases[f"tool_call_effort_{effort}"] = failure
             continue
+        # The effort reaches the template (l1 renders it); at low and high the
+        # model may close its thinking at once on a call this simple, so the
+        # case asks for the call, not for reasoning text.
         cases[f"tool_call_effort_{effort}"] = tool_call_error(
             choice["message"], choice["finish_reason"]
-        ) or (None if choice["message"].get("reasoning_content") else "no reasoning")
-    # The Chat UI's switch (model author: clear_thinking=true for chat) is accepted.
-    choice, failure = _chat_case(
-        _tool_request(chat_template_kwargs={"clear_thinking": True}, reasoning_effort="low")
-    )
-    cases["chat_clear_thinking_accepted"] = failure or tool_call_error(
+        )
+    # The body the Chat UI's effort filter produces is one the gateway accepts.
+    choice, failure = _chat_case(chat_ui_body(_tool_request(), "low"))
+    cases["chat_ui_filter_body"] = failure or tool_call_error(
         choice["message"], choice["finish_reason"]
     )
     report = {"cases": cases, "passed": not any(cases.values())}
@@ -971,6 +985,20 @@ def one_token_filler(tokenizer) -> str:
     raise ValueError("no one-token filler word found for this tokenizer")
 
 
+def retrieval_error(content: object, key: str) -> str | None:
+    """The answer names the planted key and no other key-shaped string.
+
+    The claim is retrieval from the whole context, not answer formatting: a
+    sentence around the right key passes, a wrong or second key fails.
+    """
+    if not isinstance(content, str):
+        return f"no answer text: {content!r}"
+    keys = set(re.findall(r"K[0-9A-F]{24}", content))
+    if keys != {key}:
+        return f"answer names {sorted(keys)}, expected {key}"
+    return None
+
+
 def long_context(run_dir: Path) -> int:
     """Needle retrieval at 32K, 128K, 256K and the full context minus the answer budget."""
     import secrets
@@ -1011,8 +1039,7 @@ def long_context(run_dir: Path) -> int:
         passed = (
             status == 200
             and choice.get("finish_reason") == "stop"
-            and isinstance(content, str)
-            and content.strip() == key
+            and retrieval_error(content, key) is None
             and usage.get("prompt_tokens", 0) + answer_budget <= maximum
         )
         rows.append(

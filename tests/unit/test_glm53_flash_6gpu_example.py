@@ -90,27 +90,36 @@ def test_a_tp_group_must_share_a_numa_node(example):
         control.dp_rank_numa_layout({0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 2}, pairs)
 
 
-def test_chat_ui_switch_is_one_the_gateway_forwards():
-    """The Chat UI sends clear_thinking; Kairyu rejects template kwargs it does not allow."""
+def test_chat_ui_filter_sends_only_the_public_effort():
+    """Kairyu rejects chat_template_kwargs on this model's text requests (HTTP 400)."""
     spec = importlib.util.spec_from_file_location(
         "glm_effort_filter", EXAMPLE / "webui-reasoning-effort-filter.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    deployment = load_deployment_spec((EXAMPLE / "kairyu.yaml").read_text())
-    (replica,) = deployment.pools["glm-5.3-flash"].replicas
-    allowed = set(replica.options["capabilities"]["allow_chat_template_kwargs"])
-
     flt = module.Filter()
 
     def user(effort):
         return {"valves": flt.UserValves(reasoning_effort=effort)}
 
     body = flt.inlet({"reasoning_effort": "low", "chat_template_kwargs": {"x": 1}}, user("default"))
-    assert "reasoning_effort" not in body
-    assert set(body["chat_template_kwargs"]) <= allowed
-    assert body["chat_template_kwargs"] == {"clear_thinking": True}
-    assert flt.inlet({}, user("high"))["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in body and "chat_template_kwargs" not in body
+    assert flt.inlet({}, user("high")) == {"reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize(
+    "content,ok",
+    [
+        ("KAB12CD34EF56AB12CD34EF56", True),
+        ("The archive key is **KAB12CD34EF56AB12CD34EF56**.", True),
+        ("KAB12CD34EF56AB12CD34EF57", False),
+        ("KAB12CD34EF56AB12CD34EF56 or KAB12CD34EF56AB12CD34EF57", False),
+        (None, False),
+    ],
+)
+def test_long_context_judges_retrieval_not_formatting(example, content, ok):
+    error = example("verification").retrieval_error(content, "KAB12CD34EF56AB12CD34EF56")
+    assert (error is None) is ok
 
 
 @pytest.mark.parametrize(

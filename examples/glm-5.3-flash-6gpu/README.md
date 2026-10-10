@@ -52,10 +52,12 @@ Model `glm-5.3-flash`; the Chat UI has no authentication.
   The Chat UI has a dropdown under Chat Controls → Valves → Reasoning Effort.
 - Sampling: the checkpoint's `generation_config.json` (temperature 1.0,
   top_p 0.95), the model author's recommendation.
-- `clear_thinking`: the official template keeps earlier turns' reasoning
-  (`false`, for agents that send `reasoning_content` back). The model author
-  asks chat clients to pass `clear_thinking=true`; the Chat UI does, and an
-  API client may send `"chat_template_kwargs": {"clear_thinking": true}`.
+- `clear_thinking`: the official template's default (`false`) keeps earlier
+  turns' reasoning for clients that send `reasoning_content` back (agents).
+  The model author asks chat clients to pass `clear_thinking=true`, but
+  Kairyu's chat path for this model forwards no `chat_template_kwargs` on
+  text requests (it rejects them with 400), so neither the Chat UI nor API
+  clients can set it here; the template default applies to every request.
 - Images: up to 8 per request (8 MiB each); video is not accepted (Kairyu's
   public API carries image parts only).
 - Tools: OpenAI tool calling, parsed by vLLM's `glm47` parser.

@@ -28,10 +28,8 @@ pools:
         # template (tools, image placeholders, "Reasoning Effort: Low|High|Max")
         # and parses GLM tool calls and reasoning, so Kairyu forwards messages,
         # tools and reasoning_effort (low/high/max, the template's own values).
-        # clear_thinking is the model author's chat switch; the Chat UI sets it.
         capabilities:
           allow_prompt_kinds: [multimodal]
-          allow_chat_template_kwargs: [clear_thinking]
         # The processor caps each image at 8,000 tokens; these are Kairyu-side
         # admission bounds within vLLM's 8-image limit and the 1M context.
         image_input_policy:
