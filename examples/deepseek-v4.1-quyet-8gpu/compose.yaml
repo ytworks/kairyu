@@ -305,6 +305,8 @@ services:
       QUYET_UPSTREAM: http://quyet-judge-vllm:8000
       QUYET_UPSTREAM_MODEL: quyet-1.0-large
       QUYET_ALIASES: quyet-latest
+      # The form check's name: a state Quyet would cut is refused, never judged.
+      QUYET_STRICT_ALIASES: quyet-strict
       QUYET_MAX_INFLIGHT: "${QUYET_MAX_INFLIGHT}"
       QUYET_MAX_QUEUE: "${QUYET_MAX_QUEUE}"
       QUYET_READ_WORKERS: "${QUYET_READ_WORKERS}"

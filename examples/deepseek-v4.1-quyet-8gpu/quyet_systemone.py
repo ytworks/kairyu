@@ -22,6 +22,10 @@ queue is full, 503 when vLLM is unavailable, and a ``Server-Timing`` header.
 
 Each answered read logs one ``read`` line (questions, input tokens, whether the
 state was cut at Quyet's 6,000 tokens): the example's gates count cut states from it.
+A request addressed to one of ``QUYET_STRICT_ALIASES`` is read in the package's
+strict mode: a state Quyet would cut is refused with 400 (and a ``refused`` log line)
+instead of answered from its beginning, so a caller that gates on the answer can fall
+back to its unverified path.
 """
 
 from __future__ import annotations
@@ -67,6 +71,10 @@ class Settings:
         self.upstream = _env("QUYET_UPSTREAM", "http://vllm:8000").rstrip("/")
         self.upstream_model = _env("QUYET_UPSTREAM_MODEL", "quyet-1.0-large")
         self.aliases = tuple(a for a in _env("QUYET_ALIASES", "quyet-latest").split(",") if a)
+        # Names whose reads refuse a state Quyet would cut (the package's strict mode).
+        self.strict_aliases = tuple(
+            a for a in os.environ.get("QUYET_STRICT_ALIASES", "").split(",") if a.strip()
+        )
         self.max_inflight = int(_env("QUYET_MAX_INFLIGHT", "16"))
         self.max_queue = int(_env("QUYET_MAX_QUEUE", "64"))
         self.read_workers = int(_env("QUYET_READ_WORKERS", "32"))
@@ -176,9 +184,9 @@ def quyet_on_vllm_class():
             self._timing.model_s = time.perf_counter() - started
             return out
 
-        def predict_timed(self, state, questions) -> tuple[dict, float]:
+        def predict_timed(self, state, questions, strict=False) -> tuple[dict, float]:
             self._timing.model_s = 0.0
-            return self.predict(state, questions), self._timing.model_s
+            return self.predict(state, questions, strict=strict), self._timing.model_s
 
     return QuyetOnVllm
 
@@ -285,7 +293,7 @@ def create_app(settings: Settings | None = None, *, runtime=None) -> FastAPI:
     runtime = runtime or QuyetRuntime(settings.model_dir)
     config = runtime.config
     model_version = config["name"]
-    names = {model_version, *settings.aliases, *SDK_ALIASES}
+    names = {model_version, *settings.aliases, *settings.strict_aliases, *SDK_ALIASES}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -388,8 +396,10 @@ def create_app(settings: Settings | None = None, *, runtime=None) -> FastAPI:
             return _semantic_error(f"{model_version} does not support {option}")
         questions = {qid: q.model_dump() for qid, q in req.questions.items()}
         try:
-            body, model_s = await _admit_and_read(app, settings, req.state, questions)
+            strict = req.model in settings.strict_aliases
+            body, model_s = await _admit_and_read(app, settings, req.state, questions, strict)
         except runtime.question_error as error:
+            log.info("refused questions=%d strict=%s: %s", len(questions), strict, error)
             return _semantic_error(str(error))
         except UpstreamRefused as error:
             return _semantic_error(f"the model rejected this request: {error}")
@@ -418,7 +428,9 @@ def create_app(settings: Settings | None = None, *, runtime=None) -> FastAPI:
     return app
 
 
-async def _admit_and_read(app: FastAPI, settings: Settings, state, questions) -> tuple[dict, float]:
+async def _admit_and_read(
+    app: FastAPI, settings: Settings, state, questions, strict: bool = False
+) -> tuple[dict, float]:
     if app.state.slots.locked() and app.state.waiting >= settings.max_queue:
         raise Overloaded(f"{settings.max_inflight} reads running and {settings.max_queue} waiting")
     app.state.waiting += 1
@@ -429,7 +441,7 @@ async def _admit_and_read(app: FastAPI, settings: Settings, state, questions) ->
     try:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            app.state.requests, app.state.model.predict_timed, state, questions
+            app.state.requests, app.state.model.predict_timed, state, questions, strict
         )
     finally:
         app.state.slots.release()

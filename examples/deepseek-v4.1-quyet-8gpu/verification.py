@@ -10,18 +10,21 @@ next reply needs a tool call) to the verified tool route and THINK to
 deepseek_think.
 
   l1                  every DeepSeek DP rank (thinking and chat, grammar JSON),
-                      each Quyet replica's vLLM and System One, and one
+                      each Quyet replica's vLLM and System One, the form check's
+                      strict name refusing a state Quyet would cut, and one
                       structured tool call from the public model
-  routing             datasets/tool-routing-set.json: TOOL miss rate < 10 % on
-                      the calibration and held-out halves, THINK precision >= 90 %
+  routing             datasets/tool-routing-set.json under the served rule (TOOL
+                      at P(TOOL) >= 0.1, else the most probable route): TOOL miss
+                      rate < 10 % on the calibration and held-out halves, THINK
+                      precision >= 90 %
   think-route         everyday requests stream from deepseek_think at the default effort
   effort              the caller's effort reaches the think route and the verified
                       tool route's candidates, answer and fixes; quyet-route judges
                       the route
   verified-tool-route agent turns (datasets/tool-turns.json) take the verified
                       tool route: DeepSeek's 10-16 candidates, 6 judgments each on
-                      quyet-judge, the answer and its form check on quyet-judge,
-                      and a structured call to a declared tool
+                      quyet-judge, the answer and its form check (read strict) on
+                      quyet-judge, and a structured call to a declared tool
   fallback            quyet-route down: an agent turn is answered on the think
                       route; quyet-judge down: still routed, the answer without
                       judgments and published unverified; both back: judged and
@@ -72,11 +75,13 @@ _READ_LINE = re.compile(
     r"read questions=(\d+) input_tokens=(\d+) truncated=(True|False) "
     r"state_tokens=(\S+) model_ms=(\d+)"
 )
+_REFUSED_LINE = re.compile(r"refused questions=(\d+) strict=(True|False): (.*)")
 
 
 def _quyet_reads(since: str | None) -> dict[str, dict]:
-    """Per Quyet adapter: reads, questions, states cut at 6,000 tokens and read
-    times since ``since``, from the adapter's ``read`` log lines."""
+    """Per Quyet adapter: reads, questions, states cut at 6,000 tokens, strict
+    reads refused (a state too long for the form check) and read times since
+    ``since``, from the adapter's ``read`` and ``refused`` log lines."""
 
     report = {}
     for service in control.QUYET_SERVICES:
@@ -84,7 +89,9 @@ def _quyet_reads(since: str | None) -> dict[str, dict]:
         if since:
             command[2:2] = ["--since", since]
         logs = subprocess.run(command, capture_output=True, text=True, check=False)
-        rows = [match.groups() for match in _READ_LINE.finditer(logs.stdout + logs.stderr)]
+        text = logs.stdout + logs.stderr
+        rows = [match.groups() for match in _READ_LINE.finditer(text)]
+        refused = [match.groups() for match in _REFUSED_LINE.finditer(text)]
         model_ms = sorted(int(row[4]) for row in rows)
         cut = [int(row[3]) for row in rows if row[2] == "True"]
         report[service] = {
@@ -92,6 +99,8 @@ def _quyet_reads(since: str | None) -> dict[str, dict]:
             "questions": sum(int(row[0]) for row in rows),
             "truncated": len(cut),
             "truncated_state_tokens_max": max(cut) if cut else None,
+            "refused_strict": sum(1 for row in refused if row[1] == "True"),
+            "refused_other": sum(1 for row in refused if row[1] == "False"),
             "model_ms_p50": statistics.median(model_ms) if model_ms else None,
             "model_ms_max": model_ms[-1] if model_ms else None,
         }
@@ -235,9 +244,9 @@ def _stages(trace: dict | None) -> dict[str, dict]:
 def _tool_route_problems(row: dict, caller_effort: str | None) -> list[str]:
     """What a verified tool row misses of the route (empty when sound): the
     four stages, 10-16 candidates judged 6 times each on quyet-judge, the
-    seven-question form check on quyet-judge with its report, and DeepSeek's
-    candidates and answer (fixes included) at the caller's effort (default
-    high)."""
+    seven-question form check read strict on quyet-judge (quyet_form) with its
+    report, and DeepSeek's candidates and answer (fixes included) at the
+    caller's effort (default high)."""
 
     stages = row["stages"]
     problems = []
@@ -251,8 +260,8 @@ def _tool_route_problems(row: dict, caller_effort: str | None) -> list[str]:
         problems.append(f"judgment items={items} (6 per candidate, 10-16 candidates)")
     if stages["format_check"].get("items") != 7:
         problems.append(f"form items={stages['format_check'].get('items')}")
-    for node in ("judgments", "format_check"):
-        if stages[node]["worker"] != "quyet_judge":
+    for node, worker in (("judgments", "quyet_judge"), ("format_check", "quyet_form")):
+        if stages[node]["worker"] != worker:
             problems.append(f"{node} on {stages[node]['worker']}")
     if row["verification"] is None:
         problems.append("no form-check report")

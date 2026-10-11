@@ -59,7 +59,9 @@
      "gpu_id": 6,
      "vllm_l1_port": 8015,
      "systemone_l1_port": 8016,
-     "systemone": "quyet-route-systemone",
+     "systemone": [
+      "quyet-route-systemone"
+     ],
      "serves": [
       "profile_judge"
      ]
@@ -70,7 +72,10 @@
      "gpu_id": 7,
      "vllm_l1_port": 8017,
      "systemone_l1_port": 8018,
-     "systemone": "quyet-judge-systemone",
+     "systemone": [
+      "quyet-judge-systemone",
+      "quyet-form-systemone"
+     ],
      "serves": [
       "judgments",
       "format_check"
@@ -151,13 +156,15 @@
     "QUYET_MAX_QUEUE": 16,
     "QUYET_READ_WORKERS": 64,
     "QUYET_MAX_QUESTIONS": 32
-   }
+   },
+   "strict_model": "quyet-strict"
   }
  },
  "systemone": {
   "models": [
    "quyet-route-systemone",
-   "quyet-judge-systemone"
+   "quyet-judge-systemone",
+   "quyet-form-systemone"
   ],
   "upstream_model": "Quyet-1.0-Large",
   "max_concurrency": 16,

@@ -3,9 +3,9 @@
 The example's own kairyu.yaml / verified-tool.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
 (against fake Quyet adapters that, like the real one, refuse more than 32
-questions per request and any question whose instructions are not one non-empty
-string), so the tests observe what the deployed L1 services would receive and
-which route answers.
+questions per request, any question whose instructions are not one non-empty
+string, and, under the strict name, a state too long to read whole), so the tests
+observe what the deployed L1 services would receive and which route answers.
 """
 
 from __future__ import annotations
@@ -32,6 +32,10 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deepseek-v4.1-quyet-8g
 
 # The real adapter's QUYET_MAX_QUESTIONS (example.json).
 QUYET_MAX_QUESTIONS = 32
+# The form check's strict name (QUYET_STRICT_ALIASES) and, for the fake, the
+# state size Quyet's 6,000 tokens stand for.
+STRICT_MODEL = "quyet-strict"
+STRICT_STATE_CHARS = 20000
 CANDIDATES = {
     "candidates": [
         {
@@ -87,7 +91,7 @@ MOVE = {
 }
 
 
-def _deepseek(seen: list[dict]):
+def _deepseek(seen: list[dict], move: dict = MOVE):
     """The fake DeepSeek vLLM service: candidates by role tag, else the move."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -97,7 +101,7 @@ def _deepseek(seen: list[dict]):
         if prompt.startswith("[candidates]"):
             message = {"role": "assistant", "content": json.dumps(CANDIDATES)}
         elif body.get("tools"):
-            message = MOVE
+            message = move
         else:
             message = {"role": "assistant", "content": "Paris"}
         return httpx.Response(
@@ -135,13 +139,15 @@ def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, 
                     400,
                     json={"detail": f"question {key!r}: instructions must be a non-empty string"},
                 )
+        if body["model"] == STRICT_MODEL and len(json.dumps(body["state"])) > STRICT_STATE_CHARS:
+            return httpx.Response(400, json={"detail": "state over the limit (strict)"})
         reads.append((name, body))
         if "route" in body["questions"]:
             labels = list(body["questions"]["route"]["criteria"])
             answers = {
                 "route": {
                     "type": "choice",
-                    "probabilities": {label: 0.9 if label == route else 0.1 for label in labels},
+                    "probabilities": {label: 0.95 if label == route else 0.05 for label in labels},
                 }
             }
         else:
@@ -156,14 +162,20 @@ def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, 
 
 
 def _orchestrator(
-    seen: list[dict], reads: list, *, route: str = "TOOL", down=frozenset(), form=lambda n: 0.9
+    seen: list[dict],
+    reads: list,
+    *,
+    route: str = "TOOL",
+    down=frozenset(),
+    form=lambda n: 0.9,
+    move: dict = MOVE,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
     engines = {
         name: OpenAICompatBackend(
-            **pool.replicas[0].options, transport=httpx.MockTransport(_deepseek(seen))
+            **pool.replicas[0].options, transport=httpx.MockTransport(_deepseek(seen, move))
         )
         for name, pool in deployment.pools.items()
     }
@@ -286,10 +298,12 @@ async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) 
     # The route on its own replica (told the caller declared tools); six
     # questions per candidate on the judge replica, at most 32 per read, each
     # quoting its candidate's call, over the conversation and the tools; then
-    # seven form questions over the reply, the tools and the conversation.
+    # seven form questions, read strict, over the reply, the tools and the
+    # conversation.
     (route_judge, route), *judged, (form_judge, form) = reads
     assert route_judge == "quyet-route-systemone" and route["state"]["tool_calling"] is True
-    assert {name for name, _ in judged} | {form_judge} == {"quyet-judge-systemone"}
+    assert {name for name, _ in judged} == {"quyet-judge-systemone"}
+    assert form_judge == "quyet-form-systemone" and form["model"] == STRICT_MODEL
     questions = [q for _, read in judged for q in read["questions"].values()]
     assert len(questions) == 6 * len(CANDIDATES["candidates"])
     assert all(len(read["questions"]) <= QUYET_MAX_QUESTIONS for _, read in judged)
@@ -344,6 +358,42 @@ async def test_a_reply_failing_the_form_check_is_fixed_and_checked_again(form, a
         unmet = material.split("--- UNMET REQUIREMENTS ---")[1]
         assert "- [F1] p=0.20" in unmet and "- [F7] p=0.20" in unmet
     assert '<tool_call>{"name":"bash"' in result.text
+
+
+async def test_a_reply_too_long_to_check_whole_is_published_unverified() -> None:
+    """The form check never passes a reply on a cut state (PR #645 review): a
+    state over Quyet's limit is refused under the strict name, and the reply,
+    call included, is published unverified without a fix."""
+
+    seen: list[dict] = []
+    reads: list[dict] = []
+    fixture = "\n".join(f"line {n}: value" for n in range(2000))
+    write = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_3",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps(
+                        {"command": f"cat > /app/fixture.txt <<'EOF'\n{fixture}\nEOF"}
+                    ),
+                },
+            }
+        ],
+    }
+    orchestrator = _orchestrator(seen, reads, route="TOOL", move=write)
+
+    result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
+
+    assert result.verification is not None
+    assert result.verification.guaranteed is False
+    assert result.verification.reason == "judge_unavailable"
+    assert "fixture.txt" in result.text and '<tool_call>{"name":"bash"' in result.text
+    # One answer, no fix: the refused check never sends the reply back.
+    assert sum(1 for body in seen if body.get("tools")) == 1
 
 
 async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:

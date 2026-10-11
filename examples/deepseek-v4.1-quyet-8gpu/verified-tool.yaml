@@ -24,8 +24,11 @@
 #
 # DeepSeek writes. Two Quyet replicas return probabilities through System One:
 # quyet-route (GPU 6) the route, quyet-judge (GPU 7) the judgments and the
-# form check. Quyet reads at most 6,000 state tokens, so every state below is
-# bounded to fit (VCO-D21). The prompts stay generic for any tool-calling agent.
+# form check. Quyet reads at most 6,000 state tokens: the route and judgment
+# states are bounded to fit (VCO-D21); the form check, whose reply cannot be
+# bounded, reads in strict mode and is unavailable (the reply published
+# unverified) when its state does not fit. The prompts stay generic for any
+# tool-calling agent.
 workers:
   - name: deepseek
     engine_ref: deepseek-v4.1-flash
@@ -33,6 +36,10 @@ workers:
     systemone_ref: quyet-route-systemone
   - name: quyet_judge
     systemone_ref: quyet-judge-systemone
+  # The same replica read in Quyet's strict mode: a state Quyet would cut is
+  # refused, so the form check never passes a reply it could not read whole.
+  - name: quyet_form
+    systemone_ref: quyet-form-systemone
 
 roles:
   # Candidates in ONE call, so each is written knowing the others' viewpoints.
@@ -311,14 +318,15 @@ roles:
       --- END UNMET REQUIREMENTS ---
 
   # The form check on the published move: seven Quyet questions on the reply
-  # (its text and its calls as <tool_call> envelopes). The reply goes first in
-  # the state so a cut at Quyet's 6,000 tokens never removes it; the
-  # conversation (request messages and the newest ones) comes last. A
-  # requirement read below 0.5 sends the reply back to answer's refine_prompt,
-  # at most twice; the last reply is published either way. A check Quyet
-  # cannot read publishes the reply unverified.
+  # (its text and its calls as <tool_call> envelopes), the tools and the
+  # conversation (request messages and the newest ones). It reads in strict
+  # mode (quyet_form): a state over Quyet's 6,000 tokens (a long reply, many
+  # tools) is refused, so the reply is published unverified instead of passed
+  # on what fits (PR #645 review). A requirement read below 0.5 sends the
+  # reply back to answer's refine_prompt, at most twice; the last reply is
+  # published either way.
   - name: format_check
-    worker: quyet_judge
+    worker: quyet_form
     role_type: verifier
     verifies: answer
     depends_on: [answer]
@@ -463,8 +471,14 @@ profile_judge:
     conversation's instructions require a tool call or command in every
     reply, or end the work with a tool call or command, every reply up to
     and including that final one needs a tool call.
-  # The most probable route wins (owner decision 2026-10-04; no preferred
-  # label).
+  # TOOL whenever its probability reaches 0.1, else the most probable route
+  # (owner decision 2026-10-11, VCO-D21 amendment): on 64 real agent turns the
+  # most probable route sent 11 final turns, whose next move was the submit
+  # command, to THINK; with the floor 5, and the routing set's TOOL miss stays
+  # 5 % / 0 % with THINK precision 98.9 %.
+  prefer:
+    label: TOOL
+    min_probability: 0.1
   choices:
     - profile: deepseek_think
       label: THINK

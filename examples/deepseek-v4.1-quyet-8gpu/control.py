@@ -803,6 +803,39 @@ def _validate_systemone(l1_url: str) -> None:
         raise SystemExit(f"Quyet System One probe failed: {error}")
 
 
+# A state well over Quyet's 6,000 tokens: read whole it would be cut.
+_LONG_STATE = {"log": "\n".join(f"line {n}: the build step {n} finished" for n in range(3000))}
+
+
+def _validate_strict(l1_url: str) -> None:
+    """The judge replica answers a long state under Quyet's own name (cut, with a
+    warning) and refuses it under the form check's strict name."""
+
+    questions = {"done": {"type": "noul", "instructions": "The log reports a finished build."}}
+    plain = post_json(
+        f"{l1_url}/v1/systemone",
+        {"model": QUYET_SYSTEMONE["upstream_model"], "state": _LONG_STATE, "questions": questions},
+        timeout_s=300,
+    )
+    if not any(item.get("code") == "state_truncated" for item in plain.get("warnings") or []):
+        raise SystemExit(f"Quyet did not cut the long probe state: {str(plain)[:300]}")
+    request = urllib.request.Request(
+        f"{l1_url}/v1/systemone",
+        data=json.dumps(
+            {"model": QUYET_SYSTEMONE["strict_model"], "state": _LONG_STATE, "questions": questions}
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            body = response.read()[:300]
+    except urllib.error.HTTPError as error:
+        if error.code == 400:
+            return
+        raise SystemExit(f"strict probe answered {error.code}, expected 400") from error
+    raise SystemExit(f"the strict name answered a state Quyet would cut: {body!r}")
+
+
 def routed_request(content: str, *, model: str = MODEL, **overrides) -> dict:
     """A chat request to the public model unless ``model`` says otherwise."""
 
@@ -917,6 +950,7 @@ def validate_serving(env: dict[str, str]) -> None:
         except (OSError, ValueError, urllib.error.URLError) as error:
             raise SystemExit(f"{service} vLLM is not serving: {error}") from error
         _validate_systemone(quyet_l1_url(env, service))
+    _validate_strict(quyet_l1_url(env, "quyet-judge"))
     validate_tool_answer(api_url)
 
 

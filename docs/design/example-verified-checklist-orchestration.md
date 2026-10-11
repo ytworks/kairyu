@@ -882,6 +882,27 @@ move covers as much safe work as possible, and so that the reply's form
 checked and fixed before it is published. The form threshold is 0.5 because
 VCO-D16's 0.99 sent near-passes to repair and the repairs changed the move.
 
+**Amendment (2026-10-11, PR #645): a TOOL floor and a strict form check.**
+
+- Route judge: `prefer: {label: TOOL, min_probability: 0.1}`: TOOL whenever
+  its probability reaches 0.1, otherwise the most probable route (owner
+  decision; supersedes the 2026-10-04 "most probable wins" for this example).
+- The form check reads through `quyet-form-systemone` (the judge replica under
+  the adapter name `quyet-strict`, read in the quyet package's strict mode): a
+  state Quyet would cut is refused with 400 and the reply is published
+  unverified (`judge_unavailable`), never passed on its beginning. The
+  judgments keep the plain name. The adapter logs each refused read; `l1`
+  checks the refusal live; the gates count refused reads.
+
+Why: the GPU run of 2026-10-11 routed 11 of 64 real final agent turns (the
+next move the submit command) to THINK; on the recorded probabilities a floor
+of 0.1 leaves 5 of 64 (pass line 6), routes `own-check` TOOL, keeps the routing
+set's TOOL miss at 5 % / 0 % and THINK precision at 98.9 %, and sends 4 of 16
+tool-declared text turns to TOOL. The PR #645 review reproduced a 350-line
+fixture write whose form-check state (11,039 tokens) Quyet cut to 6,000 and
+still passed: the reply cannot be bounded, so a check of a cut state must not
+pass.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

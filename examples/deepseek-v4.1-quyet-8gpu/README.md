@@ -39,7 +39,7 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   │                  one message; makes the move through the tool-calling
   │                  interface, several independent safe calls at once when the
   │                  conversation allows it
-  │    format_check  quyet-judge, 7 questions on the reply (p >= 0.5 each):
+  │    format_check  quyet-judge read strict, 7 questions on the reply (p >= 0.5 each):
   │                  announced calls made, no call written as text, declared
   │                  tools with valid arguments, at least one call, batched
   │                  calls independent, finishing call alone after success,
@@ -52,16 +52,22 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
 ```
 
 - Quyet reads at most 6,000 state tokens (its documented input; a longer
-  object is cut at its end). Every state is bounded to fit: the route judge
-  reads at most 12,000 characters of the conversation, the judgments 8,000
-  and the form check 6,000. A long run keeps its first message, its system
-  and developer messages, its latest user message and its newest messages,
-  so an agent's task, protocol and latest results stay visible; the middle
-  of a long run is not read.
+  object is cut at its end). The route judge reads at most 12,000 characters
+  of the conversation and the judgments 8,000. A long run keeps its first
+  message, its system and developer messages, its latest user message and its
+  newest messages, so an agent's task, protocol and latest results stay
+  visible; the middle of a long run is not read.
+- The form check's reply cannot be bounded (a call may write a whole file), so
+  it reads in Quyet's strict mode (the adapter name `quyet-strict`): a state
+  Quyet would cut (the reply, the tools and 6,000 characters of the
+  conversation) is refused, and the reply is published unverified rather than
+  passed on what fits.
 - The judge sends the conversation and whether the caller declared tools,
-  with one choice question; the most probable label wins. When the
-  conversation's instructions require a tool call in every reply or end the
-  work with one, every reply up to that final one is TOOL.
+  with one choice question. TOOL wins whenever its probability reaches 0.1,
+  otherwise the most probable label: on real agent runs the final turn before
+  a submit command read as a finished report. When the conversation's
+  instructions require a tool call in every reply or end the work with one,
+  every reply up to that final one is TOOL.
 - When quyet-route does not answer within 60 s (down, overloaded), the
   request takes the think route.
 - The two Quyet replicas never share a queue: a burst of judgments cannot
@@ -122,8 +128,8 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 
 | Gate | Checks |
 |---|---|
-| `l1` | every DeepSeek DP rank (thinking and chat JSON), each Quyet replica's vLLM and System One, one structured tool call from the public model |
-| `routing` | `datasets/tool-routing-set.json`: TOOL miss rate < 10 % on the calibration and held-out halves; THINK precision ≥ 90 % |
+| `l1` | every DeepSeek DP rank (thinking and chat JSON), each Quyet replica's vLLM and System One, the strict name refusing a state Quyet would cut, one structured tool call from the public model |
+| `routing` | `datasets/tool-routing-set.json` under the served rule (TOOL at P(TOOL) ≥ 0.1): TOOL miss rate < 10 % on the calibration and held-out halves; THINK precision ≥ 90 % |
 | `think-route` | everyday requests stream from the think route at the default effort |
 | `effort` | the think route gets the caller's effort; the verified tool route's candidates and answer (fixes included) get it too (default high); the route is judged on `quyet-route` |
 | `verified-tool-route` | agent turns from `datasets/tool-turns.json` take the TOOL route: 10-16 candidates, 6 judgments each on `quyet-judge`, the answer and its 7-question form check on `quyet-judge`; each reply carries a structured call to a declared tool; fixes, publish reasons and calls per reply recorded |
@@ -133,7 +139,7 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 | `browser` | `browser-smoke.sh`: Open WebUI answers |
 
 Every gate also records each Quyet adapter's reads, states cut at 6,000
-tokens and read times from the adapters' logs. The two datasets are authored
+tokens, strict reads refused and read times from the adapters' logs. The two datasets are authored
 with generic tools (shell, file read and write, HTTP fetch, web search,
 calendar, email). The routing set's THINK side holds 80 chats without tools
 and 16 tool-declared turns whose next reply is text.
@@ -147,6 +153,11 @@ and 16 tool-declared turns whose next reply is text.
   that its question leaves no room for the state, about 20,000 characters),
   the answer is written without judgments and published without the form
   check (a run shares one unjudgeable flag, m1 D8).
+- A reply whose form-check state exceeds Quyet's 6,000 tokens (a long write,
+  many or large tool schemas) is published unverified.
+- The TOOL floor (0.1) sends some tool-declared turns whose next reply is
+  text to the verified tool route, which answers with a call (routing set: 11
+  of 16 such turns stay on THINK).
 - A fix is the same DeepSeek role at the same effort; it receives the
   previous reply as text. A DeepSeek error during a fix fails the request.
 - The verified tool route is not streamed: the reply is published after its
