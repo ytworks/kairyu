@@ -6,7 +6,7 @@ rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
-Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), 8 of 9 GPU gates pass 2026-10-11 (`verified-tool-route` fails on routing)**
+Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -902,6 +902,10 @@ tool-declared text turns to TOOL. The PR #645 review reproduced a 350-line
 fixture write whose form-check state (11,039 tokens) Quyet cut to 6,000 and
 still passed: the reply cannot be bounded, so a check of a cut state must not
 pass.
+
+GPU-verified 2026-10-11 at `fa82424f` (example `MEASUREMENTS.md`): all nine
+gates pass; the route replay misroutes 5 of 64 real turns (11 before); no form
+check read a cut state (0 refusals in 571 judge reads).
 
 ## Limitations
 

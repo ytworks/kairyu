@@ -7,7 +7,69 @@ example's System One adapter): `quyet-route` on GPU 6 (route judge only),
 `quyet-judge` on GPU 7 (judgments and form check).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
 
-## Quyet layout and the rebuilt verified tool route (VCO-D21, VCO-D22)
+## Quyet layout: TOOL floor and strict form check (VCO-D21/D22 amendment)
+
+GPU run 2026-10-11 10:32-11:45 JST (gates; UTC 01:32-02:45) at `fa82424f`
+(route judge TOOL at P(TOOL) >= 0.1; the form check read strict through
+`quyet-strict`, PR #645 review). `./run.sh` rebuilt the adapter and recreated the
+changed services, Kairyu restarted on the new spec; the route replay, all nine
+gates in GATES order, then the TOOL-route replay. Logs `run-20261011-r2.log`,
+`pregate-20261011-r4.log`, `gates-20261011-r2.log`,
+`pregate-20261011-r5-tool.log`; results `*-20261011T01*`/`T02*`. **All nine
+gates pass; the route replay misroutes 5 of 64 real turns (pass line 6).**
+
+### Before and after the gates (`pregate-20261011T013119Z.json`, `pregate-20261011T024522Z.json`)
+
+- Route judge, the same 64 real DeepSWE turns: **5 routed THINK** (11 without
+  the floor; Winnow 1), all final turns before the submit command
+  (P(TOOL) 0.009-0.058). Reads 0.83 s median, 1.14 s max; 0 states cut, 0 strict
+  refusals.
+- TOOL route, the same six turns in process: one routed THINK (P(TOOL) 0.058);
+  five ran 14-16 candidates, 84-96 judgment questions in three parallel reads of
+  2.1-4.5 s, and passed the form check, four first time and one after one fix
+  (F7 0.41 -> 0.85, the four calls unchanged). Final replies made 3, 1, 4, 1 and
+  3 calls; 75-265 s per turn. 27 Quyet reads, 0 cut, 0 refused.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| l1 | pass (28 s), including the strict name refusing a long state the plain name answers cut |
+| routing | pass: TOOL miss 5 % / 0 %; THINK precision 98.9 %, recall 94.8 % (tool-declared THINK 68.8 %, 11/16); judge wall 11.2 s for 136, 0 cut |
+| think-route | pass: 6/6 THINK, streamed; p50 1.07 s, TTFT p50 0.87 s |
+| effort | pass: THINK follows the caller (0.7-0.9 s); TOOL candidates and answer follow the caller, a structured `bash` call each time, form passed first time; 70-147 s, 12,487-27,997 output tokens, 172-191 tok/s |
+| verified-tool-route | pass: 12/12 TOOL (`own-check` at P(TOOL) 0.36 now TOOL), 12-16 candidates, judgments on `quyet-judge` and the form check on `quyet-form`, form passed first time 12/12, a structured call to a declared tool; p50 64.3 s, p95 107.1 s; 149,578 output tokens, 153-185 tok/s; two replies batched two calls |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 0.8-1.3 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with a call (107.6 s); both back: judged and form-checked (111.0 s) |
+| serving | pass: 72/72 answered, every reply a structured call (table below) |
+| serving-routed | pass: 72/72 answered (table below) |
+| browser | pass: Open WebUI answers |
+
+serving (agent turns):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n | Form fix limit | Replies with 2+ calls |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|
+| c1 | 8 | 74.8 | 85.1 | 594 | 103,768 | 175 | 8 / 74.8 | 0 | 1 | 1 |
+| c4 | 16 | 65.4 | 106.1 | 390 | 168,944 | 433 | 15 / 65.7 | 1 | 0 | 6 |
+| c8 | 16 | 108.7 | 223.3 | 269 | 201,888 | 751 | 15 / 115.9 | 1 | 1 | 8 |
+| c16 | 32 | 134.2 | 235.3 | 417 | 398,451 | 955 | 31 / 141.4 | 1 | 2 | 11 |
+
+The four replies published at the fix limit each made one call; Quyet read
+F5 (true for one call by its own criteria) below 0.5 on three and F1 on one,
+so each cost two extra DeepSeek fixes. 356 Quyet reads (6,689 questions), 0
+states cut, 0 strict refusals; judgment reads p50 2.2 s, max 5.9 s.
+
+serving-routed (routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n / p50 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 25.3 | 41.9 | 221 | 157 | 2 / 53.7 | 6 / 17.7 | 0.13-0.15 |
+| c4 | 16 | 17.2 | 104.7 | 187 | 431 | 6 / 73.3 | 10 / 3.3 | 0.14-0.15 |
+| c8 | 16 | 40.1 | 122.6 | 153 | 608 | 6 / 81.9 | 10 / 17.7 | 0.18-0.39 |
+| c16 | 32 | 47.8 | 172.2 | 233 | 804 | 11 / 102.1 | 21 / 13.7 | 0.14-0.17 |
+
+One TOOL reply was fixed once and passed. 172 Quyet reads, 0 cut.
+
+## First Quyet run (2026-10-11, before the TOOL floor and the strict form check)
 
 GPU run 2026-10-11 04:38-05:46 JST (gates; UTC 2026-10-10 19:38-20:46) at
 `6d19280e` (the judgments fix below), plan
