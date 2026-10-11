@@ -905,7 +905,8 @@ pass.
 
 GPU-verified 2026-10-11 at `fa82424f` (example `MEASUREMENTS.md`): all nine
 gates pass; the route replay misroutes 5 of 64 real turns (11 before); no form
-check read a cut state (0 refusals in 571 judge reads).
+check read a cut state (of 458 judge reads in the gates, the one cut read and
+the one strict refusal were `l1`'s deliberate probes).
 
 ## Limitations
 
