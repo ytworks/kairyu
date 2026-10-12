@@ -209,3 +209,47 @@ not a long-context quality evaluation.
 `restart` (`docker compose restart deepseek`): healthy and passing the
 readiness probes (exact finite answers on the DP ranks, tool call, image)
 again after 435.7 s.
+
+## Gates with native chat messages (PR #647)
+
+The example now lists `deepseek-v4.1-flash` in `upstream_chat_models` (m9 D2
+amendment 2026-10-12): Kairyu sends each chat's messages as they are and
+vLLM renders the model author's encoder from them, instead of one flattened
+user message. Run 2026-10-12 22:36–23:22 JST on the PR head (`13d816c6`),
+plain `./run.sh up`, image `sha256:119afb09…` (unchanged), served-config
+SHA-256 `9dc307f9…`, every gate `--no-start`, run ID `20261012-native`;
+`tool-calling` re-run 2026-10-13 00:50 JST at `8527dd2a` after the gate fix
+below (fresh `./run.sh up`, same served config, run ID `20261013-native-r2`).
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `l1` | PASS 13/13 | efforts render 75/50/75/100, chat mode closes thinking; 72 probes all `323`, every variant answered by all six engines; 8,283,516 KV tokens per engine |
+| `serving` | PASS | c1 103.9, c8 291.0, c16 417.1, c32 586.7, c64 825.1 tok/s (2026-09-30: 102.3 / 306.3 / 386.9 / 591.1 / 718.1); TTFT p50 683 / 1,119 / 1,733 / 2,559 / 9,007 ms; 64/64 placed per row |
+| `completed` | PASS 192/192 | generic c1 154.5 tok/s, p50 4.6 s; c8 550.6, 10.0 s; c32 630.7, 13.4 s (p99 75.2 s); coding c1 182.6, 19.0 s; c8 776.9, 44.1 s; c32 1,092.5, 39.1 s (p99 164.2 s) |
+| `tool-calling` | PASS 5/5 (re-run) | 12 concurrent calls, streamed call, low and max effort; the tool-result turn calls `head -n 1 README.md` |
+| `vision` | PASS 6/6 | completed red answers |
+| `reasoning` | PASS 4/4 | default/low/high/max all `323` with reasoning |
+| `cancellation` | PASS | released 0.26 s after the disconnect; follow-up completed |
+| `long-context` | PASS 4/4 | 32,800 / 131,104 / 262,176 / 1,039,904 prompt tokens (5 fewer than before: no `user: … assistant:` wrapper), 2.9 / 10.9 / 21.5 / 118.6 s |
+| `restart` | PASS | healthy and answering 497 s after the L1 restart |
+
+`completed` generic c32 is lower than on 2026-09-30 (788.3 tok/s) because its
+wall time is the longest answer's (75.2 s against 54.2 s; 47,441 against
+42,742 output tokens); `serving` is unchanged or faster.
+
+`tool-calling` failed on the first pass and was fixed in the gate, not the
+served configuration (owner approval 2026-10-12): after the tool result of
+"List the files in the current directory." DeepSeek reported the listing in
+text. Sent 10 times each: through Kairyu 6 of 10 called a tool, to vLLM
+directly 7 of 10, and the flattened prompt of the legacy path 10 of 10,
+which is why the earlier run passed. The turn now asks for a step that still
+needs a call ("…, then show the first line of README.md."), as in the GLM
+example: 10 of 10 through Kairyu and directly (`ab-check-20261012.json`).
+
+Pre-benchmark check: the stopped GLM DeepSWE run's second agent turn (5
+messages with two tool results, the bash tool, `reasoning_effort: max`)
+with this model sent 5 times through Kairyu returns 5 of 5 structured calls.
+The Kairyu-to-vLLM bodies captured on the compose network (destination the
+vLLM container) carry the 5 messages unchanged with `reasoning_effort: max`;
+vLLM `/tokenize` of that body renders `Reasoning Effort: 100` and counts
+3,645 tokens, equal to Kairyu's `usage.prompt_tokens`.

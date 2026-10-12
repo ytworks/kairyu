@@ -1,7 +1,10 @@
 # Upstream-rendered chat: send a pool model's conversation as native messages
 
 Status: **Approved 2026-10-12 (owner: fix Kairyu before the DeepSWE runs,
-opt-in model list, max effort for the runs).**
+opt-in model list, max effort for the runs).** Amended 2026-10-12 (owner): the
+DeepSWE runs and the wiki report moved to issue #649; this PR is verified by
+the nine example gates and the pre-benchmark check on both examples and merges
+when both pass and CI is green.
 
 ## Problem
 
@@ -121,18 +124,10 @@ Local: `uv run ruff check .` and the touched test files with
    the 5 messages natively and `reasoning_effort: max`; vLLM `/tokenize` of
    that body renders the max marker (GLM `Reasoning Effort: Max`, DeepSeek
    max = 100).
-4. DeepSWE v1.1 full run: 113 tasks, 8 workers, 1 attempt, `RETRIES=3`,
-   `API_TIMEOUT_SECONDS=3600`, `REASONING_EFFORT=max`, every call recorded by
-   the relay; run IDs `deepswe-glm-5.3-flash-6gpu-max-8w-<date>-r1` and
-   `deepswe-deepseek-v4.1-flash-6gpu-max-8w-<date>-r1`. Stop at 15 min if
-   `RepeatedFormatError` appears, more than 10 % of replies carry no tool
-   call, a task ends within 1-2 turns, HTTP errors persist, or the agent body
-   lacks `reasoning_effort: max`. About 1-1.5 days each.
-5. Metrics counted before `./run.sh down`; results added to the kairyu-bench
-   wiki (`DeepSWE-Comparison.md`) at the existing granularity, with the
-   conditions (max effort, native messages, the references' high effort and
-   flattened conversation).
+4. The DeepSWE max-effort runs and the wiki report are tracked in issue #649
+   (owner decision 2026-10-12), not in this PR.
 
-A passed step is reported and the work continues; a failure or a stack that
-cannot run stops the work with an analysis. Merge is the owner's decision
-after CI is green.
+A passed step is reported and the work continues. A failed gate does not stop
+the remaining gates; the failures are analyzed and reported together, and
+nothing is changed or merged without the owner. The PR merges when every gate
+and the pre-benchmark check pass on both examples and CI is green.
