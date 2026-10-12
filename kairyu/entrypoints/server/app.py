@@ -83,6 +83,7 @@ from kairyu.entrypoints.server.errors import (
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metering import (
     StreamUsageOwner,
+    metered_prompt,
     record_state_usage,
     resolve_cached_tokens,
     resolve_usage_counts,
@@ -957,7 +958,7 @@ async def _stream_engine(
             )
         return metrics
 
-    owner = _stream_usage_owner(http_request, model, generation_request.prompt)
+    owner = _stream_usage_owner(http_request, model, metered_prompt(generation_request))
     try:
         try:
             owner.mark_dispatched()
@@ -1078,7 +1079,7 @@ async def _stream_engine(
                 created,
                 model,
                 _wire_usage(
-                    generation_request.prompt,
+                    metered_prompt(generation_request),
                     last.completions,
                     owner.latest_usage,
                 ),
@@ -1922,6 +1923,7 @@ def create_app(
     resolved_responses_compaction_key: bytes | None = None,
     price_sheet: PriceSheet | None = None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
     orchestration_chat_models: AbstractSet[str] | None = None,
     runtime_engines: Mapping[str, EngineBackend] | None = None,
     runtime_embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
@@ -1930,8 +1932,9 @@ def create_app(
 ) -> FastAPI:
     settings = settings or ServerSettings()
     legacy_chat_models = frozenset(legacy_chat_models or ())
+    upstream_chat_models = frozenset(upstream_chat_models or ())
     orchestration_chat_models = frozenset(orchestration_chat_models or ())
-    validate_chat_policy(chat_templates, legacy_chat_models)
+    validate_chat_policy(chat_templates, legacy_chat_models, upstream_chat_models)
     if price_sheet is not None and settings.usage_ledger_path is None:
         raise ValueError("price_sheet requires usage_ledger_path")
     if price_sheet is not None:
@@ -1997,12 +2000,17 @@ def create_app(
             "served model names collide across engines, orchestrators, and embeddings: "
             f"{sorted(collisions)}"
         )
-    missing_chat_policy = set(served_engines) - set(chat_templates or {}) - set(legacy_chat_models)
+    missing_chat_policy = (
+        set(served_engines)
+        - set(chat_templates or {})
+        - legacy_chat_models
+        - upstream_chat_models
+    )
     if missing_chat_policy:
         logger.warning(
             "served models have no configured chat rendering policy; chat "
             "direct chat requests will be rejected before dispatch until each model has a "
-            "ChatTemplate or legacy_chat_models membership: %s",
+            "ChatTemplate or legacy_chat_models/upstream_chat_models membership: %s",
             sorted(missing_chat_policy),
         )
 
@@ -2057,6 +2065,7 @@ def create_app(
         embedding_backends=served_embedding_backends,
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
         orchestrated_models=set(auto_models),
         chat_dispatch=_responses_chat_dispatch,
         responses_compaction_key=responses_compaction_key,
@@ -2715,6 +2724,7 @@ def create_app(
                 placement_started_ns=getattr(http_request.state, "placement_started_ns", None),
                 trace_requested=want_trace,
                 legacy_chat_models=legacy_chat_models,
+                upstream_chat_models=upstream_chat_models,
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
@@ -2858,7 +2868,7 @@ def create_app(
                     http_request,
                     request.model,
                     error.execution.result.usage,
-                    prompt=error.execution.result.prompt,
+                    prompt=error.execution.metered_prompt,
                     completions=error.execution.result.completions,
                 )
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
@@ -2869,7 +2879,7 @@ def create_app(
             http_request,
             request.model,
             executed.result.usage,
-            prompt=executed.result.prompt,
+            prompt=executed.metered_prompt,
             completions=executed.result.completions,
         )
         if request.stream:

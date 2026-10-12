@@ -114,6 +114,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-12 — [amendment] Upstream-chat review fix: the usage fallback counts the conversation (m9 D2, PR #647 review)
+- What: when the upstream reports no usage, response usage, the usage ledger and metrics count the conversation's JSON with the prompt text (`metering.metered_prompt`) instead of the empty prompt's 0 (1,000-word chat: 1,004 tokens; legacy 1,002).
+- Why: owner review reproduced 0 input tokens on a stream without usage; the admission bound already counted the conversation.
+- Refs: m9 D2 amendment 2026-10-12; `kairyu/entrypoints/server/metering.py`
+
+### 2026-10-12 — [amendment] Upstream-rendered pool chats are sent as native messages (m9 D2, PR #647)
+- What: new `upstream_chat_models` list: text chats of listed engine/pool models skip Kairyu rendering; the validated messages go to vLLM via `conversation_prefix`, so the model's template sees turns, tool calls and tool results. The build fails unless every replica is an `openai` backend on a `conversation_prefix` upstream (vLLM). `glm-5.3-flash-6gpu` and `deepseek-v4.1-flash-6gpu` opt in; `legacy_chat_models` and other examples unchanged.
+- Why: legacy chats reach vLLM as one flattened user message; DeepSWE on GLM-5.3-Flash ended 23 of 23 finished tasks in `RepeatedFormatError` while the same turn sent to vLLM directly returned a call; the DeepSeek reference run (67/113) went through the same flattening. `native_conversation` exists only on L2 roles.
+- Refs: m9 D2 amendment 2026-10-12; plan `docs/superpowers/plans/2026-10-12-upstream-chat-messages.md`
+
 ### 2026-10-11 — [design] Quyet replaces Winnow; verified tool route judges candidates and checks form (VCO-D21/D22, PR #645)
 - What: `deepseek-v4.1-winnow-8gpu` -> `deepseek-v4.1-quyet-8gpu`: two Quyet-1.0-Large replicas (as in `quyet-1.0-large-1gpu`) replace Winnow, states bounded to Quyet's 6,000 tokens (route 12,000 chars, judgments 8,000, form check 6,000). TOOL route: 10-16 DeepSeek candidate calls (one request), 6 Quyet judgments each (32 per read), a DeepSeek move batching independent safe calls, 7-question Quyet form check (p >= 0.5) with up to 2 DeepSeek fixes; requirements removed. Routing and think route unchanged; `kairyu/` unchanged.
 - Why: owner decisions: decisions on a calibrated Jev-family model within its documented input; choose the move needed now from many judged candidates, cover more safe work per move, and fix the reply's form (announced calls, calls as text, finishing alone) before publishing. Threshold 0.5 because VCO-D16's 0.99 repaired near-passes and changed moves.
@@ -136,22 +146,3 @@ in `.claude/rules/progress-log.md`).
 - What: `examples/glm-5.3-flash-6gpu` serves official FP8 GLM-5.3-Flash on stock vLLM v0.31.0 as one TP2 x DP3 / EP6 replica with MTP 3 (GPUs 0-5) behind the `deepseek-v4.1-flash-6gpu` L2/L3; `kairyu/` unchanged. Run `20261011-r2`: 70.6 / 298.3 / 455.7 tok/s at c1 / c16 / c64, needle found at 1,039,890 tokens, 80 max-effort answers complete.
 - Why: planned on four GPUs; the fit probe left 1.81 GiB of KV memory per GPU on TP4 against 7.56 GiB for a 1M request, so the owner-approved six-GPU fallback. The Chat UI sends only the effort: Kairyu's legacy chat path rejects `chat_template_kwargs` on text requests.
 - Refs: FN-D9 GLM amendment; plan `docs/superpowers/plans/2026-10-10-glm-5.3-flash-example.md`; example `MEASUREMENTS.md`
-
-### 2026-10-10 — [amendment] Token-count review fixes (m9 D1, PR #643 review)
-- What: `ReplicaPool` counts tokens on placeable replicas only; vLLM chat counts decline tools under `tool_choice: none`.
-- Why: a drained replica with an older config turned count_tokens/input_tokens into 400 for inputs the pool generates; vLLM's `--exclude-tools-when-tool-choice-none` drops those tools from generation but not from `/tokenize`, and Kairyu cannot see the flag.
-- Refs: m9 D1 amendment 2026-10-10; `kairyu/orchestration/replica.py`, `kairyu/engine/openai_backend.py`
-
-### 2026-10-10 — [progress] Token counts equal billed prompt tokens on live vLLM stacks (#621, PR #643)
-- What: V1 `qwen3.8-27b-1gpu` and V2 `deepseek-v4.1-flash-8gpu`: count_tokens / input_tokens equal the billed input tokens in all 14 cases (text, system+tools, tool transcript, effort high); the main build undercounted them by 12-234 and 30-212 tokens.
-- Refs: m9 D1 amendment 2026-10-10; PR #643
-
-### 2026-10-10 — [amendment] Token counts tokenize what generation sends (m9 D1, #621, PR #643)
-- What: `/v1/messages/count_tokens` and `/v1/responses/input_tokens` pass the generation `GenerationRequest` to the backend; vLLM upstreams build the `/tokenize` chat body from the dispatch payload (messages, tools, template kwargs incl. vLLM's `reasoning_effort`/`enable_thinking` merge). Native/mock counts unchanged; images and llama.cpp stay declined.
-- Why: on vLLM upstreams without a Kairyu template the count tokenized a rendered string without the chat template (too low) and with a tool-intent suffix generation never sends (either direction); clients sizing context from it got a wrong budget.
-- Refs: m9 D1 amendment 2026-10-10; plan `docs/superpowers/plans/2026-10-10-issue-621-count-tokens.md`; `kairyu/engine/openai_backend.py`
-
-### 2026-10-10 — [progress] Quyet-1.0-Large System One example: all nine GPU gates pass (PR #642)
-- What: `examples/quyet-1.0-large-1gpu` serves the Jev-family decision model as System One only (no chat): example-owned adapter on the `quyet` package with a batch-invariant vLLM v0.31.0 as an internal pool (`public_models`); `kairyu/` unchanged. Gates rebuilt from TypeSafe's documented usage (reference, attest, parity, JevBench, fan-out, consistency, SDK, throughput, overload); run `20261010-s1-r2` passes all nine.
-- Why: owner direction: Jev models are decision APIs, so chat, tool-call and image surfaces were removed. vLLM's kernels differ from transformers in the tail (median probability difference 0.0001, max 0.22), so parity is judged on prompts, confident decisions (>= 99 %) and JevBench quality; batch invariance makes repeats identical at about 10 % latency.
-- Refs: FN-D9 Quyet amendment; plan `docs/superpowers/plans/2026-10-10-quyet-large-1gpu-example.md`; example `MEASUREMENTS.md`

@@ -119,3 +119,63 @@ async def test_mock_backend_usage_still_flows():
     usage = response.json()["usage"]
     assert usage["prompt_tokens"] > 0
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+async def test_usage_fallback_counts_a_conversation_sent_as_native_messages(tmp_path):
+    """m9 D2 amendment 2026-10-12 (PR #647 review): an upstream_chat_models
+    request has no prompt text, so the usage fallback must count its
+    conversation, in the response and in the usage ledger."""
+
+    from kairyu.engine.openai_backend import OpenAICompatBackend
+    from kairyu.entrypoints.server.app import create_app
+    from kairyu.entrypoints.server.settings import ServerSettings
+
+    usage_free_stream = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://vllm.test/v1",
+        model="m",
+        api_key_env=None,
+        upstream="vllm",
+        request_stream_usage=False,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=usage_free_stream,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+    )
+    ledger = tmp_path / "usage.jsonl"
+    app = create_app(
+        {"m": backend},
+        upstream_chat_models={"m"},
+        settings=ServerSettings(usage_ledger_path=str(ledger)),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "hello " * 1000}],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+    await backend.shutdown()
+    app.state.usage_ledger.flush()
+
+    assert response.status_code == 200
+    chunks = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+    ]
+    usage = chunks[-1]["usage"]
+    (row,) = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert usage["prompt_tokens"] >= 1000
+    assert row["prompt_tokens"] == usage["prompt_tokens"]

@@ -554,6 +554,157 @@ legacy_chat_models: [remote]
     ]
 
 
+_TOOL_CONVERSATION = [
+    {"role": "system", "content": "Fix the failing test."},
+    {"role": "user", "content": "Run the tests first."},
+    {
+        "role": "assistant",
+        "content": "Running them.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command": "pytest -q"}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "1 failed"},
+]
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}
+
+
+async def test_upstream_chat_model_sends_the_callers_conversation_natively(
+    monkeypatch,
+):
+    """m9 D2 amendment 2026-10-12: the upstream renders the model's template
+    from the caller's own turns, not from one flattened user message."""
+
+    from kairyu.engine.openai_backend import OpenAICompatBackend
+
+    captured: dict = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        call = {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "cat t.py"}'},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-fake",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [call],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 1, "total_tokens": 10},
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm.test/v1",
+        model="upstream-model",
+        api_key_env=None,
+        upstream="vllm",
+        transport=httpx.MockTransport(upstream),
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda _name, **_options: backend,
+    )
+    spec = load_deployment_spec(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://vllm.test/v1
+      model: upstream-model
+      api_key_env: null
+      upstream: vllm
+upstream_chat_models: [remote]
+"""
+    )
+
+    app = build_app_from_spec(spec)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": _TOOL_CONVERSATION,
+                "tools": [_BASH_TOOL],
+                "reasoning_effort": "max",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    (call,) = response.json()["choices"][0]["message"]["tool_calls"]
+    assert call["function"]["name"] == "bash"
+    assert captured["body"]["messages"] == _TOOL_CONVERSATION
+    assert captured["body"]["tools"] == [_BASH_TOOL]
+    assert captured["body"]["reasoning_effort"] == "max"
+    await backend.shutdown()
+
+
+def test_upstream_chat_model_fails_before_construction_without_upstream_support(
+    monkeypatch,
+):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        """
+pools:
+  remote:
+    replicas:
+    - backend: openai
+      options:
+        base_url: http://vllm/v1
+        model: upstream-model
+        upstream: vllm
+    - backend: openai
+      options:
+        base_url: http://llama/v1
+        model: upstream-model
+        upstream: llamacpp
+        max_model_len: 4096
+upstream_chat_models: [remote]
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="upstream_chat_models model 'remote'.*openai upstream 'llamacpp'",
+    ):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
 def test_explicit_legacy_policy_ignores_unused_checkpoint_template_metadata(
     tmp_path,
     monkeypatch,

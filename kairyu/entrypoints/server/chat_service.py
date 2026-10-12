@@ -40,7 +40,7 @@ from kairyu.entrypoints.chat_template import (
     render_chat,
     validate_upstream_chat_template_kwargs,
 )
-from kairyu.entrypoints.server.metering import resolve_usage_counts
+from kairyu.entrypoints.server.metering import metered_prompt, resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -151,6 +151,9 @@ class ValidatedChatInput:
     # publisher that receives the conversation natively (m1 D8 amendment).
     # None when the prompt is not an L2 transcript (legacy chat rendering).
     conversation_messages: tuple[Mapping[str, object], ...] | None = None
+    # A text chat of an upstream_chat_models model: its validated messages go
+    # upstream as they are, behind an empty prompt (m9 D2 amendment 2026-10-12).
+    upstream_conversation: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,8 @@ class ValidatedChatRequest:
 class ExecutedChat:
     response: ChatCompletionResponse
     result: GenerationResult
+    # What the usage fallback counts as prompt input (``metered_prompt``).
+    metered_prompt: PromptInput
 
 
 @dataclass(frozen=True)
@@ -320,6 +325,7 @@ def _validate_response_format(response_format: dict | None) -> None:
 def validate_chat_policy(
     chat_templates: Mapping[str, ChatTemplate] | None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
 ) -> None:
     """Reject ambiguous or unverifiable chat rendering configuration."""
 
@@ -329,6 +335,14 @@ def validate_chat_policy(
         raise ValueError(
             "models cannot be configured in both chat_templates and "
             f"legacy_chat_models: {sorted(overlap)}"
+        )
+    upstream_overlap = set(upstream_chat_models or ()) & (
+        set(templates) | set(legacy_chat_models or ())
+    )
+    if upstream_overlap:
+        raise ValueError(
+            "upstream_chat_models cannot also be configured in chat_templates or "
+            f"legacy_chat_models: {sorted(upstream_overlap)}"
         )
 
     invalid = {
@@ -751,12 +765,39 @@ def _render_multimodal_prompt(
     )
 
 
+def _upstream_conversation(
+    request: ChatCompletionRequest,
+    prepared: _PreparedChatMessages,
+) -> tuple[dict[str, object], ...]:
+    """The validated messages an upstream-rendered model receives natively.
+
+    They are the messages the legacy renderer would flatten, so the upstream
+    template sees the caller's turns, tool calls and tool results.
+    """
+
+    if request.chat_template_kwargs:
+        raise ChatRequestError(
+            f"model {request.model!r} has no Kairyu chat template; "
+            "chat_template_kwargs cannot be applied"
+        )
+    if (
+        _resolved_parallel_tool_calls(request) is False
+        and request.tools
+        and request.tool_choice != "none"
+    ):
+        messages, _ = _add_single_tool_constraint(prepared, insert_if_missing=True)
+    else:
+        messages = [dict(message.text_message) for message in prepared.messages]
+    return tuple(messages)
+
+
 def validate_chat_input(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
     *,
     allow_multimodal: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatInput:
     if request.model_extra:
         raise ChatRequestError(
@@ -777,6 +818,7 @@ def validate_chat_input(
     has_images = prepared.has_images
     if has_images and not allow_multimodal:
         raise ChatRequestError(f"model {request.model!r} does not support image inputs")
+    upstream_conversation: tuple[dict[str, object], ...] = ()
     if has_images:
         prompt: PromptInput = _render_multimodal_prompt(
             request,
@@ -785,15 +827,23 @@ def validate_chat_input(
         )
     else:
         try:
-            validate_chat_policy(chat_templates, legacy_chat_models)
+            validate_chat_policy(
+                chat_templates,
+                legacy_chat_models,
+                upstream_chat_models,
+            )
         except ValueError as error:
             raise ChatRequestError(str(error)) from error
-        prompt = _render_prepared_prompt(
-            request,
-            chat_templates,
-            prepared,
-            legacy_chat_models=legacy_chat_models,
-        )
+        if request.model in (upstream_chat_models or ()):
+            upstream_conversation = _upstream_conversation(request, prepared)
+            prompt = ""
+        else:
+            prompt = _render_prepared_prompt(
+                request,
+                chat_templates,
+                prepared,
+                legacy_chat_models=legacy_chat_models,
+            )
     return ValidatedChatInput(
         request=request,
         prompt=prompt,
@@ -812,6 +862,7 @@ def validate_chat_input(
             and request.tool_choice != "none"
         ),
         include_usage=bool(request.stream_options and request.stream_options.include_usage),
+        upstream_conversation=upstream_conversation,
     )
 
 
@@ -821,6 +872,7 @@ async def validate_chat_input_async(
     *,
     allow_multimodal: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatInput:
     """Prepare and render one chat input on the bounded prompt CPU lane."""
 
@@ -830,6 +882,7 @@ async def validate_chat_input_async(
         chat_templates,
         allow_multimodal=allow_multimodal,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
     )
 
 
@@ -1052,6 +1105,7 @@ def _finish_chat_request_validation(
             if isinstance(validated_input.prompt, MultimodalPrompt)
             else None
         ),
+        conversation_prefix=validated_input.upstream_conversation,
     )
     try:
         if before_prepare:
@@ -1082,6 +1136,7 @@ def validate_chat_request(
     placement_started_ns: int | None = None,
     trace_requested: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatRequest:
     """Synchronous compatibility entry point for non-async callers."""
 
@@ -1091,6 +1146,7 @@ def validate_chat_request(
         chat_templates,
         allow_multimodal=True,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
     )
     return _finish_chat_request_validation(
         request,
@@ -1117,6 +1173,7 @@ async def validate_chat_request_async(
     placement_started_ns: int | None = None,
     trace_requested: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatRequest:
     """Render off-loop, then validate mutable backend state on the loop."""
 
@@ -1126,6 +1183,7 @@ async def validate_chat_request_async(
         chat_templates,
         allow_multimodal=True,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
     )
     return _finish_chat_request_validation(
         request,
@@ -1146,15 +1204,16 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
         result = await validated.engine.generate(validated.generation_request)
     except UpstreamClientError as error:
         raise chat_error_from_upstream_client_error(error) from error
+    metered = metered_prompt(validated.generation_request)
     response = completion_response(
         validated.input.request,
-        validated.input.prompt,
+        metered,
         result.completions,
         result.usage,
         normalized_tool_choice=validated.input.normalized_tool_choice,
         tool_call_protocol=validated.input.tool_call_protocol,
     )
-    execution = ExecutedChat(response=response, result=result)
+    execution = ExecutedChat(response=response, result=result, metered_prompt=metered)
     if not tool_choice_is_satisfied(response.choices, validated.input.normalized_tool_choice):
         raise ChatRequestError(
             "upstream model did not satisfy tool_choice",
