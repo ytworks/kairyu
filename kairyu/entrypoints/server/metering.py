@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Protocol
 
-from kairyu.engine.backend import GenerationUsage
+from kairyu.engine.backend import GenerationRequest, GenerationUsage
 from kairyu.engine.prompt import (
     PromptInput,
     prompt_kind,
@@ -69,6 +70,22 @@ def _fallback_prompt_tokens(prompt: PromptInput) -> int:
     text = prompt_text(prompt)
     assert text is not None
     return _approx_tokens(text)
+
+
+def metered_prompt(request: GenerationRequest) -> PromptInput:
+    """The prompt the usage fallback counts for one dispatched request.
+
+    A caller conversation sent as native messages (``conversation_prefix``)
+    is prompt input too: when the upstream reports no usage, its JSON joins
+    the prompt text in the approximation, as in the admission bound.
+    """
+    if not request.conversation_prefix:
+        return request.prompt
+    conversation = json.dumps(
+        list(request.conversation_prefix), ensure_ascii=False, default=str
+    )
+    text = prompt_text(request.prompt)
+    return f"{conversation}\n{text}" if text else conversation
 
 
 def resolve_usage_counts(

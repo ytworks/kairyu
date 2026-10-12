@@ -57,6 +57,7 @@ from kairyu.entrypoints.server.messages_protocol import (
 )
 from kairyu.entrypoints.server.metering import (
     _approx_tokens,
+    metered_prompt,
     record_state_usage,
     resolve_cached_tokens,
     resolve_usage_counts,
@@ -735,7 +736,7 @@ def _outcome_from_execution(
     validated: ValidatedChatRequest,
 ) -> tuple[list[dict], str, dict]:
     usage = _usage_payload(
-        execution.result.prompt,
+        execution.metered_prompt,
         execution.result.completions,
         execution.result.usage,
     )
@@ -786,7 +787,7 @@ def _record_execution(
     execution: ExecutedChat,
 ) -> None:
     usage = _usage_payload(
-        execution.result.prompt,
+        execution.metered_prompt,
         execution.result.completions,
         execution.result.usage,
     )
@@ -1008,7 +1009,7 @@ async def _live_tool_events(
         http_request.app.state,
         tenant=owner,
         model=request.model,
-        prompt=validated.generation_request.prompt,
+        prompt=metered_prompt(validated.generation_request),
         reservation=getattr(http_request.state, "tenant_admission", None),
     )
 
@@ -1097,7 +1098,7 @@ async def _live_tool_events(
         for chunk in emitter.finish():
             yield chunk
         usage = _usage_payload(
-            validated.generation_request.prompt,
+            metered_prompt(validated.generation_request),
             completions,
             usage_owner.latest_usage,
         )
@@ -1292,7 +1293,7 @@ async def _live_text_events(
         http_request.app.state,
         tenant=owner,
         model=request.model,
-        prompt=validated.generation_request.prompt,
+        prompt=metered_prompt(validated.generation_request),
         reservation=getattr(http_request.state, "tenant_admission", None),
     )
     try:
@@ -1345,7 +1346,7 @@ async def _live_text_events(
         finish_reason = completion.finish_reason if completion is not None else None
         yield _content_block_stop_event(0)
         usage = _usage_payload(
-            validated.generation_request.prompt,
+            metered_prompt(validated.generation_request),
             completions,
             usage_owner.latest_usage,
         )

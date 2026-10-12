@@ -21,7 +21,11 @@ from kairyu.entrypoints.server.chat_service import (
     ValidatedChatRequest,
     execute_chat,
 )
-from kairyu.entrypoints.server.metering import record_state_usage, stream_usage_owner_from_state
+from kairyu.entrypoints.server.metering import (
+    metered_prompt,
+    record_state_usage,
+    stream_usage_owner_from_state,
+)
 from kairyu.entrypoints.server.responses_codec import (
     _compaction_output_from_message,
     _CompactionCodec,
@@ -56,7 +60,7 @@ def _record_execution(
     execution: ExecutedChat,
 ) -> None:
     usage = _usage_payload(
-        execution.result.prompt,
+        execution.metered_prompt,
         execution.result.completions,
         execution.result.usage,
     )
@@ -151,7 +155,7 @@ async def engine_stream(
         http_request.app.state,
         tenant=owner,
         model=request.model,
-        prompt=validated.generation_request.prompt,
+        prompt=metered_prompt(validated.generation_request),
         reservation=getattr(http_request.state, "tenant_admission", None),
     )
     last: GenerationResult | None = None
@@ -162,7 +166,9 @@ async def engine_stream(
     def usage() -> dict:
         completions = last.completions if last is not None else ()
         return _usage_payload(
-            validated.generation_request.prompt, completions, usage_owner.latest_usage
+            metered_prompt(validated.generation_request),
+            completions,
+            usage_owner.latest_usage,
         )
 
     def failed_usage() -> dict:
@@ -298,7 +304,7 @@ async def engine_unary(
     execution = await _execute(request, validated, http_request)
     completion = _first_completion(execution)
     result = execution.result
-    usage = _usage_payload(result.prompt, result.completions, result.usage)
+    usage = _usage_payload(execution.metered_prompt, result.completions, result.usage)
     status, details = _status(
         request, validated, completion.finish_reason if completion is not None else None
     )
@@ -343,7 +349,7 @@ async def engine_compaction(
     execution = await _execute(request, validated, http_request)
     completion = _first_completion(execution)
     result = execution.result
-    usage = _usage_payload(result.prompt, result.completions, result.usage)
+    usage = _usage_payload(execution.metered_prompt, result.completions, result.usage)
     status, details = terminal_status(
         completion.finish_reason if completion is not None else None,
         cap_omitted=False,

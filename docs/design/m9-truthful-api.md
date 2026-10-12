@@ -186,6 +186,12 @@ token-granularity TPOT, results files).
   multimodal path. `legacy_chat_models` is unchanged. Known limit: KV-aware
   prefix placement reads the (empty) prompt text, so a multi-replica pool of
   such a model places by load and session affinity only.
+  Review amendment (PR #647, owner review): when the upstream reports no usage
+  (a stream without its usage chunk, or a disconnect before it), the usage
+  fallback counts the conversation's JSON with the prompt text
+  (`metering.metered_prompt`, the representation the admission bound counts)
+  in the response, the usage ledger and the metrics, instead of the empty
+  prompt's 0.
   Why (framework boundary): (1) the pool chat path could not deliver a
   conversation to an upstream that owns the template: legacy chats reach vLLM
   as one `system: ...\nuser: ...` user message, and GLM-5.3-Flash then
@@ -200,7 +206,8 @@ token-granularity TPOT, results files).
   the examples. Code: `chat_service._upstream_conversation`,
   `builder._entry_renders_native_chat`; tests:
   `test_upstream_chat_model_sends_the_callers_conversation_natively`,
-  `test_upstream_chat_model_fails_before_construction_without_upstream_support`.
+  `test_upstream_chat_model_fails_before_construction_without_upstream_support`,
+  `test_usage_fallback_counts_a_conversation_sent_as_native_messages`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and

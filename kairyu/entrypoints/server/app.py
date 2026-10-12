@@ -83,6 +83,7 @@ from kairyu.entrypoints.server.errors import (
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metering import (
     StreamUsageOwner,
+    metered_prompt,
     record_state_usage,
     resolve_cached_tokens,
     resolve_usage_counts,
@@ -957,7 +958,7 @@ async def _stream_engine(
             )
         return metrics
 
-    owner = _stream_usage_owner(http_request, model, generation_request.prompt)
+    owner = _stream_usage_owner(http_request, model, metered_prompt(generation_request))
     try:
         try:
             owner.mark_dispatched()
@@ -1078,7 +1079,7 @@ async def _stream_engine(
                 created,
                 model,
                 _wire_usage(
-                    generation_request.prompt,
+                    metered_prompt(generation_request),
                     last.completions,
                     owner.latest_usage,
                 ),
@@ -2867,7 +2868,7 @@ def create_app(
                     http_request,
                     request.model,
                     error.execution.result.usage,
-                    prompt=error.execution.result.prompt,
+                    prompt=error.execution.metered_prompt,
                     completions=error.execution.result.completions,
                 )
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
@@ -2878,7 +2879,7 @@ def create_app(
             http_request,
             request.model,
             executed.result.usage,
-            prompt=executed.result.prompt,
+            prompt=executed.metered_prompt,
             completions=executed.result.completions,
         )
         if request.stream:

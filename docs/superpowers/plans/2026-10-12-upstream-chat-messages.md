@@ -52,6 +52,9 @@ messages natively.
   behavior, every other example.
 - Token counts follow automatically: the vLLM `/tokenize` body is built from
   the same `_payload` (m9 D1 amendment 2026-10-10).
+- Usage fallback (owner review): when the upstream reports no usage, the
+  response, ledger and metrics count the conversation's JSON with the prompt
+  text (`metering.metered_prompt`), as the admission bound does.
 - Known limit: KV-aware prefix placement reads the prompt text, which is
   empty for these requests, so a multi-replica pool of such a model places by
   load and session affinity only. Both target examples run one replica.
@@ -98,6 +101,8 @@ Framework admission (`.claude/rules/framework-boundary.md`):
    the same messages, with `tools` and `reasoning_effort`.
 2. Startup: listing a model whose replica's upstream lacks the capability
    (`llamacpp`) fails the build.
+3. Usage fallback (review): a stream from an upstream that reports no usage
+   counts the conversation in the response usage and the usage ledger.
 
 Local: `uv run ruff check .` and the touched test files with
 `CUDA_VISIBLE_DEVICES=`; the full suite runs in GitHub CI.

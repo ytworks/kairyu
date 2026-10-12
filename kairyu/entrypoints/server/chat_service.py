@@ -40,7 +40,7 @@ from kairyu.entrypoints.chat_template import (
     render_chat,
     validate_upstream_chat_template_kwargs,
 )
-from kairyu.entrypoints.server.metering import resolve_usage_counts
+from kairyu.entrypoints.server.metering import metered_prompt, resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -167,6 +167,8 @@ class ValidatedChatRequest:
 class ExecutedChat:
     response: ChatCompletionResponse
     result: GenerationResult
+    # What the usage fallback counts as prompt input (``metered_prompt``).
+    metered_prompt: PromptInput
 
 
 @dataclass(frozen=True)
@@ -1202,15 +1204,16 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
         result = await validated.engine.generate(validated.generation_request)
     except UpstreamClientError as error:
         raise chat_error_from_upstream_client_error(error) from error
+    metered = metered_prompt(validated.generation_request)
     response = completion_response(
         validated.input.request,
-        validated.input.prompt,
+        metered,
         result.completions,
         result.usage,
         normalized_tool_choice=validated.input.normalized_tool_choice,
         tool_call_protocol=validated.input.tool_call_protocol,
     )
-    execution = ExecutedChat(response=response, result=result)
+    execution = ExecutedChat(response=response, result=result, metered_prompt=metered)
     if not tool_choice_is_satisfied(response.choices, validated.input.normalized_tool_choice):
         raise ChatRequestError(
             "upstream model did not satisfy tool_choice",
