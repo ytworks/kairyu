@@ -937,6 +937,31 @@ Why: the owner wants the same verified tool route served with GLM-5.3-Flash
 as the writer, built from the two GPU-verified examples without changing
 what neither forces.
 
+**Amendment (2026-10-13): #646 fixes in both Quyet examples.**
+
+Applies to `deepseek-v4.1-quyet-8gpu` and `glm-5.3-flash-quyet-8gpu`.
+
+- Candidates read the caller's conversation natively, their prompt (with the
+  caller's tools listed as text) after it (B2, m1 D8 amendment 2026-10-13).
+- The writer's vLLM returns cached prompt tokens
+  (`--enable-prompt-tokens-details`), so each stage's prefix-cache reuse
+  appears in the trace (A3).
+- The Quyet adapters read a question again once when the connection to
+  their vLLM drops (`NetworkError`, `RemoteProtocolError`); timeouts and
+  answered errors are not repeated (C1).
+- The route judge reads at most 11,000 characters (was 12,000) (C2).
+- Public usage counts the caller's prompt exactly and reports the writer's
+  reasoning share; form checks name their failing items (A1, A2, C4: m9 and
+  m1 D8 amendments 2026-10-13).
+
+Why: the DeepSWE run of #646 (`deepswe-quyet-verified-tool-8w-20261011-r1`):
+candidates re-read the conversation as a text block (69 % of DeepSeek's
+request time is that stage) and no stage's cache reuse was visible
+(`cached_tokens` 0 everywhere); 6 dropped Quyet reads published 5 replies
+without judgments or form check; 2 of 2,674 route states read over Quyet's
+6,000 tokens at 12,000 characters (6,069 and 6,052 tokens, 1.98 characters
+per token). GPU gates pending for both examples.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

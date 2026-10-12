@@ -4276,6 +4276,9 @@ async def test_native_conversation_publisher_keeps_a_legacy_chat_prompt():
     payloads: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tokenize"):
+            # The public prompt count (m9 amendment 2026-10-13), not a dispatch.
+            return httpx.Response(200, json={"count": 7})
         payloads.append(json.loads(request.content))
         return httpx.Response(
             200,
@@ -4336,6 +4339,101 @@ async def test_native_conversation_publisher_keeps_a_legacy_chat_prompt():
     (sent,) = payloads
     assert len(sent["messages"]) == 1
     assert "What is 2 + 2?" in sent["messages"][0]["content"]
+
+
+async def test_orchestrated_usage_counts_the_callers_prompt_and_reports_reasoning():
+    # #646 A1/A2 (m9 amendment 2026-10-13): a DSL route's public prompt_tokens
+    # is the publisher worker's /tokenize count of the caller's own messages
+    # and tools (not a word count), and the upstream's reasoning share of the
+    # public completion reaches usage and the trace.
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.router import RuleRouter
+
+    tokenized: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/tokenize"):
+            tokenized.append(body)
+            return httpx.Response(200, json={"count": 321})
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "4"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 400,
+                    "completion_tokens": 30,
+                    "total_tokens": 430,
+                    "completion_tokens_details": {"reasoning_tokens": 25},
+                },
+            },
+        )
+
+    upstream = OpenAICompatBackend(
+        base_url="https://native.example/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+    )
+    multi_step = (
+        "First, research the options. Then design a plan. After that, implement it. "
+        "Finally, verify everything works end to end."
+    )
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(multi_step)
+
+    orchestrator = Orchestrator(
+        {"tier1": upstream, "tier2": upstream},
+        roles=(
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                prompt="Answer briefly.",
+                native_conversation=True,
+            ),
+        ),
+        router=MultiAgentRouter(),
+    )
+    app = create_legacy_app(engines={}, orchestrators={"auto": orchestrator})
+    messages = [
+        {"role": "system", "content": "Be terse."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ]
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "auto", "messages": messages, "max_tokens": 64},
+            headers={"X-Kairyu-Trace": "1"},
+        )
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == 321
+    assert usage["completion_tokens"] == 30
+    assert usage["completion_tokens_details"] == {"reasoning_tokens": 25}
+    # The legacy-rendered chat reaches the counter as the publisher gets it
+    # (one user message); a native conversation is counted as its messages
+    # (the Quyet example tests).
+    ((counted,),) = [count["messages"] for count in tokenized]
+    assert "Be terse." in counted["content"] and "What is 2 + 2?" in counted["content"]
+    events = response.json()["kairyu_trace_v2"]["events"]
+    final = next(event for event in events if event["node"] == "final")
+    assert final["usage"]["reasoning_tokens"] == 25
 
 
 # --- Issue #496: OpenAI compatibility for output limits, model retrieve, ---

@@ -67,6 +67,9 @@ services:
     - '{"temperature":1.0,"top_p":0.95}'
     - --limit-mm-per-prompt
     - '{"image":8}'
+    # Per-call cached prompt tokens in usage, so the trace shows each
+    # stage's prefix-cache reuse (#646 A3).
+    - --enable-prompt-tokens-details
     - --disable-uvicorn-access-log
     healthcheck:
       test:

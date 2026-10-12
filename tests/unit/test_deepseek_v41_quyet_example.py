@@ -11,6 +11,7 @@ observe what the deployed L1 services would receive and which route answers.
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 from pathlib import Path
 
@@ -91,11 +92,16 @@ MOVE = {
 }
 
 
-def _deepseek(seen: list[dict], move: dict = MOVE):
+def _deepseek(seen: list[dict], move: dict = MOVE, counts: list[dict] | None = None):
     """The fake DeepSeek vLLM service: candidates by role tag, else the move."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        if request.url.path.endswith("/tokenize"):
+            # The public prompt count of the caller's request (#646 A1).
+            if counts is not None:
+                counts.append(body)
+            return httpx.Response(200, json={"count": 1234})
         seen.append(body)
         prompt = body["messages"][-1]["content"]
         if prompt.startswith("[candidates]"):
@@ -169,13 +175,14 @@ def _orchestrator(
     down=frozenset(),
     form=lambda n: 0.9,
     move: dict = MOVE,
+    counts: list[dict] | None = None,
 ):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
     engines = {
         name: OpenAICompatBackend(
-            **pool.replicas[0].options, transport=httpx.MockTransport(_deepseek(seen, move))
+            **pool.replicas[0].options, transport=httpx.MockTransport(_deepseek(seen, move, counts))
         )
         for name, pool in deployment.pools.items()
     }
@@ -276,7 +283,8 @@ async def test_think_is_one_deepseek_answer_at_the_callers_effort(effort) -> Non
 async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="TOOL")
+    counts: list[dict] = []
+    orchestrator = _orchestrator(seen, reads, route="TOOL", counts=counts)
     call = _agent_call()
     if effort is not None:
         call = dataclasses.replace(call, reasoning_effort=effort)
@@ -291,6 +299,15 @@ async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) 
     # The candidates: one DeepSeek call at the caller's effort that reads the
     # caller's tools.
     candidates, answer = seen
+    # The candidates read the caller's turn natively, their prompt after it
+    # (#646 B2), and get no tools to call.
+    assert candidates["messages"][:-1] == AGENT_TURN
+    assert not candidates.get("tools")
+    # The public prompt is the caller's turn and tools, counted by the
+    # publisher's worker (#646 A1).
+    assert result.public_prompt_tokens == 1234
+    ((count,),) = [counts]
+    assert count["messages"] == AGENT_TURN and count["tools"] == [BASH]
     prompt = candidates["messages"][-1]["content"]
     assert prompt.startswith("[candidates]") and candidates["model"] == "deepseek-v4.1-flash"
     assert candidates["reasoning_effort"] == (effort or "high")
@@ -358,6 +375,14 @@ async def test_a_reply_failing_the_form_check_is_fixed_and_checked_again(form, a
         unmet = material.split("--- UNMET REQUIREMENTS ---")[1]
         assert "- [F1] p=0.20" in unmet and "- [F7] p=0.20" in unmet
     assert '<tool_call>{"name":"bash"' in result.text
+    # Each form check names the requirements it failed (#646 C4).
+    checks = [
+        event.metadata["failing_ids"]
+        for event in result.structured_trace.events
+        if event.node == "format_check" and event.kind == "verified"
+    ]
+    assert checks[0] == [f"F{n}" for n in range(1, 8)]
+    assert len(checks) == answers
 
 
 async def test_a_reply_too_long_to_check_whole_is_published_unverified() -> None:
@@ -406,3 +431,44 @@ async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:
     assert call.role_profile_judgment is None
     (body,) = seen
     assert body["messages"] == [{"role": "user", "content": "Name the capital of France."}]
+
+
+def _reader(transport: httpx.BaseTransport):
+    module_spec = importlib.util.spec_from_file_location(
+        f"{EXAMPLE.name}_quyet_systemone", EXAMPLE / "quyet_systemone.py"
+    )
+    adapter = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(adapter)
+    return adapter.VllmReader(adapter.Settings(), transport=transport)
+
+
+@pytest.mark.parametrize("drops", [1, 2])
+def test_a_dropped_quyet_read_is_read_again_once(drops) -> None:
+    # #646 C1: a read whose connection drops is sent again once; a second
+    # drop reaches the endpoint, which answers 503.
+    attempts: list[int] = []
+
+    def vllm(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) <= drops:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+        return httpx.Response(
+            200,
+            json={
+                "usage": {"prompt_tokens": 3},
+                "choices": [
+                    {"logprobs": {"top_logprobs": [{"token_id:7": -0.1, "token_id:8": -2.3}]}}
+                ],
+            },
+        )
+
+    reader = _reader(httpx.MockTransport(vllm))
+    try:
+        if drops == 1:
+            assert reader.letter_logprobs([1, 2, 3], [7, 8]) == [-0.1, -2.3]
+        else:
+            with pytest.raises(httpx.TransportError):
+                reader.letter_logprobs([1, 2, 3], [7, 8])
+    finally:
+        reader.close()
+    assert len(attempts) == 2

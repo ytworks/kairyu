@@ -115,6 +115,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-13 — [amendment] #646 fixes: exact orchestrated usage, native candidates, Quyet robustness (m9, m1 D8, VCO)
+- What: DSL routes count the caller's prompt with the publisher worker (`/tokenize`) and report the upstream's reasoning share (usage, trace); checklist traces name failing items; any generation role may read the conversation natively. Both Quyet examples: candidates read natively, writer vLLM returns cached tokens, adapters re-read a dropped Quyet read once, route judge 11,000 chars. GPU gates pending for both.
+- Why: DeepSWE run of #646: public prompt_tokens 0.27x of exact, thinking unreported, no per-stage cache data, 6 dropped Quyet reads, 2 route states over 6,000 tokens.
+- Refs: #646 (A1, A2, A3, B2, C1, C2, C4); m9 and m1 D8 amendments 2026-10-13; VCO amendment 2026-10-13
+
 ### 2026-10-12 — [design] GLM-5.3-Flash as the verified tool route's writer (VCO-D23, PR #648)
 - What: new `examples/glm-5.3-flash-quyet-8gpu`: VCO-D22 route (2026-10-11 amendment) with GLM-5.3-Flash (TP2 x DP3 / EP6, MTP 3, stock vLLM v0.31.0, GPUs 0-5) in every writer role and the two Quyet replicas of VCO-D21. Changed only what GLM forces: no `chat_template_kwargs` (effort via `reasoning_effort`), pool on `upstream_chat_models`, default effort max, F2 names GLM's call markup. `kairyu/` unchanged; GPU gates pending.
 - Why: owner decision: the same route served with GLM as the writer, built from two GPU-verified examples without changing what neither forces.

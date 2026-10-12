@@ -114,18 +114,23 @@ class VllmReader:
         self.http.close()
 
     def letter_logprobs(self, ids: list[int], letter_ids: list[int]) -> list[float]:
-        response = self.http.post(
-            "/v1/completions",
-            json={
-                "model": self.model,
-                "prompt": ids,
-                "max_tokens": 1,
-                "temperature": 0,
-                "logprobs": 1,
-                "logprob_token_ids": letter_ids,
-                "return_tokens_as_token_ids": True,
-            },
-        )
+        body = {
+            "model": self.model,
+            "prompt": ids,
+            "max_tokens": 1,
+            "temperature": 0,
+            "logprobs": 1,
+            "logprob_token_ids": letter_ids,
+            "return_tokens_as_token_ids": True,
+        }
+        try:
+            response = self.http.post("/v1/completions", json=body)
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as error:
+            # A dropped connection (disconnect, reset) is read again once: the
+            # read is greedy and one token, so a repeat answers the same
+            # (#646 C1). A timeout or a response with a status is not repeated.
+            log.warning("read retried after %s", type(error).__name__)
+            response = self.http.post("/v1/completions", json=body)
         if 400 <= response.status_code < 500:
             raise UpstreamRefused(response.text[:500])
         response.raise_for_status()

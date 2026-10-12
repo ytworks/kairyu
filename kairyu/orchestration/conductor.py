@@ -229,17 +229,17 @@ class RoleSpec:
     # template is rendered over the role outputs plus {previous} and
     # {feedback}.
     refine_prompt: str = ""
-    # A publisher that answers the caller's turn itself: its worker receives
-    # the caller's conversation as native chat messages (tool calls and tool
-    # results included) and the rendered prompt as one final user message,
-    # omitted when empty (m1 D8 amendment 2026-10-09).
+    # A generation role that reads the caller's turn itself: its worker
+    # receives the caller's conversation as native chat messages (tool calls
+    # and tool results included) and the rendered prompt as one final user
+    # message, omitted when empty (m1 D8 amendments 2026-10-09, 2026-10-13).
     native_conversation: bool = False
 
     def __post_init__(self) -> None:
         if self.native_conversation:
-            if self.role_type != "publisher":
+            if self.role_type in {"verifier", "executor"}:
                 raise ValueError(
-                    f"role {self.name!r}: native_conversation is for a publisher role"
+                    f"role {self.name!r}: native_conversation is for a generation role"
                 )
             if self.prompt_suffix or self.prompt_headless or self.reasoning_closed or (
                 self.reasoning_close_tag and self.reasoning_continuation != "chat"
@@ -396,6 +396,8 @@ class ConductorResult:
     # unit); None when any active public stage lacked backend usage. Standard
     # OpenAI usage derives from this, never from the cumulative sums above.
     public_completion_tokens: int | None = None
+    # Upstream-reported reasoning share of public_completion_tokens (None: unreported).
+    public_reasoning_tokens: int | None = None
     # False when the selected final unit failed or produced no public text
     # (issue #496): the caller must see an explicit error, never an internal
     # stage's text or an empty "stop".
@@ -594,6 +596,8 @@ class _RunState:
     head_completion_tokens: int | None = None
     head_usage_reported: bool = False
     final_unit_completion_tokens: int | None = None
+    # The final unit's reasoning share of those tokens, when its upstream reports it.
+    final_unit_reasoning_tokens: int | None = None
     public_budget_exhausted: bool = False
     final_unit_unusable: bool = False
     # Checklist verification state: the final unit's public report, and the
@@ -1951,6 +1955,7 @@ class Conductor:
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
                 cached_tokens=result.usage.cached_tokens,
+                reasoning_tokens=result.usage.reasoning_tokens,
             )
         return _GenerationObservation(
             text=result.text,
@@ -2224,6 +2229,7 @@ class Conductor:
                 prompt_tokens=latest_usage.prompt_tokens,
                 completion_tokens=latest_usage.completion_tokens,
                 cached_tokens=latest_usage.cached_tokens,
+                reasoning_tokens=latest_usage.reasoning_tokens,
             )
 
         try:
@@ -2445,6 +2451,7 @@ class Conductor:
             # The backend count belonged to the last attempt, not this text;
             # public usage falls back to the m9 approximation.
             run.final_unit_completion_tokens = None
+            run.final_unit_reasoning_tokens = None
 
     def _publish_last_answer(
         self,
@@ -2589,6 +2596,9 @@ class Conductor:
                     "pass": verdict.passed,
                     "items": len(verdict.items),
                     "failing": len(failing),
+                    # Which items failed on this attempt, so repairs can be
+                    # audited per requirement (m1 D8 amendment 2026-10-13).
+                    "failing_ids": [item.id for item in failing],
                     "min_p": min((item.p for item in verdict.items), default=1.0),
                     "reads": verdict.reads,
                     "refinement_exhausted": not verdict.passed and not can_refine,
@@ -2848,6 +2858,9 @@ class Conductor:
                     observed.usage.completion_tokens
                     if observed.usage is not None
                     else None
+                )
+                run.final_unit_reasoning_tokens = (
+                    observed.usage.reasoning_tokens if observed.usage is not None else None
                 )
             run.trace.append(
                 self._trace_event(
@@ -3162,6 +3175,7 @@ class Conductor:
             run.outputs.pop(spec.name, None)
             run.final_completions = ()
             run.final_unit_completion_tokens = None
+            run.final_unit_reasoning_tokens = None
         if spec.name not in run.outputs and not self._head_committed_text(run):
             run.final_unit_unusable = True
 
@@ -3318,6 +3332,21 @@ class Conductor:
         if final_tokens is None:
             return None
         return head_tokens + final_tokens
+
+    def _public_reasoning_tokens(self, run: _RunState) -> int | None:
+        """The upstream-reported reasoning share of the public answer's tokens.
+
+        Only a final unit published alone is covered: a committed head has no
+        reported reasoning share of its own, so the total is unknown.
+        """
+
+        if (
+            self._head is not None
+            and self._head_enabled()
+            and self._head.name in run.outputs
+        ):
+            return None
+        return run.final_unit_reasoning_tokens
 
     def _final_output_unit(self, run: _RunState) -> RoleSpec | None:
         terminal = self._terminal_units()
@@ -3583,6 +3612,7 @@ class Conductor:
                     prompt_tokens=latest_usage.prompt_tokens,
                     completion_tokens=latest_usage.completion_tokens,
                     cached_tokens=latest_usage.cached_tokens,
+                    reasoning_tokens=latest_usage.reasoning_tokens,
                 )
             run.trace.append(
                 self._trace_event(
@@ -3619,6 +3649,7 @@ class Conductor:
                 prompt_tokens=latest_usage.prompt_tokens,
                 completion_tokens=latest_usage.completion_tokens,
                 cached_tokens=latest_usage.cached_tokens,
+                reasoning_tokens=latest_usage.reasoning_tokens,
             )
         run.trace.append(
             self._trace_event(
@@ -3648,6 +3679,9 @@ class Conductor:
         run.final_completions = unit_completions
         run.final_unit_completion_tokens = (
             latest_usage.completion_tokens if latest_usage is not None else None
+        )
+        run.final_unit_reasoning_tokens = (
+            latest_usage.reasoning_tokens if latest_usage is not None else None
         )
 
     async def _deferred_final_events(
@@ -3738,6 +3772,7 @@ class Conductor:
             cached_tokens=run.cached_tokens,
             reasoning_content=self._reasoning_content(run),
             public_completion_tokens=self._public_completion_tokens(run),
+            public_reasoning_tokens=self._public_reasoning_tokens(run),
             final_unit_ok=not run.final_unit_unusable,
             verification=run.verification,
         )
@@ -3809,6 +3844,7 @@ class Conductor:
                     include_final_attribution=False,
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
+                public_reasoning_tokens=self._public_reasoning_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
                 verification=run.verification,
             )
@@ -3995,6 +4031,7 @@ class Conductor:
                     include_final_attribution=False,
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
+                public_reasoning_tokens=self._public_reasoning_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
                 verification=run.verification,
             ),

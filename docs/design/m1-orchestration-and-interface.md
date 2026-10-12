@@ -332,6 +332,26 @@ prompt stay in the example. Code: `RoleSpec.native_conversation`,
 `test_generate_sends_the_callers_conversation_as_native_messages`,
 `test_conversation_prefix_fails_closed_without_upstream_support`.
 
+Amendment (2026-10-13, #646 B2/C4, owner authorization): (B2) any generation
+role may declare `native_conversation`, not only a publisher; verifiers and
+executors may not. A role before the publisher then receives the caller's
+messages natively with its prompt after them, and still none of the
+caller's tools. (C4) A checklist verifier's trace event names the failing
+item IDs of each attempt (`failing_ids`) beside their count.
+Why (framework boundary): (1) a pre-publisher role could read an agent's
+turn only as a JSON transcript inside its prompt, so on the DeepSWE run of
+#646 the candidates stage re-read the whole conversation in a text block
+whose prefix no other call shares; repairs could be audited only by count
+(102 refinements, no requirement named); (2) `native_conversation` was
+publisher-only and the trace had no item field; (3) any DSL whose earlier
+roles read a tool conversation, and any checklist with repairs, is affected;
+(4) the first lifts one role-type restriction over the existing
+`conversation_prefix`; the second adds one metadata list. Which roles read
+natively stays in the examples. Code: `RoleSpec.__post_init__`,
+`Conductor._checklist_round` trace metadata; tests:
+`test_native_conversation_reaches_a_role_before_the_publisher`, the Quyet
+example tests (`failing_ids`).
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in

@@ -52,7 +52,7 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
 ```
 
 - Quyet reads at most 6,000 state tokens (its documented input; a longer
-  object is cut at its end). The route judge reads at most 12,000 characters
+  object is cut at its end). The route judge reads at most 11,000 characters
   of the conversation and the judgments 8,000. A long run keeps its first
   message, its system and developer messages, its latest user message and its
   newest messages, so an agent's task, protocol and latest results stay
@@ -87,7 +87,9 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   the reply's form, not the correctness of the move.
 - Both routes pass the caller's tools and response_format to the DeepSeek role
   that publishes, which receives the caller's conversation as native chat
-  messages (m1 D8 amendment). The candidates read the conversation as JSON.
+  messages (m1 D8 amendment). The candidates also receive the conversation
+  as native chat messages, followed by their prompt, which lists the
+  caller's tools as text; they get no tools to call (#646 B2).
 - Stage reports are not returned in `reasoning_content`: an agent replays
   them in its next request.
 

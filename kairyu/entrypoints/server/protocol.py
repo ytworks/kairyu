@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -342,11 +343,17 @@ class PromptTokensDetails(BaseModel):
     cached_tokens: int = 0
 
 
+class CompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+
+
 class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     prompt_tokens_details: PromptTokensDetails | None = None
+    # Present only when the upstream reported the reasoning share.
+    completion_tokens_details: CompletionTokensDetails | None = None
     # Additive AUTO-model accounting.  These are absent on ordinary engine
     # responses and are cumulative across every internal generation call.
     orchestration_input_tokens: int | None = Field(default=None, ge=0)
@@ -364,6 +371,15 @@ class KairyuTraceUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    # Present only when the upstream reported the reasoning share.
+    reasoning_tokens: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unreported_reasoning(self, handler):
+        payload = handler(self)
+        if payload.get("reasoning_tokens") is None:
+            payload.pop("reasoning_tokens", None)
+        return payload
 
 
 class KairyuTraceBudget(BaseModel):

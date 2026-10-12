@@ -856,6 +856,57 @@ async def test_native_conversation_publisher_answers_the_callers_own_turn(case) 
         assert final.prompt == "Material: ok"
 
 
+async def test_native_conversation_reaches_a_role_before_the_publisher() -> None:
+    # m1 D8 amendment 2026-10-13 (#646 B2): a generation role before the
+    # publisher may read the caller's turn natively too (its prompt after the
+    # messages); it still gets none of the caller's tools.
+    from kairyu.entrypoints.server.chat_service import validate_orchestration_chat_input
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    worker = _ChatRecorder()
+    orchestrator = _orchestrator(
+        engines={"tier2": worker},
+        roles=(
+            RoleSpec(
+                name="notes",
+                worker="tier2",
+                prompt="[notes] list the next steps",
+                native_conversation=True,
+            ),
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                depends_on=("notes",),
+                prompt="Material: {notes}",
+            ),
+        ),
+    )
+    messages = [
+        {"role": "user", "content": COMPLEX},
+        {"role": "assistant", "content": "Looking."},
+        {"role": "user", "content": "Go on."},
+    ]
+    tool = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}
+    validated = validate_orchestration_chat_input(
+        ChatCompletionRequest(model="m", messages=messages, tools=[tool])
+    )
+    await orchestrator.run(
+        OrchestrationRequest(
+            prompt=validated.prompt,
+            sampling_params=SamplingParams(max_tokens=64),
+            tools=(tool,),
+            conversation=validated.conversation_messages,
+        )
+    )
+
+    notes, final = worker.requests
+    assert notes.conversation_prefix == tuple(messages)
+    assert notes.prompt == "[notes] list the next steps"
+    assert not notes.tools
+    assert final.conversation_prefix == ()
+
+
 def test_character_cost_counts_a_native_conversation() -> None:
     # PR #641 review: max_cost_usd must see the conversation sent natively.
     from kairyu.orchestration.conductor import chars_cost_model

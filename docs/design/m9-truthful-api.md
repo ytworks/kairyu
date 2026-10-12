@@ -208,6 +208,32 @@ token-granularity TPOT, results files).
   `test_upstream_chat_model_sends_the_callers_conversation_natively`,
   `test_upstream_chat_model_fails_before_construction_without_upstream_support`,
   `test_usage_fallback_counts_a_conversation_sent_as_native_messages`.
+- **Orchestrated-usage amendment (2026-10-13, #646 A1/A2, owner authorization):**
+  (A1) A DSL route's public `usage.prompt_tokens` is the caller's request
+  counted by the selected profile's publisher worker: its messages (or plain
+  prompt) and tools, with the effective effort, through
+  `backend_count_prompt_tokens_async` (vLLM `/tokenize`, m9 D1 amendment
+  2026-10-10). When that worker cannot count exactly (non-vLLM upstream, an
+  image request, a failure) the m9 approximation stays. (A2) The upstream's
+  `completion_tokens_details.reasoning_tokens` is read into
+  `GenerationUsage.reasoning_tokens`, each trace event's usage, and the public
+  `usage.completion_tokens_details.reasoning_tokens` for the part that public
+  `completion_tokens` covers (the final unit; unknown when a head is
+  committed). It is never estimated: when the upstream does not report it the
+  field is absent.
+  Why (framework boundary): (1) a DSL route returned `public_prompt_tokens`
+  None, so `usage.prompt_tokens` was a whitespace word count
+  (`metering._approx_tokens`): 53.6M reported against 196.1M exact on the
+  DeepSWE run of #646 (0.27x), and thinking inside `completion_tokens` could
+  not be told from the returned text (85.9 % of it there); (2) no extension
+  point sets the public prompt count of an orchestrated route or carries a
+  reasoning share; (3) every orchestrated model under-reports its prompt to
+  clients that budget or bill from usage, and every thinking upstream's
+  share is lost, whatever the example; (4) the count reuses the existing
+  counter and the share is one optional usage field. Code:
+  `Orchestrator._public_prompt_tokens`, `openai_backend._usage_from`,
+  `Conductor._public_reasoning_tokens`, `app._orchestration_wire_usage`;
+  test: `test_orchestrated_usage_counts_the_callers_prompt_and_reports_reasoning`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and

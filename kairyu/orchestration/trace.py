@@ -40,11 +40,22 @@ class TraceTiming:
     completed_at: str | None = None
 
 
+def _usage_dict(usage: TraceUsage) -> dict[str, int]:
+    """The usage object, with reasoning_tokens only when the upstream reported it."""
+
+    payload = asdict(usage)
+    if payload["reasoning_tokens"] is None:
+        del payload["reasoning_tokens"]
+    return payload
+
+
 @dataclass(frozen=True)
 class TraceUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    # The upstream's reasoning share of completion_tokens; None when unreported.
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,7 +151,7 @@ class TraceEvent:
             "engine": self.engine,
             "model": self.model,
             "timing": asdict(self.timing) if self.timing is not None else None,
-            "usage": asdict(self.usage) if self.usage is not None else None,
+            "usage": _usage_dict(self.usage) if self.usage is not None else None,
             "budget": asdict(self.budget) if self.budget is not None else None,
             "detail": structured_detail,
             "error": asdict(self.error) if self.error is not None else None,

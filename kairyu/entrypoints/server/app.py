@@ -114,6 +114,7 @@ from kairyu.entrypoints.server.protocol import (
     CompletionLogprobs,
     CompletionRequest,
     CompletionResponse,
+    CompletionTokensDetails,
     LogLikelihoodCompletionChoice,
     LogLikelihoodCompletionResponse,
     ModelCard,
@@ -415,11 +416,6 @@ def _verification_payload(result) -> dict[str, object] | None:
 
     verification = getattr(result, "verification", None)
     return None if verification is None else verification.as_dict()
-_USAGE_ORCHESTRATION_FIELDS = frozenset(
-    {"orchestration_input_tokens", "orchestration_output_tokens"}
-)
-_USAGE_INPUT_FIELD = frozenset({"orchestration_input_tokens"})
-_USAGE_OUTPUT_FIELD = frozenset({"orchestration_output_tokens"})
 _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS = _KAIRYU_CHAT_EXTENSION_FIELDS | frozenset({"usage"})
 _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS = frozenset({"usage"})
 
@@ -434,13 +430,17 @@ def _route_payload(decision) -> RouteDecisionPayload:
 
 
 def _unset_orchestration_usage_fields(usage: Usage) -> frozenset[str]:
-    if usage.orchestration_input_tokens is None:
-        if usage.orchestration_output_tokens is None:
-            return _USAGE_ORCHESTRATION_FIELDS
-        return _USAGE_INPUT_FIELD
-    if usage.orchestration_output_tokens is None:
-        return _USAGE_OUTPUT_FIELD
-    return frozenset()
+    """Usage fields to omit: unset AUTO counters and an unreported reasoning share."""
+
+    return frozenset(
+        name
+        for name, value in (
+            ("orchestration_input_tokens", usage.orchestration_input_tokens),
+            ("orchestration_output_tokens", usage.orchestration_output_tokens),
+            ("completion_tokens_details", usage.completion_tokens_details),
+        )
+        if value is None
+    )
 
 
 def _with_usage_exclude(
@@ -476,6 +476,7 @@ def _orchestration_wire_usage(
     completion_tokens: int,
     public_prompt_tokens: int | None = None,
     public_completion_tokens: int | None = None,
+    public_reasoning_tokens: int | None = None,
 ) -> Usage:
     """OpenAI usage describes the public request/response; AUTO totals are exact.
 
@@ -492,6 +493,10 @@ def _orchestration_wire_usage(
         usage.prompt_tokens = public_prompt_tokens
     if public_completion_tokens is not None:
         usage.completion_tokens = public_completion_tokens
+    if public_reasoning_tokens is not None:
+        usage.completion_tokens_details = CompletionTokensDetails(
+            reasoning_tokens=public_reasoning_tokens
+        )
     usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
     usage.orchestration_input_tokens = prompt_tokens
     usage.orchestration_output_tokens = completion_tokens
@@ -1310,6 +1315,7 @@ async def _stream_orchestrator(
                 completion_tokens=final_result.completion_tokens,
                 public_prompt_tokens=final_result.public_prompt_tokens,
                 public_completion_tokens=final_result.public_completion_tokens,
+                public_reasoning_tokens=final_result.public_reasoning_tokens,
             )
             metadata = _orchestrator_metadata_chunk(
                 response_id,
@@ -1358,6 +1364,7 @@ async def _stream_orchestrator(
                 completion_tokens=final_result.completion_tokens,
                 public_prompt_tokens=final_result.public_prompt_tokens,
                 public_completion_tokens=final_result.public_completion_tokens,
+                public_reasoning_tokens=final_result.public_reasoning_tokens,
             )
             metadata = _orchestrator_metadata_chunk(
                 response_id,
@@ -2565,6 +2572,7 @@ def create_app(
                     completion_tokens=result.completion_tokens,
                     public_prompt_tokens=result.public_prompt_tokens,
                     public_completion_tokens=result.public_completion_tokens,
+                    public_reasoning_tokens=result.public_reasoning_tokens,
                 )
                 _record_usage(
                     http_request,
@@ -2617,6 +2625,7 @@ def create_app(
                 completion_tokens=result.completion_tokens,
                 public_prompt_tokens=result.public_prompt_tokens,
                 public_completion_tokens=result.public_completion_tokens,
+                public_reasoning_tokens=result.public_reasoning_tokens,
             )
             # OrchestratorResult uses 0/0 when its backend did not report
             # usage; keep that state missing so metering derives the wire
@@ -3257,7 +3266,7 @@ def create_app(
         return JSONResponse(
             content=response.model_dump(
                 mode="json",
-                exclude={"usage": _USAGE_ORCHESTRATION_FIELDS},
+                exclude={"usage": _unset_orchestration_usage_fields(response.usage)},
             )
         )
 

@@ -47,6 +47,7 @@ from kairyu.entrypoints.server.protocol import (
     ChatMessage,
     Choice,
     ChoiceLogprobs,
+    CompletionTokensDetails,
     FunctionCall,
     LogprobEntry,
     PromptTokensDetails,
@@ -1778,11 +1779,18 @@ def _wire_usage(
         details = usage.prompt_tokens_details
     else:
         details = None
+    if isinstance(usage, GenerationUsage) and usage.reasoning_tokens is not None:
+        completion_details = CompletionTokensDetails(reasoning_tokens=usage.reasoning_tokens)
+    elif isinstance(usage, Usage):
+        completion_details = usage.completion_tokens_details
+    else:
+        completion_details = None
     return Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
         prompt_tokens_details=details,
+        completion_tokens_details=completion_details,
     )
 
 

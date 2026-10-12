@@ -860,12 +860,15 @@ class GenerationUsage:
 
     ``prompt_tokens`` is counted once per request (not per completion);
     ``completion_tokens`` sums across completions; ``cached_tokens`` is the
-    prompt prefix served from the radix cache.
+    prompt prefix served from the radix cache. ``reasoning_tokens`` is the
+    part of ``completion_tokens`` the upstream reports as reasoning, ``None``
+    when it does not report it (never estimated).
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)

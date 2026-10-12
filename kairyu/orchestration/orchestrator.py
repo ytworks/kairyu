@@ -18,6 +18,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     backend_admission_upper_bound,
+    backend_count_prompt_tokens_async,
     backend_max_model_len,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
@@ -146,6 +147,8 @@ class OrchestratorResult:
     # caller's request.
     public_prompt_tokens: int | None = None
     public_completion_tokens: int | None = None
+    # The upstream-reported reasoning share of public_completion_tokens.
+    public_reasoning_tokens: int | None = None
     # Checklist verification of the published answer (None without one).
     verification: VerificationReport | None = None
 
@@ -981,6 +984,7 @@ class Orchestrator:
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
                 cached_tokens=result.usage.cached_tokens,
+                reasoning_tokens=result.usage.reasoning_tokens,
             )
             if result.usage is not None
             else None
@@ -1151,6 +1155,32 @@ class Orchestrator:
         # Exactly the Conductor's resolution (inline-bound roles excluded and
         # dependencies on them remapped to their targets).
         return final_unit_role(roles)
+
+    async def _public_prompt_tokens(self, call: OrchestrationRequest) -> int | None:
+        """The caller's request counted by the publisher's worker (m9 amendment
+        2026-10-13): its messages (or plain prompt) and tools, rendered as that
+        worker renders a native conversation. ``None`` when the worker cannot
+        count exactly (non-vLLM upstream, an image request, a failure); the
+        wire layer then keeps the m9 approximation."""
+
+        if call.multimodal_prompt is not None:
+            return None
+        worker = self._conductor_final_role(self._roles_for(call)).worker
+        engine = self._engines.get(worker) or next(iter(self._engines.values()))
+        request = GenerationRequest(
+            request_id=f"count-{uuid.uuid4().hex[:12]}",
+            prompt="",
+            sampling_params=SamplingParams(max_tokens=1),
+            tools=call.tools,
+            reasoning_effort=self._effective_reasoning_effort(call),
+            conversation_prefix=tuple(
+                call.conversation or ({"role": "user", "content": call.prompt},)
+            ),
+        )
+        try:
+            return await backend_count_prompt_tokens_async(engine, request)
+        except Exception:  # noqa: BLE001 - a count never fails the answer
+            return None
 
     def _conductor_head_role(self, roles: tuple[RoleSpec, ...]) -> RoleSpec | None:
         return next((role for role in roles if role.role_type == "head"), None)
@@ -2192,6 +2222,7 @@ class Orchestrator:
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
                 cached_tokens=result.usage.cached_tokens,
+                reasoning_tokens=result.usage.reasoning_tokens,
             )
             if result.usage is not None
             else None
@@ -2267,6 +2298,7 @@ class Orchestrator:
             reasoning_content: str | None = None,
             public_prompt_tokens: int | None = None,
             public_completion_tokens: int | None = None,
+            public_reasoning_tokens: int | None = None,
             verification: VerificationReport | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
@@ -2280,6 +2312,7 @@ class Orchestrator:
                 reasoning_content=reasoning_content,
                 public_prompt_tokens=public_prompt_tokens,
                 public_completion_tokens=public_completion_tokens,
+                public_reasoning_tokens=public_reasoning_tokens,
                 verification=verification,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
@@ -2564,7 +2597,9 @@ class Orchestrator:
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
                 reasoning_content=result.reasoning_content,
+                public_prompt_tokens=await self._public_prompt_tokens(call),
                 public_completion_tokens=result.public_completion_tokens,
+                public_reasoning_tokens=result.public_reasoning_tokens,
                 verification=result.verification,
             )
         try:
@@ -2776,6 +2811,7 @@ class Orchestrator:
             reasoning_content: str | None = None,
             public_prompt_tokens: int | None = None,
             public_completion_tokens: int | None = None,
+            public_reasoning_tokens: int | None = None,
             verification: VerificationReport | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
@@ -2789,6 +2825,7 @@ class Orchestrator:
                 reasoning_content=reasoning_content,
                 public_prompt_tokens=public_prompt_tokens,
                 public_completion_tokens=public_completion_tokens,
+                public_reasoning_tokens=public_reasoning_tokens,
                 verification=verification,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
@@ -2849,6 +2886,7 @@ class Orchestrator:
                         prompt_tokens=latest_usage.prompt_tokens,
                         completion_tokens=latest_usage.completion_tokens,
                         cached_tokens=latest_usage.cached_tokens,
+                        reasoning_tokens=latest_usage.reasoning_tokens,
                     )
                     if latest_usage is not None
                     else None
@@ -2931,6 +2969,7 @@ class Orchestrator:
                                 prompt_tokens=failover_usage.prompt_tokens,
                                 completion_tokens=failover_usage.completion_tokens,
                                 cached_tokens=failover_usage.cached_tokens,
+                                reasoning_tokens=failover_usage.reasoning_tokens,
                             )
                             if failover_usage is not None
                             else None
@@ -2974,6 +3013,7 @@ class Orchestrator:
                             prompt_tokens=failover_usage.prompt_tokens,
                             completion_tokens=failover_usage.completion_tokens,
                             cached_tokens=failover_usage.cached_tokens,
+                            reasoning_tokens=failover_usage.reasoning_tokens,
                         )
                         if failover_usage is not None
                         else None
@@ -3030,6 +3070,7 @@ class Orchestrator:
                     prompt_tokens=latest_usage.prompt_tokens,
                     completion_tokens=latest_usage.completion_tokens,
                     cached_tokens=latest_usage.cached_tokens,
+                    reasoning_tokens=latest_usage.reasoning_tokens,
                 )
                 if latest_usage is not None
                 else None
@@ -3463,7 +3504,9 @@ class Orchestrator:
                 completion_tokens=conductor_result.usage[1],
                 cached_tokens=conductor_result.cached_tokens,
                 reasoning_content=conductor_result.reasoning_content,
+                public_prompt_tokens=await self._public_prompt_tokens(call),
                 public_completion_tokens=conductor_result.public_completion_tokens,
+                public_reasoning_tokens=conductor_result.public_reasoning_tokens,
                 verification=conductor_result.verification,
             ),
         )

@@ -200,10 +200,12 @@ def _usage_from(data: dict | None) -> GenerationUsage | None:
     if not data:
         return None
     details = data.get("prompt_tokens_details") or {}
+    reasoning = (data.get("completion_tokens_details") or {}).get("reasoning_tokens")
     return GenerationUsage(
         prompt_tokens=data.get("prompt_tokens", 0),
         completion_tokens=data.get("completion_tokens", 0),
         cached_tokens=details.get("cached_tokens", 0),
+        reasoning_tokens=reasoning if isinstance(reasoning, int) else None,
     )
 
 
