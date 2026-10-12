@@ -132,3 +132,49 @@ failed three things, each changed with the owner's approval before `r2`:
   requires the answer to name exactly the planted key as a whole identifier.
 
 Only SHA-bound rows of run `20261011-r2` establish the claims above.
+
+## Gates with native chat messages (PR #647)
+
+The example now lists `glm-5.3-flash` in `upstream_chat_models` (m9 D2
+amendment 2026-10-12): Kairyu sends each chat's messages as they are and the
+official template renders them, instead of one flattened user message.
+Run 2026-10-12 16:20–17:22 JST at `b24009e7`, served-config SHA-256
+`2392fc6a…`, every gate `--no-start`; tool-calling and vision re-run 17:34 JST
+at `e4494e15` after the two gate fixes below.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `l1` | PASS 16/16 | renders Max/Low/High/Max; 16 probes per effort from all 3 engines |
+| `serving` | PASS | c1 71.2, c8 206.6, c16 303.4, c32 392.2, c64 464.2 tok/s (r2: 70.6 / 209.7 / 298.3 / 386.2 / 455.7); TTFT p50 0.94 / 1.11 / 2.27 / 3.97 / 14.93 s |
+| `completed` | PASS 80/80 | generic c1 94.3 tok/s, p50 14.1 s; generic c16 388.4, 38.3 s; coding c1 101.2, 127.4 s; coding c16 477.0, 209.1 s (p99 814.0 s); longest answer 52,426 tokens |
+| `tool-calling` | PASS 7/7 (re-run) | the tool-result turn calls `head -n 1 README.md` |
+| `vision` | PASS 9/9 (re-run) | pure-red probe |
+| `reasoning` | PASS 4/4 | |
+| `cancellation` | PASS | released 0.23 s after the disconnect |
+| `long-context` | PASS 4/4 | 32,782 / 131,086 / 262,158 / 1,039,886 prompt tokens (4 fewer than r2: no `user: … assistant:` wrapper), 4.1 / 14.2 / 28.1 / 142.8 s |
+| `restart` | PASS | answering 243 s after the L1 restart |
+
+Two gates failed on the first pass and were fixed in the gates, not the
+served configuration:
+
+- `tool-calling`: after the tool result of "List the files in the current
+  directory." GLM reported the listing in text despite the system rule to
+  call a tool in every reply. The same request sent to vLLM directly called a
+  tool 1 of 10 times (Kairyu 0 of 10); the flattened prompt of the legacy path
+  gave 9 of 10, which is why r2 passed. The turn now asks for a step that
+  still needs a call ("…, then show the first line of README.md."): 10 of 10
+  through Kairyu and directly.
+- `vision`: GLM named the (220, 40, 40) probe "Maroon", "Crimson" or "Salmon"
+  in about 4 % of answers through Kairyu (55 of 57 red) and directly (46 of
+  48); with nine answers that must all say red the gate failed by chance. The
+  probe is now pure (255, 0, 0) red: 64 of 64 answers red.
+
+Pre-benchmark check (the stopped DeepSWE run's second agent turn: 5 messages
+with two tool results, the bash tool, `reasoning_effort: max`): 5 of 5
+structured calls through Kairyu (2 of 2 directly); the captured
+Kairyu-to-vLLM body carries the 5 messages unchanged with `reasoning_effort:
+max`; vLLM `/tokenize` of that body renders `Reasoning Effort: Max` and
+counts 2,780 tokens, equal to Kairyu's `usage.prompt_tokens`.
+
+Not caused by Kairyu: GLM on vLLM v0.31.0 sometimes returns an em dash as
+mojibake (`â\x80\x94`), 3 of 10 answers sent directly.
