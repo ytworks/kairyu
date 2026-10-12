@@ -548,11 +548,13 @@ def validate_tool_calling(api_url: str) -> None:
         )
 
 
-# A 64x64 solid-red PNG: readiness includes the vision encoder and an image span.
+# A 64x64 solid pure-red (255, 0, 0) PNG: readiness includes the vision encoder
+# and an image span. The earlier (220, 40, 40) red was named "maroon",
+# "crimson" or "salmon" in about 4 % of answers, directly from vLLM too.
 PROBE_IMAGE_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PQQkAAAgEsItz/fMY"
-    "xgi+hcEKLNO+FgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGB"
-    "ywLzk8EPlvGqjQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4"
+    "FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc"
+    "8OJg6Ln3AAAAAElFTkSuQmCC"
 )
 
 
