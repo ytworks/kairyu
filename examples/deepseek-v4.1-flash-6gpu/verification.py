@@ -543,11 +543,20 @@ def tool_calling(run_dir: Path) -> int:
     if first is not None:
         call = first["tool_calls"][0]
         call_id = call.get("id") or "call_0"
+        # The task still needs a call after the listing: once the result
+        # answers the request, the model reports it in text (7 of 10 calls
+        # sent to vLLM directly).
         status, body, _ = post_chat(
             _tool_request(
                 messages=[
                     {"role": "system", "content": _TOOL_SYSTEM},
-                    {"role": "user", "content": "List the files in the current directory."},
+                    {
+                        "role": "user",
+                        "content": (
+                            "List the files in the current directory, "
+                            "then show the first line of README.md."
+                        ),
+                    },
                     {
                         "role": "assistant",
                         "content": first.get("content"),
