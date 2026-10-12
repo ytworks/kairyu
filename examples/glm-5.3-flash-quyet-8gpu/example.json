@@ -10,7 +10,10 @@
  },
  "storage": {
   "root": "/mnt/nvme/kairyu",
-  "minimum_free_gib": 450
+  "minimum_free_gib": {
+   "glm": 400,
+   "quyet": 80
+  }
  },
  "allocation": {
   "glm": {

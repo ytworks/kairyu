@@ -511,11 +511,6 @@ def _seed_model(target: Path, variable: str, image: str) -> None:
 def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> None:
     target = Path(storage) / model["slug"]
     _seed_model(target, seed_variable, image)
-    if not (target / "config.json").is_file():
-        free_gib = shutil.disk_usage(target.parent).free // (1024**3)
-        minimum = int(SPEC["storage"]["minimum_free_gib"])
-        if free_gib < minimum:
-            raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
     command = [
         "docker",
         "run",
@@ -604,16 +599,36 @@ print(f'model attested: {len(rows)} files, tree {tree}')
 """
 
 
+def required_free_gib(*, glm_present: bool, quyet_present: bool) -> int:
+    """NVMe space the checkpoints still to be fetched need: each one's own
+    example's minimum (glm-5.3-flash-6gpu, quyet-1.0-large-1gpu), summed."""
+
+    minimum = SPEC["storage"]["minimum_free_gib"]
+    return (0 if glm_present else int(minimum["glm"])) + (
+        0 if quyet_present else int(minimum["quyet"])
+    )
+
+
+def _check_free_space(env: dict[str, str]) -> None:
+    """One check before any download, so a fetched checkpoint never fails the next one's."""
+
+    glm = Path(env["GLM_MODEL_STORAGE_PATH"]) / SPEC["glm"]["model"]["slug"]
+    quyet = Path(env["QUYET_MODEL_STORAGE_PATH"]) / SPEC["quyet"]["model"]["slug"]
+    required = required_free_gib(
+        # A seed is hard-linked: it takes no space.
+        glm_present=(glm / "config.json").is_file() or bool(os.environ.get("GLM_MODEL_SEED")),
+        quyet_present=(quyet / ".kairyu-model-attestation.json").exists(),
+    )
+    free_gib = shutil.disk_usage(environment_storage()).free // (1024**3)
+    if free_gib < required:
+        raise SystemExit(f"NVMe storage has {free_gib} GiB free; {required} GiB is required")
+
+
 def _ensure_quyet_model(env: dict[str, str]) -> None:
     """Download (or re-verify) the pinned Quyet checkpoint both replicas read."""
 
     model = SPEC["quyet"]["model"]
     storage = env["QUYET_MODEL_STORAGE_PATH"]
-    if not (Path(storage) / model["slug"] / ".kairyu-model-attestation.json").exists():
-        free_gib = shutil.disk_usage(storage).free // (1024**3)
-        minimum = int(SPEC["storage"]["minimum_free_gib"])
-        if free_gib < minimum:
-            raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
     command = ["docker", "run", "--rm", "--entrypoint", "python3",
                "--env", "HF_HUB_DISABLE_TELEMETRY=1",
                "--volume", f"{storage}:/models"]  # fmt: skip
@@ -943,6 +958,14 @@ def _public_ui_host() -> str:
     return detected
 
 
+def ui_check_url(env: dict[str, str]) -> str:
+    """Where this host reaches the Chat UI: loopback when it listens on every interface."""
+
+    bind = env["CHAT_UI_BIND_ADDRESS"]
+    host = "127.0.0.1" if bind == "0.0.0.0" else bind
+    return f"http://{host}:{env['CHAT_UI_PORT']}"
+
+
 def up() -> None:
     env = _compose_env()
     bind = env["CHAT_UI_BIND_ADDRESS"]
@@ -951,6 +974,7 @@ def up() -> None:
     _preflight(env)
     _ensure_vllm_image(env["GLM_VLLM_IMAGE"], GLM_VLLM["repo_digest"])
     _ensure_quyet_images()
+    _check_free_space(env)
     _ensure_model(
         env["GLM_MODEL_STORAGE_PATH"],
         SPEC["glm"]["model"],
@@ -965,7 +989,7 @@ def up() -> None:
         env=env,
     )
     validate_serving(env)
-    provision_chat_ui(f"http://127.0.0.1:{env['CHAT_UI_PORT']}")
+    provision_chat_ui(ui_check_url(env))
     print("\nEnvironment is ready.")
     print(f"Chat UI:     http://{ui_host}:{env['CHAT_UI_PORT']} (Open WebUI, no authentication)")
     print(f"OpenAI API:  http://127.0.0.1:{env['API_PORT']}/v1 (model {MODEL})")

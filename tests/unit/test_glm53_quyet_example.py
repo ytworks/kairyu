@@ -11,6 +11,7 @@ observe what the deployed L1 services would receive and which route answers.
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 from pathlib import Path
 
@@ -411,3 +412,36 @@ async def test_an_unavailable_route_judge_routes_to_the_think_answer() -> None:
     assert call.role_profile_judgment is None
     (body,) = seen
     assert body["messages"] == [{"role": "user", "content": "Name the capital of France."}]
+
+
+def _control():
+    module_spec = importlib.util.spec_from_file_location(
+        "glm_quyet_control", EXAMPLE / "control.py"
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("glm_present", "quyet_present", "required"),
+    [(False, False, 480), (True, False, 80), (True, True, 0)],
+)
+def test_free_space_counts_only_missing_checkpoints(glm_present, quyet_present, required) -> None:
+    # One check before any download (PR #648 review): a fetched GLM must not
+    # leave the Quyet download facing the whole example's requirement again.
+    control = _control()
+    assert (
+        control.required_free_gib(glm_present=glm_present, quyet_present=quyet_present) == required
+    )
+
+
+def test_chat_ui_check_follows_the_bind_address() -> None:
+    control = _control()
+    env = {"CHAT_UI_PORT": "3017"}
+    assert control.ui_check_url({**env, "CHAT_UI_BIND_ADDRESS": "0.0.0.0"}) == (
+        "http://127.0.0.1:3017"
+    )
+    assert control.ui_check_url({**env, "CHAT_UI_BIND_ADDRESS": "192.0.2.10"}) == (
+        "http://192.0.2.10:3017"
+    )
