@@ -162,6 +162,16 @@ and 16 tool-declared turns whose next reply is text.
   turns stay on THINK).
 - A fix is the same GLM role at the same effort; it receives the
   previous reply as text. A GLM error during a fix fails the request.
+- vLLM v0.31.0 occasionally ends a grammar-constrained request with MTP as an
+  internal error ("grammar rejected tokens", once in about 100 candidates
+  calls in the GPU gates); that request fails with 502. The GLM pool keeps its
+  only replica after one such failure (`unhealthy_after: 3`), so the requests
+  waiting for it are not failed with it.
+- A tool-declared agent turn that the route judge reads below the TOOL floor
+  takes the think route, where GLM may report the task done instead of making
+  the call still needed (`dedup-case` in `datasets/tool-turns.json`,
+  P(TOOL) 0.025: 1 of 3 serving runs; DeepSeek made the call each time in
+  `deepseek-v4.1-quyet-8gpu`).
 - The verified tool route is not streamed: the reply is published after its
   form check.
 - The candidates share one call capped at 131,072 tokens (the DSL's internal

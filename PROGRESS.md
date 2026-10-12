@@ -115,6 +115,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-13 — [amendment] GLM + Quyet: the GLM pool keeps its replica after one failed request (VCO-D23, PR #648)
+- What: `glm-5.3-flash-quyet-8gpu` GLM pool `unhealthy_after` 1 -> 3. First GPU run: 8 of 9 gates pass; serving c16 21/32: vLLM ended one grammar-constrained MTP candidates call ("grammar rejected tokens", 1 of ~100), the only replica left placement and 10 waiting requests got 502; one THINK-routed agent turn (`dedup-case`, P(TOOL) 0.025) answered done without a call. Both recorded as README limits.
+- Why: owner decision 2026-10-13: one failed request must not fail every request waiting for the only replica; MTP and the candidates grammar stay.
+- Refs: VCO-D23 amendment 2026-10-13; example `kairyu.yaml`, `README.md`
+
 ### 2026-10-13 — [progress] Native chat messages: both six-GPU examples pass all nine gates (PR #647)
 - What: `deepseek-v4.1-flash-6gpu` and `glm-5.3-flash-6gpu` with `upstream_chat_models` pass the nine example gates and the pre-benchmark check (a DeepSWE second turn: 5/5 structured calls; the Kairyu-to-vLLM body carries the 5 messages with `reasoning_effort: max`; `/tokenize` count equals `usage.prompt_tokens`). DeepSeek's tool-result gate turn now asks for a step that still needs a call, as GLM's (native: 6/10 via Kairyu, 7/10 direct; fixed turn 10/10). The DeepSWE runs and the wiki report moved to issue #649.
 - Why: owner decision 2026-10-12: PR #647 is verified by the gates; DeepSWE is tracked separately. The gate fix follows the model's own template reading (owner-approved).

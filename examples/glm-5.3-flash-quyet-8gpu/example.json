@@ -138,7 +138,7 @@
   "pool": {
    "queue_depth_threshold": 0,
    "prefix_index": true,
-   "unhealthy_after": 1,
+   "unhealthy_after": 3,
    "placement_log": "/var/lib/kairyu/placement/glm-5.3-flash.jsonl"
   }
  },

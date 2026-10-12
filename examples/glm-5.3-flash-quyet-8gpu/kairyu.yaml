@@ -45,7 +45,11 @@ pools:
         attention_data_parallel_size: 3
         mtp_enabled: true
         container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
-    unhealthy_after: 1
+    # The only GLM replica stays in placement after one failed request: vLLM
+    # v0.31.0 occasionally ends a grammar-constrained MTP request with an
+    # internal error, and ejecting the replica then failed every request that
+    # waited for it until the next probe (10 of 11 failures at serving c16).
+    unhealthy_after: 3
     queue_depth_threshold: 0
     prefix_index: true
     probe_interval_s: 2.0

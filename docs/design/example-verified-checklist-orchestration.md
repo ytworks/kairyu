@@ -937,6 +937,16 @@ Why: the owner wants the same verified tool route served with GLM-5.3-Flash
 as the writer, built from the two GPU-verified examples without changing
 what neither forces.
 
+Amendment 2026-10-13 (owner decision after the first GPU run, PR #648): the
+GLM pool's `unhealthy_after` is 3 (Kairyu's default) instead of 1. At serving
+c16 vLLM v0.31.0 ended one grammar-constrained `candidates` request with MTP
+as an internal error ("grammar rejected tokens", once in about 100 candidates
+calls); with `unhealthy_after: 1` the only GLM replica left placement and the
+10 requests waiting for it failed with 502 until the next probe. The vLLM
+error itself, and GLM's think route reporting a misrouted agent turn done
+without the call it still needs (`dedup-case`, P(TOOL) 0.025, 1 of 3 runs),
+stay as recorded limits; the design is otherwise unchanged.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which
