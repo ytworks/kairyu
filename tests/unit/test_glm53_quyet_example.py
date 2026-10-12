@@ -445,3 +445,16 @@ def test_chat_ui_check_follows_the_bind_address() -> None:
     assert control.ui_check_url({**env, "CHAT_UI_BIND_ADDRESS": "192.0.2.10"}) == (
         "http://192.0.2.10:3017"
     )
+
+
+def test_free_space_counts_a_leftover_glm_directory_as_missing(tmp_path, monkeypatch) -> None:
+    # A directory left by a failed run stops _seed_model from linking, and the
+    # model program then downloads the whole checkpoint (PR #648 review): GLM
+    # counts as present only once its config.json is there, seed or not.
+    control = _control()
+    monkeypatch.setenv("GLM_MODEL_SEED", str(tmp_path / "seed"))
+    leftover = tmp_path / "glm-5.3-flash"
+    leftover.mkdir()
+    assert not control.glm_present(leftover)
+    (leftover / "config.json").write_text("{}")
+    assert control.glm_present(leftover)

@@ -508,9 +508,7 @@ def _seed_model(target: Path, variable: str, image: str) -> None:
     )
 
 
-def _ensure_model(storage: str, model: dict, image: str, seed_variable: str) -> None:
-    target = Path(storage) / model["slug"]
-    _seed_model(target, seed_variable, image)
+def _ensure_model(storage: str, model: dict, image: str) -> None:
     command = [
         "docker",
         "run",
@@ -609,15 +607,28 @@ def required_free_gib(*, glm_present: bool, quyet_present: bool) -> int:
     )
 
 
-def _check_free_space(env: dict[str, str]) -> None:
-    """One check before any download, so a fetched checkpoint never fails the next one's."""
+def glm_present(target: Path) -> bool:
+    """GLM needs no download: _MODEL_PROGRAM fetches only without config.json.
+    A seed counts once _seed_model has linked it, never for its variable alone."""
 
-    glm = Path(env["GLM_MODEL_STORAGE_PATH"]) / SPEC["glm"]["model"]["slug"]
-    quyet = Path(env["QUYET_MODEL_STORAGE_PATH"]) / SPEC["quyet"]["model"]["slug"]
+    return (target / "config.json").is_file()
+
+
+def quyet_present(target: Path) -> bool:
+    """Quyet needs no download: _QUYET_MODEL_PROGRAM fetches only without its attestation."""
+
+    return (target / ".kairyu-model-attestation.json").exists()
+
+
+def _check_free_space(env: dict[str, str]) -> None:
+    """One check before any download (after the seed is linked), so a fetched
+    checkpoint never fails the next one's."""
+
     required = required_free_gib(
-        # A seed is hard-linked: it takes no space.
-        glm_present=(glm / "config.json").is_file() or bool(os.environ.get("GLM_MODEL_SEED")),
-        quyet_present=(quyet / ".kairyu-model-attestation.json").exists(),
+        glm_present=glm_present(Path(env["GLM_MODEL_STORAGE_PATH"]) / SPEC["glm"]["model"]["slug"]),
+        quyet_present=quyet_present(
+            Path(env["QUYET_MODEL_STORAGE_PATH"]) / SPEC["quyet"]["model"]["slug"]
+        ),
     )
     free_gib = shutil.disk_usage(environment_storage()).free // (1024**3)
     if free_gib < required:
@@ -974,13 +985,15 @@ def up() -> None:
     _preflight(env)
     _ensure_vllm_image(env["GLM_VLLM_IMAGE"], GLM_VLLM["repo_digest"])
     _ensure_quyet_images()
-    _check_free_space(env)
-    _ensure_model(
-        env["GLM_MODEL_STORAGE_PATH"],
-        SPEC["glm"]["model"],
-        env["GLM_VLLM_IMAGE"],
+    # A seed is hard-linked (no space) before the space check, which then sees
+    # the checkpoint it left, not the variable.
+    _seed_model(
+        Path(env["GLM_MODEL_STORAGE_PATH"]) / SPEC["glm"]["model"]["slug"],
         "GLM_MODEL_SEED",
+        env["GLM_VLLM_IMAGE"],
     )
+    _check_free_space(env)
+    _ensure_model(env["GLM_MODEL_STORAGE_PATH"], SPEC["glm"]["model"], env["GLM_VLLM_IMAGE"])
     _ensure_quyet_model(env)
     # --remove-orphans: an update from a release that still defined a service
     # stops and removes its old container.
