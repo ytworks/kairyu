@@ -92,6 +92,7 @@ class AsyncRequestWorker:
         metrics=None,
         chat_templates: Mapping[str, ChatTemplate] | None = None,
         legacy_chat_models: AbstractSet[str] | None = None,
+        upstream_chat_models: AbstractSet[str] | None = None,
         usage_ledger: UsageLedgerSink | None = None,
         tenant_limiter: TokenLimiterSink | None = None,
         tenant_config: TenantConfig | None = None,
@@ -104,7 +105,8 @@ class AsyncRequestWorker:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         legacy_chat_models = frozenset(legacy_chat_models or ())
-        validate_chat_policy(chat_templates, legacy_chat_models)
+        upstream_chat_models = frozenset(upstream_chat_models or ())
+        validate_chat_policy(chat_templates, legacy_chat_models, upstream_chat_models)
         self._store = store
         self._engines = dict(engines)
         self._max_concurrency = max_concurrency
@@ -118,6 +120,7 @@ class AsyncRequestWorker:
         self._metrics = metrics
         self._chat_templates = chat_templates
         self._legacy_chat_models = legacy_chat_models
+        self._upstream_chat_models = upstream_chat_models
         self._usage_ledger = usage_ledger
         self._tenant_limiter = tenant_limiter
         self._tenant_config = tenant_config or TenantConfig()
@@ -417,6 +420,7 @@ class AsyncRequestWorker:
             priority=self._tenant_config.limits_for(request.owner).batch_priority,
             scheduling_class="batch",
             legacy_chat_models=self._legacy_chat_models,
+            upstream_chat_models=self._upstream_chat_models,
         )
         admission = None
         metric_admitted = False

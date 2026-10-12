@@ -670,11 +670,20 @@ def tool_calling(run_dir: Path) -> int:
         call_id = call.get("id") or "call_0"
         # The previous turn's reasoning travels back (the template's default
         # keeps it: clear_thinking false), as an agent sends its transcript.
+        # The task still needs a call after the listing: once the result
+        # answers the request, the model reports it in text (1 of 10 calls
+        # sent to vLLM directly).
         choice, failure = _chat_case(
             _tool_request(
                 messages=[
                     {"role": "system", "content": _TOOL_SYSTEM},
-                    {"role": "user", "content": "List the files in the current directory."},
+                    {
+                        "role": "user",
+                        "content": (
+                            "List the files in the current directory, "
+                            "then show the first line of README.md."
+                        ),
+                    },
                     {
                         "role": "assistant",
                         "content": first.get("content"),

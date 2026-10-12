@@ -76,6 +76,7 @@ def add_extra_routes(
     embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch=None,
     responses_compaction_key: bytes,
@@ -85,6 +86,7 @@ def add_extra_routes(
         engines,
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
         orchestrated_models=orchestrated_models,
         chat_dispatch=chat_dispatch,
         compaction_key=responses_compaction_key,
@@ -95,6 +97,7 @@ def add_extra_routes(
         engines,
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
+        upstream_chat_models=upstream_chat_models,
         orchestrated_models=orchestrated_models,
         chat_dispatch=chat_dispatch,
     )

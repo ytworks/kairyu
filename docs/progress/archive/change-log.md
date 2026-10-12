@@ -11,6 +11,25 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-10 — [amendment] Token-count review fixes (m9 D1, PR #643 review)
+- What: `ReplicaPool` counts tokens on placeable replicas only; vLLM chat counts decline tools under `tool_choice: none`.
+- Why: a drained replica with an older config turned count_tokens/input_tokens into 400 for inputs the pool generates; vLLM's `--exclude-tools-when-tool-choice-none` drops those tools from generation but not from `/tokenize`, and Kairyu cannot see the flag.
+- Refs: m9 D1 amendment 2026-10-10; `kairyu/orchestration/replica.py`, `kairyu/engine/openai_backend.py`
+
+### 2026-10-10 — [progress] Token counts equal billed prompt tokens on live vLLM stacks (#621, PR #643)
+- What: V1 `qwen3.8-27b-1gpu` and V2 `deepseek-v4.1-flash-8gpu`: count_tokens / input_tokens equal the billed input tokens in all 14 cases (text, system+tools, tool transcript, effort high); the main build undercounted them by 12-234 and 30-212 tokens.
+- Refs: m9 D1 amendment 2026-10-10; PR #643
+
+### 2026-10-10 — [amendment] Token counts tokenize what generation sends (m9 D1, #621, PR #643)
+- What: `/v1/messages/count_tokens` and `/v1/responses/input_tokens` pass the generation `GenerationRequest` to the backend; vLLM upstreams build the `/tokenize` chat body from the dispatch payload (messages, tools, template kwargs incl. vLLM's `reasoning_effort`/`enable_thinking` merge). Native/mock counts unchanged; images and llama.cpp stay declined.
+- Why: on vLLM upstreams without a Kairyu template the count tokenized a rendered string without the chat template (too low) and with a tool-intent suffix generation never sends (either direction); clients sizing context from it got a wrong budget.
+- Refs: m9 D1 amendment 2026-10-10; plan `docs/superpowers/plans/2026-10-10-issue-621-count-tokens.md`; `kairyu/engine/openai_backend.py`
+
+### 2026-10-10 — [progress] Quyet-1.0-Large System One example: all nine GPU gates pass (PR #642)
+- What: `examples/quyet-1.0-large-1gpu` serves the Jev-family decision model as System One only (no chat): example-owned adapter on the `quyet` package with a batch-invariant vLLM v0.31.0 as an internal pool (`public_models`); `kairyu/` unchanged. Gates rebuilt from TypeSafe's documented usage (reference, attest, parity, JevBench, fan-out, consistency, SDK, throughput, overload); run `20261010-s1-r2` passes all nine.
+- Why: owner direction: Jev models are decision APIs, so chat, tool-call and image surfaces were removed. vLLM's kernels differ from transformers in the tail (median probability difference 0.0001, max 0.22), so parity is judged on prompts, confident decisions (>= 99 %) and JevBench quality; batch invariance makes repeats identical at about 10 % latency.
+- Refs: FN-D9 Quyet amendment; plan `docs/superpowers/plans/2026-10-10-quyet-large-1gpu-example.md`; example `MEASUREMENTS.md`
+
 ### 2026-10-09 — [progress] Verified tool route: all nine GPU gates pass (PR #641)
 - What: at `8e85b30f`, l1, routing (TOOL miss 5 %/5 %, THINK precision 97.9 %), think-route, effort, verified-tool-route (12/12 structured calls, p50 131.7 s), fallback, serving (72/72, every reply a structured call), serving-routed and browser pass. 4 of 24 agent turns route THINK in serving.
 - Refs: example `MEASUREMENTS.md`; VCO-D20 and its amendments

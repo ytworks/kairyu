@@ -136,6 +136,7 @@ def add_responses_route(
     *,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch=None,
     compaction_key: bytes,
@@ -338,6 +339,7 @@ def add_responses_route(
                         http_request.state, "placement_started_ns", None
                     ),
                     legacy_chat_models=legacy_chat_models,
+                    upstream_chat_models=upstream_chat_models,
                 )
         except ChatRequestError as error:
             image = first_image_path(request.input)
@@ -537,6 +539,7 @@ def add_responses_route(
                     or f"resp-{uuid.uuid4().hex[:12]}"
                 ),
                 legacy_chat_models=legacy_chat_models,
+                upstream_chat_models=upstream_chat_models,
             )
             if isinstance(validated.generation_request.prompt, MultimodalPrompt):
                 raise ResponsesError(

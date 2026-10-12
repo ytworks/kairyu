@@ -480,6 +480,10 @@ class DeploymentSpec(BaseModel):
     # paths currently require this model-scoped compatibility choice because
     # they cannot retain pre-rendered tokenizer ownership downstream.
     legacy_chat_models: frozenset[str] = frozenset()
+    # Served models whose upstream renders the model's own chat template from
+    # native messages (m9 D2 amendment 2026-10-12): Kairyu sends a text chat's
+    # validated messages as they are instead of a rendered prompt.
+    upstream_chat_models: frozenset[str] = frozenset()
     orchestrator: OrchestratorSection | None = None
     # served auto-model name -> orchestrator spec; serves ANY number of named
     # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
@@ -538,6 +542,23 @@ class DeploymentSpec(BaseModel):
             raise ValueError(
                 "models cannot declare both a real chat template and the legacy "
                 f"chat fallback: {sorted(conflicting_chat_policy)}"
+            )
+        unknown_upstream = (
+            self.upstream_chat_models - self.engines.keys() - self.pools.keys()
+        )
+        if unknown_upstream:
+            raise ValueError(
+                "upstream_chat_models contains unknown models "
+                f"{sorted(unknown_upstream)}; names must match engines: or pools: "
+                "names"
+            )
+        conflicting_upstream = self.upstream_chat_models & (
+            self.legacy_chat_models | self.chat_templates.keys()
+        )
+        if conflicting_upstream:
+            raise ValueError(
+                "upstream_chat_models cannot also declare a chat template or the "
+                f"legacy chat fallback: {sorted(conflicting_upstream)}"
             )
         if any(not name for name in self.orchestrators):
             raise ValueError("orchestrators: names must be non-empty strings")

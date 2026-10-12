@@ -44,5 +44,8 @@ pools:
     prefix_index: true
     probe_interval_s: 2.0
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl
-legacy_chat_models:
+# vLLM renders the model author's encoder from the caller's own messages
+# (earlier turns, tool calls and tool results) and parses tool calls, so
+# Kairyu sends each chat's messages as they are (m9 D2 amendment 2026-10-12).
+upstream_chat_models:
 - deepseek-v4.1-flash

@@ -1137,6 +1137,13 @@ def _validate_chat_policy(
                 "non-template-preserving served models require an explicit "
                 "model-scoped legacy chat policy"
             )
+        elif "upstream_chat_models" in message:
+            code = "schema.invalid_upstream_chat_policy"
+            field = "upstream_chat_models"
+            safe_message = (
+                "upstream_chat_models need every replica to render native chat "
+                "messages upstream (an openai backend with upstream: vllm)"
+            )
         else:
             code = "schema.invalid_chat_policy"
             field = "chat_templates"
