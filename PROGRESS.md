@@ -114,6 +114,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-12 — [amendment] Upstream-rendered pool chats are sent as native messages (m9 D2, PR #647)
+- What: new `upstream_chat_models` list: text chats of listed engine/pool models skip Kairyu rendering; the validated messages go to vLLM via `conversation_prefix`, so the model's template sees turns, tool calls and tool results. The build fails unless every replica is an `openai` backend on a `conversation_prefix` upstream (vLLM). `glm-5.3-flash-6gpu` and `deepseek-v4.1-flash-6gpu` opt in; `legacy_chat_models` and other examples unchanged.
+- Why: legacy chats reach vLLM as one flattened user message; DeepSWE on GLM-5.3-Flash ended 23 of 23 finished tasks in `RepeatedFormatError` while the same turn sent to vLLM directly returned a call; the DeepSeek reference run (67/113) went through the same flattening. `native_conversation` exists only on L2 roles.
+- Refs: m9 D2 amendment 2026-10-12; plan `docs/superpowers/plans/2026-10-12-upstream-chat-messages.md`
+
 ### 2026-10-11 — [design] Quyet replaces Winnow; verified tool route judges candidates and checks form (VCO-D21/D22, PR #645)
 - What: `deepseek-v4.1-winnow-8gpu` -> `deepseek-v4.1-quyet-8gpu`: two Quyet-1.0-Large replicas (as in `quyet-1.0-large-1gpu`) replace Winnow, states bounded to Quyet's 6,000 tokens (route 12,000 chars, judgments 8,000, form check 6,000). TOOL route: 10-16 DeepSeek candidate calls (one request), 6 Quyet judgments each (32 per read), a DeepSeek move batching independent safe calls, 7-question Quyet form check (p >= 0.5) with up to 2 DeepSeek fixes; requirements removed. Routing and think route unchanged; `kairyu/` unchanged.
 - Why: owner decisions: decisions on a calibrated Jev-family model within its documented input; choose the move needed now from many judged candidates, cover more safe work per move, and fix the reply's form (announced calls, calls as text, finishing alone) before publishing. Threshold 0.5 because VCO-D16's 0.99 repaired near-passes and changed moves.

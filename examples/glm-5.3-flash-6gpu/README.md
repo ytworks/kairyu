@@ -60,7 +60,9 @@ Model `glm-5.3-flash`; the Chat UI has no authentication.
   clients can set it here; the template default applies to every request.
 - Images: up to 8 per request (8 MiB each); video is not accepted (Kairyu's
   public API carries image parts only).
-- Tools: OpenAI tool calling, parsed by vLLM's `glm47` parser.
+- Tools: OpenAI tool calling, parsed by vLLM's `glm47` parser. Kairyu sends
+  each chat's messages as they are (`upstream_chat_models`), so the official
+  template renders an agent's earlier turns, tool calls and tool results.
 
 ## Why this configuration
 

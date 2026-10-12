@@ -58,6 +58,7 @@ time; a change is adopted only for ≥ 5 % on c1 or c32 throughput without a
 | Sequences | 128 per DP engine | Official Blackwell value; 64 measured no different. |
 | Vision encoder | default (not `--mm-encoder-tp-mode data`) | Official option measured no different on TP1 ranks. |
 | Effort | default thinking high (75); low 50, max 100 | The model author's encoder (`encoding/README.md`), which the runtime renders; the recipe's 25/50/75/100 table is the older vLLM encoder's. |
+| Chat | `upstream_chat_models` | vLLM renders the encoder from the caller's own messages (earlier turns, tool calls, tool results); Kairyu sends them as they are instead of one flattened user message. |
 | Sampling | temperature 1.0, top_p 0.95 | Model card; the setting DeepSeek's published results use. Applied at L1 with `--override-generation-config`; callers can still send their own. |
 
 Each of the six DP engines holds about 8.3M KV tokens, so a full

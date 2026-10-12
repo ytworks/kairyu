@@ -1596,6 +1596,7 @@ def add_messages_route(
     *,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    upstream_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch=None,
 ) -> None:
@@ -1661,6 +1662,7 @@ def add_messages_route(
                     chat_templates,
                     request_id=request_id or f"msg-{uuid.uuid4().hex[:12]}",
                     legacy_chat_models=legacy_chat_models,
+                    upstream_chat_models=upstream_chat_models,
                 )
                 try:
                     counted = await backend_count_prompt_tokens_async(
@@ -1773,6 +1775,7 @@ def add_messages_route(
                         http_request.state, "placement_started_ns", None
                     ),
                     legacy_chat_models=legacy_chat_models,
+                    upstream_chat_models=upstream_chat_models,
                 )
         except ChatRequestError as error:
             return chat_error(error)

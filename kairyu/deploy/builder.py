@@ -36,6 +36,7 @@ from kairyu.engine.embedding import (
     FastEmbedEmbeddingBackend,
     MockEmbeddingBackend,
 )
+from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.engine.registry import create_backend
 from kairyu.engine.systemone import HTTPSystemOneBackend
 from kairyu.engine.tokenizer import (
@@ -76,6 +77,7 @@ class _ResolvedChatPolicy:
 
     templates: dict[str, ChatTemplate]
     legacy_models: frozenset[str]
+    upstream_models: frozenset[str] = frozenset()
 
 
 def _effective_tokenizer_source(entry) -> Path | None:
@@ -130,6 +132,21 @@ def _entry_preserves_templated_prompt(entry) -> bool:
     )
 
 
+def _entry_renders_native_chat(entry) -> bool:
+    """Whether a replica's upstream renders a caller's native messages."""
+
+    if entry.backend != "openai":
+        return False
+    try:
+        capabilities = resolve_openai_capabilities(
+            entry.options.get("upstream", "generic"),
+            entry.options.get("capabilities"),
+        )
+    except ValueError:
+        return False
+    return capabilities.conversation_prefix
+
+
 def _metadata_identity(metadata: TokenizerChatMetadata) -> tuple[object, ...]:
     return (
         tuple(sorted(metadata.templates.items())),
@@ -174,6 +191,27 @@ def _resolve_chat_policy(
     legacy_models = set(spec.legacy_chat_models)
     for model_name, entries in model_entries.items():
         explicit = spec.chat_templates.get(model_name)
+        if model_name in spec.upstream_chat_models:
+            pool = spec.pools.get(model_name)
+            incompatible = sorted(
+                {
+                    entry.backend
+                    if entry.backend != "openai"
+                    else f"openai upstream {entry.options.get('upstream', 'generic')!r}"
+                    for entry in entries
+                    if not _entry_renders_native_chat(entry)
+                }
+            )
+            if not entries or (pool is not None and pool.discovery is not None):
+                incompatible.append("discovered or absent replicas")
+            if incompatible:
+                raise ValueError(
+                    f"upstream_chat_models model {model_name!r} needs every replica "
+                    "to render native chat messages upstream (an openai backend with "
+                    "upstream: vllm); not supported by: " + ", ".join(incompatible)
+                )
+            # The upstream owns the model's template; Kairyu renders nothing.
+            continue
         if model_name in legacy_models:
             if emit_warnings:
                 logger.warning(
@@ -368,6 +406,7 @@ def _resolve_chat_policy(
     return _ResolvedChatPolicy(
         templates=templates,
         legacy_models=frozenset(legacy_models),
+        upstream_models=frozenset(spec.upstream_chat_models),
     )
 
 
@@ -898,6 +937,11 @@ def build_app_from_spec(
         for name in chat_policy.legacy_models
         if public_models is None or name in public_models
     )
+    served_upstream_chat_models = frozenset(
+        name
+        for name in chat_policy.upstream_models
+        if public_models is None or name in public_models
+    )
 
     workers: list[object] = []  # filled after create_app (workers need app metrics)
     owned_stores: list[object] = []
@@ -970,6 +1014,7 @@ def build_app_from_spec(
         resolved_responses_compaction_key=responses_compaction_key,
         price_sheet=spec.pricing,
         legacy_chat_models=served_legacy_chat_models,
+        upstream_chat_models=served_upstream_chat_models,
         orchestration_chat_models=set(served_orchestrators),
         runtime_engines=engines,
         runtime_embedding_backends=embedding_backends,
@@ -1016,6 +1061,7 @@ def build_app_from_spec(
             metrics=app.state.metrics,
             chat_templates=chat_templates,  # batch and HTTP must render identically
             legacy_chat_models=chat_policy.legacy_models,
+            upstream_chat_models=chat_policy.upstream_models,
             usage_ledger=getattr(app.state, "usage_ledger", None),
             tenant_limiter=getattr(app.state, "tenant_limiter", None),
             tenant_config=tenant_config,
@@ -1050,6 +1096,7 @@ def build_app_from_spec(
             metrics=app.state.metrics,
             chat_templates=served_chat_templates,
             legacy_chat_models=served_legacy_chat_models,
+            upstream_chat_models=served_upstream_chat_models,
             usage_ledger=getattr(app.state, "usage_ledger", None),
             tenant_limiter=getattr(app.state, "tenant_limiter", None),
             tenant_config=tenant_config,

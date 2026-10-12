@@ -58,7 +58,8 @@ pools:
     # One JSONL row per placement; verify.sh reads it to count placements.
     placement_log_path: /var/lib/kairyu/placement/glm-5.3-flash.jsonl
 
-# vLLM renders the chat template and parses tool calls, so Kairyu uses its
-# legacy chat path, as in the sibling single-replica examples.
-legacy_chat_models:
+# vLLM renders the checkpoint's chat template from the caller's own messages
+# (earlier turns, tool calls and tool results) and parses tool calls, so
+# Kairyu sends each chat's messages as they are (m9 D2 amendment 2026-10-12).
+upstream_chat_models:
 - glm-5.3-flash

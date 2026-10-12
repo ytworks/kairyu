@@ -168,6 +168,39 @@ token-granularity TPOT, results files).
   it (verified-tool gate 1 of 12 at effort max; DeepSWE 1 of 1,410 and 5 of
   77 replies); (4) only this structure, only at the end, only for declared
   tools with schema-valid arguments; no example policy enters the parse.
+- **Upstream-chat amendment (2026-10-12, PR #647, owner authorization):**
+  `DeploymentSpec.upstream_chat_models` names served `engines:`/`pools:`
+  models whose upstream renders the model's own chat template. A text chat
+  of such a model is not rendered by Kairyu: its validated messages (the list
+  the legacy renderer would flatten, including the `parallel_tool_calls:
+  false` constraint) go to the backend in `GenerationRequest.conversation_prefix`
+  behind an empty prompt, so the upstream body carries the caller's turns,
+  tool calls and tool results with `tools`, `tool_choice` and
+  `reasoning_effort` as before. Chat Completions, Responses, Messages
+  (including `count_tokens`), batch and AsyncRequest share it through
+  `validate_chat_request(_async)`. A name cannot also be in
+  `legacy_chat_models` or `chat_templates`; the build fails, before any
+  backend is constructed, unless every replica is a static `openai` backend
+  whose upstream profile declares `conversation_prefix` (vLLM).
+  `chat_template_kwargs` on text chats stay rejected and image chats keep the
+  multimodal path. `legacy_chat_models` is unchanged. Known limit: KV-aware
+  prefix placement reads the (empty) prompt text, so a multi-replica pool of
+  such a model places by load and session affinity only.
+  Why (framework boundary): (1) the pool chat path could not deliver a
+  conversation to an upstream that owns the template: legacy chats reach vLLM
+  as one `system: ...\nuser: ...` user message, and GLM-5.3-Flash then
+  answered every second agent turn without a tool call (DeepSWE, 23 of 23
+  finished tasks `RepeatedFormatError`; the same request sent to vLLM
+  directly returned a call); (2) `native_conversation` (m1 D8 amendment
+  2026-10-09) exists only on L2 publisher roles; (3) any vLLM-served model
+  driven by a multi-turn tool agent is affected, observable as the one-message
+  upstream body (m1 D8 measured DeepSeek-V4.1 writing calls as text 11 of 12
+  times from a transcript, 0 of 12 natively); (4) the mechanism is one model
+  list over the existing `conversation_prefix`; which models opt in stays in
+  the examples. Code: `chat_service._upstream_conversation`,
+  `builder._entry_renders_native_chat`; tests:
+  `test_upstream_chat_model_sends_the_callers_conversation_natively`,
+  `test_upstream_chat_model_fails_before_construction_without_upstream_support`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and
