@@ -337,7 +337,8 @@ prompt stay in the example. Code: `RoleSpec.native_conversation`,
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/unit/test_profile_judge_systemone.py`; GPU evidence in
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b` (`routing`);
-Winnow as the judge: `examples/deepseek-v4.1-winnow-8gpu/` (VCO-D18).
+Winnow as the judge (VCO-D18), then Quyet (VCO-D21):
+`examples/deepseek-v4.1-quyet-8gpu/`.
 
 A `profile_judge` whose `worker` is a `systemone_ref` worker routes by System
 One probabilities instead of a generated label. Kairyu sends the

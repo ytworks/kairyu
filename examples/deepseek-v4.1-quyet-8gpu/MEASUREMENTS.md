@@ -1,10 +1,163 @@
-# deepseek-v4.1-winnow-8gpu evidence
+# deepseek-v4.1-quyet-8gpu evidence
 
 Host: 8 x RTX PRO 6000 Blackwell Server Edition (SM120), PCIe. DeepSeek-V4.1
 DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
-overlay); two Winnow-12B Q8_0 replicas (winnow-server `77d1458` + f072b10):
-`winnow-route` on GPU 6 (route judge only), `winnow-judge` on GPU 7
-(judgments only).
+overlay); two Quyet-1.0-Large replicas (stock vLLM v0.31.0 bf16 plus this
+example's System One adapter): `quyet-route` on GPU 6 (route judge only),
+`quyet-judge` on GPU 7 (judgments and form check).
+Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
+
+## Quyet layout: TOOL floor and strict form check (VCO-D21/D22 amendment)
+
+GPU run 2026-10-11 10:32-11:45 JST (gates; UTC 01:32-02:45) at `fa82424f`
+(route judge TOOL at P(TOOL) >= 0.1; the form check read strict through
+`quyet-strict`, PR #645 review). `./run.sh` rebuilt the adapter and recreated the
+changed services, Kairyu restarted on the new spec; the route replay, all nine
+gates in GATES order, then the TOOL-route replay. Logs `run-20261011-r2.log`,
+`pregate-20261011-r4.log`, `gates-20261011-r2.log`,
+`pregate-20261011-r5-tool.log`; results `*-20261011T01*`/`T02*`. **All nine
+gates pass; the route replay misroutes 5 of 64 real turns (pass line 6).**
+
+### Before and after the gates (`pregate-20261011T013119Z.json`, `pregate-20261011T024522Z.json`)
+
+- Route judge, the same 64 real DeepSWE turns: **5 routed THINK** (11 without
+  the floor; Winnow 1), all final turns before the submit command
+  (P(TOOL) 0.009-0.058). Reads 0.83 s median, 1.14 s max; 0 states cut, 0 strict
+  refusals.
+- TOOL route, the same six turns in process: one routed THINK (P(TOOL) 0.058);
+  five ran 14-16 candidates, 84-96 judgment questions in three parallel reads of
+  2.1-4.5 s, and passed the form check, four first time and one after one fix
+  (F7 0.41 -> 0.85, the four calls unchanged). Final replies made 3, 1, 4, 1 and
+  3 calls; 75-265 s per turn. 27 Quyet reads, 0 cut, 0 refused.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| l1 | pass (28 s), including the strict name refusing a long state the plain name answers cut |
+| routing | pass: TOOL miss 5 % / 0 %; THINK precision 98.9 %, recall 94.8 % (tool-declared THINK 68.8 %, 11/16); judge wall 11.2 s for 136, 0 cut |
+| think-route | pass: 6/6 THINK, streamed; p50 1.07 s, TTFT p50 0.87 s |
+| effort | pass: THINK follows the caller (0.7-0.9 s); TOOL candidates and answer follow the caller, a structured `bash` call each time, form passed first time; 70-147 s, 12,487-27,997 output tokens, 172-191 tok/s |
+| verified-tool-route | pass: 12/12 TOOL (`own-check` at P(TOOL) 0.36 now TOOL), 12-16 candidates, judgments on `quyet-judge` and the form check on `quyet-form`, form passed first time 12/12, a structured call to a declared tool; p50 64.3 s, p95 107.1 s; 149,578 output tokens, 153-185 tok/s; two replies batched two calls |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 0.8-1.3 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with a call (107.6 s); both back: judged and form-checked (111.0 s) |
+| serving | pass: 72/72 answered, every reply a structured call (table below) |
+| serving-routed | pass: 72/72 answered (table below) |
+| browser | pass: Open WebUI answers |
+
+serving (agent turns):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n | Form fix limit | Replies with 2+ calls |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|
+| c1 | 8 | 74.8 | 85.1 | 594 | 103,768 | 175 | 8 / 74.8 | 0 | 1 | 1 |
+| c4 | 16 | 65.4 | 106.1 | 390 | 168,944 | 433 | 15 / 65.7 | 1 | 0 | 6 |
+| c8 | 16 | 108.7 | 223.3 | 269 | 201,888 | 751 | 15 / 115.9 | 1 | 1 | 8 |
+| c16 | 32 | 134.2 | 235.3 | 417 | 398,451 | 955 | 31 / 141.4 | 1 | 2 | 11 |
+
+The four replies published at the fix limit each made one call; Quyet read
+F5 (true for one call by its own criteria) below 0.5 on three and F1 on one,
+so each cost two extra DeepSeek fixes. 356 Quyet reads (6,689 questions), 0
+states cut, 0 strict refusals; judgment reads p50 2.2 s, max 5.9 s.
+
+serving-routed (routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n / p50 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 25.3 | 41.9 | 221 | 157 | 2 / 53.7 | 6 / 17.7 | 0.13-0.15 |
+| c4 | 16 | 17.2 | 104.7 | 187 | 431 | 6 / 73.3 | 10 / 3.3 | 0.14-0.15 |
+| c8 | 16 | 40.1 | 122.6 | 153 | 608 | 6 / 81.9 | 10 / 17.7 | 0.18-0.39 |
+| c16 | 32 | 47.8 | 172.2 | 233 | 804 | 11 / 102.1 | 21 / 13.7 | 0.14-0.17 |
+
+One TOOL reply was fixed once and passed. 172 Quyet reads, 0 cut.
+
+## First Quyet run (2026-10-11, before the TOOL floor and the strict form check)
+
+GPU run 2026-10-11 04:38-05:46 JST (gates; UTC 2026-10-10 19:38-20:46) at
+`6d19280e` (the judgments fix below), plan
+`docs/superpowers/plans/2026-10-11-deepseek-v4.1-quyet-8gpu.md`. Storage prepared
+by hard-linking the attested DeepSeek and Quyet checkpoints, then plain
+`./run.sh`; `./verify.sh <gate>` in GATES order, run to the end. Logs
+`run-20261011.log`, `pregate-20261011-r3.log`, `gates-20261011.log`; results
+`*-20261010T19*`/`T20*`. **8 of 9 gates pass; `verified-tool-route` fails 2 of
+12 on routing (`own-check` routed THINK); the pre-gate route replay misroutes 11
+of 64 real turns (pass line 6).**
+
+Fixed during the run: the first pre-gate run showed every judgment read refused
+with 400 (`instructions must be a non-empty string`): the quyet package takes a
+question's instructions only as one string, and the candidate went in as an
+object (checklist `context`). The candidate now goes in the question text; the
+example test's fake adapter applies the package's rule (5 of 11 cases fail on the
+old spec).
+
+### Before the gates (`pregate-20261010T192154Z.json`)
+
+Route judge, 64 real DeepSWE turns that each need a tool call
+(`deepswe-verified-3wave-nextstep-4w-20261007-r1`, the last and a middle turn of
+32 runs; median 198,515 characters; the agent's `bash` tool given as a generic
+`bash(command)` schema), one at a time: **11 routed THINK** (Winnow: 1 of 64 on
+the same run), all of them last turns: the next move is the submit command after
+tool results show the commit and tests done. The task message survived the
+12,000-character bound in all 11. Reads 0.83 s median, 0 states cut.
+
+TOOL route, six of those turns in process (real L1, every exchange recorded):
+one was routed THINK; the other five ran 14-16 candidates, 84-96 judgment
+questions in three parallel reads of 1.7-4.8 s, and passed the form check on the
+first attempt (no fixes; F7 read 0.51-0.92, every other item >= 0.91). Final
+replies made 2, 1, 4, 3 and 1 calls; 72-283 s per turn (candidates 59-174 s).
+26 Quyet reads, 0 states cut.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| l1 | pass (29 s): every DeepSeek DP rank, each Quyet vLLM and System One, one structured tool call from the public model through the new route |
+| routing | pass: TOOL miss 5 % (calibration) / 0 % (held-out); THINK precision 99.0 %, recall 99.0 % (tool-declared THINK 93.8 %); judge wall 11.1 s for 136 |
+| think-route | pass: 6/6 THINK, streamed; p50 0.95 s, TTFT p50 0.76 s |
+| effort | pass: THINK follows the caller (0.8-1.1 s); TOOL candidates and answer follow the caller, a structured `bash` call each time, form passed first time; 88-144 s, 15,277-25,657 output tokens, 174-185 tok/s |
+| verified-tool-route | **fail**: 10/12 TOOL with 12-16 candidates, every judgment and form check on `quyet-judge`, form passed first time (no fixes), a structured call to a declared tool; `own-check` (unary and streamed) routed THINK (P(TOOL) 0.35) and answered with a `bash` call. p50 64.8 s, p95 114.3 s; 132,006 output tokens; one reply batched two calls |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 0.8-1.5 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with a call (90.3 s); both back: judged and form-checked (134.6 s) |
+| serving | pass: 72/72 answered, every reply a structured call (table below) |
+| serving-routed | pass: 72/72 answered (table below) |
+| browser | pass: Open WebUI answers |
+
+serving (agent turns), Winnow layout p50 of 2026-10-09 in brackets:
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n | Form: fixed / limit | Replies with 2+ calls |
+|---|---:|---:|---:|---:|---:|---|---:|---|---:|
+| c1 | 8 | 74.0 (137.2) | 105.1 | 544 | 174 | 7 / 75.1 | 1 | 1 / 0 | 2 |
+| c4 | 16 | 71.9 (131.5) | 120.0 | 360 | 494 | 15 / 79.0 | 1 | 1 / 0 | 7 |
+| c8 | 16 | 103.7 (195.8) | 162.2 | 255 | 656 | 14 / 107.6 | 2 | 0 / 1 | 5 |
+| c16 | 32 | 131.1 (208.6) | 200.6 | 364 | 1,042 | 30 / 138.3 | 2 | 0 / 1 | 13 |
+
+The two replies published at the fix limit read F5 below 0.5 on one call (c8)
+and F1 and F5 on two read-only calls with empty text (c16); both carried
+structured calls. 342 Quyet reads (6,216 questions), 0 states cut; judgment
+reads p50 2.1 s, max 6.3 s.
+
+serving-routed (routing set):
+
+| Level | Requests | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n / p50 s | Route judge p50 s |
+|---|---:|---:|---:|---:|---:|---|---|---|
+| c1 | 8 | 15.8 | 56.0 | 216 | 157 | 2 / 59.8 | 6 / 12.2 | 0.13-0.15 |
+| c4 | 16 | 29.6 | 74.6 | 148 | 458 | 6 / 61.3 | 10 / 3.1 | 0.14-0.15 |
+| c8 | 16 | 46.6 | 114.3 | 135 | 645 | 6 / 77.9 | 10 / 16.2 | 0.19-0.39 |
+| c16 | 32 | 49.6 | 182.9 | 256 | 759 | 10 / 123.7 | 22 / 12.2 | 0.14-0.70 |
+
+Every TOOL reply here passed the form check first time. 168 Quyet reads, 0
+states cut.
+
+### Routing misses: what a TOOL floor would change (offline, recorded probabilities)
+
+| P(TOOL) floor | Real turns misrouted | `own-check` | Routing set TOOL miss (cal / held-out) | THINK precision | Tool-declared text turns kept on THINK |
+|---|---|---|---|---|---|
+| none (served) | 11/64 | THINK | 5 % / 0 % | 99.0 % | 15/16 |
+| 0.2 | 7/64 | TOOL | 5 % / 0 % | 98.9 % | 12/16 |
+| 0.1 | 5/64 | TOOL | 5 % / 0 % | 98.9 % | 11/16 |
+
+## Earlier layout: two Winnow-12B replicas (`deepseek-v4.1-winnow-8gpu`)
+
+The sections below were measured before VCO-D21, when the example was
+`deepseek-v4.1-winnow-8gpu`: two Winnow-12B Q8_0 replicas (winnow-server
+`77d1458` + f072b10), `winnow-route` on GPU 6 and `winnow-judge` on GPU 7.
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-winnow-8gpu/results/`.
 The verified tool route: `*-20261009T07*` to `T09*` (rerun, gate log
 `gates-20261009-verified-tool-5.log`) and `*-20261009T04*` to `T06*` (gate log

@@ -3,7 +3,7 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 venv_bin="$here/../../.venv/bin"
 nvme_root="${NVME_STORAGE_ROOT:-/mnt/nvme/kairyu}"
-bench_tmp="$nvme_root/model-volumes/deepseek-v4.1-winnow-8gpu/bench-tmp"
+bench_tmp="$nvme_root/model-volumes/deepseek-v4.1-quyet-8gpu/bench-tmp"
 mkdir -p "$bench_tmp"
 PATH="$venv_bin:$PATH"
 TMPDIR="$bench_tmp"
