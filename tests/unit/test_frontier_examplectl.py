@@ -37,6 +37,7 @@ def test_examples_surface_contains_the_seven_hardware_examples() -> None:
         "deepseek-v4.1-flash-8gpu",
         "deepseek-v4.1-quyet-8gpu",
         "glm-5.3-flash-6gpu",
+        "glm-5.3-flash-quyet-8gpu",
         "openjev-diffusiongemma-26b-1gpu",
         "quyet-1.0-large-1gpu",
         "qwen3.8-27b-1gpu",

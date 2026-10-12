@@ -1,0 +1,1401 @@
+{
+ "tools": {
+  "calendar": [
+   {
+    "type": "function",
+    "function": {
+     "name": "list_events",
+     "description": "List the user's calendar events on a date (YYYY-MM-DD).",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "date": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "date"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "create_event",
+     "description": "Create a calendar event. start and end are ISO 8601 local times.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "title": {
+        "type": "string"
+       },
+       "start": {
+        "type": "string"
+       },
+       "end": {
+        "type": "string"
+       },
+       "attendees": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      },
+      "required": [
+       "title",
+       "start",
+       "end"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "send_email",
+     "description": "Send an email from the user's account.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "to": {
+        "type": "string"
+       },
+       "subject": {
+        "type": "string"
+       },
+       "body": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "to",
+       "subject",
+       "body"
+      ]
+     }
+    }
+   }
+  ],
+  "code": [
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "files": [
+   {
+    "type": "function",
+    "function": {
+     "name": "read_file",
+     "description": "Read a text file and return its content.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "write_file",
+     "description": "Write a text file, replacing its whole content.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "content": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "content"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   }
+  ],
+  "ops": [
+   {
+    "type": "function",
+    "function": {
+     "name": "bash",
+     "description": "Run a shell command in the workspace and return its output.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "finish",
+     "description": "End the task and report a summary to the user.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "summary": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "summary"
+      ]
+     }
+    }
+   }
+  ],
+  "web": [
+   {
+    "type": "function",
+    "function": {
+     "name": "http_get",
+     "description": "Fetch a URL and return the HTTP status and body.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "url": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "url"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "web_search",
+     "description": "Search the web and return the top results.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ "items": [
+  {
+   "id": "public-name",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "parse() in mylib should raise a new exception ParseError on malformed input. Users import it as `from mylib import ParseError`."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && ls mylib && sed -n 1,20p mylib/__init__.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "__init__.py\nparser.py\n\nfrom mylib.parser import parse\n\n__all__ = ['parse']\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat > mylib/errors.py <<'EOF'\\nclass ParseError(ValueError):\\n    \\\"\\\"\\\"Raised by parse() on malformed input.\\\"\\\"\\\"\\nEOF\\nsed -i 's/^    raise ValueError(\\\"bad input\\\")/    raise ParseError(\\\"bad input\\\")/' mylib/parser.py && sed -i '1i from mylib.errors import ParseError' mylib/parser.py && grep -n ParseError mylib/parser.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "1:from mylib.errors import ParseError\n41:    raise ParseError(\"bad input\")"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -c \\\"from mylib.errors import ParseError; from mylib import parse\\ntry:\\n    parse('{{')\\nexcept ParseError as e:\\n    print('ok', e)\\\" && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "ok bad input\n88 passed in 1.42s"
+    }
+   ]
+  },
+  {
+   "id": "finish-batched",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "Fix the off-by-one in paginate() in app/pages.py, then commit the fix with the message 'fix: paginate start index'."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/start = page \\\\* size + 1/start = page * size/' app/pages.py && python -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "57 passed in 1.31s"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git add -A && git commit -q -m 'fix: paginate start index' && submit\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "Author identity unknown\n\n*** Please tell me who you are.\n\nRun\n\n  git config --global user.email \"you@example.com\"\n  git config --global user.name \"Your Name\"\n\nfatal: unable to auto-detect email address (got 'root@4f2c.(none)')"
+    }
+   ]
+  },
+  {
+   "id": "own-check",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Each Worker must initialise its cache independently: creating a Worker must not require any other Worker to exist. Fix app/worker.py and add a test."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -n 1,30p app/worker.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "_shared = None\n\n\nclass Worker:\n    def __init__(self, name, root=False):\n        global _shared\n        if root:\n            _shared = {}\n        self.cache = _shared\n        self.name = name\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python - <<'EOF'\\nimport re, pathlib\\np = pathlib.Path('app/worker.py')\\np.write_text(p.read_text().replace('        self.cache = _shared\\\\n', '        self.cache = _shared if _shared is not None else {}\\\\n'))\\nEOF\\ncat > tests/test_worker_cache.py <<'EOF'\\nfrom app.worker import Worker\\n\\n\\ndef test_second_worker_gets_a_cache():\\n    Worker('a', root=True)\\n    b = Worker('b')\\n    assert b.cache is not None\\nEOF\\npython -m pytest -q tests/test_worker_cache.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "1 passed in 0.04s"
+    }
+   ]
+  },
+  {
+   "id": "second-source",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Compare the free-tier request limits of ServiceA (https://servicea.example.com/pricing) and ServiceB (https://serviceb.example.com/pricing). Give both numbers and their source pages."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://servicea.example.com/pricing\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 200\n<h2>Free</h2><p>Up to 10,000 API requests per month. 1 project.</p>"
+    }
+   ]
+  },
+  {
+   "id": "reschedule",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Move my 'Budget review' on 2026-10-15 to the same time on 2026-10-16 if I'm free then, and email ana@example.com about the change."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-15\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Budget review\", \"start\": \"2026-10-15T14:00\", \"end\": \"2026-10-15T14:30\", \"attendees\": [\"ana@example.com\"]}]"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-16\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "[{\"title\": \"Standup\", \"start\": \"2026-10-16T09:00\", \"end\": \"2026-10-16T09:30\"}, {\"title\": \"Lunch\", \"start\": \"2026-10-16T12:00\", \"end\": \"2026-10-16T13:00\"}]"
+    }
+   ]
+  },
+  {
+   "id": "type-check",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Add an overload so pick(obj, keys) in src/pick.ts returns an object typed with only the picked keys. CI runs `npx tsc --noEmit` and `npm test`."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat src/pick.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "export function pick(obj: Record<string, unknown>, keys: string[]) {\n  const out: Record<string, unknown> = {};\n  for (const key of keys) out[key] = obj[key];\n  return out;\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat > src/pick.ts <<'EOF'\\nexport function pick<T, K extends keyof T>(obj: T, keys: K[]): Pick<T, K>;\\nexport function pick(obj: Record<string, unknown>, keys: string[]) {\\n  const out: Record<string, unknown> = {};\\n  for (const key of keys) out[key] = obj[key];\\n  return out;\\n}\\nEOF\\nnode -e \\\"require('ts-node/register'); console.log(require('./src/pick.ts').pick({a: 1, b: 2}, ['a']))\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "{ a: 1 }"
+    }
+   ]
+  },
+  {
+   "id": "must-not-warn",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Warn when the config file has unknown keys. Valid configs must load without warnings."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -n 1,25p app/config.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import tomllib\nimport warnings\n\nKNOWN = {'name', 'port', 'debug'}\n\n\ndef load(path):\n    with open(path, 'rb') as handle:\n        data = tomllib.load(handle)\n    return data\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python - <<'EOF'\\nimport pathlib\\np = pathlib.Path('app/config.py')\\np.write_text(p.read_text().replace('    return data\\\\n', \\\"    for key in set(data) - KNOWN:\\\\n        warnings.warn(f'unknown key {key!r} in {path}')\\\\n    return data\\\\n\\\"))\\nEOF\\npython -m pytest -q\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "31 passed, 1 warning in 0.77s\n\n=============================== warnings summary ===============================\ntests/test_config.py::test_load_valid\n  /app/app/config.py:11: UserWarning: unknown key 'version' in tests/fixtures/valid.toml"
+    }
+   ]
+  },
+  {
+   "id": "announced-no-call",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "tests/test_dates.py::test_parse_iso fails. Fix it."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "FAILED tests/test_dates.py::test_parse_iso - AssertionError\n1 failed, 41 passed in 0.92s"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -n 'ISO_RE' app/dates.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "12:ISO_RE = re.compile(r\"^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})$\")"
+    },
+    {
+     "role": "assistant",
+     "content": "The pattern rejects the trailing 'Z'. I'll make the zone suffix optional in ISO_RE and rerun the tests."
+    },
+    {
+     "role": "user",
+     "content": "No tool call found in your last reply. Every reply must call exactly one tool."
+    }
+   ]
+  },
+  {
+   "id": "every-exporter",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time. When the task is complete and verified, run `submit` with the bash tool as your final action, on its own."
+    },
+    {
+     "role": "user",
+     "content": "Make every exporter (csv, json and xml in app/export/) escape newlines inside field values."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && ls app/export\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "__init__.py\ncsv_export.py\njson_export.py\nxml_export.py"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/value = str(value)/value = str(value).replace(\\\"\\\\\\\\n\\\", \\\"\\\\\\\\\\\\\\\\n\\\")/' app/export/csv_export.py && python -c \\\"from app.export.csv_export import export; print(export([{'a': 'x\\\\ny'}]))\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "a\nx\\ny"
+    }
+   ]
+  },
+  {
+   "id": "dedup-case",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Deduplicate /data/customers.csv by email, ignoring case, keep the first occurrence, write /data/customers_dedup.csv, and tell me how many rows were removed."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"head -4 /data/customers.csv; wc -l /data/customers.csv\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "id,name,email\n1,Ada,ada@example.com\n2,Bob,BOB@example.com\n3,Bob B.,bob@example.com\n2001 /data/customers.csv"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /data && python3 - <<'EOF'\\nimport csv\\nseen = set()\\nrows = list(csv.DictReader(open('customers.csv')))\\nkeep = [r for r in rows if not (r['email'] in seen or seen.add(r['email']))]\\nw = csv.DictWriter(open('customers_dedup.csv', 'w', newline=''), fieldnames=['id', 'name', 'email'])\\nw.writeheader(); w.writerows(keep)\\nprint(len(rows) - len(keep))\\nEOF\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "12"
+    }
+   ]
+  },
+  {
+   "id": "wrong-column",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Who are the top 3 customers by total spend in /data/orders.csv?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"head -3 /data/orders.csv\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "order_id,customer,total,currency\n1001,acme,250.00,EUR\n1002,globex,80.50,EUR"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"tail -n +2 /data/orders.csv | awk -F, '{s[$2]+=$4} END {for (c in s) print s[c], c}' | sort -rn | head -3\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "0 umbrella\n0 initech\n0 globex"
+    }
+   ]
+  },
+  {
+   "id": "official-schedule",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "When is the next CPython feature release planned, according to its official release schedule?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"CPython release schedule PEP next feature release\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "1. PEP 790 - Python 3.15 Release Schedule - peps.python.org/pep-0790/\n2. Status of Python versions - devguide.python.org/versions/\n3. Blog post: what's coming in 3.15 - example-blog.dev"
+    }
+   ]
+  },
+  {
+   "id": "reminders",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Send each attendee of Friday's 'Retro' (2026-10-16) a separate reminder email with the time."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "list_events",
+        "arguments": "{\"date\": \"2026-10-16\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "[{\"title\": \"Retro\", \"start\": \"2026-10-16T15:00\", \"end\": \"2026-10-16T16:00\", \"attendees\": [\"dana@example.com\", \"eli@example.com\", \"fay@example.com\"]}]"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "send_email",
+        "arguments": "{\"to\": \"dana@example.com\", \"subject\": \"Reminder: Retro on Friday\", \"body\": \"Hi Dana, a reminder that the Retro is on Friday 2026-10-16 from 15:00 to 16:00.\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "{\"status\": \"sent\"}"
+    }
+   ]
+  },
+  {
+   "id": "upgrade-dependency",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Upgrade requests to 2.32.3 in requirements.txt and confirm the tests still pass."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -i 's/^requests==.*/requests==2.32.3/' requirements.txt && grep requests requirements.txt\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "requests==2.32.3"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && pip install -q -r requirements.txt && pip show requests | head -2\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "Name: requests\nVersion: 2.32.3"
+    }
+   ]
+  },
+  {
+   "id": "traceback",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "GET /items?ttl=1 returns 500. Find and fix the cause."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -m pytest -q tests/test_items.py -x\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "E   KeyError: 'ttl'\n\napp/cache.py:88: KeyError\nFAILED tests/test_items.py::test_items_with_ttl - KeyError: 'ttl'\n1 failed, 6 passed in 0.31s"
+    }
+   ]
+  },
+  {
+   "id": "route-missing",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Add DELETE /items/{id} returning 204, as specified in docs/api.md."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && grep -n 'DELETE' -A4 docs/api.md\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "31:### DELETE /items/{id}\n32-Deletes the item. Returns 204 with no body; 404 when it does not exist."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat >> app/items.py <<'EOF'\\n\\n\\ndef delete_item(item_id):\\n    if item_id not in ITEMS:\\n        raise NotFound()\\n    del ITEMS[item_id]\\n    return Response(status=204)\\nEOF\\npython -m pytest -q tests/test_items.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "FAILED tests/test_items.py::test_delete_item - assert 405 == 204\nFAILED tests/test_items.py::test_delete_missing - assert 405 == 404\n2 failed, 7 passed in 0.35s"
+    }
+   ]
+  },
+  {
+   "id": "reload-and-check",
+   "tools": "ops",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an operations agent. Use bash to do the work. When everything is done and checked, call the finish tool with a short summary."
+    },
+    {
+     "role": "user",
+     "content": "Make nginx serve /srv/www/site on port 8080, reload it, and confirm the site answers."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cat > /etc/nginx/conf.d/site.conf <<'EOF'\\nserver {\\n    listen 8080;\\n    root /srv/www/site;\\n}\\nEOF\\nnginx -t\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful"
+    }
+   ]
+  },
+  {
+   "id": "finish-report",
+   "tools": "ops",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an operations agent. Use bash to do the work. When everything is done and checked, call the finish tool with a short summary."
+    },
+    {
+     "role": "user",
+     "content": "Report the expiry date of the TLS certificate served by example.com on port 443."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"echo | openssl s_client -connect example.com:443 -servername example.com 2>/dev/null | openssl x509 -noout -enddate\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "notAfter=Jan 15 23:59:59 2027 GMT"
+    }
+   ]
+  },
+  {
+   "id": "partial-revert",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Revert commit 9c1e2aa but keep the test changes it made."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git show --stat 9c1e2aa | tail -4\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": " app/text.py            | 6 +++---\n tests/test_text.py     | 9 +++++++++\n 2 files changed, 12 insertions(+), 3 deletions(-)"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && git revert --no-commit 9c1e2aa && git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "M  app/text.py\nM  tests/test_text.py"
+    }
+   ]
+  },
+  {
+   "id": "benchmark",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Speed up slow_sum in app/stats.py without changing its results. Measure with `python bench.py`."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && sed -n 1,10p app/stats.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "def slow_sum(values):\n    total = 0\n    for i in range(len(values)):\n        total = total + values[i]\n    return total\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python bench.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "slow_sum: 1.84 s for 10 runs"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python - <<'EOF'\\nimport pathlib\\np = pathlib.Path('app/stats.py')\\np.write_text('def slow_sum(values):\\\\n    return sum(values)\\\\n')\\nEOF\\necho written\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "written"
+    }
+   ]
+  },
+  {
+   "id": "code-blocks",
+   "tools": "files",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a data assistant working with the files under /data."
+    },
+    {
+     "role": "user",
+     "content": "Replace every 'colour' with 'color' in /data/docs/*.md, but leave fenced code blocks unchanged."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /data/docs && sed -i 's/colour/color/g' *.md && git diff --stat && git diff | grep '^[-+] ' | head -6\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": " guide.md | 6 +++---\n intro.md | 2 +-\n 2 files changed, 4 insertions(+), 4 deletions(-)\n-The colour of the header can be set.\n+The color of the header can be set.\n-    set_colour('red')\n+    set_color('red')"
+    }
+   ]
+  },
+  {
+   "id": "link-check",
+   "tools": "web",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a research assistant. Look things up with the tools and cite the pages you used."
+    },
+    {
+     "role": "user",
+     "content": "Check that every link on https://example.org/docs/index.html returns HTTP 200 and list any that do not."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://example.org/docs/index.html\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "HTTP 200\n<a href=\"https://example.org/docs/start.html\">Start</a> <a href=\"https://example.org/docs/api.html\">API</a> <a href=\"https://example.org/docs/faq.html\">FAQ</a>"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "http_get",
+        "arguments": "{\"url\": \"https://example.org/docs/start.html\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "HTTP 200\n<h1>Getting started</h1>"
+    }
+   ]
+  },
+  {
+   "id": "calendar-first-move",
+   "tools": "calendar",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a personal assistant with access to the user's calendar and email. The user's time zone is Europe/Berlin. Today is 2026-10-13."
+    },
+    {
+     "role": "user",
+     "content": "Find my first free 45-minute slot after 13:00 on 2026-10-19 and book 'Hiring debrief' there with fay@example.com."
+    }
+   ]
+  },
+  {
+   "id": "repeat-read",
+   "tools": "code",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the repository at /app. Use the bash tool to inspect, edit and test code, one step at a time."
+    },
+    {
+     "role": "user",
+     "content": "Make app/slug.py keep digits in slugs: slugify('Top 10 tips') must return 'top-10-tips'."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat app/slug.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import re\n\n\ndef slugify(text):\n    words = re.findall(r'[a-z]+', text.lower())\n    return '-'.join(words)\n"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && python -c \\\"from app.slug import slugify; print(slugify('Top 10 tips'))\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "top-tips"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /app && cat app/slug.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "import re\n\n\ndef slugify(text):\n    words = re.findall(r'[a-z]+', text.lower())\n    return '-'.join(words)\n"
+    }
+   ]
+  }
+ ]
+}

@@ -6,13 +6,15 @@ rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
-Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11**
+Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
 `examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18, from
 `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
-2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21). Framework
+2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21) and, with
+GLM-5.3-Flash as the writer, `examples/glm-5.3-flash-quyet-8gpu/` (VCO-D23). Framework
 mechanisms: m1 D8 (checklist verifiers), m1 D9 and the
 m11 D8 replica amendment.
 
@@ -907,6 +909,33 @@ GPU-verified 2026-10-11 at `fa82424f` (example `MEASUREMENTS.md`): all nine
 gates pass; the route replay misroutes 5 of 64 real turns (11 before); no form
 check read a cut state (of 458 judge reads in the gates, the one cut read and
 the one strict refusal were `l1`'s deliberate probes).
+
+### VCO-D23 — GLM-5.3-Flash as the writer (2026-10-12, PR #648)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-12-glm-5.3-flash-quyet-8gpu.md`.
+
+- New example `examples/glm-5.3-flash-quyet-8gpu`; `deepseek-v4.1-quyet-8gpu`
+  stays. GPUs 0-5 run GLM-5.3-Flash exactly as `glm-5.3-flash-6gpu` selected
+  it (official FP8, TP2 x DP3 / EP6, MTP 3, stock vLLM v0.31.0); GPUs 6-7 run
+  the two Quyet replicas of VCO-D21 unchanged.
+- L2: the VCO-D22 route (with its 2026-10-11 amendment) with GLM in every
+  writer role (`candidates`, `answer` and its fixes, `glm_think_answer`).
+  Changes forced by the writer only: the pool allows no
+  `chat_template_kwargs` (GLM always thinks; the effort is
+  `reasoning_effort`), the pool is in `upstream_chat_models` as in
+  `glm-5.3-flash-6gpu` (m9 D2 amendment, PR #647), the default effort is
+  `max` (GLM's official default; owner decision), and F2 names GLM's
+  `<arg_key>`/`<arg_value>` call markup instead of DSML. Every other value
+  (questions, thresholds, states, fixes, budget, `max_tokens` 262,144, pool
+  timeout 7,200 s, concurrency 128) is VCO-D22's.
+- `kairyu/` is unchanged: `enable_thinking` is added only for a pool that
+  allows it, so GLM receives the effort alone.
+- GPU verification: the nine gates of VCO-D22 with the same pass criteria;
+  pending (the example's `MEASUREMENTS.md`).
+
+Why: the owner wants the same verified tool route served with GLM-5.3-Flash
+as the writer, built from the two GPU-verified examples without changing
+what neither forces.
 
 ## Limitations
 
