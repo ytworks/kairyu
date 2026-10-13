@@ -947,6 +947,18 @@ error itself, and GLM's think route reporting a misrouted agent turn done
 without the call it still needs (`dedup-case`, P(TOOL) 0.025, 1 of 3 runs),
 stay as recorded limits; the design is otherwise unchanged.
 
+Amendment 2026-10-13, second (owner decision after the re-run, PR #648): the
+form check's F5 asks first whether the reply makes exactly one call, and only
+for several calls whether they need no result of each other and the
+conversation allows several. Asked whether the conversation allows several
+calls, Quyet read a one-call reply under a one-call protocol below 0.5
+(`announced-no-call`: 0.16-0.23), so 5 of 6 serving runs of that turn went
+through two fixes and the last fix once dropped the call (a reply with no
+call published at the fix limit). Replaying the 127 recorded TOOL replies
+through Quyet: those one-call replies read 0.63-0.88, a two-call reply under
+the one-call protocol still fails, no other reply crosses 0.5. Only this
+example's F5 changes; `deepseek-v4.1-quyet-8gpu` keeps VCO-D22's wording.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

@@ -115,6 +115,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-13 — [amendment] GLM + Quyet: the form check's F5 asks for one call first (VCO-D23, PR #648)
+- What: re-run with `unhealthy_after: 3`: l1 and serving-routed pass; serving c16 32/32 answered (no 502) but `announced-no-call` published a reply without a call: Quyet read F5 below 0.5 (0.16-0.23) for its one-call replies, two fixes ran, the last dropped the call. F5 now asks "exactly one call?" first; several calls must be independent and allowed. Replay of 127 recorded replies: those read 0.63-0.88, the two-call reply under the one-call protocol still fails, none else crosses 0.5.
+- Why: owner decision 2026-10-13; only this example's F5 changes, DeepSeek's passes its gates.
+- Refs: VCO-D23 amendment 2026-10-13 (second); example `verified-tool.yaml`
+
 ### 2026-10-13 — [amendment] GLM + Quyet: the GLM pool keeps its replica after one failed request (VCO-D23, PR #648)
 - What: `glm-5.3-flash-quyet-8gpu` GLM pool `unhealthy_after` 1 -> 3. First GPU run: 8 of 9 gates pass; serving c16 21/32: vLLM ended one grammar-constrained MTP candidates call ("grammar rejected tokens", 1 of ~100), the only replica left placement and 10 waiting requests got 502; one THINK-routed agent turn (`dedup-case`, P(TOOL) 0.025) answered done without a call. Both recorded as README limits.
 - Why: owner decision 2026-10-13: one failed request must not fail every request waiting for the only replica; MTP and the candidates grammar stay.

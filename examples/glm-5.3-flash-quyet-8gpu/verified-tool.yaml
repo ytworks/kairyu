@@ -385,15 +385,18 @@ roles:
             The reply has at least one <tool_call> envelope
           criteria_false: >-
             The reply has no <tool_call> envelope
+        # The ask starts with the one-call case (VCO-D23 amendment 2026-10-13):
+        # asked whether the conversation allows several calls, Quyet read a
+        # one-call reply under a one-call protocol below 0.5 (0.16-0.23).
         - id: F5
           group: form
           proposition: Batched calls need no result of each other
           ask: >-
             In the state, reply is the draft reply's text followed by its tool
-            calls, each written as <tool_call>{{...}}</tool_call>. When the reply
-            makes several calls, can each be made without the result of another
-            call in the same reply, and does the conversation allow several calls
-            in one reply?
+            calls, each written as <tool_call>{{...}}</tool_call>. Does the reply
+            make exactly one call? If it makes several calls, answer yes only when
+            each can be made without the result of another call in the same reply
+            and the conversation allows several calls in one reply.
           criteria_true: >-
             The reply makes one call, or the arguments and safety of every call
             depend only on what the conversation already shows, and the
