@@ -7,7 +7,7 @@ DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment)
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
-the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GPU gates pending**
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -931,7 +931,8 @@ Owner decision. Plan: `docs/superpowers/plans/2026-10-12-glm-5.3-flash-quyet-8gp
 - `kairyu/` is unchanged: `enable_thinking` is added only for a pool that
   allows it, so GLM receives the effort alone.
 - GPU verification: the nine gates of VCO-D22 with the same pass criteria;
-  pending (the example's `MEASUREMENTS.md`).
+  all pass 2026-10-13 after the amendments below (the example's
+  `MEASUREMENTS.md`).
 
 Why: the owner wants the same verified tool route served with GLM-5.3-Flash
 as the writer, built from the two GPU-verified examples without changing
@@ -969,7 +970,7 @@ runs 14 of 209 TOOL replies failed their first check: 4 passed after a fix,
 each after Quyet misread a correct one-call reply (`reschedule` F1,
 `announced-no-call` F5). Rewording F1 the way F5 was reworded did not move
 the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
-`json_schema` call, open upstream as vllm#44006) and the `dedup-case` think
+`json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
 route stay recorded limits.
 
 ## Limitations
