@@ -6,13 +6,15 @@ rebuilt as Winnow-routed answers without checklists 2026-10-06 (VCO-D18, PR #640
 DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
-Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11**
+Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
 `examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18, from
 `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
-2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21). Framework
+2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21) and, with
+GLM-5.3-Flash as the writer, `examples/glm-5.3-flash-quyet-8gpu/` (VCO-D23). Framework
 mechanisms: m1 D8 (checklist verifiers), m1 D9 and the
 m11 D8 replica amendment.
 
@@ -907,6 +909,69 @@ GPU-verified 2026-10-11 at `fa82424f` (example `MEASUREMENTS.md`): all nine
 gates pass; the route replay misroutes 5 of 64 real turns (11 before); no form
 check read a cut state (of 458 judge reads in the gates, the one cut read and
 the one strict refusal were `l1`'s deliberate probes).
+
+### VCO-D23 — GLM-5.3-Flash as the writer (2026-10-12, PR #648)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-12-glm-5.3-flash-quyet-8gpu.md`.
+
+- New example `examples/glm-5.3-flash-quyet-8gpu`; `deepseek-v4.1-quyet-8gpu`
+  stays. GPUs 0-5 run GLM-5.3-Flash exactly as `glm-5.3-flash-6gpu` selected
+  it (official FP8, TP2 x DP3 / EP6, MTP 3, stock vLLM v0.31.0); GPUs 6-7 run
+  the two Quyet replicas of VCO-D21 unchanged.
+- L2: the VCO-D22 route (with its 2026-10-11 amendment) with GLM in every
+  writer role (`candidates`, `answer` and its fixes, `glm_think_answer`).
+  Changes forced by the writer only: the pool allows no
+  `chat_template_kwargs` (GLM always thinks; the effort is
+  `reasoning_effort`), the pool is in `upstream_chat_models` as in
+  `glm-5.3-flash-6gpu` (m9 D2 amendment, PR #647), the default effort is
+  `max` (GLM's official default; owner decision), and F2 names GLM's
+  `<arg_key>`/`<arg_value>` call markup instead of DSML. Every other value
+  (questions, thresholds, states, fixes, budget, `max_tokens` 262,144, pool
+  timeout 7,200 s, concurrency 128) is VCO-D22's.
+- `kairyu/` is unchanged: `enable_thinking` is added only for a pool that
+  allows it, so GLM receives the effort alone.
+- GPU verification: the nine gates of VCO-D22 with the same pass criteria;
+  all pass 2026-10-13 after the amendments below (the example's
+  `MEASUREMENTS.md`).
+
+Why: the owner wants the same verified tool route served with GLM-5.3-Flash
+as the writer, built from the two GPU-verified examples without changing
+what neither forces.
+
+Amendment 2026-10-13 (owner decision after the first GPU run, PR #648): the
+GLM pool's `unhealthy_after` is 3 (Kairyu's default) instead of 1. At serving
+c16 vLLM v0.31.0 ended one grammar-constrained `candidates` request with MTP
+as an internal error ("grammar rejected tokens", once in about 100 candidates
+calls); with `unhealthy_after: 1` the only GLM replica left placement and the
+10 requests waiting for it failed with 502 until the next probe. The vLLM
+error itself, and GLM's think route reporting a misrouted agent turn done
+without the call it still needs (`dedup-case`, P(TOOL) 0.025, 1 of 3 runs),
+stay as recorded limits; the design is otherwise unchanged.
+
+Amendment 2026-10-13, second (owner decision after the re-run, PR #648): the
+form check's F5 asks first whether the reply makes exactly one call, and only
+for several calls whether they need no result of each other and the
+conversation allows several. Asked whether the conversation allows several
+calls, Quyet read a one-call reply under a one-call protocol below 0.5
+(`announced-no-call`: 0.16-0.23), so 5 of 6 serving runs of that turn went
+through two fixes and the last fix once dropped the call (a reply with no
+call published at the fix limit). Replaying the 127 recorded TOOL replies
+through Quyet: those one-call replies read 0.63-0.88, a two-call reply under
+the one-call protocol still fails, no other reply crosses 0.5. Only this
+example's F5 changes; `deepseek-v4.1-quyet-8gpu` keeps VCO-D22's wording.
+
+Amendment 2026-10-13, third (owner decision after the third run, PR #648): the
+form check sends no reply back (`max_refinements` 0, `max_refine_depth` 0;
+`refine_prompt` removed). It still reads the seven questions and reports them
+in `kairyu_verification`; the reply is published as written. Across the GPU
+runs 14 of 209 TOOL replies failed their first check: 4 passed after a fix,
+8 reached the fix limit unchanged (283-655 s each) and 2 lost their call
+(one a text-only reply, one GLM's reasoning about the check as its text),
+each after Quyet misread a correct one-call reply (`reschedule` F1,
+`announced-no-call` F5). Rewording F1 the way F5 was reworded did not move
+the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
+`json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
+route stay recorded limits.
 
 ## Limitations
 
