@@ -959,6 +959,19 @@ through Quyet: those one-call replies read 0.63-0.88, a two-call reply under
 the one-call protocol still fails, no other reply crosses 0.5. Only this
 example's F5 changes; `deepseek-v4.1-quyet-8gpu` keeps VCO-D22's wording.
 
+Amendment 2026-10-13, third (owner decision after the third run, PR #648): the
+form check sends no reply back (`max_refinements` 0, `max_refine_depth` 0;
+`refine_prompt` removed). It still reads the seven questions and reports them
+in `kairyu_verification`; the reply is published as written. Across the GPU
+runs 14 of 209 TOOL replies failed their first check: 4 passed after a fix,
+8 reached the fix limit unchanged (283-655 s each) and 2 lost their call
+(one a text-only reply, one GLM's reasoning about the check as its text),
+each after Quyet misread a correct one-call reply (`reschedule` F1,
+`announced-no-call` F5). Rewording F1 the way F5 was reworded did not move
+the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
+`json_schema` call, open upstream as vllm#44006) and the `dedup-case` think
+route stay recorded limits.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

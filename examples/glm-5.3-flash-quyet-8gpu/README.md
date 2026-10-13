@@ -44,9 +44,8 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   │                  announced calls made, no call written as text, declared
   │                  tools with valid arguments, at least one call, batched
   │                  calls independent, finishing call alone after success,
-  │                  short text without internal material
-  │                  fail → answer writes the reply again (only what the unmet
-  │                  items need; the move kept) → checked again, at most twice
+  │                  short text without internal material; reported in
+  │                  kairyu_verification, the reply published as written
   └─ THINK ─────► glm_think_answer  GLM, the caller's effort
                                      (default max), one call with the
                                      caller's conversation as sent
@@ -132,8 +131,8 @@ curl -s http://127.0.0.1:8016/v1/chat/completions -H 'Content-Type: application/
 | `l1` | every GLM DP rank (grammar JSON at the default and low effort), each Quyet replica's vLLM and System One, the strict name refusing a state Quyet would cut, one structured tool call from the public model |
 | `routing` | `datasets/tool-routing-set.json` under the served rule (TOOL at P(TOOL) ≥ 0.1): TOOL miss rate < 10 % on the calibration and held-out halves; THINK precision ≥ 90 % |
 | `think-route` | everyday requests stream from the think route at the default effort |
-| `effort` | the think route gets the caller's effort; the verified tool route's candidates and answer (fixes included) get it too (default max); the route is judged on `quyet-route` |
-| `verified-tool-route` | agent turns from `datasets/tool-turns.json` take the TOOL route: 10-16 candidates, 6 judgments each on `quyet-judge`, the answer and its 7-question form check on `quyet-judge`; each reply carries a structured call to a declared tool; fixes, publish reasons and calls per reply recorded |
+| `effort` | the think route gets the caller's effort; the verified tool route's candidates and answer get it too (default max); the route is judged on `quyet-route` |
+| `verified-tool-route` | agent turns from `datasets/tool-turns.json` take the TOOL route: 10-16 candidates, 6 judgments each on `quyet-judge`, the answer and its 7-question form check on `quyet-judge`; each reply carries a structured call to a declared tool; form results, publish reasons and calls per reply recorded |
 | `fallback` | `quyet-route` down: think route; `quyet-judge` down: still routed, answer without judgments, published unverified; both back: judged and form-checked |
 | `serving` | agent turns at c1/c4/c8/c16 (8/16/16/32 requests): every reply a structured call; per-route latency and tokens |
 | `serving-routed` | the routing set at c1/c4/c8/c16, route mix and per-route latency and tokens |
@@ -160,8 +159,11 @@ and 16 tool-declared turns whose next reply is text.
   text to the verified tool route, which answers with a call (routing set on
   the same Quyet route judge in `deepseek-v4.1-quyet-8gpu`: 11 of 16 such
   turns stay on THINK).
-- A fix is the same GLM role at the same effort; it receives the
-  previous reply as text. A GLM error during a fix fails the request.
+- The form check does not send a reply back for a fix (VCO-D23 amendment
+  2026-10-13): Quyet read some correct one-call replies as failing (F1, F5),
+  and in the GPU runs 2 of the 10 replies that reached the fix limit had lost
+  their call. A reply that fails the check is published as written with the
+  failing items in `kairyu_verification`.
 - vLLM v0.31.0 occasionally ends a grammar-constrained request with MTP as an
   internal error ("grammar rejected tokens", once in about 100 candidates
   calls in the GPU gates); that request fails with 502. The GLM pool keeps its

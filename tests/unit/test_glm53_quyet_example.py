@@ -336,34 +336,26 @@ async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) 
     assert "- [C1-now] p=0.70" in material and "- [C10-safe] p=0.70" in material
 
 
-@pytest.mark.parametrize(
-    ("form", "answers"),
-    [(lambda n: 0.2 if n == 0 else 0.9, 2), (lambda n: 0.2, 3)],
-    ids=["fixed", "exhausted"],
-)
-async def test_a_reply_failing_the_form_check_is_fixed_and_checked_again(form, answers) -> None:
+async def test_a_reply_failing_the_form_check_is_published_as_written() -> None:
+    """No fix (VCO-D23 amendment 2026-10-13): a reply the form check fails is
+    published once, call included, with the failing items reported."""
+
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="TOOL", form=form)
+    orchestrator = _orchestrator(seen, reads, route="TOOL", form=lambda n: 0.2)
 
     result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
 
-    # One fix and a passing check, or two fixes and the last reply published.
     _, *replies = seen
-    assert len(replies) == answers
-    assert sum(1 for _, read in reads if "reply" in read["state"]) == answers
-    for fix in replies[1:]:
-        # The fix is GLM again, with the caller's turn, tools and effort,
-        # the previous reply (its call included) and the unmet requirements.
-        assert fix["messages"][:-1] == AGENT_TURN
-        assert fix["tools"] == replies[0]["tools"]
-        assert fix["reasoning_effort"] == DEFAULT_EFFORT
-        material = fix["messages"][-1]["content"]
-        draft = material.split("--- DRAFT ---")[1].split("--- END DRAFT ---")[0]
-        assert '<tool_call>{"name":"bash"' in draft
-        unmet = material.split("--- UNMET REQUIREMENTS ---")[1]
-        assert "- [F1] p=0.20" in unmet and "- [F7] p=0.20" in unmet
+    assert len(replies) == 1
+    assert sum(1 for _, read in reads if "reply" in read["state"]) == 1
     assert '<tool_call>{"name":"bash"' in result.text
+    assert result.verification is not None
+    assert result.verification.guaranteed is False
+    assert result.verification.attempts == 1
+    assert {item.id for item in result.verification.items if not item.passed} == {
+        f"F{n}" for n in range(1, 8)
+    }
 
 
 async def test_a_reply_too_long_to_check_whole_is_published_unverified() -> None:

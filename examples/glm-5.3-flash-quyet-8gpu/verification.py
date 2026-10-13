@@ -19,7 +19,7 @@ glm_think.
                       precision >= 90 %
   think-route         everyday requests stream from glm_think at the default effort
   effort              the caller's effort reaches the think route and the verified
-                      tool route's candidates, answer and fixes; quyet-route judges
+                      tool route's candidates and answer; quyet-route judges
                       the route
   verified-tool-route agent turns (datasets/tool-turns.json) take the verified
                       tool route: GLM's 10-16 candidates, 6 judgments each on
@@ -247,7 +247,7 @@ def _tool_route_problems(row: dict, caller_effort: str | None) -> list[str]:
     """What a verified tool row misses of the route (empty when sound): the
     four stages, 10-16 candidates judged 6 times each on quyet-judge, the
     seven-question form check read strict on quyet-judge (quyet_form) with its
-    report, and GLM's candidates and answer (fixes included) at the
+    report, and GLM's candidates and answer at the
     caller's effort (default max)."""
 
     stages = row["stages"]
@@ -319,7 +319,7 @@ def _tool_call_problems(row: dict, tools: list[dict]) -> list[str]:
 
 def _tool_route_efforts(caller_effort: str | None) -> dict[str, str]:
     """The verified tool route's efforts: the caller's (default max) for the
-    candidates and the answer (and so for its fixes)."""
+    candidates and the answer."""
 
     wanted = caller_effort or DEFAULT_EFFORT
     return {"candidates": wanted, "answer": wanted}
@@ -746,7 +746,7 @@ def gate_think_route(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
 def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
     """The caller's effort (default max) reaches the think route and the
-    verified tool route's candidates and answer (fixes included); quyet-route
+    verified tool route's candidates and answer; quyet-route
     judges the route."""
 
     deadline = Deadline("effort", budget_s)
@@ -787,7 +787,7 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> 
     caller's effort cycling through none, low, high and max: each must be
     routed TOOL and return 200 after GLM listed 10-16 candidates, Quyet
     (quyet-judge) judged each six times, the answer was written and its form
-    checked on quyet-judge (fixes and the publish reason are recorded), at the
+    checked on quyet-judge (the publish reason is recorded), at the
     caller's effort; the reply carries a structured call to a declared tool
     with JSON-object arguments.
     """
@@ -948,7 +948,7 @@ def _load(
     ``require_calls`` every reply must carry a structured call to a declared tool."""
 
     report = {}
-    # Each verified tool request carries the candidates, the answer and its fixes (6 h).
+    # Each verified tool request carries the candidates, the answer and its form check (6 h).
     deadline = Deadline(gate, 21600)
     for concurrency, prompts in batches.items():
         started = time.monotonic()

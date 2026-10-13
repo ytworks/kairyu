@@ -17,9 +17,9 @@
 #                                     critically and makes the move, several
 #                                     independent safe calls at once when the
 #                                     conversation allows it
-#   format_check  (Quyet judge)       7 form questions on the reply; a reply
-#                                     that fails is written again by answer
-#                                     (refine_prompt), at most twice
+#   format_check  (Quyet judge)       7 form questions on the reply, reported
+#                                     in kairyu_verification; the reply is
+#                                     published as written (no fix)
 #   glm_think     (GLM)               one answer at the caller's effort, the
 #                                     caller's conversation sent as it is
 #
@@ -241,9 +241,8 @@ roles:
   # and writes the reply. As the final unit it carries the caller's
   # response_format and tools, and receives the caller's conversation as
   # native chat messages with this prompt as one final user message (m1 D8
-  # amendment 2026-10-09). A reply that fails the form check is written again
-  # from refine_prompt (the previous reply and the unmet requirements), at
-  # most twice (format_check below).
+  # amendment 2026-10-09). The form check does not send it back (format_check
+  # below).
   - name: answer
     worker: glm
     role_type: publisher
@@ -289,43 +288,16 @@ roles:
       --- JUDGMENTS ---
       {judgments}
       --- END ---
-    # A fix changes only what the unmet form requirements need and keeps the
-    # move (VCO-D16: repairs that rewrote whole replies changed the agent's
-    # commands and once replaced an exploring step with the submission).
-    refine_prompt: |-
-      Before replying, read the material below. It is not part of the
-      conversation: never mention it in the reply. A draft of the next
-      assistant message was written, and an independent check found that it
-      does not meet some form requirements. The draft follows as text: its
-      tool calls appear after its text as <tool_call>{{...}}</tool_call>
-      and are not part of its text. Write the reply again: change only what
-      the unmet requirements need, and keep the same move (the same calls
-      with the same arguments, and the same short text) wherever they are
-      not affected. When batched calls depend on each other's results, keep
-      the first calls that need no other result and leave the rest for a
-      later move. When a finishing call is batched with other calls, or
-      comes before tool results show the steps it depends on succeeded,
-      leave it out and make the call that shows those steps instead. Make
-      every call through the tool-calling interface; never write a call, its
-      arguments, a <tool_call> envelope or a description of one in the reply
-      text, and never announce a call or an action without making the call
-      in this reply. Write only the reply, in exactly the format the
-      conversation demands.
-      --- DRAFT ---
-      {previous}
-      --- END DRAFT ---
-      --- UNMET REQUIREMENTS ---
-      {feedback}
-      --- END UNMET REQUIREMENTS ---
 
   # The form check on the published move: seven Quyet questions on the reply
   # (its text and its calls as <tool_call> envelopes), the tools and the
   # conversation (request messages and the newest ones). It reads in strict
   # mode (quyet_form): a state over Quyet's 6,000 tokens (a long reply, many
   # tools) is refused, so the reply is published unverified instead of passed
-  # on what fits (PR #645 review). A requirement read below 0.5 sends the
-  # reply back to answer's refine_prompt, at most twice; the last reply is
-  # published either way.
+  # on what fits (PR #645 review). A requirement read below 0.5 is reported in
+  # kairyu_verification and the reply is published as written: GLM's fixes of
+  # one-call replies Quyet misread dropped the call (VCO-D23 amendment
+  # 2026-10-13).
   - name: format_check
     worker: quyet_form
     role_type: verifier
@@ -442,7 +414,7 @@ roles:
       # VCO-D16: a high bar sent near-passes (p 0.998) to repair.
       threshold: 0.5
       max_questions_per_call: 32
-      max_refinements: 2
+      max_refinements: 0
       on_unavailable: publish_unverified
       feedback_header: >-
         Form requirements the draft does not meet (p = probability that the
@@ -529,7 +501,7 @@ internal_max_tokens: 131072
 # decision 2026-10-07).
 expose_intermediate_outputs: false
 budget:
-  # candidates, the judgments read, the answer and its form check, two fixes
-  # with their checks, and the answer's empty-output re-dispatch.
+  # candidates, the judgments read, the answer and its form check, and the
+  # answer's empty-output re-dispatch; no fix.
   max_steps: 10
-  max_refine_depth: 2
+  max_refine_depth: 0

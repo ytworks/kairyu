@@ -115,6 +115,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-13 — [amendment] GLM + Quyet: the form check reports without fixes (VCO-D23, PR #648)
+- What: third run stopped at `verified-tool-route` (`reschedule`: Quyet read the one-call reply's F1 low, the second fix published GLM's reasoning about the check without a call). `format_check` now has no fixes (`max_refinements` 0, `refine_prompt` removed): the reply is published as written, the seven results in `kairyu_verification`. Runs so far: 14/209 TOOL replies failed the first check, fixes passed 4, left 8 unchanged, dropped the call in 2.
+- Why: owner decision 2026-10-13: GLM's fixes of misread one-call replies made them worse; an F1 rewording did not move the misread on replay. Gate runs now stop at the first failure (owner).
+- Refs: VCO-D23 amendment 2026-10-13 (third); example `verified-tool.yaml`, `README.md`
+
 ### 2026-10-13 — [amendment] GLM + Quyet: the form check's F5 asks for one call first (VCO-D23, PR #648)
 - What: re-run with `unhealthy_after: 3`: l1 and serving-routed pass; serving c16 32/32 answered (no 502) but `announced-no-call` published a reply without a call: Quyet read F5 below 0.5 (0.16-0.23) for its one-call replies, two fixes ran, the last dropped the call. F5 now asks "exactly one call?" first; several calls must be independent and allowed. Replay of 127 recorded replies: those read 0.63-0.88, the two-call reply under the one-call protocol still fails, none else crosses 0.5.
 - Why: owner decision 2026-10-13; only this example's F5 changes, DeepSeek's passes its gates.
