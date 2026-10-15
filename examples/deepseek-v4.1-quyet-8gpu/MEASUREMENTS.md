@@ -4,8 +4,67 @@ Host: 8 x RTX PRO 6000 Blackwell Server Edition (SM120), PCIe. DeepSeek-V4.1
 DP6/EP6 on GPUs 0-5 (image `sha256:119afb09…`, the six-GPU example's SM120
 overlay); two Quyet-1.0-Large replicas (stock vLLM v0.31.0 bf16 plus this
 example's System One adapter): `quyet-route` on GPU 6 (route judge only),
-`quyet-judge` on GPU 7 (judgments and form check).
+`quyet-judge` on GPU 7 (the decision since VCO-D24; judgments and form check
+before).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
+
+## One reply decided by Quyet (VCO-D24)
+
+GPU run 2026-10-15 11:14-11:33 JST (UTC 02:14-02:33) at `dc93f466`: the
+writer makes the move in one reply with every call needed now that is safe and
+independent; Quyet reads it once, strict (nine questions: R1, S1-S3, F1-F5);
+a failing reply is written again once. `./run.sh`, Kairyu restarted on the
+final spec, then the nine gates in GATES order. Log `gates-20261015.log`;
+results `*-20261015T02*`. **All nine gates pass.** The gate summary's failing
+requirements were read from the wrong report key in this run; the counts below
+are recounted from the recorded rows (the pass criteria do not use them).
+
+| Gate | Result |
+|---|---|
+| l1 | pass (3 s), including the strict name refusing a long state the plain name answers cut |
+| routing | pass: TOOL miss 0 % held-out / 5 % calibration; THINK precision 98.9 %, recall 94.8 % (tool-declared THINK 68.8 %, 11/16); judge wall 11.1 s for 136, 0 cut |
+| think-route | pass: 6/6 THINK, streamed; p50 1.62 s, TTFT p50 1.37 s |
+| effort | pass: THINK and the answer follow the caller (none, low, high, max); TOOL 1.9-3.5 s, one call each, decided first time |
+| verified-tool-route | pass: 12/12 TOOL; the decision on `quyet_form` with nine questions passed 12/12 (11 first time, `reschedule` after one fix); a structured call each; p50 2.96 s, p95 10.88 s, max 17.56 s (limit 900 s); 7,090 output tokens; 3 replies batched two calls |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 1.3 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with two calls (4.1 s); both back: decided and passed (3.4 s) |
+| serving | pass: 72/72 answered, every reply a structured call (table below) |
+| serving-routed | pass: 72/72 answered (table below) |
+| browser | pass: Open WebUI answers |
+
+serving (agent turns; VCO-D22 layout p50 74.8 / 65.4 / 108.7 / 134.2 s,
+output tokens 103,768 / 168,944 / 201,888 / 398,451):
+
+| Level | Requests | p50 s | p95 s | Max s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n | Decision passed | Fixes passed / failing | Replies with 2+ calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---:|
+| c1 | 8 | 2.7 | 4.6 | 23.4 | 41 | 5,228 | 126 | 8 / 2.7 | 0 | 7 / 8 | 1 / 1 | 3 |
+| c4 | 16 | 2.6 | 6.3 | 12.5 | 20 | 4,520 | 223 | 15 / 2.6 | 1 | 14 / 15 | 0 / 1 | 7 |
+| c8 | 16 | 3.3 | 11.6 | 15.5 | 16 | 5,156 | 333 | 15 / 3.4 | 1 | 15 / 15 | 2 / 0 | 4 |
+| c16 | 32 | 5.3 | 11.1 | 84.8 | 85 | 24,686 | 291 | 31 / 5.3 | 1 | 29 / 31 | 0 / 2 | 8 |
+
+Four replies were published at the fix limit, failing F1 (3), S1 (2), R1 (1)
+and S3 (1) after the fix. Three are Quyet misreads of safe two-file reads with
+an empty text (`read_file` of two documents twice: S1 and F1; `sed` plus
+`grep`: F1). The fourth (`reschedule`) announces a move it makes only by
+creating the new event; the fix did not close that gap.
+
+serving-routed (the routing set):
+
+| Level | Requests | p50 s | p95 s | Max s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n / p50 s | Decision passed |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|
+| c1 | 8 | 9.2 | 18.8 | 46.1 | 104 | 15,606 | 149 | 2 / 3.5 | 6 / 12.5 | 2 / 2 |
+| c4 | 16 | 2.2 | 39.1 | 42.7 | 52 | 15,104 | 291 | 6 / 2.7 | 10 / 1.8 | 6 / 6 |
+| c8 | 16 | 4.7 | 77.0 | 93.3 | 97 | 33,975 | 350 | 6 / 2.9 | 10 / 14.2 | 6 / 6 |
+| c16 | 32 | 6.3 | 118.8 | 241.8 | 242 | 96,321 | 398 | 11 / 3.6 | 21 / 17.9 | 11 / 11 |
+
+Quyet in the gates:
+- `quyet-route`: 310 reads.
+- `quyet-judge`: 122 decision reads, 1,083 questions, p50 0.46-0.51 s, max
+  1.93 s.
+- No state was cut and no strict read was refused, apart from `l1`'s
+  deliberate probe.
+
+The gate datasets are short synthetic turns; DeepSWE measures real agent
+turns.
 
 ## Quyet layout: TOOL floor and strict form check (VCO-D21/D22 amendment)
 

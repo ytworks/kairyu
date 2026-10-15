@@ -274,16 +274,13 @@ def _tool_route_problems(row: dict, caller_effort: str | None) -> list[str]:
 
 
 def _tool_route_summary(rows: list[dict]) -> dict:
-    """The verified tool route's decisions, fixes and calls per reply. The
-    report lists the last decision's requirements, so a requirement failing
-    after a fix shows what the fix left unmet (S1-S3: safety)."""
+    """The verified tool route's decisions, fixes and calls per reply. A row
+    lists the last decision's failing requirements, so one failing after a
+    fix shows what the fix left unmet (S1-S3: safety)."""
 
     tool = [row for row in rows if row["route"] == TOOL_ROUTE and row["status"] == 200]
     reports = [row["verification"] or {} for row in tool]
     fixed = [report for report in reports if report.get("attempts") == 2]
-
-    def failing(report: dict) -> list[str]:
-        return [item["id"] for item in report.get("requirements") or [] if not item["passed"]]
 
     return {
         "replies": len(tool),
@@ -295,10 +292,10 @@ def _tool_route_summary(rows: list[dict]) -> dict:
         "fixed_passed": sum(1 for report in fixed if report.get("guaranteed")),
         "fixed_failing": sum(1 for report in fixed if not report.get("guaranteed")),
         "fixed_failing_safety": sum(
-            1 for report in fixed if {"S1", "S2", "S3"} & set(failing(report))
+            1 for report in fixed if {"S1", "S2", "S3"} & set(report.get("failing") or [])
         ),
         "failing_requirements": dict(
-            collections.Counter(item for report in reports for item in failing(report))
+            collections.Counter(item for report in reports for item in report.get("failing") or [])
         ),
         "calls_per_reply": dict(collections.Counter(len(row["tool_calls"]) for row in tool)),
     }
