@@ -4,11 +4,11 @@
 # below); THINK takes deepseek_think (one DeepSeek answer at the caller's
 # effort).
 #
-#   answer        (DeepSeek, caller)  makes the move needed now in one reply,
-#                                     with every call needed now that is safe
-#                                     and needs no other call's result
-#   decision      (Quyet, strict)     9 questions on the reply: room for more
-#                                     parallel calls (R1), safety (S1-S3),
+#   answer        (DeepSeek, caller)  the move, from the caller's conversation
+#                                     as sent (no added prompt)
+#   decision      (Quyet, strict)     9 questions on the reply: a call needed
+#                                     now that could run alongside left out
+#                                     (R1), safety (S1-S3),
 #                                     form (F1-F5); a reply that fails is
 #                                     written again once by answer with the
 #                                     unmet requirements and their
@@ -36,41 +36,19 @@ workers:
 roles:
   # The move, in one DeepSeek call. As the final unit it carries the caller's
   # response_format and tools, and receives the caller's conversation as
-  # native chat messages with this prompt as one final user message (m1 D8
-  # amendment 2026-10-09). A reply that fails the decision is written again
-  # from refine_prompt (the draft and the unmet requirements), once.
+  # native chat messages exactly as sent, with no added prompt (m1 D8
+  # amendment 2026-10-09): any added user message after a tool result made
+  # the writer plan the work again (replayed DeepSWE turns at max effort:
+  # output p50 1,242 tokens without a note, 5,801-8,210 with notes of any
+  # length; VCO-D24 amendment 2026-10-15). The decision carries the
+  # requirements; a reply that fails it is written again from refine_prompt
+  # (the draft and the unmet requirements), once.
   - name: answer
     worker: deepseek
     role_type: publisher
     reasoning_effort: inherit
     native_conversation: true
     sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
-    prompt: |-
-      Before replying, read this note. It is not part of the
-      conversation: never mention it in the reply. The reply is the next
-      assistant message: the tool call or calls for the move needed now,
-      from where the work stands, with at most a short text; not the
-      final result in one jump, and not a repeat of a step whose result
-      the conversation already shows. Make this move as large as it
-      safely can be: include every call that is needed now and can be
-      made now, that is, every call whose arguments and safety depend
-      only on what the conversation already shows, not on the result of
-      another call in this reply, and that changes nothing another call
-      in this reply reads or changes (for example, read every file the
-      next step needs, or run every independent check, together), and
-      add no call the work does not need now. A call that needs another
-      call's result waits for a later move. Make several calls only when
-      the conversation's instructions do not limit a reply to one call
-      or one step. Every call must be safe now: it destroys, overwrites
-      or reverts no work or data the request needs, and changes nothing
-      the request says must stay as it is. The finishing call (the call
-      or command the conversation defines for ending the work) goes
-      alone in its reply, and only after earlier tool results show every
-      step it depends on succeeded. Make every call through the
-      tool-calling interface; never write a call, its arguments or a
-      description of one in the reply text, and never announce a call or
-      an action without making the call in this reply. Write only the
-      reply, in exactly the format the conversation demands.
     # A fix changes only what the unmet requirements need and keeps every
     # other call (VCO-D16: repairs that rewrote whole replies changed the
     # agent's commands and once replaced an exploring step with the

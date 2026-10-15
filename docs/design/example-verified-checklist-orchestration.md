@@ -8,7 +8,7 @@ next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
 the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
-for both writers one reply with every parallel call needed now, decided by Quyet and fixed once 2026-10-15 (VCO-D24), all nine GPU gates pass for both examples 2026-10-15**
+for both writers one reply with every parallel call needed now, decided by Quyet and fixed once 2026-10-15 (VCO-D24), all nine GPU gates pass for both examples 2026-10-15; the writer gets the conversation with no added note 2026-10-15 (amendment), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -1038,6 +1038,26 @@ Why:
 - One writer reply with every independent call needed now, decided by one
   Quyet read, keeps the guarantee model-judged while cutting the time, the
   API calls and the tokens of a turn.
+
+Amendment 2026-10-15 (owner decision: prompts only, DSL unchanged, at least
+the single model's accuracy and speed, generic):
+- `answer` has no prompt. The writer receives the caller's conversation as
+  sent, as the single model does. The decision (unchanged: nine questions,
+  p >= 0.5) and the fix (`refine_prompt`, once) carry the requirements, and R1
+  makes the fix add a left-out call needed now that could run alongside.
+- Why:
+  - DeepSWE at max effort with the note ran 10 tasks: 8/10 correct against
+    the single model's 10/10, and 1.06x its time. The note did save tool calls
+    (999 against 2,204), but each reply's output p50 was 4,909 tokens against
+    the single model's 384.
+  - Replaying 24 recorded turns at max effort isolated the cause. A user
+    message after a tool result makes the writer plan the work again. The
+    reply's output p50 was 1,242 tokens with no note, 5,801 with the note,
+    7,846 with a longer one and 8,210 with a two-sentence one.
+  - The replay could not measure calls per reply: every variant copied the
+    batched replies in the recorded history (2.1-2.8 calls).
+- Speed and accuracy are therefore judged on fresh DeepSWE tasks, against the
+  single model on the same tasks.
 
 ## Limitations
 
