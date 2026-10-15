@@ -46,30 +46,31 @@ roles:
     native_conversation: true
     sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 262144}
     prompt: |-
-      Before replying, read this note. It is not part of the conversation:
-      never mention it in the reply. The reply is the next assistant
-      message: the tool call or calls for the move needed now, from where
-      the work stands, with at most a short text; not the final result in
-      one jump, and not a repeat of a step whose result the conversation
-      already shows. Make this move as large as it safely can be: include
-      every call that is needed now and can be made now, that is, every
-      call whose arguments and safety depend only on what the conversation
-      already shows, not on the result of another call in this reply, and
-      that changes nothing another call in this reply reads or changes (for
-      example, read every file the next step needs, or run every
-      independent check, together). A call that needs another call's result
-      waits for a later move. Make several calls only when the
-      conversation's instructions do not limit a reply to one call or one
-      step. Every call must be safe now: it destroys, overwrites or reverts
-      no work or data the request needs, and changes nothing the request
-      says must stay as it is. The finishing call (the call or command the
-      conversation defines for ending the work) goes alone in its reply, and
-      only after earlier tool results show every step it depends on
-      succeeded. Make every call through the tool-calling interface; never
-      write a call, its arguments or a description of one in the reply
-      text, and never announce a call or an action without making the call
-      in this reply. Write only the reply, in exactly the format the
-      conversation demands.
+      Before replying, read this note. It is not part of the
+      conversation: never mention it in the reply. The reply is the next
+      assistant message: the tool call or calls for the move needed now,
+      from where the work stands, with at most a short text; not the
+      final result in one jump, and not a repeat of a step whose result
+      the conversation already shows. Make this move as large as it
+      safely can be: include every call that is needed now and can be
+      made now, that is, every call whose arguments and safety depend
+      only on what the conversation already shows, not on the result of
+      another call in this reply, and that changes nothing another call
+      in this reply reads or changes (for example, read every file the
+      next step needs, or run every independent check, together), and
+      add no call the work does not need now. A call that needs another
+      call's result waits for a later move. Make several calls only when
+      the conversation's instructions do not limit a reply to one call
+      or one step. Every call must be safe now: it destroys, overwrites
+      or reverts no work or data the request needs, and changes nothing
+      the request says must stay as it is. The finishing call (the call
+      or command the conversation defines for ending the work) goes
+      alone in its reply, and only after earlier tool results show every
+      step it depends on succeeded. Make every call through the
+      tool-calling interface; never write a call, its arguments or a
+      description of one in the reply text, and never announce a call or
+      an action without making the call in this reply. Write only the
+      reply, in exactly the format the conversation demands.
     # A fix changes only what the unmet requirements need and keeps every
     # other call (VCO-D16: repairs that rewrote whole replies changed the
     # agent's commands and once replaced an exploring step with the
@@ -80,13 +81,14 @@ roles:
       assistant message was written, and an independent judge found that it
       does not meet some requirements; each unmet requirement is listed with
       the judge's probability that it holds. The judge can be wrong: check
-      each finding against the conversation yourself. The draft follows as
+      each finding against the conversation yourself, and keep as it is what
+      a finding the conversation does not support names. The draft follows as
       text: its tool calls appear after its text as
       <tool_call>{{...}}</tool_call> and are not part of its text. Write the
       reply again. Change only what the unmet requirements need, and keep
       every other call with the same arguments and the same short text:
-      - R1 (calls missing): add the calls that are needed now, safe now and
-        need no result of another call in the reply.
+      - R1 (a call left out): add the calls the conversation shows are needed
+        now, safe now and needing nothing from the reply's other calls.
       - S1 (a call is not safe now): replace it with a safe call for the
         same step, or leave it out.
       - S2 (calls depend on each other): keep the calls that need no other
@@ -122,22 +124,22 @@ roles:
       questions:
         - id: R1
           group: room
-          proposition: Every call needed now that can be made alongside is made
+          proposition: No call the conversation shows is needed now is left out
           ask: >-
             In the state, reply is the draft reply's text followed by its tool
             calls, each written as <tool_call>{{...}}</tool_call>. Does the reply
-            already make every call that is needed now and could be made in this
-            same reply, leaving no further independent call for a later reply?
+            include every call that the conversation already shows is needed now
+            and that needs nothing from the reply's other calls?
           criteria_true: >-
-            No call is missing that is needed now, is safe now, and needs neither
-            the result of a call in this reply nor anything the conversation does
-            not yet show; or the conversation limits a reply to one call or one
-            step; or the reply makes the finishing call
+            Every call the conversation shows is needed now and that needs nothing
+            from the reply's calls is in the reply; or the next step depends on
+            the results of the reply's calls; or the conversation limits a reply
+            to one call or one step; or the reply makes the finishing call
           criteria_false: >-
-            A further call that is needed now, safe now and independent of the
-            reply's other calls is missing, such as another file the next step
-            must read or another independent check, so the work takes more replies
-            than it needs
+            The conversation already shows that a further call is needed now and
+            needs nothing from the reply's calls, such as reading another file or
+            output the conversation names or running another check the request
+            asks for, and the reply leaves it for a later reply
         - id: S1
           group: safe
           proposition: Every call is safe to make now
@@ -157,10 +159,10 @@ roles:
           proposition: Batched calls need no result of each other
           ask: >-
             In the state, reply is the draft reply's text followed by its tool
-            calls, each written as <tool_call>{{...}}</tool_call>. When the reply
-            makes several calls, can each be made without the result of another
-            call in the same reply, and does the conversation allow several calls
-            in one reply?
+            calls, each written as <tool_call>{{...}}</tool_call>. Does the reply
+            make exactly one call? If it makes several calls, answer yes only when
+            each can be made without the result of another call in the same reply
+            and the conversation allows several calls in one reply.
           criteria_true: >-
             The reply makes one call, or the arguments and safety of every call
             depend only on what the conversation already shows, and the

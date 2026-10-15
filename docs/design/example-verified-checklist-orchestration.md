@@ -989,9 +989,11 @@ Owner decision. Plan: `docs/superpowers/plans/2026-10-15-quyet-parallel-tool-cal
 - `decision`: Quyet reads once, strict (quyet-judge on GPU 7,
   `quyet-strict`). It reads the reply, the tools and the conversation
   (2,000 / 6,000 characters) and answers nine questions at p >= 0.5:
-  - R1: no further call needed now could have been made alongside.
+  - R1: no call that the conversation shows is needed now, and that needs
+    nothing from the reply's other calls, is left out.
   - S1: every call is safe now.
-  - S2: batched calls are independent (VCO-D22's F5 wording).
+  - S2: batched calls are independent, asked one call first (the
+    replay-checked wording of VCO-D23's second amendment, now in both).
   - S3: a finishing call is alone, after shown success (F6).
   - F1-F5: form (VCO-D22's F1-F4 and F7; F2 names each writer's call markup).
 - A failing reply is written again once from `refine_prompt`, with the draft
@@ -1004,9 +1006,13 @@ Owner decision. Plan: `docs/superpowers/plans/2026-10-15-quyet-parallel-tool-cal
   and `internal_max_tokens`.
 - Unchanged: the route judge (VCO-D21 with the 2026-10-11 TOOL floor), the
   think route, the L1 and the GPU allocation. `kairyu/` is unchanged.
-- Supersedes VCO-D22's candidates and judgments, and VCO-D23's second (GLM
-  F5 wording) and third (no fix) amendments. Both examples ask the same
-  questions apart from F2.
+- Supersedes VCO-D22's candidates and judgments, and VCO-D23's third
+  amendment (no fix). VCO-D23's second amendment (F5 asks for one call first)
+  now holds for both examples as S2. Both examples ask the same questions
+  apart from F2.
+- The owner left the prompts and questions to the implementer, who anchored
+  R1 on what the conversation shows, so that a speculative call is no
+  omission and a misread costs no fix, and took S2's replay-checked wording.
 - GPU verification: the nine gates of each example. `verified-tool-route`
   also requires every request to finish under 900 s, and records decisions,
   failing requirements and fixes.
