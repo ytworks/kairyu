@@ -1,8 +1,9 @@
 # Verified tool route (VCO-D22; docs/design/example-verified-checklist-orchestration.md).
-# Model kairyu-verified-tool: Quyet judges whether the next reply needs to call
-# one of the caller's tools. TOOL takes the verified tool route (primary,
-# below); THINK takes deepseek_think (one DeepSeek answer at the caller's
-# effort).
+# Model kairyu-verified-tool: Quyet routes each request (VCO-D25). MULTI takes
+# the verified tool route (primary, below), which works the reply out over
+# several stages, only while a tool call is needed and the conversation has
+# made no change yet; SINGLE takes deepseek_think (one DeepSeek answer at the
+# caller's effort) for every other request.
 #
 #   candidates    (DeepSeek, caller)  10-16 candidate tool calls for the next
 #                                     move from different viewpoints, one call
@@ -445,12 +446,16 @@ roles:
         requirement holds):
       feedback_item: "- [{id}] p={p} {proposition}"
 
-# Quyet route judge (VCO-D21; the question and choices of VCO-D20, m1 D9) on
-# its own replica (quyet-route, GPU 6): one System One choice over the
-# conversation.
-# The judge's state carries tool_calling (whether the caller declared tools)
-# beside the conversation. A judge that cannot answer routes to
-# deepseek_think.
+# Quyet route judge (VCO-D25; VCO-D21, m1 D9) on its own replica
+# (quyet-route, GPU 6): one System One choice over the conversation, the more
+# probable label wins. MULTI only while a tool call is needed and the
+# conversation has made no change yet: on the benchmark records that phase
+# took about the time of one answer per reply on the verified tool route, with
+# far fewer calls and input tokens, while every later phase took 1.4-10 times
+# the time (VCO-D25). More than 20 messages left out of the judge's view
+# counts as a change it may not see. The judge's state carries tool_calling
+# (whether the caller declared tools) beside the conversation. A judge that
+# cannot answer routes to deepseek_think.
 profile_judge:
   worker: quyet_route
   # The DSL maximum (owner decision 2026-10-09): a few agents' reads can
@@ -465,38 +470,36 @@ profile_judge:
   # ones (m1 D9 amendment).
   max_conversation_chars: 12000
   question: >-
-    Does the next assistant reply in this conversation need to call one of
-    the caller's tools? tool_calling in the state says whether the caller
-    declared any tools; without tools no call can be made. When the
-    conversation's instructions require a tool call or command in every
-    reply, or end the work with a tool call or command, every reply up to
-    and including that final one needs a tool call.
-  # TOOL whenever its probability reaches 0.1, else the most probable route
-  # (owner decision 2026-10-11, VCO-D21 amendment): on 64 real agent turns the
-  # most probable route sent 11 final turns, whose next move was the submit
-  # command, to THINK; with the floor 5, and the routing set's TOOL miss stays
-  # 5 % / 0 % with THINK precision 98.9 %.
-  prefer:
-    label: TOOL
-    min_probability: 0.1
+    Should the next assistant reply be worked out over several stages? Read
+    the state: conversation is the request's messages plus the newest
+    messages that fit; conversation_omitted_messages, when present, counts
+    the messages left out; tool_calling says whether the caller declared any
+    tools, and without tools no call can be made. First look at every tool
+    call the assistant has already made in the conversation: a call that
+    asks to create, edit, move or delete data (a file, a record, a calendar
+    event, a message), to send something, to install something or to commit
+    is a change, even when its result is an error. Reading, listing,
+    searching and running a program for its output are not changes. Answer
+    MULTI only when the assistant has made no change, at most 20 messages are
+    left out, and the next reply must call one of the caller's tools.
+    Otherwise answer SINGLE.
   choices:
     - profile: deepseek_think
-      label: THINK
+      label: SINGLE
       criteria: >-
-        no tool call is needed next: the caller declared no tools, or the
-        conversation accepts a plain-text reply and the next reply is text
-        only, such as a direct answer from what the model knows or what the
-        conversation already shows, a question back to the user, or the
-        final report once tool results show the work done
+        the assistant has already made a change (a call to create, edit, move
+        or delete data, send, install or commit, even one that failed); or
+        more than 20 messages are left out; or no tool call is needed next:
+        the caller declared no tools, or the conversation accepts a
+        plain-text reply and the next reply is text only, such as a direct
+        answer from what the model knows or what the conversation already
+        shows, a question back to the user, or the final report once tool
+        results show the work done
     - profile: primary
-      label: TOOL
+      label: MULTI
       criteria: >-
-        the next reply must call one of the caller's tools: the request
-        needs an action or information only a tool provides; the
-        conversation ends with tool results or the assistant's own turns
-        while the work is not yet finished; or the conversation's
-        instructions require a tool call or command in every reply or to
-        finish the work (for example a submit or finish command)
+        the assistant has made no change yet, at most 20 messages are left
+        out, and the next reply must call one of the caller's tools
 
 profiles:
   - name: deepseek_think

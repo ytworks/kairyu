@@ -237,7 +237,7 @@
  },
  "items": [
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "code",
    "messages": [
@@ -252,7 +252,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "code",
    "messages": [
@@ -267,7 +267,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "calendar",
    "messages": [
@@ -282,7 +282,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "calendar",
    "messages": [
@@ -297,7 +297,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "web",
    "messages": [
@@ -312,7 +312,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "web",
    "messages": [
@@ -327,7 +327,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "files",
    "messages": [
@@ -342,7 +342,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_first_move",
    "tools": "files",
    "messages": [
@@ -357,7 +357,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "code",
    "messages": [
@@ -391,7 +391,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "code",
    "messages": [
@@ -425,7 +425,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "calendar",
    "messages": [
@@ -459,7 +459,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "web",
    "messages": [
@@ -493,7 +493,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "files",
    "messages": [
@@ -527,7 +527,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "code",
    "messages": [
@@ -561,7 +561,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "calendar",
    "messages": [
@@ -595,7 +595,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "web",
    "messages": [
@@ -629,7 +629,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "code",
    "messages": [
@@ -663,7 +663,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_mid_task",
    "tools": "files",
    "messages": [
@@ -697,7 +697,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_error",
    "tools": "code",
    "messages": [
@@ -731,9 +731,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_after_error",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -803,7 +804,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_error",
    "tools": "web",
    "messages": [
@@ -837,7 +838,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_error",
    "tools": "files",
    "messages": [
@@ -871,9 +872,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_after_error",
    "tools": "calendar",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -905,9 +907,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_after_error",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -939,9 +942,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -992,9 +996,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1026,9 +1031,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "files",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1060,9 +1066,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1094,9 +1101,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1166,9 +1174,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_verify_pending",
    "tools": "calendar",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1200,9 +1209,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_finish_call",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1272,9 +1282,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_finish_call",
    "tools": "code",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1325,9 +1336,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_finish_call",
    "tools": "ops",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1359,9 +1371,10 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "SINGLE",
    "category": "tool_finish_call",
    "tools": "ops",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1412,7 +1425,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_text",
    "tools": "code",
    "messages": [
@@ -1454,7 +1467,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_text",
    "tools": "code",
    "messages": [
@@ -1477,7 +1490,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_text",
    "tools": "calendar",
    "messages": [
@@ -1500,7 +1513,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_after_text",
    "tools": "files",
    "messages": [
@@ -1523,7 +1536,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_new_request",
    "tools": "calendar",
    "messages": [
@@ -1565,7 +1578,7 @@
    ]
   },
   {
-   "label": "TOOL",
+   "label": "MULTI",
    "category": "tool_new_request",
    "tools": "web",
    "messages": [
@@ -1607,7 +1620,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "files",
    "messages": [
@@ -1641,7 +1654,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "calendar",
    "messages": [
@@ -1675,7 +1688,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "web",
    "messages": [
@@ -1709,7 +1722,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "code",
    "messages": [
@@ -1743,9 +1756,10 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "calendar",
+   "changed": true,
    "messages": [
     {
      "role": "system",
@@ -1777,7 +1791,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_final_text",
    "tools": "web",
    "messages": [
@@ -1830,7 +1844,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "code",
    "messages": [
@@ -1845,7 +1859,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "calendar",
    "messages": [
@@ -1887,7 +1901,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "files",
    "messages": [
@@ -1902,7 +1916,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "web",
    "messages": [
@@ -1917,7 +1931,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "code",
    "messages": [
@@ -1932,7 +1946,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "calendar",
    "messages": [
@@ -1947,7 +1961,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "web",
    "messages": [
@@ -1962,7 +1976,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "code",
    "messages": [
@@ -1977,7 +1991,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_direct_text",
    "tools": "files",
    "messages": [
@@ -1992,7 +2006,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "tools_ask_user",
    "tools": "calendar",
    "messages": [
@@ -2007,7 +2021,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2017,7 +2031,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2027,7 +2041,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2037,7 +2051,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2047,7 +2061,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2057,7 +2071,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2067,7 +2081,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2077,7 +2091,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "expert",
    "messages": [
     {
@@ -2087,7 +2101,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2097,7 +2111,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2107,7 +2121,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2117,7 +2131,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2127,7 +2141,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2137,7 +2151,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2147,7 +2161,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2157,7 +2171,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "many_requirements",
    "messages": [
     {
@@ -2167,7 +2181,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2185,7 +2199,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2203,7 +2217,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2221,7 +2235,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2239,7 +2253,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2257,7 +2271,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2275,7 +2289,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2293,7 +2307,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "error_feedback",
    "messages": [
     {
@@ -2311,7 +2325,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2321,7 +2335,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2331,7 +2345,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2341,7 +2355,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2351,7 +2365,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2361,7 +2375,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2371,7 +2385,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2381,7 +2395,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "frustration",
    "messages": [
     {
@@ -2391,7 +2405,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2401,7 +2415,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2411,7 +2425,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2421,7 +2435,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2431,7 +2445,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2441,7 +2455,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2451,7 +2465,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2461,7 +2475,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "high_stakes",
    "messages": [
     {
@@ -2471,7 +2485,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2481,7 +2495,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2491,7 +2505,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2501,7 +2515,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2511,7 +2525,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2521,7 +2535,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2531,7 +2545,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2541,7 +2555,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "explicit_accuracy",
    "messages": [
     {
@@ -2551,7 +2565,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2561,7 +2575,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2571,7 +2585,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2581,7 +2595,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2591,7 +2605,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2601,7 +2615,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2611,7 +2625,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2621,7 +2635,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2631,7 +2645,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2641,7 +2655,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2651,7 +2665,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2661,7 +2675,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2671,7 +2685,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2681,7 +2695,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2691,7 +2705,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2701,7 +2715,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2711,7 +2725,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2721,7 +2735,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2731,7 +2745,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2741,7 +2755,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2751,7 +2765,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2761,7 +2775,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2771,7 +2785,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2781,7 +2795,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2791,7 +2805,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2801,7 +2815,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2811,7 +2825,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2821,7 +2835,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2831,7 +2845,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2841,7 +2855,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2851,7 +2865,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {
@@ -2861,7 +2875,7 @@
    ]
   },
   {
-   "label": "THINK",
+   "label": "SINGLE",
    "category": "everyday",
    "messages": [
     {

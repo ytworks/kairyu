@@ -3,9 +3,10 @@
 
 GLM-5.3-Flash (one TP2 x DP3 / EP6 replica, GPUs 0-5) writes; two Quyet-1.0-Large
 replicas (stock vLLM plus this example's System One adapter) judge through System
-One: quyet-route (GPU 6) routes each request to the verified tool route (the next
-reply needs a tool call) or to one answer at the caller's effort, and quyet-judge
-(GPU 7) judges the verified tool route's candidates and the form of its reply.
+One: quyet-route (GPU 6) routes each request to the verified tool route (a tool
+call is needed and the conversation has made no change yet) or to one answer at
+the caller's effort, and quyet-judge (GPU 7) judges the verified tool route's
+candidates and the form of its reply.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ QUYET_SERVICES: list[str] = [replica["service"] for replica in QUYET_REPLICAS]
 # The services that hold GPUs.
 L1_SERVICES = ("glm", *(replica["vllm_service"] for replica in QUYET_REPLICAS))
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified-tool: Quyet routes per request (TOOL or THINK).
+# kairyu-verified-tool: Quyet routes per request (MULTI or SINGLE, VCO-D25).
 (MODEL,) = PUBLIC_MODELS
 GLM_SERVED = SPEC["glm"]["model"]["served_name"]
 GLM_VLLM = SPEC["glm"]["vllm"]

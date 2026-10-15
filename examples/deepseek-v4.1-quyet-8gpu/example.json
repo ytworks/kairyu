@@ -87,8 +87,8 @@
  "orchestration": {
   "spec": "verified-tool.yaml",
   "routes": {
-   "TOOL": "primary",
-   "THINK": "deepseek_think"
+   "MULTI": "primary",
+   "SINGLE": "deepseek_think"
   },
   "final_unit": "answer",
   "budget": {

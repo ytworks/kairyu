@@ -84,8 +84,8 @@
  "orchestration": {
   "spec": "verified-tool.yaml",
   "routes": {
-   "TOOL": "primary",
-   "THINK": "glm_think"
+   "MULTI": "primary",
+   "SINGLE": "glm_think"
   },
   "final_unit": "answer",
   "budget": {

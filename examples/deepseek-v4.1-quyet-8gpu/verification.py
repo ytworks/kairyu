@@ -5,31 +5,31 @@ Every gate has a time budget and writes its per-request evidence (latency,
 tokens, tok/s, route, efforts, form check) to
 model-volumes/<environment>/results/<gate>-<UTC>.json, with the Quyet reads of
 the gate (count, states cut at Quyet's 6,000 tokens, read times) from the
-adapters' logs. One public model, kairyu-verified-tool: Quyet routes TOOL (the
-next reply needs a tool call) to the verified tool route and THINK to
-deepseek_think.
+adapters' logs. One public model, kairyu-verified-tool: Quyet routes MULTI (a tool call is
+needed and the conversation has made no change yet, VCO-D25) to the verified
+tool route and SINGLE to deepseek_think.
 
   l1                  every DeepSeek DP rank (thinking and chat, grammar JSON),
                       each Quyet replica's vLLM and System One, the form check's
                       strict name refusing a state Quyet would cut, and one
                       structured tool call from the public model
-  routing             datasets/tool-routing-set.json under the served rule (TOOL
-                      at P(TOOL) >= 0.1, else the most probable route): TOOL miss
-                      rate < 10 % on the calibration and held-out halves, THINK
-                      precision >= 90 %
+  routing             datasets/tool-routing-set.json under the served rule (the
+                      more probable label): at least 90 % of the MULTI
+                      conversations routed MULTI on the calibration and held-out
+                      halves, at most one conversation holding a change routed MULTI
   think-route         everyday requests stream from deepseek_think at the default effort
   effort              the caller's effort reaches the think route and the verified
                       tool route's candidates, answer and fixes; quyet-route judges
                       the route
-  verified-tool-route agent turns (datasets/tool-turns.json) take the verified
+  verified-tool-route MULTI agent turns (datasets/tool-turns.json) take the verified
                       tool route: DeepSeek's 10-16 candidates, 6 judgments each on
                       quyet-judge, the answer and its form check (read strict) on
                       quyet-judge, and a structured call to a declared tool
-  fallback            quyet-route down: an agent turn is answered on the think
+  fallback            quyet-route down: a MULTI agent turn is answered on the think
                       route; quyet-judge down: still routed, the answer without
                       judgments and published unverified; both back: judged and
                       form-checked again
-  serving             agent turns at c1/c4/c8/c16: every reply a structured call;
+  serving             agent turns (MULTI and SINGLE) at c1/c4/c8/c16: every reply a structured call;
                       latency, tokens, tok/s per route
   serving-routed      the routing set at c1/c4/c8/c16: route mix, latency, tokens per route
   browser             Open WebUI answers in a real browser
@@ -141,7 +141,7 @@ TOOL_ROUTE = "verified-tool"
 
 
 def _route(trace: dict | None) -> tuple[str, float | None]:
-    """The profile that served the request and Quyet's P(TOOL), from the trace."""
+    """The profile that served the request and Quyet's P(MULTI), from the trace."""
 
     events = (trace or {}).get("events") or []
     judge = next((event for event in events if event.get("node") == "profile_judge"), None)
@@ -149,10 +149,10 @@ def _route(trace: dict | None) -> tuple[str, float | None]:
         return "unknown", None
     detail = judge.get("detail") or {}
     verdict = detail.get("verdict")
-    p_tool = detail.get("p_TOOL")
+    p_multi = detail.get("p_MULTI")
     if verdict is None:
-        return f"deepseek_think (fallback: {detail.get('fallback')})", p_tool
-    return (TOOL_ROUTE if verdict == "primary" else verdict), p_tool
+        return f"deepseek_think (fallback: {detail.get('fallback')})", p_multi
+    return (TOOL_ROUTE if verdict == "primary" else verdict), p_multi
 
 
 def _judge_seconds(trace: dict | None) -> float | None:
@@ -420,7 +420,7 @@ def chat(
     message = choice.get("message") or {}
     output_tokens = usage.get("orchestration_output_tokens") or usage.get("completion_tokens") or 0
     trace_body = body.get("kairyu_trace_v2")
-    route, p_tool = _route(trace_body)
+    route, p_multi = _route(trace_body)
     report = body.get("kairyu_verification")
     verification = (
         None
@@ -442,7 +442,7 @@ def chat(
         "ttft_s": round(ttft, 2) if ttft is not None else None,
         "model": model,
         "route": route,
-        "p_tool": p_tool,
+        "p_multi": p_multi,
         "efforts": _efforts(trace_body),
         "judge_worker": _judge_worker(trace_body),
         "stages": _stages(trace_body),
@@ -481,7 +481,7 @@ def _print_rows(rows: list[dict]) -> None:
     for index, row in enumerate(rows):
         print(
             f"  #{index:02d} status={row['status']} {row['seconds']:7.1f}s "
-            f"ttft={row.get('ttft_s')} route={row['route']} p_tool={row.get('p_tool')} "
+            f"ttft={row.get('ttft_s')} route={row['route']} p_multi={row.get('p_multi')} "
             f"efforts={row['efforts']} judge={row.get('judge_worker')} "
             f"calls={[(call.get('function') or {}).get('name') for call in row['tool_calls']]} "
             f"judge_s={row.get('judge_s')} form={row.get('verification')} "
@@ -580,7 +580,7 @@ def _routing_probabilities(env: dict[str, str], items: list[dict]) -> list[dict[
                 for key, value in metadata.items()
                 if key.startswith("p_") and isinstance(value, (int, float))
             }
-            return probabilities if "TOOL" in probabilities else None
+            return probabilities if "MULTI" in probabilities else None
 
         try:
             return await asyncio.gather(*(one(item) for item in items))
@@ -590,23 +590,21 @@ def _routing_probabilities(env: dict[str, str], items: list[dict]) -> list[dict[
     return asyncio.run(judge_all())
 
 
-def _served_route(probabilities: dict[str, float], tau: float | None) -> str:
-    # The served rule: TOOL when preferred (p >= tau, if a floor is
-    # configured), else the most probable route.
-    if tau is not None and probabilities["TOOL"] >= tau:
-        return "TOOL"
+def _served_route(probabilities: dict[str, float]) -> str:
+    # The served rule (VCO-D25): the more probable label.
     return max(probabilities, key=probabilities.__getitem__)
 
 
 def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
-    """Quyet routes turns whose next reply needs a tool call to TOOL.
+    """Quyet routes MULTI only while a tool call is needed and the
+    conversation has made no change yet (VCO-D25).
 
-    The configured rule (prefer.min_probability, or the most probable route
-    when none is set) must miss fewer than 10 % of the TOOL turns on both the
-    calibration half (even items) and the held-out half (odd items), and at
-    least 90 % of the conversations it sends to THINK must need no tool call
-    (THINK precision). The largest floor meeting the miss rate on the
-    calibration half is reported as recommended_tau.
+    The served rule (the more probable label) must route at least 90 % of the
+    MULTI conversations to MULTI on both the calibration half (even items) and
+    the held-out half (odd items), and at most one conversation that already
+    holds a change to MULTI: such a turn sent to the verified tool route spends
+    that route's stages on a move one answer makes. SINGLE conversations that
+    need no tool call are reported as main's gate reported them, not gated.
     """
 
     deadline = Deadline("routing", budget_s)
@@ -621,54 +619,35 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
             "label": item["label"],
             "category": item["category"],
             "tools": bool(item.get("tools")),
+            "changed": bool(item.get("changed")),
             "messages": len(item["messages"]),
             "p": p,
-            "p_tool": p["TOOL"],
+            "p_multi": p["MULTI"],
+            "route": _served_route(p),
         }
         for item, p in zip(items, probabilities, strict=True)
     ]
-    import yaml
 
-    prefer = yaml.safe_load((HERE / "verified-tool.yaml").read_text())["profile_judge"].get(
-        "prefer"
-    )
-    configured = prefer["min_probability"] if prefer else None
+    def multi_share(subset: list[dict]) -> float:
+        wanted = [row for row in subset if row["label"] == "MULTI"]
+        return sum(1 for row in wanted if row["route"] == "MULTI") / len(wanted)
 
-    def miss_rate(subset: list[dict], tau: float | None) -> float:
-        needed = [row for row in subset if row["label"] == "TOOL"]
-        missed = [row for row in needed if _served_route(row["p"], tau) != "TOOL"]
-        return len(missed) / len(needed)
-
-    def think_precision(subset: list[dict], tau: float | None) -> float:
-        sent = [row for row in subset if _served_route(row["p"], tau) == "THINK"]
-        return sum(1 for row in sent if row["label"] == "THINK") / len(sent) if sent else 1.0
-
-    def think_recall(subset: list[dict], tau: float | None) -> float:
-        easy = [row for row in subset if row["label"] == "THINK"]
-        return sum(1 for row in easy if _served_route(row["p"], tau) == "THINK") / len(easy)
-
-    calibration = rows[0::2]
-    holdout = rows[1::2]
-    candidates = sorted({round(row["p_tool"], 4) for row in calibration} | {0.0, 0.5}, reverse=True)
-    recommended = next(
-        (tau for tau in candidates if tau <= 0.5 and miss_rate(calibration, tau) < 0.10), 0.0
-    )
+    leaked = [row for row in rows if row["changed"] and row["route"] == "MULTI"]
+    text = [row for row in rows if row["label"] == "SINGLE" and not row["changed"]]
     by_category: dict[str, list[float]] = {}
     for row in rows:
-        by_category.setdefault(f"{row['label']}/{row['category']}", []).append(row["p_tool"])
+        by_category.setdefault(f"{row['label']}/{row['category']}", []).append(row["p_multi"])
     summary = {
         "conversations": len(rows),
         "judge_wall_s": round(judge_seconds, 2),
-        "configured_tau": configured,
-        "recommended_tau": recommended,
-        "calibration_miss_rate": round(miss_rate(calibration, configured), 4),
-        "holdout_miss_rate": round(miss_rate(holdout, configured), 4),
-        "think_precision": round(think_precision(rows, configured), 4),
-        "think_recall": round(think_recall(rows, configured), 4),
-        "think_with_tools_recall": round(
-            think_recall([row for row in rows if row["tools"]], configured), 4
+        "calibration_multi_share": round(multi_share(rows[0::2]), 4),
+        "holdout_multi_share": round(multi_share(rows[1::2]), 4),
+        "changed_routed_multi": len(leaked),
+        "changed_routed_multi_categories": sorted(row["category"] for row in leaked),
+        "no_change_single_routed_single": round(
+            sum(1 for row in text if row["route"] == "SINGLE") / len(text), 4
         ),
-        "p_tool_by_category": {
+        "p_multi_by_category": {
             category: {
                 "n": len(values),
                 "min": round(min(values), 4),
@@ -681,19 +660,26 @@ def gate_routing(env: dict[str, str], *, budget_s: float = 1800) -> None:
     deadline.check()
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     passed = (
-        summary["holdout_miss_rate"] < 0.10
-        and summary["calibration_miss_rate"] < 0.10
-        and summary["think_precision"] >= 0.90
+        summary["calibration_multi_share"] >= 0.90
+        and summary["holdout_multi_share"] >= 0.90
+        and summary["changed_routed_multi"] <= 1
     )
     _write("routing", {"passed": passed, "summary": summary, "rows": rows})
     print(
         f"routing: {'PASS' if passed else 'FAIL'} "
-        f"(TOOL miss rate held-out {summary['holdout_miss_rate']}, "
-        f"calibration {summary['calibration_miss_rate']}; "
-        f"THINK precision {summary['think_precision']})"
+        f"(MULTI routed MULTI calibration {summary['calibration_multi_share']}, "
+        f"held-out {summary['holdout_multi_share']}; "
+        f"changed routed MULTI {summary['changed_routed_multi']}; "
+        f"other SINGLE routed SINGLE {summary['no_change_single_routed_single']})"
     )
     if not passed:
         raise SystemExit(1)
+
+
+def _multi_turns() -> list[dict]:
+    """The agent turns that take the verified tool route (route MULTI)."""
+
+    return [item for item in _dataset("tool-turns.json") if item["route"] == "MULTI"]
 
 
 def _everyday(items: list[dict]) -> list[dict]:
@@ -749,7 +735,7 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
 
     deadline = Deadline("effort", budget_s)
     easy = _everyday(_dataset("tool-routing-set.json"))[0]
-    turn = _dataset("tool-turns.json")[0]
+    turn = _multi_turns()[0]
     findings = []
     report = {}
     for effort in (None, "low", "high", "max"):
@@ -781,9 +767,9 @@ def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
 def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> None:
     """Agent turns take the verified tool route into one structured call.
 
-    Six turns of datasets/tool-turns.json, unary and streamed, with the
+    Six MULTI turns of datasets/tool-turns.json, unary and streamed, with the
     caller's effort cycling through none, low, high and max: each must be
-    routed TOOL and return 200 after DeepSeek listed 10-16 candidates, Quyet
+    routed MULTI and return 200 after DeepSeek listed 10-16 candidates, Quyet
     (quyet-judge) judged each six times, the answer was written and its form
     checked on quyet-judge (fixes and the publish reason are recorded), at the
     caller's effort; the reply carries a structured call to a declared tool
@@ -791,7 +777,7 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> 
     """
 
     deadline = Deadline("verified-tool-route", budget_s)
-    items = _dataset("tool-turns.json")[:6]
+    items = _multi_turns()[:6]
     efforts = [None, "low", "high", "max"]
     findings = []
     rows = []
@@ -870,7 +856,7 @@ def gate_fallback(env: dict[str, str], *, budget_s: float = 3600) -> None:
     and form-checked again."""
 
     deadline = Deadline("fallback", budget_s)
-    turn = _dataset("tool-turns.json")[0]
+    turn = _multi_turns()[0]
 
     def ask() -> dict:
         return chat(env, messages=turn["messages"], tools=turn["tools"], trace=True)

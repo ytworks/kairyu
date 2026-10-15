@@ -239,6 +239,7 @@
   {
    "id": "public-name",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -310,6 +311,7 @@
   {
    "id": "finish-batched",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -362,6 +364,7 @@
   {
    "id": "own-check",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -414,6 +417,7 @@
   {
    "id": "second-source",
    "tools": "web",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -447,6 +451,7 @@
   {
    "id": "reschedule",
    "tools": "calendar",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -499,6 +504,7 @@
   {
    "id": "type-check",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -551,6 +557,7 @@
   {
    "id": "must-not-warn",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -603,6 +610,7 @@
   {
    "id": "announced-no-call",
    "tools": "code",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -663,6 +671,7 @@
   {
    "id": "every-exporter",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -715,6 +724,7 @@
   {
    "id": "dedup-case",
    "tools": "files",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -767,6 +777,7 @@
   {
    "id": "wrong-column",
    "tools": "files",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -819,6 +830,7 @@
   {
    "id": "official-schedule",
    "tools": "web",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -852,6 +864,7 @@
   {
    "id": "reminders",
    "tools": "calendar",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -904,6 +917,7 @@
   {
    "id": "upgrade-dependency",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -956,6 +970,7 @@
   {
    "id": "traceback",
    "tools": "code",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -989,6 +1004,7 @@
   {
    "id": "route-missing",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -1041,6 +1057,7 @@
   {
    "id": "reload-and-check",
    "tools": "ops",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -1074,6 +1091,7 @@
   {
    "id": "finish-report",
    "tools": "ops",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -1107,6 +1125,7 @@
   {
    "id": "partial-revert",
    "tools": "code",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -1159,6 +1178,7 @@
   {
    "id": "benchmark",
    "tools": "code",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -1230,6 +1250,7 @@
   {
    "id": "code-blocks",
    "tools": "files",
+   "route": "SINGLE",
    "messages": [
     {
      "role": "system",
@@ -1263,6 +1284,7 @@
   {
    "id": "link-check",
    "tools": "web",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -1315,6 +1337,7 @@
   {
    "id": "calendar-first-move",
    "tools": "calendar",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",
@@ -1329,6 +1352,7 @@
   {
    "id": "repeat-read",
    "tools": "code",
+   "route": "MULTI",
    "messages": [
     {
      "role": "system",

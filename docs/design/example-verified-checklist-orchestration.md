@@ -7,7 +7,8 @@ DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment)
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
-the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
+the route judge sends only the phase before the first change to the verified tool route 2026-10-15 (VCO-D25), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -972,6 +973,69 @@ each after Quyet misread a correct one-call reply (`reschedule` F1,
 the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
 `json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
 route stay recorded limits.
+
+### VCO-D25 — Only the phase before the first change takes the verified tool route (2026-10-15, PR #653)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-15-quyet-decisive-route.md`.
+VCO-D24 (one writer reply checked by Quyet, PR #652) was closed without
+adoption.
+
+- Both examples. Only `profile_judge`'s question and choices change. MULTI
+  (the verified tool route, `primary`) when the next reply must call one of
+  the caller's tools, the assistant has made no change yet, and at most 20
+  messages are left out of the judge's view; SINGLE (`deepseek_think` /
+  `glm_think`) otherwise. A change is a call that asks to create, edit, move
+  or delete data, send, install or commit, even when it failed. The more
+  probable label wins (no `prefer`). The verified tool route (roles, prompts,
+  budget), the think route and `kairyu/` are unchanged, and there is no
+  summary stage: both routes receive the caller's conversation as it was
+  sent.
+- Facts, from the DeepSWE records (the candidates run
+  `deepswe-quyet-verified-tool-8w-20261011-r1` at high against DeepSeek 6GPU
+  max, DeepSeek 8GPU high and GLM 6GPU max; turn times from the agents'
+  trajectories, equal to the relay's within 0.1 s at p50):
+  - Before the first change (mostly the harness's step 1, reading the code),
+    the verified tool route took per task 0.93x the time of single max with
+    0.07x the L3 calls and 0.39x the L1 input (1.31x the L1 output). Every
+    phase after the first change took 1.4-10x the time: reads after a change
+    come as about 26 short streaks per task (31 s mean on single max) against
+    about 200 s per verified turn. The first change itself took 172 s against
+    23 s.
+  - Of the 21 tasks that only one of the candidates run and the single runs
+    solved, the deciding move was the first implementation in 12 (verified
+    route 7 wins, 5 losses) and the test-and-fix loop in 6 (0 wins); none was
+    exploration or a batch of calls.
+  - The judge's view (4,000 characters per message, 12,000 per conversation)
+    keeps the task message's first 4,000 characters, the last tool result
+    and about 3 replies and 4 results before it; on single max 200 messages
+    are left out at p50, and a change 4 or more replies back is mostly out of
+    view. More than 20 messages left out therefore counts as a change the
+    judge may not see.
+  - Quyet on 651 recorded DeepSWE turns: 95.4 % of the turns before any
+    change routed MULTI, 0.3 % (1 of 385) of the turns after a change.
+    Whether the next reply makes a change could not be read, with or without
+    a DeepSeek summary in front of Quyet (the summary raised the after-change
+    share to 10.4 %), so the first change is written on the verified tool
+    route.
+  - Kairyu's routes return no reasoning to the agent, while DeepSeek V4.1 and
+    GLM-5.3 keep earlier reasoning in tool conversations. Replaying 24 single
+    max turns without it at max: output 1.30x mean and 0.38x p50, time 0.51x;
+    no slowdown.
+- Expected against single max (high-effort data): time about +8 %, L3 calls
+  about -12 %, L1 input about -1.5 %, L1 output about +14 %. The verified
+  tool route's time at max and with GLM is not measured yet.
+- Gates: `routing` passes at 90 % or more of the MULTI conversations routed
+  MULTI on both halves and at most one conversation holding a change routed
+  MULTI (the synthetic set relabelled by the definition: 27 MULTI, 109
+  SINGLE of which 14 hold a change); `verified-tool-route`, `effort` and
+  `fallback` use the 11 MULTI agent turns of `tool-turns.json`. The routing
+  gate passes on the running quyet-route 2026-10-15 (MULTI 0.93 / 1.00, 0
+  changed conversations routed MULTI, 0.95 of the other SINGLE ones routed
+  SINGLE); the other gates are pending.
+
+Why: the owner asked to keep main's verified tool route and enter it only
+where working over several stages is more efficient, with the condition
+derived from the benchmark data and stated in generic terms.
 
 ## Limitations
 

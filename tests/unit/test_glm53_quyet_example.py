@@ -168,7 +168,7 @@ def _orchestrator(
     seen: list[dict],
     reads: list,
     *,
-    route: str = "TOOL",
+    route: str = "MULTI",
     down=frozenset(),
     form=lambda n: 0.9,
     move: dict = MOVE,
@@ -253,7 +253,7 @@ def test_compose_gpus_match_the_allocation() -> None:
 async def test_think_is_one_glm_answer_at_the_callers_effort(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="THINK")
+    orchestrator = _orchestrator(seen, reads, route="SINGLE")
     call = _call("Name the capital of France in one word.")
     if effort is not None:
         call = dataclasses.replace(call, reasoning_effort=effort)
@@ -263,7 +263,7 @@ async def test_think_is_one_glm_answer_at_the_callers_effort(effort) -> None:
 
     ((judge, read),) = reads
     assert judge == "quyet-route-systemone"
-    assert set(read["questions"]["route"]["criteria"]) == {"THINK", "TOOL"}
+    assert set(read["questions"]["route"]["criteria"]) == {"SINGLE", "MULTI"}
     assert read["state"]["conversation"][-1]["role"] == "user"
     assert read["state"]["tool_calling"] is False
     assert result.text == "Paris"
@@ -281,7 +281,7 @@ async def test_think_is_one_glm_answer_at_the_callers_effort(effort) -> None:
 async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="TOOL")
+    orchestrator = _orchestrator(seen, reads, route="MULTI")
     call = _agent_call()
     if effort is not None:
         call = dataclasses.replace(call, reasoning_effort=effort)
@@ -342,7 +342,7 @@ async def test_a_reply_failing_the_form_check_is_published_as_written() -> None:
 
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="TOOL", form=lambda n: 0.2)
+    orchestrator = _orchestrator(seen, reads, route="MULTI", form=lambda n: 0.2)
 
     result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
 
@@ -382,7 +382,7 @@ async def test_a_reply_too_long_to_check_whole_is_published_unverified() -> None
             }
         ],
     }
-    orchestrator = _orchestrator(seen, reads, route="TOOL", move=write)
+    orchestrator = _orchestrator(seen, reads, route="MULTI", move=write)
 
     result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
 

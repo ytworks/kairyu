@@ -1,14 +1,16 @@
 # Routed answers: DeepSeek-V4.1 (6 GPUs) + two Quyet-1.0-Large replicas (2 GPUs)
 
 One public model, `kairyu-verified-tool`. Quyet reads each conversation and
-asks whether the next reply needs to call one of the caller's tools. If it
-does, the turn takes the verified tool route (VCO-D22): DeepSeek lists
+routes it (VCO-D25). While the next reply must call one of the caller's tools
+and the assistant has made no change yet (no call to create, edit, move or
+delete data, send, install or commit), the turn takes the verified tool route
+(VCO-D22): DeepSeek lists
 candidate calls, Quyet judges them, DeepSeek makes the move, and Quyet checks
 the reply's form before it is published. Every other request takes the think
 route, where DeepSeek answers at the effort the caller asked for.
 
 Design: `docs/design/example-verified-checklist-orchestration.md` (VCO-D21,
-VCO-D22); framework mechanisms: m1 D8 (checklist verifiers and their
+VCO-D22, VCO-D25); framework mechanisms: m1 D8 (checklist verifiers and their
 refinement), m1 D9 (the System One route judge). `kairyu/` is not changed
 for this example.
 
@@ -24,9 +26,9 @@ for this example.
 request
   │
   ▼
-profile_judge ── quyet-route (System One), 1 request: does the next reply
-  │              need a tool call? TOOL or THINK
-  ├─ TOOL
+profile_judge ── quyet-route (System One), 1 request: a tool call needed, no
+  │              change made yet, at most 20 messages out of view? MULTI or SINGLE
+  ├─ MULTI
   │    candidates    DeepSeek, the caller's effort: 10-16 candidate tool calls
   │                  for the next move from different viewpoints, one call
   │                  each, in one request
@@ -46,7 +48,7 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   │                  short text without internal material
   │                  fail → answer writes the reply again (only what the unmet
   │                  items need; the move kept) → checked again, at most twice
-  └─ THINK ─────► deepseek_think_answer  DeepSeek, the caller's effort
+  └─ SINGLE ────► deepseek_think_answer  DeepSeek, the caller's effort
                                           (default high), one call with the
                                           caller's conversation as sent
 ```
@@ -62,12 +64,15 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   Quyet would cut (the reply, the tools and 6,000 characters of the
   conversation) is refused, and the reply is published unverified rather than
   passed on what fits.
-- The judge sends the conversation and whether the caller declared tools,
-  with one choice question. TOOL wins whenever its probability reaches 0.1,
-  otherwise the most probable label: on real agent runs the final turn before
-  a submit command read as a finished report. When the conversation's
-  instructions require a tool call in every reply or end the work with one,
-  every reply up to that final one is TOOL.
+- The judge sends the conversation, the number of messages left out of it
+  and whether the caller declared tools, with one choice question; the more
+  probable label wins. MULTI only while the assistant has made no change and
+  at most 20 messages are left out (a change further back may be out of
+  view). On the DeepSWE records that phase took about the time of one answer
+  per reply on the verified tool route with far fewer calls and input
+  tokens, while every later phase took 1.4-10 times the time (VCO-D25). The
+  first change is written on the verified tool route: whether the next reply
+  makes a change cannot be read before it is written.
 - When quyet-route does not answer within 60 s (down, overloaded), the
   request takes the think route.
 - The two Quyet replicas never share a queue: a burst of judgments cannot
@@ -129,10 +134,10 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 | Gate | Checks |
 |---|---|
 | `l1` | every DeepSeek DP rank (thinking and chat JSON), each Quyet replica's vLLM and System One, the strict name refusing a state Quyet would cut, one structured tool call from the public model |
-| `routing` | `datasets/tool-routing-set.json` under the served rule (TOOL at P(TOOL) ≥ 0.1): TOOL miss rate < 10 % on the calibration and held-out halves; THINK precision ≥ 90 % |
+| `routing` | `datasets/tool-routing-set.json` under the served rule (the more probable label): ≥ 90 % of the MULTI conversations routed MULTI on the calibration and held-out halves; at most one conversation holding a change routed MULTI |
 | `think-route` | everyday requests stream from the think route at the default effort |
 | `effort` | the think route gets the caller's effort; the verified tool route's candidates and answer (fixes included) get it too (default high); the route is judged on `quyet-route` |
-| `verified-tool-route` | agent turns from `datasets/tool-turns.json` take the TOOL route: 10-16 candidates, 6 judgments each on `quyet-judge`, the answer and its 7-question form check on `quyet-judge`; each reply carries a structured call to a declared tool; fixes, publish reasons and calls per reply recorded |
+| `verified-tool-route` | the MULTI agent turns from `datasets/tool-turns.json` take the verified tool route: 10-16 candidates, 6 judgments each on `quyet-judge`, the answer and its 7-question form check on `quyet-judge`; each reply carries a structured call to a declared tool; fixes, publish reasons and calls per reply recorded |
 | `fallback` | `quyet-route` down: think route; `quyet-judge` down: still routed, answer without judgments, published unverified; both back: judged and form-checked |
 | `serving` | agent turns at c1/c4/c8/c16 (8/16/16/32 requests): every reply a structured call; per-route latency and tokens |
 | `serving-routed` | the routing set at c1/c4/c8/c16, route mix and per-route latency and tokens |
@@ -141,8 +146,11 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 Every gate also records each Quyet adapter's reads, states cut at 6,000
 tokens, strict reads refused and read times from the adapters' logs. The two datasets are authored
 with generic tools (shell, file read and write, HTTP fetch, web search,
-calendar, email). The routing set's THINK side holds 80 chats without tools
-and 16 tool-declared turns whose next reply is text.
+calendar, email), labelled by the route's definition: the routing set's MULTI
+side holds 27 tool turns with no change yet; its SINGLE side holds 80 chats
+without tools, 16 tool-declared turns whose next reply is text and 13 tool
+turns that already hold a change (14 conversations are marked `changed`).
+`tool-turns.json` marks each agent turn's route (11 MULTI, 13 SINGLE).
 
 ## Limits
 
@@ -155,9 +163,13 @@ and 16 tool-declared turns whose next reply is text.
   check (a run shares one unjudgeable flag, m1 D8).
 - A reply whose form-check state exceeds Quyet's 6,000 tokens (a long write,
   many or large tool schemas) is published unverified.
-- The TOOL floor (0.1) sends some tool-declared turns whose next reply is
-  text to the verified tool route, which answers with a call (routing set: 11
-  of 16 such turns stay on THINK).
+- A tool-declared turn whose next reply is text can still read as MULTI and
+  get an answer with a call (routing set 2026-10-15: 0.95 of the SINGLE
+  conversations without a change routed SINGLE).
+- Only the turns before the first change, and the first change itself, run
+  on the verified tool route. A change is seen only while it stays in the
+  judge's view or more than 20 messages are left out (DeepSWE records: 0.3 %
+  of the turns after a change routed MULTI).
 - A fix is the same DeepSeek role at the same effort; it receives the
   previous reply as text. A DeepSeek error during a fix fails the request.
 - The verified tool route is not streamed: the reply is published after its
