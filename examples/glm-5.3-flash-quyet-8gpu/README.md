@@ -3,10 +3,10 @@
 One public model, `kairyu-verified-tool`. Quyet reads each conversation and
 asks whether the next reply needs to call one of the caller's tools. If it
 does, the turn takes the verified tool route (VCO-D23, VCO-D24): GLM makes the move
-from the caller's conversation as sent, Quyet decides whether the reply left
-out a call needed now that could run alongside, is safe and is well formed,
-and a reply that fails is written again once with Quyet's findings before it
-is published. Every other request
+in one reply with every call needed now that is safe and needs no other
+call's result, Quyet decides whether the reply leaves room for more parallel
+calls, is safe and is well formed, and a reply that fails is written again
+once with Quyet's findings before it is published. Every other request
 takes the think route, where GLM answers at the effort the caller asked for (default
 max, GLM's official default).
 
@@ -31,8 +31,9 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   │              need a tool call? TOOL or THINK
   ├─ TOOL
   │    answer        GLM, the caller's effort: the caller's conversation
-  │                  as native messages, exactly as sent (no added note); makes
-  │                  the move through the tool-calling interface
+  │                  as native messages, then one note; makes the move needed
+  │                  now through the tool-calling interface, with every call
+  │                  needed now that is safe and needs no other call's result
   │    decision      quyet-judge read strict, 9 questions on the reply (p >= 0.5 each):
   │                  R1 no further parallel call left; S1 every call safe,
   │                  S2 batched calls independent, S3 finishing call alone
@@ -71,11 +72,10 @@ profile_judge ── quyet-route (System One), 1 request: does the next reply
   delay the next request's route decision.
 - The reply is the next assistant message: the tool call or calls for the move
   needed now, with at most a short text. It is not the task's final result in
-  one jump, and not a repeat of a step the tool results already show. The
-  writer receives no added note: any user message after a tool result made it
-  plan the work again (several times the thinking per reply), so the decision
-  carries the requirements, and its fix adds a call needed now that could run
-  alongside (R1). The finishing move goes alone, once tool results show every step it depends on
+  one jump, and not a repeat of a step the tool results already show. It
+  carries every call needed now that is safe and needs no result of another
+  call in the reply (every file the next step reads, every independent
+  check). The finishing move goes alone, once tool results show every step it depends on
   succeeded.
 - The decision reads the reply as text with its calls written as
   `<tool_call>{...}</tool_call>`, then the tools and the conversation. The

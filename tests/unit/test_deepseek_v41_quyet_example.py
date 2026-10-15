@@ -274,12 +274,14 @@ async def test_tool_route_writes_one_reply_then_quyet_decides_it(effort) -> None
     # Stage reports are not replayed through reasoning_content.
     assert not result.reasoning_content
     # One DeepSeek call at the caller's effort: the caller's turn as native
-    # messages, as sent with no added note, published with the caller's tools.
+    # messages, then one note, published with the caller's tools.
     (answer,) = seen
     assert answer["model"] == "deepseek-v4.1-flash"
     assert answer["reasoning_effort"] == (effort or "high")
     assert answer["tools"][0]["function"]["name"] == "bash"
-    assert answer["messages"] == AGENT_TURN
+    assert answer["messages"][:-1] == AGENT_TURN
+    note = answer["messages"][-1]
+    assert note["role"] == "user" and note["content"].startswith("Before replying")
     # The route on its own replica (told the caller declared tools), then one
     # strict read of nine questions over the reply, the tools and the
     # conversation.
