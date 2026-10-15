@@ -7,6 +7,37 @@ example's System One adapter): `quyet-route` on GPU 6 (route judge only),
 `quyet-judge` on GPU 7 (judgments and form check).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
 
+## Routing to the verified tool route only before the first change (VCO-D25)
+
+GPU run 2026-10-15 21:12-23:09 JST (UTC 12:12-14:09) at `849aa03d` (route judge
+MULTI / SINGLE, VCO-D25; the verified tool route unchanged). `./run.sh down`,
+then `./run.sh up` (log `up-20261015-d25.log`), then the nine gates in GATES
+order (log `gates-20261015-d25.log`, results `*-20261015T12*` to `*T14*`).
+**All nine gates pass.**
+
+Before the gates, the served route judge on 651 recorded DeepSWE turns
+(quyet-route, offline harness): 95.4 % of the 153 turns before any change
+routed MULTI, 0.3 % (1 of 385) of the turns after a change, and 90.3 % of the
+113 first-change turns (MULTI by design: whether the next reply changes
+something cannot be read before it is written).
+
+| Gate | Result |
+|---|---|
+| l1 | pass (24 s) |
+| routing | pass: MULTI routed MULTI 0.93 (calibration) / 1.00 (held-out); 0 of the 14 conversations holding a change routed MULTI; the other SINGLE conversations routed SINGLE 0.95; 136 reads, 0 cut |
+| think-route | pass: 6/6 `deepseek_think`, streamed; 0.3-4.3 s, TTFT 0.27-3.83 s |
+| effort | pass: SINGLE follows the caller (0.7-0.9 s); MULTI candidates and answer follow it, one structured call each: low 23.6 s, high 31.6 / 34.2 s, max 116.1 s (17,805 output tokens) |
+| verified-tool-route | pass: 12/12 routed MULTI with a structured call; p50 65 s, p95 339 s; one max-effort turn (`reschedule`, streamed) took 2,353 s with 416,815 output tokens |
+| fallback | pass: quyet-route down sends the turn to `deepseek_think`; quyet-judge down still routes MULTI and publishes unverified; both back: judged and form-checked |
+| serving | pass: 72/72 structured calls; SINGLE 45 (p50 1.3-2.2 s by level, max 5.7 s), MULTI 27 (p50 57-116 s by level); one c1 MULTI turn at the default effort took 1,793.5 s with 347,562 output tokens |
+| serving-routed | pass: 72/72; MULTI 17 (p50 64-105 s), SINGLE 55 (p50 1.3-14.9 s) |
+| browser | pass |
+
+Quyet in serving: 72 route reads (p50 0.19 s), 116 judgment and form reads
+(2,501 questions, p50 2.0 s); 0 states cut, 0 strict refusals. The two long
+MULTI turns are single runaway generations on the verified tool route; in
+DeepSWE a request over 900 s is cut by the task's proxy.
+
 ## Quyet layout: TOOL floor and strict form check (VCO-D21/D22 amendment)
 
 GPU run 2026-10-11 10:32-11:45 JST (gates; UTC 01:32-02:45) at `fa82424f`

@@ -8,7 +8,7 @@ next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
 the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
-the route judge sends only the phase before the first change to the verified tool route 2026-10-15 (VCO-D25), GPU gates pending**
+the route judge sends only the phase before the first change to the verified tool route 2026-10-15 (VCO-D25), all nine GPU gates pass 2026-10-15 (DeepSeek; GLM pending)**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -1031,7 +1031,8 @@ adoption.
   `fallback` use the 11 MULTI agent turns of `tool-turns.json`. The routing
   gate passes on the running quyet-route 2026-10-15 (MULTI 0.93 / 1.00, 0
   changed conversations routed MULTI, 0.95 of the other SINGLE ones routed
-  SINGLE); the other gates are pending.
+  SINGLE). All nine gates pass on `deepseek-v4.1-quyet-8gpu` 2026-10-15
+  (the example's `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` pending.
 
 Why: the owner asked to keep main's verified tool route and enter it only
 where working over several stages is more efficient, with the condition
