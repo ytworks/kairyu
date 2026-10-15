@@ -62,9 +62,7 @@
      "systemone": [
       "quyet-route-systemone"
      ],
-     "serves": [
-      "profile_judge"
-     ]
+     "serves": []
     },
     {
      "service": "quyet-judge",
@@ -73,12 +71,10 @@
      "vllm_l1_port": 8017,
      "systemone_l1_port": 8018,
      "systemone": [
-      "quyet-judge-systemone",
       "quyet-form-systemone"
      ],
      "serves": [
-      "judgments",
-      "format_check"
+      "decision"
      ]
     }
    ]
@@ -86,14 +82,10 @@
  },
  "orchestration": {
   "spec": "verified-tool.yaml",
-  "routes": {
-   "TOOL": "primary",
-   "THINK": "deepseek_think"
-  },
   "final_unit": "answer",
   "budget": {
-   "max_steps": 10,
-   "max_refine_depth": 2
+   "max_steps": 5,
+   "max_refine_depth": 1
   }
  },
  "deepseek": {
@@ -163,7 +155,6 @@
  "systemone": {
   "models": [
    "quyet-route-systemone",
-   "quyet-judge-systemone",
    "quyet-form-systemone"
   ],
   "upstream_model": "Quyet-1.0-Large",

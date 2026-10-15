@@ -7,7 +7,8 @@ DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment)
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
-the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
+for both writers the route judge and the verified tool route replaced by one flow: the writer answers as it is, Quyet decides five questions on whether the answer costs extra replies, a failing answer is fixed once 2026-10-16 (VCO-D27), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -972,6 +973,56 @@ each after Quyet misread a correct one-call reply (`reschedule` F1,
 the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
 `json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
 route stay recorded limits.
+
+### VCO-D27 — The writer answers as it is; Quyet decides whether one fix can cut API calls (2026-10-16, PR #655)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-16-quyet-draft-efficiency-fix.md`.
+VCO-D24 to VCO-D26 were proposed in PRs #652-#654 and closed unmerged; this
+decision replaces VCO-D21's route judge and the VCO-D22/D23 route in both
+examples (`deepseek-v4.1-quyet-8gpu`, `glm-5.3-flash-quyet-8gpu`).
+
+- Goal (owner): fewer API calls until a multi-turn task is solved, so fewer
+  input tokens and less time, without a lower score.
+- One flow for every request; no route judge, no think route, no candidates:
+  - `answer`: the writer (DeepSeek or GLM) at the caller's effort receives
+    the caller's conversation as native messages with nothing added (the
+    answer the writer alone would write).
+  - `decision`: Quyet reads once, strict (quyet-judge on GPU 7), the answer,
+    the tools and the conversation (2,000 / 6,000 characters), and answers
+    five questions at p >= 0.5, each a cause of extra replies: E1 a call the
+    conversation shows is needed now left for a later reply; E2 no call where
+    the move needs one (text only, an announced action not made, a call
+    written in the text); E3 an invalid call; E4 a repeated step whose result
+    is shown and unchanged; E5 calls in one reply that need each other's
+    results.
+  - All five pass: the answer is published as written. Any fails: the writer
+    writes once more from `refine_prompt` (the conversation, the draft and
+    the failing questions with their probabilities), Quyet reads the fix
+    once more for the report, and the fix is published (`max_refinements` 1,
+    budget `max_steps` 5, `max_refine_depth` 1).
+  - A state Quyet would cut is refused and the answer published unverified.
+- Not judged: safety and an early finishing call are correctness, not call
+  count, and the answer is the writer's own; the fix prompt keeps added
+  calls safe and the finishing call alone, after shown success.
+- Unchanged: `kairyu/`, the L1 and the GPU allocation. quyet-route (GPU 6)
+  stays deployed with the L1 and is not read.
+- Verification (owner 2026-10-16): the gates guarantee behaviour, not the
+  decision's accuracy; the effect (API calls, input tokens, time, score) is
+  measured by DeepSWE. Gates: l1, decision (the rule on 12 agent turns,
+  unary and streamed: a passing first decision publishes with no fix, a
+  failing one runs exactly one fix decided again; structured calls under
+  900 s), text, effort, fallback (quyet-judge down: published unverified),
+  serving, serving-mixed, browser.
+- Recorded before implementation, not a gate: on 120 labelled replies of
+  the single DeepSeek 6GPU max DeepSWE run, Quyet's E1 probabilities did not
+  separate replies that left room from those that did not (precision 49-57 %
+  under two wordings and 6,000 or 12,000 conversation characters); E2-E4 did
+  not occur in that run. The chosen wording sent 5-10 % of replies to a fix.
+
+Why: the owner's goal is fewer API calls per solved task. Starting from the
+writer's own answer keeps the single-writer behaviour that scores best
+(DeepSeek 6GPU max 85/113, GLM 6GPU max 72/113) and adds one Quyet read; only
+an answer that would cost extra replies pays for a second writer call.
 
 ## Limitations
 

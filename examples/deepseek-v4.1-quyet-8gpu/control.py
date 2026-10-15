@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for routed DeepSeek-V4.1 answers.
+"""One-command lifecycle for DeepSeek-V4.1 answers decided by Quyet.
 
-DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) writes; two Quyet-1.0-Large
-replicas (stock vLLM plus this example's System One adapter) judge through System
-One: quyet-route (GPU 6) routes each request to the verified tool route (the next
-reply needs a tool call) or to one answer at the caller's effort, and quyet-judge
-(GPU 7) judges the verified tool route's candidates and the form of its reply.
+DeepSeek-V4.1-Flash (one DP6 / EP6 replica, GPUs 0-5) answers every request as
+it is; two Quyet-1.0-Large replicas (stock vLLM plus this example's System One
+adapter) run through System One: quyet-judge (GPU 7) decides whether the answer
+would cost the work more replies than needed, and a failing answer is written
+once more; quyet-route (GPU 6) stays deployed with the L1 and is not read.
 """
 
 from __future__ import annotations
@@ -32,14 +32,14 @@ DEEPSEEK_GPU_IDS: list[int] = [int(index) for index in DEEPSEEK["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in DEEPSEEK["dp_rank_gpu_ids"]]
 QUYET = SPEC["allocation"]["quyet"]
 QUYET_GPU_IDS: list[int] = [int(index) for index in QUYET["gpu_ids"]]
-# One Quyet replica per System One use: the route judge; the judgments and the
-# form check. Each is a vLLM on its GPU plus its adapter on the CPU.
+# Two Quyet replicas, each a vLLM on its GPU plus its adapter on the CPU:
+# quyet-route (unread since VCO-D27) and quyet-judge (the decision).
 QUYET_REPLICAS: list[dict] = list(QUYET["replicas"])
 QUYET_SERVICES: list[str] = [replica["service"] for replica in QUYET_REPLICAS]
 # The services that hold GPUs.
 L1_SERVICES = ("deepseek", *(replica["vllm_service"] for replica in QUYET_REPLICAS))
 PUBLIC_MODELS: list[str] = list(SPEC["public_models"])
-# kairyu-verified-tool: Quyet routes per request (TOOL or THINK).
+# kairyu-verified-tool: the answer, then Quyet's decision.
 (MODEL,) = PUBLIC_MODELS
 DEEPSEEK_SERVED = SPEC["deepseek"]["served_name"]
 QUYET_SERVED = SPEC["quyet"]["model"]["served_name"]
@@ -809,7 +809,7 @@ _LONG_STATE = {"log": "\n".join(f"line {n}: the build step {n} finished" for n i
 
 def _validate_strict(l1_url: str) -> None:
     """The judge replica answers a long state under Quyet's own name (cut, with a
-    warning) and refuses it under the form check's strict name."""
+    warning) and refuses it under the decision's strict name."""
 
     questions = {"done": {"type": "noul", "instructions": "The log reports a finished build."}}
     plain = post_json(

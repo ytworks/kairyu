@@ -103,7 +103,8 @@ services:
   # Quyet-1.0-Large (bf16), two replicas served as in quyet-1.0-large-1gpu:
   # stock vLLM v0.31.0 holds the model (internal), and an adapter answers
   # System One with the quyet package's prompt and calibration.
-  # GPU 6: the route judge (profile_judge) only.
+  # GPU 6: the former route judge's replica, deployed with the L1 and not read
+  # since VCO-D27.
   quyet-route-vllm:
     image: ${QUYET_VLLM_IMAGE}
     ipc: host
@@ -217,7 +218,7 @@ services:
       retries: 120
       start_period: 30s
     restart: unless-stopped
-  # GPU 7: the verified tool route's judgments and form check only.
+  # GPU 7: the decision on every answer only.
   quyet-judge-vllm:
     image: ${QUYET_VLLM_IMAGE}
     ipc: host
@@ -299,7 +300,7 @@ services:
       QUYET_UPSTREAM: http://quyet-judge-vllm:8000
       QUYET_UPSTREAM_MODEL: quyet-1.0-large
       QUYET_ALIASES: quyet-latest
-      # The form check's name: a state Quyet would cut is refused, never judged.
+      # The decision's name: a state Quyet would cut is refused, never judged.
       QUYET_STRICT_ALIASES: quyet-strict
       QUYET_MAX_INFLIGHT: "${QUYET_MAX_INFLIGHT}"
       QUYET_MAX_QUEUE: "${QUYET_MAX_QUEUE}"
@@ -370,7 +371,7 @@ services:
       timeout: 3s
       retries: 120
     restart: unless-stopped
-  # Open WebUI: kairyu-verified-tool (Quyet routes per request).
+  # Open WebUI: kairyu-verified-tool (the answer, then Quyet's decision).
   chat-ui:
     image: ${OPEN_WEBUI_IMAGE}
     environment:
