@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-13 — [amendment] GLM + Quyet: the GLM pool keeps its replica after one failed request (VCO-D23, PR #648)
+- What: `glm-5.3-flash-quyet-8gpu` GLM pool `unhealthy_after` 1 -> 3. First GPU run: 8 of 9 gates pass; serving c16 21/32: vLLM ended one grammar-constrained MTP candidates call ("grammar rejected tokens", 1 of ~100), the only replica left placement and 10 waiting requests got 502; one THINK-routed agent turn (`dedup-case`, P(TOOL) 0.025) answered done without a call. Both recorded as README limits.
+- Why: owner decision 2026-10-13: one failed request must not fail every request waiting for the only replica; MTP and the candidates grammar stay.
+- Refs: VCO-D23 amendment 2026-10-13; example `kairyu.yaml`, `README.md`
+
+### 2026-10-13 — [progress] Native chat messages: both six-GPU examples pass all nine gates (PR #647)
+- What: `deepseek-v4.1-flash-6gpu` and `glm-5.3-flash-6gpu` with `upstream_chat_models` pass the nine example gates and the pre-benchmark check (a DeepSWE second turn: 5/5 structured calls; the Kairyu-to-vLLM body carries the 5 messages with `reasoning_effort: max`; `/tokenize` count equals `usage.prompt_tokens`). DeepSeek's tool-result gate turn now asks for a step that still needs a call, as GLM's (native: 6/10 via Kairyu, 7/10 direct; fixed turn 10/10). The DeepSWE runs and the wiki report moved to issue #649.
+- Why: owner decision 2026-10-12: PR #647 is verified by the gates; DeepSWE is tracked separately. The gate fix follows the model's own template reading (owner-approved).
+- Refs: PR #647; issue #649; both examples' `MEASUREMENTS.md`
+
+### 2026-10-12 — [design] GLM-5.3-Flash as the verified tool route's writer (VCO-D23, PR #648)
+- What: new `examples/glm-5.3-flash-quyet-8gpu`: VCO-D22 route (2026-10-11 amendment) with GLM-5.3-Flash (TP2 x DP3 / EP6, MTP 3, stock vLLM v0.31.0, GPUs 0-5) in every writer role and the two Quyet replicas of VCO-D21. Changed only what GLM forces: no `chat_template_kwargs` (effort via `reasoning_effort`), pool on `upstream_chat_models`, default effort max, F2 names GLM's call markup. `kairyu/` unchanged; GPU gates pending.
+- Why: owner decision: the same route served with GLM as the writer, built from two GPU-verified examples without changing what neither forces.
+- Refs: VCO-D23; plan `docs/superpowers/plans/2026-10-12-glm-5.3-flash-quyet-8gpu.md`; depends on PR #647
+
+### 2026-10-12 — [amendment] Upstream-chat review fix: the usage fallback counts the conversation (m9 D2, PR #647 review)
+- What: when the upstream reports no usage, response usage, the usage ledger and metrics count the conversation's JSON with the prompt text (`metering.metered_prompt`) instead of the empty prompt's 0 (1,000-word chat: 1,004 tokens; legacy 1,002).
+- Why: owner review reproduced 0 input tokens on a stream without usage; the admission bound already counted the conversation.
+- Refs: m9 D2 amendment 2026-10-12; `kairyu/entrypoints/server/metering.py`
+
+### 2026-10-12 — [amendment] Upstream-rendered pool chats are sent as native messages (m9 D2, PR #647)
+- What: new `upstream_chat_models` list: text chats of listed engine/pool models skip Kairyu rendering; the validated messages go to vLLM via `conversation_prefix`, so the model's template sees turns, tool calls and tool results. The build fails unless every replica is an `openai` backend on a `conversation_prefix` upstream (vLLM). `glm-5.3-flash-6gpu` and `deepseek-v4.1-flash-6gpu` opt in; `legacy_chat_models` and other examples unchanged.
+- Why: legacy chats reach vLLM as one flattened user message; DeepSWE on GLM-5.3-Flash ended 23 of 23 finished tasks in `RepeatedFormatError` while the same turn sent to vLLM directly returned a call; the DeepSeek reference run (67/113) went through the same flattening. `native_conversation` exists only on L2 roles.
+- Refs: m9 D2 amendment 2026-10-12; plan `docs/superpowers/plans/2026-10-12-upstream-chat-messages.md`
+
 ### 2026-10-11 — [design] Quyet replaces Winnow; verified tool route judges candidates and checks form (VCO-D21/D22, PR #645)
 - What: `deepseek-v4.1-winnow-8gpu` -> `deepseek-v4.1-quyet-8gpu`: two Quyet-1.0-Large replicas (as in `quyet-1.0-large-1gpu`) replace Winnow, states bounded to Quyet's 6,000 tokens (route 12,000 chars, judgments 8,000, form check 6,000). TOOL route: 10-16 DeepSeek candidate calls (one request), 6 Quyet judgments each (32 per read), a DeepSeek move batching independent safe calls, 7-question Quyet form check (p >= 0.5) with up to 2 DeepSeek fixes; requirements removed. Routing and think route unchanged; `kairyu/` unchanged.
 - Why: owner decisions: decisions on a calibrated Jev-family model within its documented input; choose the move needed now from many judged candidates, cover more safe work per move, and fix the reply's form (announced calls, calls as text, finishing alone) before publishing. Threshold 0.5 because VCO-D16's 0.99 repaired near-passes and changed moves.
