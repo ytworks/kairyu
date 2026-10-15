@@ -7,7 +7,8 @@ DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment)
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
-the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
+for both writers one reply with every parallel call needed now, decided by Quyet and fixed once 2026-10-15 (VCO-D24), GPU gates pending**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -972,6 +973,54 @@ each after Quyet misread a correct one-call reply (`reschedule` F1,
 the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
 `json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
 route stay recorded limits.
+
+### VCO-D24 — One writer reply with every parallel call, decided by Quyet (2026-10-15, PR #652)
+
+Owner decision. Plan: `docs/superpowers/plans/2026-10-15-quyet-parallel-tool-calls.md`.
+
+- Both examples (`deepseek-v4.1-quyet-8gpu`, `glm-5.3-flash-quyet-8gpu`) share
+  one verified tool route: `answer`, then `decision`, then at most one fix.
+- `answer`: the writer (DeepSeek or GLM) at the caller's effort receives the
+  caller's conversation as native messages plus one note, and makes the move
+  needed now in one reply. The reply carries every call that is needed now,
+  is safe now, needs no result of another call in the reply and changes
+  nothing another call reads or changes. The finishing call goes alone, after
+  tool results show success.
+- `decision`: Quyet reads once, strict (quyet-judge on GPU 7,
+  `quyet-strict`). It reads the reply, the tools and the conversation
+  (2,000 / 6,000 characters) and answers nine questions at p >= 0.5:
+  - R1: no further call needed now could have been made alongside.
+  - S1: every call is safe now.
+  - S2: batched calls are independent (VCO-D22's F5 wording).
+  - S3: a finishing call is alone, after shown success (F6).
+  - F1-F5: form (VCO-D22's F1-F4 and F7; F2 names each writer's call markup).
+- A failing reply is written again once from `refine_prompt`, with the draft
+  and the unmet requirements with their probabilities. The fix is decided
+  again, and the last reply is published either way (`max_refinements` 1,
+  budget `max_steps` 5, `max_refine_depth` 1).
+- A state Quyet would cut is refused, and the reply is published unverified,
+  as before.
+- Removed: `candidates`, `judgments`, the non-strict `quyet-judge-systemone`
+  and `internal_max_tokens`.
+- Unchanged: the route judge (VCO-D21 with the 2026-10-11 TOOL floor), the
+  think route, the L1 and the GPU allocation. `kairyu/` is unchanged.
+- Supersedes VCO-D22's candidates and judgments, and VCO-D23's second (GLM
+  F5 wording) and third (no fix) amendments. Both examples ask the same
+  questions apart from F2.
+- GPU verification: the nine gates of each example. `verified-tool-route`
+  also requires every request to finish under 900 s, and records decisions,
+  failing requirements and fixes.
+
+Why:
+- At max effort the VCO-D22 route made agent turns long: two writer calls and
+  about five Quyet reads per turn, p50 about 320 s and up to 892 s in a
+  stopped DeepSWE run. More turns hit the DeepSWE agent proxy's 900 s cut and
+  the 3-hour task limit.
+- The candidates were 65 % of the writer's output, and the judgments 90 % of
+  Quyet's input.
+- One writer reply with every independent call needed now, decided by one
+  Quyet read, keeps the guarantee model-judged while cutting the time, the
+  API calls and the tokens of a turn.
 
 ## Limitations
 

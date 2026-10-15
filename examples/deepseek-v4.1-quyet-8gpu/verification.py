@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""GPU gates for routed DeepSeek-V4.1 answers (VCO-D21, VCO-D22).
+"""GPU gates for routed DeepSeek-V4.1 answers (VCO-D21, VCO-D22, VCO-D24).
 
 Every gate has a time budget and writes its per-request evidence (latency,
-tokens, tok/s, route, efforts, form check) to
+tokens, tok/s, route, efforts, decision) to
 model-volumes/<environment>/results/<gate>-<UTC>.json, with the Quyet reads of
 the gate (count, states cut at Quyet's 6,000 tokens, read times) from the
 adapters' logs. One public model, kairyu-verified-tool: Quyet routes TOOL (the
@@ -10,7 +10,7 @@ next reply needs a tool call) to the verified tool route and THINK to
 deepseek_think.
 
   l1                  every DeepSeek DP rank (thinking and chat, grammar JSON),
-                      each Quyet replica's vLLM and System One, the form check's
+                      each Quyet replica's vLLM and System One, the decision's
                       strict name refusing a state Quyet would cut, and one
                       structured tool call from the public model
   routing             datasets/tool-routing-set.json under the served rule (TOOL
@@ -19,16 +19,15 @@ deepseek_think.
                       precision >= 90 %
   think-route         everyday requests stream from deepseek_think at the default effort
   effort              the caller's effort reaches the think route and the verified
-                      tool route's candidates, answer and fixes; quyet-route judges
-                      the route
+                      tool route's answer and its fix; quyet-route judges the
+                      route
   verified-tool-route agent turns (datasets/tool-turns.json) take the verified
-                      tool route: DeepSeek's 10-16 candidates, 6 judgments each on
-                      quyet-judge, the answer and its form check (read strict) on
-                      quyet-judge, and a structured call to a declared tool
+                      tool route: DeepSeek's reply, the nine-question decision (read
+                      strict) on quyet-judge, at most one fix, a structured call
+                      to a declared tool, every request under 900 s
   fallback            quyet-route down: an agent turn is answered on the think
-                      route; quyet-judge down: still routed, the answer without
-                      judgments and published unverified; both back: judged and
-                      form-checked again
+                      route; quyet-judge down: still routed, the reply published
+                      unverified; both back: decided again
   serving             agent turns at c1/c4/c8/c16: every reply a structured call;
                       latency, tokens, tok/s per route
   serving-routed      the routing set at c1/c4/c8/c16: route mix, latency, tokens per route
@@ -80,7 +79,7 @@ _REFUSED_LINE = re.compile(r"refused questions=(\d+) strict=(True|False): (.*)")
 
 def _quyet_reads(since: str | None) -> dict[str, dict]:
     """Per Quyet adapter: reads, questions, states cut at 6,000 tokens, strict
-    reads refused (a state too long for the form check) and read times since
+    reads refused (a state too long for the decision) and read times since
     ``since``, from the adapter's ``read`` and ``refused`` log lines."""
 
     report = {}
@@ -199,12 +198,12 @@ def _seconds(timing: dict | None, key: str) -> datetime | None:
         return None
 
 
-STAGES = ("candidates", "judgments", "answer", "format_check")
+STAGES = ("answer", "decision")
 
 
 def _stages(trace: dict | None) -> dict[str, dict]:
     """The verified tool route's stages from the trace: status and worker of
-    the last run, runs (the answer and its form check run again per fix),
+    the last run, runs (the answer and its decision run again on a fix),
     start of the first and end of the last run (seconds from the first stage),
     and a verification's question count."""
 
@@ -243,50 +242,63 @@ def _stages(trace: dict | None) -> dict[str, dict]:
 
 def _tool_route_problems(row: dict, caller_effort: str | None) -> list[str]:
     """What a verified tool row misses of the route (empty when sound): the
-    four stages, 10-16 candidates judged 6 times each on quyet-judge, the
-    seven-question form check read strict on quyet-judge (quyet_form) with its
-    report, and DeepSeek's candidates and answer (fixes included) at the
-    caller's effort (default high)."""
+    answer, then the nine-question decision read strict on quyet-judge
+    (quyet_form) with its report, or a decision Quyet refused to read whole
+    (its state over 6,000 tokens: the reply published unverified); at most one
+    fix; and DeepSeek's answer (its fix included) at the caller's effort (default
+    high)."""
 
     stages = row["stages"]
+    answer = stages.get("answer") or {}
+    decision = stages.get("decision") or {}
+    refused = decision.get("reason") == "judge_unavailable"
     problems = []
-    for node in STAGES:
-        if (stages.get(node) or {}).get("status") != "success":
-            problems.append(f"{node}={stages.get(node)}")
+    if answer.get("status") != "success":
+        problems.append(f"answer={answer}")
+    if decision.get("status") != "success" and not refused:
+        problems.append(f"decision={decision}")
     if problems:
         return problems
-    items = stages["judgments"].get("items") or 0
-    if items % 6 or not 60 <= items <= 96:
-        problems.append(f"judgment items={items} (6 per candidate, 10-16 candidates)")
-    if stages["format_check"].get("items") != 7:
-        problems.append(f"form items={stages['format_check'].get('items')}")
-    for node, worker in (("judgments", "quyet_judge"), ("format_check", "quyet_form")):
-        if stages[node]["worker"] != worker:
-            problems.append(f"{node} on {stages[node]['worker']}")
-    if row["verification"] is None:
-        problems.append("no form-check report")
+    if not refused and decision.get("items") != 9:
+        problems.append(f"decision items={decision.get('items')}")
+    if decision.get("worker") != "quyet_form":
+        problems.append(f"decision on {decision.get('worker')}")
+    report = row["verification"]
+    if report is None:
+        problems.append("no decision report")
+    elif (report.get("attempts") or 0) > 2:
+        problems.append(f"attempts={report.get('attempts')} (one fix at most)")
     if row["efforts"] != _tool_route_efforts(caller_effort):
         problems.append(f"efforts={row['efforts']}")
     return problems
 
 
 def _tool_route_summary(rows: list[dict]) -> dict:
-    """The verified tool route's form checks, fixes, candidates and calls per reply."""
+    """The verified tool route's decisions, fixes and calls per reply. The
+    report lists the last decision's requirements, so a requirement failing
+    after a fix shows what the fix left unmet (S1-S3: safety)."""
 
     tool = [row for row in rows if row["route"] == TOOL_ROUTE and row["status"] == 200]
+    reports = [row["verification"] or {} for row in tool]
+    fixed = [report for report in reports if report.get("attempts") == 2]
+
+    def failing(report: dict) -> list[str]:
+        return [item["id"] for item in report.get("requirements") or [] if not item["passed"]]
+
     return {
         "replies": len(tool),
-        "form_passed": sum(1 for row in tool if (row["verification"] or {}).get("guaranteed")),
+        "decision_passed": sum(1 for report in reports if report.get("guaranteed")),
         "publish_reasons": dict(
-            collections.Counter(str((row["verification"] or {}).get("reason")) for row in tool)
+            collections.Counter(str(report.get("reason")) for report in reports)
         ),
-        "answer_attempts": dict(
-            collections.Counter((row["verification"] or {}).get("attempts") for row in tool)
+        "answer_attempts": dict(collections.Counter(report.get("attempts") for report in reports)),
+        "fixed_passed": sum(1 for report in fixed if report.get("guaranteed")),
+        "fixed_failing": sum(1 for report in fixed if not report.get("guaranteed")),
+        "fixed_failing_safety": sum(
+            1 for report in fixed if {"S1", "S2", "S3"} & set(failing(report))
         ),
-        "candidates": dict(
-            collections.Counter(
-                ((row["stages"].get("judgments") or {}).get("items") or 0) // 6 for row in tool
-            )
+        "failing_requirements": dict(
+            collections.Counter(item for report in reports for item in failing(report))
         ),
         "calls_per_reply": dict(collections.Counter(len(row["tool_calls"]) for row in tool)),
     }
@@ -316,11 +328,10 @@ def _tool_call_problems(row: dict, tools: list[dict]) -> list[str]:
 
 
 def _tool_route_efforts(caller_effort: str | None) -> dict[str, str]:
-    """The verified tool route's efforts: the caller's (default high) for the
-    candidates and the answer (and so for its fixes)."""
+    """The verified tool route's effort: the caller's (default high) for the
+    answer (and so for its fix)."""
 
-    wanted = caller_effort or "high"
-    return {"candidates": wanted, "answer": wanted}
+    return {"answer": caller_effort or "high"}
 
 
 def _post_stream(
@@ -472,6 +483,7 @@ def _summary(rows: list[dict]) -> dict:
         "ok": len(ok),
         "latency_p50_s": statistics.median(seconds) if seconds else None,
         "latency_p95_s": seconds[max(0, int(len(seconds) * 0.95) - 1)] if seconds else None,
+        "latency_max_s": seconds[-1] if seconds else None,
         "orchestration_input_tokens": in_tokens,
         "orchestration_output_tokens": out_tokens,
     }
@@ -744,8 +756,8 @@ def gate_think_route(env: dict[str, str], *, budget_s: float = 1800) -> None:
 
 def gate_effort(env: dict[str, str], *, budget_s: float = 5400) -> None:
     """The caller's effort (default high) reaches the think route and the
-    verified tool route's candidates and answer (fixes included); quyet-route
-    judges the route."""
+    verified tool route's answer (its fix included); quyet-route judges the
+    route."""
 
     deadline = Deadline("effort", budget_s)
     easy = _everyday(_dataset("tool-routing-set.json"))[0]
@@ -783,11 +795,13 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> 
 
     Six turns of datasets/tool-turns.json, unary and streamed, with the
     caller's effort cycling through none, low, high and max: each must be
-    routed TOOL and return 200 after DeepSeek listed 10-16 candidates, Quyet
-    (quyet-judge) judged each six times, the answer was written and its form
-    checked on quyet-judge (fixes and the publish reason are recorded), at the
+    routed TOOL and return 200 after DeepSeek wrote the reply and Quyet
+    (quyet-judge, read strict) decided its nine requirements, with at most one
+    fix (the decision's results and the publish reason are recorded), at the
     caller's effort; the reply carries a structured call to a declared tool
-    with JSON-object arguments.
+    with JSON-object arguments, and no request takes 900 s (the cut the
+    DeepSWE agent's proxy makes). A decision Quyet refused to read whole
+    counts only against the adapter's strict refusals.
     """
 
     deadline = Deadline("verified-tool-route", budget_s)
@@ -812,6 +826,8 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> 
             problems = ([f"route={row['route']}"] if row["route"] != TOOL_ROUTE else []) + (
                 _tool_route_problems(row, effort) + _tool_call_problems(row, item["tools"])
             )
+            if row["seconds"] >= 900:
+                problems.append(f"{row['seconds']} s (900 s or more)")
             if row["status"] != 200 or problems:
                 findings.append(
                     f"{item['id']} stream={stream} effort={effort}: status={row['status']} "
@@ -819,6 +835,14 @@ def gate_verified_tool_route(env: dict[str, str], *, budget_s: float = 7200) -> 
                 )
         deadline.check()
     _print_rows(rows)
+    refused = sum(
+        1
+        for row in rows
+        if (row["stages"].get("decision") or {}).get("reason") == "judge_unavailable"
+    )
+    strict_refusals = _quyet_reads(GATE_STARTED).get("quyet-judge", {}).get("refused_strict", 0)
+    if refused > strict_refusals:
+        findings.append(f"{refused} decisions unavailable, {strict_refusals} strict refusals")
     summary = {**_summary(rows), "tool_route": _tool_route_summary(rows)}
     print(json.dumps(summary, indent=2), flush=True)
     _write(
@@ -865,9 +889,8 @@ def _replica_services(service: str) -> tuple[str, str]:
 def gate_fallback(env: dict[str, str], *, budget_s: float = 3600) -> None:
     """Each Quyet replica (its vLLM and adapter) fails alone: quyet-route down
     sends an agent turn to the think route; quyet-judge down leaves routing
-    intact, and the verified tool route answers without judgments and is
-    published unverified, still with a structured call; both back: judged
-    and form-checked again."""
+    intact, and the verified tool route's reply is published unverified, still
+    with a structured call; both back: decided again."""
 
     deadline = Deadline("fallback", budget_s)
     turn = _dataset("tool-turns.json")[0]
@@ -900,19 +923,19 @@ def gate_fallback(env: dict[str, str], *, budget_s: float = 3600) -> None:
         _compose(env, "stop", *_replica_services("quyet-judge"))
         unjudged = ask()
         phases["judge_down"] = [unjudged]
-        judgments = unjudged["stages"].get("judgments") or {}
+        decision = unjudged["stages"].get("decision") or {}
         verification = unjudged["verification"] or {}
         if (
             unjudged["status"] != 200
             or unjudged["route"] != TOOL_ROUTE
             or (unjudged["stages"].get("answer") or {}).get("status") != "success"
-            or "reason" not in judgments
+            or "reason" not in decision
             or verification.get("guaranteed") is not False
             or _tool_call_problems(unjudged, turn["tools"])
         ):
             findings.append(
                 f"judge down: status={unjudged['status']} route={unjudged['route']} "
-                f"judgments={judgments} form={verification} "
+                f"decision={decision} report={verification} "
                 f"{_tool_call_problems(unjudged, turn['tools'])}"
             )
     finally:
@@ -946,7 +969,7 @@ def _load(
     ``require_calls`` every reply must carry a structured call to a declared tool."""
 
     report = {}
-    # Each verified tool request carries the candidates, the answer and its fixes (6 h).
+    # Each verified tool request carries the answer, its decision and a fix (6 h).
     deadline = Deadline(gate, 21600)
     for concurrency, prompts in batches.items():
         started = time.monotonic()

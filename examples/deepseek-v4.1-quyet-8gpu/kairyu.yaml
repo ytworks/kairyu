@@ -89,18 +89,16 @@ pools:
     probe_interval_s: 2.0
 # Quyet's typed decisions through this example's adapter (quyet_systemone.py),
 # one replica per use: quyet-route-systemone (GPU 6) is the route judge,
-# quyet-judge-systemone and quyet-form-systemone (GPU 7) the verified tool
-# route's judgments and form check, so a burst of judgments never queues the
-# next request's route decision. The form check reads in Quyet's strict mode
-# (name quyet-strict): a state Quyet would cut at 6,000 tokens is refused with
-# 400, so a reply too long to check is published unverified, never passed on
-# its beginning. Each adapter reads 16 requests at a time and queues 16 more,
-# then answers 529; Kairyu forwards at most 16 to a replica (8 + 8 on GPU 7)
-# and queues 64 for 30 s, so a burst gets Kairyu's limit, never the adapter's
-# 529. When the route judge does not
-# answer, the route falls back to deepseek_think; when the judge does not
-# answer, the verified tool route's answer is written without judgments and
-# published without the form check.
+# quyet-form-systemone (GPU 7) the verified tool route's decision, so a burst
+# of decisions never queues the next request's route decision. The decision
+# reads in Quyet's strict mode (name quyet-strict): a state Quyet would cut at
+# 6,000 tokens is refused with 400, so a reply too long to check is published
+# unverified, never passed on its beginning. Each adapter reads 16 requests at
+# a time and queues 16 more, then answers 529; Kairyu forwards at most 16 to
+# the route replica and 8 to GPU 7, and queues 64 for 30 s, so a burst gets
+# Kairyu's limit, never the adapter's 529. When the route judge does not
+# answer, the route falls back to deepseek_think; when the decision does not
+# answer, the verified tool route's reply is published unverified.
 systemone:
   quyet-route-systemone:
     base_url: http://quyet-route:8092
@@ -113,21 +111,10 @@ systemone:
     max_questions: 32
     # the adapter's own 8 MiB limit
     max_body_bytes: 8388608
-  quyet-judge-systemone:
-    base_url: http://quyet-judge:8092
-    upstream_model: Quyet-1.0-Large
-    description: Quyet-1.0-Large candidate judgments (bf16 on vLLM, GPU 7)
-    max_concurrency: 8
-    max_queue: 64
-    queue_wait_s: 30
-    timeout_s: 300
-    max_questions: 32
-    # the adapter's own 8 MiB limit
-    max_body_bytes: 8388608
   quyet-form-systemone:
     base_url: http://quyet-judge:8092
     upstream_model: quyet-strict
-    description: Quyet-1.0-Large form check, strict (refuses a state it would cut; GPU 7)
+    description: Quyet-1.0-Large decision, strict (refuses a state it would cut; GPU 7)
     max_concurrency: 8
     max_queue: 64
     queue_wait_s: 30

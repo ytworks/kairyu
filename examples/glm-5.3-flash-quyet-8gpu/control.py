@@ -5,7 +5,8 @@ GLM-5.3-Flash (one TP2 x DP3 / EP6 replica, GPUs 0-5) writes; two Quyet-1.0-Larg
 replicas (stock vLLM plus this example's System One adapter) judge through System
 One: quyet-route (GPU 6) routes each request to the verified tool route (the next
 reply needs a tool call) or to one answer at the caller's effort, and quyet-judge
-(GPU 7) judges the verified tool route's candidates and the form of its reply.
+(GPU 7) decides whether the verified tool route's reply makes every call
+needed now and is safe and well formed.
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ GLM_GPU_IDS: list[int] = [int(index) for index in GLM["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in GLM["dp_rank_gpu_ids"]]
 QUYET = SPEC["allocation"]["quyet"]
 QUYET_GPU_IDS: list[int] = [int(index) for index in QUYET["gpu_ids"]]
-# One Quyet replica per System One use: the route judge; the judgments and the
-# form check. Each is a vLLM on its GPU plus its adapter on the CPU.
+# One Quyet replica per System One use: the route judge; the decision on the
+# reply. Each is a vLLM on its GPU plus its adapter on the CPU.
 QUYET_REPLICAS: list[dict] = list(QUYET["replicas"])
 QUYET_SERVICES: list[str] = [replica["service"] for replica in QUYET_REPLICAS]
 # The services that hold GPUs.
@@ -699,8 +700,8 @@ def validate_ready(api_url: str) -> None:
         raise SystemExit(f"healthy replicas must be {expected!r}, got {healthy!r}")
 
 
-# Readiness checks grammar-constrained JSON (the candidates role's output form)
-# at the template's default effort (max) and the lightest one on every DP rank.
+# Readiness checks grammar-constrained JSON (a caller's response_format) at
+# the template's default effort (max) and the lightest one on every DP rank.
 _ANSWER_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -803,7 +804,7 @@ _LONG_STATE = {"log": "\n".join(f"line {n}: the build step {n} finished" for n i
 
 def _validate_strict(l1_url: str) -> None:
     """The judge replica answers a long state under Quyet's own name (cut, with a
-    warning) and refuses it under the form check's strict name."""
+    warning) and refuses it under the decision's strict name."""
 
     questions = {"done": {"type": "noul", "instructions": "The log reports a finished build."}}
     plain = post_json(

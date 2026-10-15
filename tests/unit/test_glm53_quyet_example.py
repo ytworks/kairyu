@@ -1,4 +1,4 @@
-"""Routed answers: GLM-5.3-Flash six-GPU + two Quyet replicas example (VCO-D23).
+"""Routed answers: GLM-5.3-Flash six-GPU + two Quyet replicas example (VCO-D23, VCO-D24).
 
 The example's own kairyu.yaml / verified-tool.yaml drive the production loaders, the
 real OpenAI backend (against a fake vLLM) and the real System One backend
@@ -35,22 +35,10 @@ DEFAULT_EFFORT = "max"
 
 # The real adapter's QUYET_MAX_QUESTIONS (example.json).
 QUYET_MAX_QUESTIONS = 32
-# The form check's strict name (QUYET_STRICT_ALIASES) and, for the fake, the
+# The decision's strict name (QUYET_STRICT_ALIASES) and, for the fake, the
 # state size Quyet's 6,000 tokens stand for.
 STRICT_MODEL = "quyet-strict"
 STRICT_STATE_CHARS = 20000
-CANDIDATES = {
-    "candidates": [
-        {
-            "id": f"C{k}",
-            "viewpoint": f"view {k}",
-            "purpose": f"step {k}",
-            "name": "bash",
-            "arguments": json.dumps({"command": f"step-{k}"}),
-        }
-        for k in range(1, 11)
-    ]
-}
 BASH = {
     "type": "function",
     "function": {
@@ -95,15 +83,12 @@ MOVE = {
 
 
 def _glm(seen: list[dict], move: dict = MOVE):
-    """The fake GLM vLLM service: candidates by role tag, else the move."""
+    """The fake GLM vLLM service: the move when tools are declared."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         seen.append(body)
-        prompt = body["messages"][-1]["content"]
-        if prompt.startswith("[candidates]"):
-            message = {"role": "assistant", "content": json.dumps(CANDIDATES)}
-        elif body.get("tools"):
+        if body.get("tools"):
             message = move
         else:
             message = {"role": "assistant", "content": "Paris"}
@@ -119,11 +104,11 @@ def _glm(seen: list[dict], move: dict = MOVE):
     return handler
 
 
-def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, form):
+def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, decision):
     """One fake Quyet adapter; ``reads`` records which replica read what.
 
-    ``form(n)`` is the probability every form question reads on the n-th form
-    check (0-based); judgments read 0.7.
+    ``decision(n)`` is the probability every question reads on the n-th
+    decision (0-based).
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -154,8 +139,7 @@ def _quyet(reads: list[tuple[str, dict]], name: str, *, route: str, down: bool, 
                 }
             }
         else:
-            checks = sum(1 for _, seen in reads if "reply" in seen["state"]) - 1
-            p = form(checks) if "reply" in body["state"] else 0.7
+            p = decision(sum(1 for _, seen in reads if "reply" in seen["state"]) - 1)
             answers = {key: {"type": "noul", "noul": p} for key in body["questions"]}
         return httpx.Response(
             200, json={"answers": answers, "usage": {"input_tokens": 50, "output_tokens": 0}}
@@ -170,7 +154,7 @@ def _orchestrator(
     *,
     route: str = "TOOL",
     down=frozenset(),
-    form=lambda n: 0.9,
+    decision=lambda n: 0.9,
     move: dict = MOVE,
 ):
     deployment = load_deployment_spec(
@@ -187,7 +171,7 @@ def _orchestrator(
             base_url=section.base_url,
             upstream_model=section.upstream_model,
             transport=httpx.MockTransport(
-                _quyet(reads, name, route=route, down=name in down, form=form)
+                _quyet(reads, name, route=route, down=name in down, decision=decision)
             ),
         )
         for name, section in deployment.systemone.items()
@@ -278,7 +262,7 @@ async def test_think_is_one_glm_answer_at_the_callers_effort(effort) -> None:
 
 
 @pytest.mark.parametrize("effort", [None, "low", "max"])
-async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) -> None:
+async def test_tool_route_writes_one_reply_then_quyet_decides_it(effort) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
     orchestrator = _orchestrator(seen, reads, route="TOOL")
@@ -289,77 +273,70 @@ async def test_tool_route_judges_candidates_then_checks_the_replys_form(effort) 
     call = await orchestrator.judge_role_profile(call)
     result = await orchestrator.run(call)
 
-    # The published move carries its structured call.
+    # The published move carries its structured call, and its decision passed.
     assert '<tool_call>{"name":"bash"' in result.text
+    assert result.verification is not None and result.verification.guaranteed is True
     # Stage reports are not replayed through reasoning_content.
     assert not result.reasoning_content
-    # The candidates: one GLM call at the caller's effort that reads the
-    # caller's tools; no GLM call carries template kwargs.
-    candidates, answer = seen
-    assert not any("chat_template_kwargs" in body for body in seen)
-    prompt = candidates["messages"][-1]["content"]
-    assert prompt.startswith("[candidates]") and candidates["model"] == "glm-5.3-flash"
-    assert candidates["reasoning_effort"] == (effort or DEFAULT_EFFORT)
-    assert '"name": "bash"' in prompt.split("--- TOOLS ---")[1]
-    # The route on its own replica (told the caller declared tools); six
-    # questions per candidate on the judge replica, at most 32 per read, each
-    # quoting its candidate's call, over the conversation and the tools; then
-    # seven form questions, read strict, over the reply, the tools and the
-    # conversation.
-    (route_judge, route), *judged, (form_judge, form) = reads
-    assert route_judge == "quyet-route-systemone" and route["state"]["tool_calling"] is True
-    assert {name for name, _ in judged} == {"quyet-judge-systemone"}
-    assert form_judge == "quyet-form-systemone" and form["model"] == STRICT_MODEL
-    questions = [q for _, read in judged for q in read["questions"].values()]
-    assert len(questions) == 6 * len(CANDIDATES["candidates"])
-    assert all(len(read["questions"]) <= QUYET_MAX_QUESTIONS for _, read in judged)
-    assert (
-        'tool bash, arguments {"command": "step-1"}; purpose: step 1.'
-        in (questions[0]["instructions"])
-    )
-    for _, read in judged:
-        assert list(read["state"]) == ["conversation", "tools"]
-        assert read["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
-        assert read["state"]["tools"] == [BASH]
-    assert list(form["state"])[:3] == ["reply", "tools", "conversation"]
-    assert '<tool_call>{"name":"bash"' in form["state"]["reply"]
-    assert len(form["questions"]) == 7
-    # The answer at the caller's effort gets the caller's turn as native
-    # messages, then one message with the candidates and every judgment, and
-    # publishes with the caller's tools.
+    # One GLM call at the caller's effort, without template kwargs: the
+    # caller's turn as native messages, then one note, published with the
+    # caller's tools.
+    (answer,) = seen
+    assert "chat_template_kwargs" not in answer
+    assert answer["model"] == "glm-5.3-flash"
     assert answer["reasoning_effort"] == (effort or DEFAULT_EFFORT)
     assert answer["tools"][0]["function"]["name"] == "bash"
     assert answer["messages"][:-1] == AGENT_TURN
-    material = answer["messages"][-1]["content"]
-    assert answer["messages"][-1]["role"] == "user" and material.startswith("Before replying")
-    assert '"viewpoint": "view 10"' in material
-    assert "- [C1-now] p=0.70" in material and "- [C10-safe] p=0.70" in material
+    note = answer["messages"][-1]
+    assert note["role"] == "user" and note["content"].startswith("Before replying")
+    # The route on its own replica (told the caller declared tools), then one
+    # strict read of nine questions over the reply, the tools and the
+    # conversation.
+    (route_judge, route), (decision_judge, decision) = reads
+    assert route_judge == "quyet-route-systemone" and route["state"]["tool_calling"] is True
+    assert decision_judge == "quyet-form-systemone" and decision["model"] == STRICT_MODEL
+    assert len(decision["questions"]) == 9
+    assert list(decision["state"])[:3] == ["reply", "tools", "conversation"]
+    assert '<tool_call>{"name":"bash"' in decision["state"]["reply"]
+    assert decision["state"]["tools"] == [BASH]
+    assert decision["state"]["conversation"][-1]["content"] == "1 failed: test_parse"
 
 
-async def test_a_reply_failing_the_form_check_is_published_as_written() -> None:
-    """No fix (VCO-D23 amendment 2026-10-13): a reply the form check fails is
-    published once, call included, with the failing items reported."""
-
+@pytest.mark.parametrize(
+    ("decision", "guaranteed"),
+    [(lambda n: 0.2 if n == 0 else 0.9, True), (lambda n: 0.2, False)],
+    ids=["fixed", "still-failing"],
+)
+async def test_a_failing_reply_is_fixed_once_with_the_decision_shown(decision, guaranteed) -> None:
     seen: list[dict] = []
     reads: list[dict] = []
-    orchestrator = _orchestrator(seen, reads, route="TOOL", form=lambda n: 0.2)
+    orchestrator = _orchestrator(seen, reads, route="TOOL", decision=decision)
 
     result = await orchestrator.run(await orchestrator.judge_role_profile(_agent_call()))
 
-    _, *replies = seen
-    assert len(replies) == 1
-    assert sum(1 for _, read in reads if "reply" in read["state"]) == 1
-    assert '<tool_call>{"name":"bash"' in result.text
+    # One fix, decided again; the fixed reply is published either way.
+    draft, fix = seen
+    assert sum(1 for _, read in reads if "reply" in read["state"]) == 2
     assert result.verification is not None
-    assert result.verification.guaranteed is False
-    assert result.verification.attempts == 1
-    assert {item.id for item in result.verification.items if not item.passed} == {
-        f"F{n}" for n in range(1, 8)
-    }
+    assert result.verification.guaranteed is guaranteed
+    assert result.verification.attempts == 2
+    # The fix is GLM again, with the caller's turn, tools and effort, the
+    # draft (its call included) and Quyet's unmet requirements with their
+    # probabilities.
+    assert fix["messages"][:-1] == AGENT_TURN
+    assert fix["tools"] == draft["tools"]
+    assert fix["reasoning_effort"] == DEFAULT_EFFORT
+    material = fix["messages"][-1]["content"]
+    previous = material.split("--- DRAFT ---")[1].split("--- END DRAFT ---")[0]
+    assert '<tool_call>{"name":"bash"' in previous
+    findings = material.split("--- JUDGE'S FINDINGS ---")[1]
+    assert "- [R1] p=0.20" in findings and "- [S1] p=0.20" in findings
+    assert "- [F5] p=0.20" in findings
+    assert '<tool_call>{"name":"bash"' in result.text
 
 
 async def test_a_reply_too_long_to_check_whole_is_published_unverified() -> None:
-    """The form check never passes a reply on a cut state (PR #645 review): a
+    """The decision never passes a reply on a cut state (PR #645 review): a
     state over Quyet's limit is refused under the strict name, and the reply,
     call included, is published unverified without a fix."""
 

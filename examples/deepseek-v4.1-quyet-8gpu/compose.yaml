@@ -223,7 +223,7 @@ services:
       retries: 120
       start_period: 30s
     restart: unless-stopped
-  # GPU 7: the verified tool route's judgments and form check only.
+  # GPU 7: the verified tool route's decision only.
   quyet-judge-vllm:
     image: ${QUYET_VLLM_IMAGE}
     ipc: host
@@ -305,7 +305,7 @@ services:
       QUYET_UPSTREAM: http://quyet-judge-vllm:8000
       QUYET_UPSTREAM_MODEL: quyet-1.0-large
       QUYET_ALIASES: quyet-latest
-      # The form check's name: a state Quyet would cut is refused, never judged.
+      # The decision's name: a state Quyet would cut is refused, never judged.
       QUYET_STRICT_ALIASES: quyet-strict
       QUYET_MAX_INFLIGHT: "${QUYET_MAX_INFLIGHT}"
       QUYET_MAX_QUEUE: "${QUYET_MAX_QUEUE}"

@@ -70,12 +70,10 @@
      "vllm_l1_port": 8020,
      "systemone_l1_port": 8021,
      "systemone": [
-      "quyet-judge-systemone",
       "quyet-form-systemone"
      ],
      "serves": [
-      "judgments",
-      "format_check"
+      "decision"
      ]
     }
    ]
@@ -89,8 +87,8 @@
   },
   "final_unit": "answer",
   "budget": {
-   "max_steps": 10,
-   "max_refine_depth": 2
+   "max_steps": 5,
+   "max_refine_depth": 1
   }
  },
  "glm": {
@@ -190,7 +188,6 @@
  "systemone": {
   "models": [
    "quyet-route-systemone",
-   "quyet-judge-systemone",
    "quyet-form-systemone"
   ],
   "upstream_model": "Quyet-1.0-Large",
