@@ -5,9 +5,68 @@ Host: 8 x RTX PRO 6000 Blackwell Server Edition (SM120), PCIe. GLM-5.3-Flash
 vLLM v0.31.0 (`sha256:c1c9f6fd…`); two Quyet-1.0-Large replicas on the same
 image plus this example's System One adapter (`local/quyet-systemone:1.0.2-vllm-v0.31.0-glm53-8gpu`,
 `sha256:aef3eff7…`): `quyet-route` on GPU 6 (route judge only), `quyet-judge`
-on GPU 7 (judgments and the strict form check).
+on GPU 7 (the strict decision since VCO-D24; judgments and the strict form
+check before).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/glm-5.3-flash-quyet-8gpu/results/`
 and `run-logs/`.
+
+## One reply decided by Quyet (VCO-D24)
+
+GPU run 2026-10-15 11:44-12:17 JST (UTC 02:44-03:17) at `06133907`: the
+writer makes the move in one reply with every call needed now that is safe and
+independent; Quyet reads it once, strict (nine questions: R1, S1-S3, F1-F5,
+with S2 asking for one call first); a failing reply is written again once.
+Plain `./run.sh` after `deepseek-v4.1-quyet-8gpu` went down, then the nine
+gates in GATES order. Logs `run-logs/up-20261015.log`,
+`run-logs/gates-20261015.log`; results `*-20261015T02*`/`T03*`. **All nine
+gates pass.**
+
+| Gate | Result |
+|---|---|
+| l1 | pass (3 s), including the strict name refusing a long state the plain name answers cut |
+| routing | pass: TOOL miss 0 % held-out / 5 % calibration; THINK precision 98.9 %, recall 94.8 % (tool-declared THINK 68.8 %, 11/16); judge wall 11.1 s for 136, 0 cut |
+| think-route | pass: 6/6 THINK, streamed; p50 4.9 s, TTFT p50 4.5 s (default effort max) |
+| effort | pass: THINK and the answer follow the caller (default max, low, high, max); TOOL 1.8-10.4 s, one call each, decided first time |
+| verified-tool-route | pass: 12/12 TOOL; the decision on `quyet_form` with nine questions passed 12/12 (11 first time, one after one fix); a structured call each; p50 1.95 s, p95 8.66 s, max 55.15 s (limit 900 s); 7,143 output tokens; 4 replies batched two calls |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 1.7 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with a call (10.0 s); both back: decided and passed (7.1 s) |
+| serving | pass: 72/72 answered, every reply a structured call (table below) |
+| serving-routed | pass: 72/72 answered (table below) |
+| browser | pass: Open WebUI answers |
+
+serving (agent turns, default effort max; VCO-D23 layout p50 151.5 / 111.5 /
+142.5 / 185.6 s, output tokens 121,961 / 156,871 / 178,601 / 383,830):
+
+| Level | Requests | p50 s | p95 s | Max s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n | Decision passed | Fixes passed / failing | Replies with 2+ calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---:|
+| c1 | 8 | 2.9 | 16.5 | 18.7 | 57 | 4,387 | 77 | 8 / 2.9 | 0 | 8 / 8 | 0 / 0 | 2 |
+| c4 | 16 | 3.6 | 7.3 | 16.1 | 26 | 4,081 | 159 | 15 / 3.7 | 1 | 15 / 15 | 0 / 0 | 5 |
+| c8 | 16 | 5.0 | 31.9 | 45.2 | 45 | 9,114 | 202 | 15 / 5.4 | 1 | 15 / 15 | 0 / 0 | 9 |
+| c16 | 32 | 6.8 | 38.5 | 59.8 | 60 | 16,205 | 271 | 31 / 6.8 | 1 | 31 / 31 | 1 / 0 | 12 |
+
+No reply was published failing its decision. The one-call misread of the old
+F5 (`announced-no-call`) did not recur under S2.
+
+serving-routed (the routing set, default effort max):
+
+| Level | Requests | p50 s | p95 s | Max s | Wall s | Output tokens | Output tok/s | TOOL n / p50 s | THINK n / p50 s | Decision passed |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|
+| c1 | 8 | 10.1 | 41.4 | 110.2 | 200 | 18,656 | 93 | 2 / 8.5 | 6 / 10.1 | 2 / 2 |
+| c4 | 16 | 7.4 | 49.9 | 51.2 | 75 | 14,720 | 195 | 6 / 6.5 | 10 / 7.4 | 6 / 6 |
+| c8 | 16 | 13.8 | 176.1 | 486.0 | 486 | 71,669 | 147 | 6 / 2.9 | 10 / 23.5 | 6 / 6 |
+| c16 | 32 | 15.7 | 186.0 | 519.8 | 520 | 102,577 | 197 | 11 / 5.6 | 21 / 21.0 | 11 / 11 |
+
+The longest requests are THINK answers at max effort (an everyday question
+thought through for 486 s at c8).
+
+Quyet in the gates:
+- `quyet-route`: 310 reads.
+- `quyet-judge`: 116 decision reads, 1,029 questions, p50 0.44-0.56 s, max
+  1.13 s.
+- No state was cut and no strict read was refused, apart from `l1`'s
+  deliberate probe.
+
+The gate datasets are short synthetic turns; DeepSWE measures real agent
+turns.
 
 ## Final run: all nine gates pass
 

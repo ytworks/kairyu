@@ -8,7 +8,7 @@ next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
 the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13;
-for both writers one reply with every parallel call needed now, decided by Quyet and fixed once 2026-10-15 (VCO-D24), GPU gates pending**
+for both writers one reply with every parallel call needed now, decided by Quyet and fixed once 2026-10-15 (VCO-D24), all nine GPU gates pass for both examples 2026-10-15**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
@@ -1016,6 +1016,17 @@ Owner decision. Plan: `docs/superpowers/plans/2026-10-15-quyet-parallel-tool-cal
 - GPU verification: the nine gates of each example. `verified-tool-route`
   also requires every request to finish under 900 s, and records decisions,
   failing requirements and fixes.
+
+GPU-verified 2026-10-15 (each example's `MEASUREMENTS.md`): all nine gates
+pass for both examples.
+- DeepSeek (`dc93f466`): serving TOOL p50 c1/c16 2.7/5.3 s (VCO-D22 layout
+  74.8/134.2 s), 39,590 output tokens (873,051). Four replies were published
+  failing after their fix; three were Quyet misreads of safe two-file reads.
+- GLM (`06133907`): serving TOOL p50 c1/c16 2.9/6.8 s (VCO-D23 layout
+  151.5/185.6 s), 33,787 output tokens (841,263). No reply was published
+  failing.
+- `verified-tool-route` max 17.6 s (DeepSeek) and 55.2 s (GLM). No state was
+  cut and no strict read was refused, apart from `l1`'s probe.
 
 Why:
 - At max effort the VCO-D22 route made agent turns long: two writer calls and
