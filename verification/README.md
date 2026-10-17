@@ -165,6 +165,17 @@ structural-source mismatches are invalid and are not recorded.
 The seven-day pull-request reports produced by issue #378 do not seed this
 separate nightly chain.
 
+### L1/L3 Responses equivalence
+
+`verification/product/correctness/upstream_api_equivalence.py` sends the same
+OpenAI Responses requests to an L1 server and to Kairyu L3 and requires the same
+Responses structure from both (m11 D4 amendment 2026-10-17); with
+`--l1-metrics` it also reads L1's request counters to confirm that L3 reached
+it on `/v1/responses`. `--l1-docker` captures L1 requests inside a container
+that publishes no host port. `verification/l1/performance/serving_bench.py
+--api responses` measures the Responses API; its rows end naturally within
+`--max-tokens` because Responses has no `ignore_eos`, `min_tokens` or `seed`.
+
 ### Target and credential migration
 
 Every benchmark target now uses one package-owned grammar:

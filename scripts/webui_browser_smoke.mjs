@@ -497,18 +497,16 @@ async function assertRagAfterGatewayRestart() {
 	await answerWithRagDocument(fileId);
 }
 
+// Open WebUI's connection uses api_type=responses (m11 D7 amendment
+// 2026-10-17), so its /openai/chat/completions proxy relays Kairyu's
+// Responses events unchanged.
 function parseSse(body, modelId) {
 	const payloads = [];
-	let sawDone = false;
 	for (const rawLine of body.split(/\r?\n/)) {
 		if (!rawLine.startsWith('data:')) {
 			continue;
 		}
 		const data = rawLine.slice('data:'.length).trim();
-		if (data === '[DONE]') {
-			sawDone = true;
-			continue;
-		}
 		if (!data) {
 			continue;
 		}
@@ -522,16 +520,26 @@ function parseSse(body, modelId) {
 	}
 
 	const contentDeltas = payloads
-		.flatMap((payload) => payload?.choices ?? [])
-		.map((choice) => choice?.delta?.content)
+		.filter((payload) => payload?.type === 'response.output_text.delta')
+		.map((payload) => payload.delta)
 		.filter((content) => typeof content === 'string' && content.length > 0);
 
-	const streamError = payloads.find((payload) => payload?.error !== undefined);
+	const streamError = payloads.find(
+		(payload) =>
+			payload?.error !== undefined ||
+			payload?.type === 'error' ||
+			payload?.type === 'response.failed'
+	);
 	invariant(
 		streamError === undefined,
-		`${modelId} browser-visible SSE contained an error event: ${JSON.stringify(streamError?.error)}`
+		`${modelId} browser-visible SSE contained an error event: ${JSON.stringify(streamError)}`
 	);
-	invariant(sawDone, `${modelId} browser-visible SSE body did not contain data: [DONE]`);
+	invariant(
+		payloads.at(-1)?.type === 'response.completed',
+		`${modelId} browser-visible SSE did not end with response.completed: ${JSON.stringify(
+			payloads.at(-1)?.type
+		)}`
+	);
 	invariant(
 		contentDeltas.length >= 2,
 		`${modelId} browser-visible SSE contained ${contentDeltas.length} content delta(s), expected at least 2`
@@ -896,8 +904,10 @@ async function assertTieredProductInventory() {
 		`Open WebUI must expose only ${productModel}; got ${JSON.stringify(modelIds)}`
 	);
 	invariant(
-		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response === false,
-		`Open WebUI effective model params did not disable streaming: ${modelConfig.text}`
+		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response !== false,
+		// A non-streaming Responses result loses its reasoning items in
+		// Open WebUI v0.11.0, so the Thought section needs streaming.
+		`Open WebUI effective model params disabled streaming: ${modelConfig.text}`
 	);
 	await selectModel(productModel);
 }

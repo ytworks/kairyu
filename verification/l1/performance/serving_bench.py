@@ -611,6 +611,91 @@ async def run_one(
     )
 
 
+async def run_one_responses(
+    client: httpx.AsyncClient,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    *,
+    temperature: float | None = None,
+    request_trace: bool = False,
+    capture_response: bool = False,
+) -> RequestMetrics:
+    """One streamed OpenAI Responses request (``--api responses``).
+
+    The Responses API has no ``ignore_eos``/``min_tokens``/``seed``: a row ends
+    naturally within ``max_output_tokens``. TTFT is the first output-text delta,
+    as the chat mode times the first content delta, and the completion length
+    is the terminal event's ``usage.output_tokens``.
+    """
+
+    body: dict[str, object] = {
+        "model": model,
+        "input": prompt,
+        "max_output_tokens": max_tokens,
+        "stream": True,
+        "store": False,
+    }
+    if temperature is not None:
+        body["temperature"] = temperature
+    start = time.perf_counter()
+    ttft = None
+    chunks = 0
+    completion_tokens = None
+    response_parts: list[str] = []
+    terminal: dict | None = None
+    async with client.stream(
+        "POST",
+        "responses",
+        headers=_TRACE_HEADER if request_trace else None,
+        json=body,
+    ) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.startswith(_SSE_PREFIX):
+                continue
+            event = json.loads(line[len(_SSE_PREFIX):])
+            kind = event.get("type")
+            if kind in {"error", "response.failed"}:
+                error = event.get("response", {}).get("error") if kind != "error" else event
+                label = (error or {}).get("code") or "unknown"
+                raise RuntimeError(f"target stream failed ({label})")
+            if kind == "response.output_text.delta" and event.get("delta"):
+                if capture_response:
+                    response_parts.append(event["delta"])
+                chunks += 1
+                if ttft is None:
+                    ttft = time.perf_counter() - start
+            if kind in {"response.completed", "response.incomplete"}:
+                terminal = event.get("response") or {}
+                usage = terminal.get("usage") or {}
+                completion_tokens = usage.get("output_tokens")
+    total = time.perf_counter() - start
+    trace_status = "missing" if request_trace else "not_requested"
+    trace_version = None
+    trace_stages: tuple[TraceStageMetrics, ...] = ()
+    if request_trace and terminal is not None and "kairyu_trace_v2" in terminal:
+        try:
+            trace_version, trace_stages = _parse_trace(
+                terminal["kairyu_trace_v2"],
+                response_id=terminal.get("id"),
+            )
+        except ValueError:
+            trace_status = "invalid"
+        else:
+            trace_status = "valid" if trace_stages else "missing"
+    return RequestMetrics(
+        ttft_s=ttft if ttft is not None else total,
+        total_s=total,
+        output_chunks=chunks,
+        completion_tokens=completion_tokens,
+        response_text="".join(response_parts),
+        trace_status=trace_status,
+        trace_version=trace_version,
+        trace_stages=trace_stages,
+    )
+
+
 def _percentile(sorted_values: list[float], fraction: float) -> float:
     """Compatibility wrapper for the package-owned nearest-rank definition."""
     return nearest_rank_percentile(sorted_values, fraction)
@@ -690,6 +775,7 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "seed": args.seed,
         "min_tokens": args.min_tokens,
         "ignore_eos": args.ignore_eos,
+        "api": getattr(args, "api", "chat"),
         "public_tokenizer_url": getattr(args, "public_tokenizer_url", None),
         "public_tokenizer_model": getattr(args, "public_tokenizer_model", None),
         "stage_trace": getattr(args, "stage_trace", False),
@@ -733,6 +819,20 @@ def serving_artifact_paths(
 
 
 def _validate_run_args(args: argparse.Namespace) -> None:
+    if getattr(args, "api", "chat") == "responses":
+        chat_only = [
+            flag
+            for flag, value in (
+                ("--seed", args.seed),
+                ("--min-tokens", args.min_tokens),
+                ("--ignore-eos", args.ignore_eos or None),
+            )
+            if value is not None
+        ]
+        if chat_only:
+            raise ValueError(
+                "--api responses has no Responses form for " + ", ".join(chat_only)
+            )
     for name in (
         "num_requests",
         "concurrency",
@@ -1106,6 +1206,16 @@ async def run_benchmark(args: argparse.Namespace) -> None:
 
         async def bounded(prompt: str) -> RequestMetrics:
             async with semaphore:
+                if getattr(args, "api", "chat") == "responses":
+                    return await run_one_responses(
+                        client,
+                        target.model,
+                        prompt,
+                        args.max_tokens,
+                        temperature=args.temperature,
+                        request_trace=getattr(args, "stage_trace", False),
+                        capture_response=args.public_tokenizer_url is not None,
+                    )
                 return await run_one(
                     client,
                     target.model,
@@ -1275,6 +1385,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-requests", type=int, default=128)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument(
+        "--api",
+        choices=("chat", "responses"),
+        default="chat",
+        help="Public API to measure: chat (formal gates) or responses (rows end "
+        "naturally within --max-tokens)",
+    )
     parser.add_argument(
         "--temperature",
         type=float,

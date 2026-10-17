@@ -39,6 +39,9 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local
+      # m11 D7 amendment 2026-10-17: the chat UI talks to Kairyu over
+      # /v1/responses (connection index 0 is OPENAI_API_BASE_URL).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       # The admin-visible "new version available" toast lands bottom-right at
       # an unpredictable moment after login and intercepts pointer events on
       # the model selector (flaky webui-e2e "AUTO UI chat" click timeouts).

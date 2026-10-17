@@ -95,7 +95,8 @@ def _webui_smoke_env(
         'case "$*" in\n'
         '  *" config --format json")\n'
         "    printf "
-        "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\"}}}}' "
+        "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\","
+        "\"OPENAI_API_CONFIGS\":\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}}}}' "
         '"$WEBUI_RENDERED_BASE_URL"\n'
         "    ;;\n"
         f"{fail_case}"
@@ -149,6 +150,7 @@ elif url.endswith("/metrics"):
     sys.stdout.write(
         'kairyu_requests_total{code="200",method="POST",'
         'model="embed-small",path="/v1/embeddings",tenant="default"} 10.0\\n'
+        'kairyu_request_duration_seconds_count{path="/v1/responses"} 6.0\\n'
     )
 else:
     print(f"unexpected fake curl URL: {url!r}", file=sys.stderr)
@@ -251,6 +253,7 @@ def test_webui_compose_pins_full_authenticated_browser_topology():
     environment = webui["environment"]
     assert environment["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert environment["OPENAI_API_KEY"] == "sk-local"
+    assert json.loads(environment["OPENAI_API_CONFIGS"]) == {"0": {"api_type": "responses"}}
     assert {
         key: environment[key]
         for key in (
@@ -852,13 +855,13 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
         f"{compose} --profile browser-smoke down --volumes --remove-orphans",
     ]
     curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
-    assert len(curl_commands) == 4
+    assert len(curl_commands) == 6
     assert all("--connect-timeout 2 --max-time 10" in line for line in curl_commands)
     assert "/v1/embeddings" in curl_commands[0]
     assert '"model":"embed-small"' in curl_commands[0]
-    assert curl_commands[1].endswith("http://localhost:8000/metrics")
-    assert curl_commands[2].endswith("http://localhost:8000/readyz")
-    assert curl_commands[3].endswith("http://localhost:8000/metrics")
+    assert all(line.endswith("http://localhost:8000/metrics") for line in curl_commands[1:3])
+    assert curl_commands[3].endswith("http://localhost:8000/readyz")
+    assert all(line.endswith("http://localhost:8000/metrics") for line in curl_commands[4:])
 
 
 def test_webui_smoke_tears_down_if_browser_phase_fails(tmp_path):
@@ -918,7 +921,7 @@ def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
         command for command in curl_commands if command.endswith("/readyz")
     ]
     assert 1 <= len(readiness_commands) <= 90
-    assert len(readiness_commands) == len(curl_commands) - 2
+    assert len(readiness_commands) == len(curl_commands) - 3
 
 
 def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
@@ -944,6 +947,8 @@ def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
     assert "assert_embedding_contract" in smoke
     assert "assert_embedding_metrics 4" in smoke
     assert "assert_embedding_metrics 2" in smoke
+    assert "assert_responses_wire 5" in smoke
+    assert "assert_responses_wire 3" in smoke
     assert '"$BASE_URL/v1/embeddings"' in smoke
     assert '"$BASE_URL/metrics"' in smoke
 

@@ -525,6 +525,14 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   the backend as Chat does. Why: the example gates move to `/v1/responses`
   and read `kairyu_verification` there (owner decision 2026-10-17). Test:
   `test_trace_extensions_ride_the_response_object`.
+- Equivalence gate: `verification/product/correctness/upstream_api_equivalence.py`
+  sends the same Responses requests (text, stream, efforts, a tool round trip,
+  an image, a length cap, and the Open WebUI v0.11.0 body in
+  `verification/product/correctness/fixtures/`) to an L1 directly and to L3,
+  validates L3 against the openai-python types, records L1-only events as
+  extensions, compares status, item types, collapsed events, usage keys and
+  function names, and reads L1's `http_requests_total` to confirm L3 reached it
+  on `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
 
 ### D5 — Vision wire format
 

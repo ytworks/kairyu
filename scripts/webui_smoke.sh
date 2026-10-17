@@ -103,12 +103,18 @@ import sys
 
 expected = sys.argv[1]
 data = json.load(sys.stdin)
-actual = data.get("services", {}).get("webui", {}).get("environment", {}).get(
-    "OPENAI_API_BASE_URL"
-)
+environment = data.get("services", {}).get("webui", {}).get("environment", {})
+actual = environment.get("OPENAI_API_BASE_URL")
 if actual != expected:
     print(
         f"WEBUI CONFIG FAIL: expected OPENAI_API_BASE_URL={expected!r}, got {actual!r}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+api_type = json.loads(environment.get("OPENAI_API_CONFIGS") or "{}").get("0", {}).get("api_type")
+if api_type != "responses":
+    print(
+        f"WEBUI CONFIG FAIL: connection 0 must use api_type=responses, got {api_type!r}",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -117,6 +123,28 @@ if actual != expected:
 # From the first startup attempt onward, always remove containers and the
 # ephemeral first-user database so every run starts from the same state.
 trap cleanup EXIT
+
+assert_responses_wire() {
+  local minimum=$1 phase=$2 body
+  body=$(curl_bounded -sf "$BASE_URL/metrics") \
+    || fail "Kairyu metrics were unavailable during $phase"
+  printf '%s' "$body" | python3 -c '
+import sys
+
+minimum = float(sys.argv[1])
+counts = {}
+for line in sys.stdin:
+    if line.startswith("kairyu_request_duration_seconds_count{"):
+        labels, value = line.rsplit(" ", 1)
+        counts[labels] = float(value)
+responses = counts.get("kairyu_request_duration_seconds_count{path=\"/v1/responses\"}", 0.0)
+chat = counts.get("kairyu_request_duration_seconds_count{path=\"/v1/chat/completions\"}", 0.0)
+if responses < minimum:
+    raise SystemExit(f"/v1/responses request count {responses:g} is below required {minimum:g}")
+if chat:
+    raise SystemExit(f"Open WebUI still reached /v1/chat/completions {chat:g} time(s)")
+' "$minimum" || fail "Open WebUI did not use the Responses API during $phase"
+}
 
 echo "== start Kairyu and Open WebUI =="
 compose up -d --build --wait --wait-timeout "$COMPOSE_WAIT_SECONDS" kairyu webui \
@@ -132,6 +160,7 @@ assert_embedding_contract
 echo "== fresh-user direct/auto streaming and persistence =="
 browser_phase initial || fail "initial browser contract failed"
 assert_embedding_metrics 4 "initial ingest/retrieval/chat"
+assert_responses_wire 5 "initial RAG/streaming/UI chat"
 
 echo "== gateway outage is visible in the existing Open WebUI instance =="
 compose stop kairyu || fail "could not stop Kairyu"
@@ -143,5 +172,6 @@ wait_for "$BASE_URL/readyz" '"ready"' 90 \
   || fail "Kairyu did not become ready after restart"
 browser_phase recovery || fail "browser did not recover after Kairyu restart"
 assert_embedding_metrics 2 "post-restart retrieval/chat"
+assert_responses_wire 3 "post-restart RAG/streaming/UI chat"
 
 echo "WEBUI E2E PASS"
