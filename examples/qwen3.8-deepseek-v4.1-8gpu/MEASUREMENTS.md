@@ -1,11 +1,49 @@
 # qwen3.8-deepseek-v4.1-8gpu evidence
 
-Status: **GPU gates pass on the current configuration** (DTO-D17 with the
-loosened ENSEMBLE criteria and judge fallback `deepseek_think`, 2026-10-01).
+Status: **GPU verification pending** for the 2026-10-17 Responses connection
+(below). The GPU gates passed on the chat configuration of 2026-10-01 (DTO-D17
+with the loosened ENSEMBLE criteria and judge fallback `deepseek_think`); those
+results describe that configuration, not the current one.
 
 Hardware: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, PCIe). The
 DeepSeek-V4.1-Flash L1 runs on GPUs 0–5; the two Qwen3.8-27B replicas run on
 GPUs 6 and 7.
+
+## 2026-10-17 Responses connection — GPU verification pending
+
+What changed (m9 D2, m11 D4/D7, m1 D8 amendments of 2026-10-17):
+
+- The Chat UI connects with `api_type: responses` and streams
+  (`stream_response: false` removed); the effort filter normalizes each body
+  to the Responses API.
+- Both pools moved from `legacy_chat_models` to the three upstream lists, so
+  the AUTO roles reach L1 in the caller's API (a Chat UI turn on
+  `/v1/responses`).
+- Overlay edit 8 maps the encoder's `xhigh` to 100 (Kairyu sends L3 `max` as
+  Responses `xhigh`).
+- Every gate calls L3 on `/v1/responses`; the serving and coding rows run
+  `serving_bench.py --api responses` without a seed (the paired direct row
+  too), so they are not directly comparable with the chat rows below. New
+  gate: `api-equivalence`.
+
+CPU evidence only:
+
+- `patch_sm120.py` edit 8 applied to the pinned encoder source
+  (`deepseek_v41_encoding.py` at `ac68c3087`): `xhigh` renders `Reasoning
+  Effort: 100`, the unpatched file fails the post-patch check.
+- `tests/unit/test_qwen38_deepseek_v41_example.py`: an image request arriving
+  as a Responses caller sends the image and `reasoning.effort` to every
+  DeepSeek role, and the route judge and every DAG role reach their L1 on
+  `/v1/responses`.
+
+Remaining on GPU: build and pin the overlay, `run.sh up` (including the
+`xhigh` rendering probe and the `/openai/config` check), every
+`verify.sh` gate including `api-equivalence`, and `browser-smoke.sh`.
+
+The served vLLM image (`local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh`)
+is rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 ## Carried-over L1 evidence
 

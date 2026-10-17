@@ -4,6 +4,8 @@ The selected TP8/EP8 configuration passes the complete 320-request serving
 matrix, thinking/tool/vision/cancellation gates, normal restart, and four
 long-context retrieval smokes through 1,039,909 actual prompt tokens.
 Measurements below apply to the pinned runtime and this hardware.
+Since 2026-10-17 the served configuration uses the Responses API; GPU
+verification of that change is pending (last section).
 
 Hardware target: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition,
 97,887 MiB per GPU, PCIe, one TP8 replica.
@@ -231,3 +233,43 @@ samples, placements, requests/responses or runtime identity as applicable.
 | `20260911T034604Z-tuning/selection.json` | `418d798fdd46d2ac8867d4d644fe7fb0ac1af5af04736d0ed790694661c2f01d` |
 | `sm120-page32-parity.log` | `45493a4f8905749f435ce91f82faeefcbb4e154850c7a99584ff3bf222941931` |
 | `sm120-indexer-parity.log` | `1ffe04e48d4ce35bc8c248b92091cf098c8c46fcf2540525d73799d587a28db5` |
+
+## 2026-10-17 Responses connection — GPU verification pending
+
+The served configuration changed after every result above (m9 D2, m11 D4/D7
+amendments of 2026-10-17); none of the gates below has run on it yet:
+
+- Open WebUI connects with `api_type: responses`; the effort filter also
+  normalizes the body to strict Responses fields and `store: false`.
+- `kairyu.yaml` replaces `legacy_chat_models` with `upstream_chat_models`,
+  `upstream_responses_models` and `upstream_messages_models`: chat reaches
+  vLLM as the caller's own turns instead of one flattened user message, and
+  Responses and Anthropic Messages callers reach vLLM's `/v1/responses` and
+  `/v1/messages` (startup fails when a route is missing), with L3 `max`
+  spelled `xhigh` on the Responses wire.
+- `patch_runtime.py` keeps `xhigh` in the encoder's mapping at the max
+  budget (100); it used to drop `xhigh`, which a Responses `xhigh` would
+  reject.
+- Every public gate sends `/v1/responses`. `serving` rows end naturally
+  within 256 output tokens (the Responses API has no `ignore_eos` /
+  `min_tokens`), so they are not comparable with the fixed-length chat rows
+  above; `cancellation` disconnects a natural-completion stream. The new
+  `api-equivalence` gate compares vLLM's and Kairyu's `/v1/responses`.
+  Readiness (tool call, image) also moved to `/v1/responses`.
+- `tool_result_turn` takes the PR #647 wording ("…, then show the first
+  line of README.md."): with the caller's own turns the listing request is
+  answered by the tool result, as PR #647 found for the other examples.
+- The overlay changed, so the image is retagged `local/vllm-openai:deepseek-v41-sm120-xhigh`
+  and rebuilt on the next `run.sh up`.
+
+To do on GPU: `./run.sh up` (rebuild), record the new image ID in the two
+pins, `./run.sh up` again (route check at startup), then every gate above
+plus `api-equivalence`, and the browser path (multi-turn thinking, image,
+tool and effort switches in the Chat UI with `/v1/responses` in the Kairyu
+and vLLM logs).
+
+The served vLLM image (`local/vllm-openai:deepseek-v41-sm120-xhigh`) is
+rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:be8fa3f4fa4824910567b81f2ad0543d9eaca2d3c68abfcbbb022ecaa39e7f0e`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
+

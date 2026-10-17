@@ -32,6 +32,9 @@ glm_think.
   serving             agent turns at c1/c4/c8/c16: every reply a structured call;
                       latency, tokens, tok/s per route
   serving-routed      the routing set at c1/c4/c8/c16: route mix, latency, tokens per route
+  api-equivalence     the same Responses requests to GLM's L1 and to the public
+                      model validate and agree (status, usage keys), and every role
+                      call reached L1 on /v1/responses
   browser             Open WebUI answers in a real browser
 """
 
@@ -325,10 +328,24 @@ def _tool_route_efforts(caller_effort: str | None) -> dict[str, str]:
     return {"candidates": wanted, "answer": wanted}
 
 
+# Events that carry the reply's first token on a Responses stream.
+_FIRST_TOKEN_EVENTS = frozenset(
+    {
+        "response.output_text.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.function_call_arguments.delta",
+    }
+)
+
+
 def _post_stream(
     url: str, payload: dict, headers: dict, timeout_s: float
 ) -> tuple[dict, float | None]:
-    """Stream one chat request; returns an assembled body and the time to first token."""
+    """Stream one Responses request; returns the terminal response in the chat
+    shape (``control.chat_view``, kairyu_* extensions kept) and the time to
+    first token. A stream without a completed or incomplete response returns
+    an ``error`` body."""
 
     request = urllib.request.Request(
         url,
@@ -337,39 +354,27 @@ def _post_stream(
     )
     started = time.monotonic()
     first: float | None = None
-    content, reasoning = [], []
-    calls: dict[int, dict] = {}
-    finish = None
-    body: dict = {"choices": [{"message": {}}]}
+    body: dict = {"error": "the stream ended without a terminal response"}
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for raw in response:
             line = raw.decode("utf-8").strip()
             if not line.startswith("data: {"):
                 continue
-            chunk = json.loads(line[len("data: ") :])
-            for choice in chunk.get("choices") or []:
-                delta = choice.get("delta") or {}
-                if (delta.get("content") or delta.get("reasoning_content")) and first is None:
-                    first = time.monotonic() - started
-                content.append(delta.get("content") or "")
-                reasoning.append(delta.get("reasoning_content") or "")
-                for call in delta.get("tool_calls") or []:
-                    if first is None:
-                        first = time.monotonic() - started
-                    slot = calls.setdefault(call.get("index", 0), {"name": "", "arguments": ""})
-                    function = call.get("function") or {}
-                    slot["name"] += function.get("name") or ""
-                    slot["arguments"] += function.get("arguments") or ""
-                finish = choice.get("finish_reason") or finish
-            for key in ("usage", "kairyu_verification", "kairyu_trace_v2", "kairyu_route"):
-                if chunk.get(key) is not None:
-                    body[key] = chunk[key]
-    body["choices"][0]["message"] = {
-        "content": "".join(content),
-        "reasoning_content": "".join(reasoning),
-        "tool_calls": [{"type": "function", "function": calls[index]} for index in sorted(calls)],
-    }
-    body["choices"][0]["finish_reason"] = finish
+            event = json.loads(line[len("data: ") :])
+            kind = event.get("type")
+            if first is None and (
+                kind in _FIRST_TOKEN_EVENTS
+                or (
+                    kind == "response.output_item.added"
+                    and (event.get("item") or {}).get("type") == "function_call"
+                )
+            ):
+                first = time.monotonic() - started
+            if kind in ("response.completed", "response.incomplete"):
+                body = control.chat_view(event["response"])
+            elif kind in ("error", "response.failed"):
+                failure = event if kind == "error" else (event.get("response") or {}).get("error")
+                body = {"error": str(failure)[:500]}
     return body, first
 
 
@@ -385,21 +390,23 @@ def chat(
     timeout_s: float = 7200,
     **extra,
 ) -> dict:
-    """One chat request; returns the per-request evidence row."""
+    """One request to the public Responses API (the Chat UI's); returns the
+    per-request evidence row, read from the reply in the chat shape."""
 
     payload = control.routed_request(content or "", model=model, **extra)
     if messages is not None:
         payload["messages"] = messages
     if tools:
         payload["tools"] = tools
+    if stream:
+        payload["stream"] = True
+    payload = control.responses_request(payload)
     headers = {"X-Kairyu-Trace": "1"} if trace else {}
-    url = f"{_api(env)}/v1/chat/completions"
+    url = f"{_api(env)}/v1/responses"
     started = time.monotonic()
     ttft = None
     try:
         if stream:
-            payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
             body, ttft = _post_stream(url, payload, headers, timeout_s)
         else:
             request = urllib.request.Request(
@@ -408,8 +415,8 @@ def chat(
                 headers={"Content-Type": "application/json", **headers},
             )
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
-                body = json.loads(response.read())
-        status = 200
+                body = control.chat_view(json.loads(response.read()))
+        status = 0 if "error" in body else 200
     except urllib.error.HTTPError as error:
         body = {"error": error.read().decode("utf-8", "replace")[:500]}
         status = error.code
@@ -1037,6 +1044,48 @@ def gate_serving_routed(env: dict[str, str]) -> None:
     _load(env, "serving-routed", batches, per_route=True)
 
 
+def gate_api_equivalence(env: dict[str, str]) -> None:
+    """The same Responses requests to GLM's L1 and to the public model (m11 D4
+    amendment 2026-10-17): both validate against the OpenAI types and agree on
+    status and usage keys (the public model is orchestrated, so its items come
+    from its routes), and GLM's own request counters show that every role
+    call reached it on /v1/responses."""
+
+    l1 = f"http://127.0.0.1:{env['GLM_L1_PORT']}"
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    out = _results_dir() / f"api-equivalence-report-{stamp}.json"
+    command = [
+        sys.executable,
+        str(control.ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
+        "--l1",
+        f"{l1}/v1",
+        "--l1-model",
+        control.GLM_SERVED,
+        "--l1-metrics",
+        f"{l1}/metrics",
+        "--l3",
+        f"{_api(env)}/v1",
+        "--l3-model",
+        MODEL,
+        "--l3-orchestrated",
+        "--cases",
+        "text,stream,effort,tools,cap,openwebui",
+        # xhigh is L3's max on the Responses wire.
+        "--efforts",
+        "low,high,xhigh",
+        # Room for thinking at max on both sides, so neither stops at the cap.
+        "--max-output-tokens",
+        "32768",
+        "--out",
+        str(out),
+    ]
+    code = subprocess.run(command, check=False).returncode
+    _write("api-equivalence", {"passed": code == 0, "report": str(out)})
+    print(f"api-equivalence: {'PASS' if code == 0 else 'FAIL'}")
+    if code:
+        raise SystemExit(1)
+
+
 def gate_browser(_env: dict[str, str]) -> None:
     subprocess.run([str(HERE / "browser-smoke.sh")], check=True)
     _write("browser", {"passed": True})
@@ -1051,6 +1100,7 @@ GATES = {
     "fallback": gate_fallback,
     "serving": gate_serving,
     "serving-routed": gate_serving_routed,
+    "api-equivalence": gate_api_equivalence,
     "browser": gate_browser,
 }
 

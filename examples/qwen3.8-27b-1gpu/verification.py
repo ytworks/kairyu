@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measured serving verification for this environment."""
+"""Measured serving and L1/L3 Responses-equivalence verification for this environment."""
 
 from __future__ import annotations
 
@@ -15,7 +15,24 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
-RESULTS_ROOT = ROOT / "verification/results/examples" / SPEC["environment"]
+
+
+def _nvme_root() -> Path:
+    configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
+    if not configured.is_absolute():
+        raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
+    root = configured.resolve()
+    nvme = Path("/mnt/nvme")
+    if root != nvme and nvme not in root.parents:
+        raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
+    return root
+
+
+# Gate results stay on the environment's NVMe storage, beside its model and cache.
+ENVIRONMENT_STORAGE = _nvme_root() / "model-volumes" / SPEC["environment"]
+RESULTS_ROOT = Path(
+    os.environ.get("VERIFICATION_RESULTS_ROOT", ENVIRONMENT_STORAGE / "verification-results")
+)
 
 
 def _run(command: list[str], *, log: Path | None = None, check: bool = True) -> int:
@@ -79,22 +96,33 @@ def _serving_dataset(path: Path, requests: int, approximate_tokens: int) -> None
     path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
 
+def _api_url() -> str:
+    return f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}"
+
+
 def serving(run_dir: Path) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
+    max_output_tokens = int(config["max_output_tokens"])
     dataset = run_dir / "serving-8k.json"
     _serving_dataset(dataset, requests, int(config["prompt_tokens_approx"]))
     failures = 0
     for concurrency in config["concurrency"]:
         row_dir = run_dir / f"serving-c{concurrency}"
+        # Rows run on the public Responses API (m11 D7 amendment 2026-10-17).
+        # It has no ignore_eos/min_tokens/seed, so each request ends naturally
+        # within max_output_tokens; rows are not comparable with the
+        # fixed-length chat rows recorded before 2026-10-17.
         code = _run(
             [
                 str(ROOT / ".venv/bin/python"),
                 str(ROOT / "verification/l1/performance/serving_bench.py"),
                 "--base-url",
-                f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
+                f"{_api_url()}/v1",
                 "--model",
                 SPEC["model"]["served_name"],
+                "--api",
+                config["api"],
                 "--dataset",
                 str(dataset),
                 "--num-requests",
@@ -102,14 +130,9 @@ def serving(run_dir: Path) -> int:
                 "--concurrency",
                 str(concurrency),
                 "--max-tokens",
-                str(config["output_tokens"]),
-                "--min-tokens",
-                str(config["output_tokens"]),
-                "--ignore-eos",
+                str(max_output_tokens),
                 "--temperature",
                 "1.0",
-                "--seed",
-                "0",
                 "--timeout",
                 "86400",
                 "--results-dir",
@@ -123,15 +146,15 @@ def serving(run_dir: Path) -> int:
             check=False,
         )
         if code == 0:
-            code = _validate_serving_row(row_dir, requests, int(config["output_tokens"]))
+            code = _validate_serving_row(row_dir, requests, max_output_tokens)
         failures += code != 0
         if code:
             break
     return 1 if failures else 0
 
 
-def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> int:
-    """Reject partial streams and nominally successful zero-token runs."""
+def _validate_serving_row(row_dir: Path, requests: int, max_output_tokens: int) -> int:
+    """Reject partial streams and empty answers; each request ends naturally."""
 
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -147,14 +170,14 @@ def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> i
     except (KeyError, OSError, TypeError, ValueError) as error:
         print(f"invalid serving result: {error}", file=sys.stderr)
         return 1
-    expected_total = requests * output_tokens
+    tokens = [sample.get("completion_tokens") for sample in samples]
     complete = (
         summary.get("requests") == requests
-        and summary.get("completion_tokens_total") == expected_total
+        and len(samples) == requests
+        and all(isinstance(count, int) and 1 <= count <= max_output_tokens for count in tokens)
+        and summary.get("completion_tokens_total") == sum(tokens)
         and isinstance(summary.get("output_tokens_per_s"), (int, float))
         and summary["output_tokens_per_s"] > 0
-        and len(samples) == requests
-        and all(sample.get("completion_tokens") == output_tokens for sample in samples)
     )
     if not complete:
         print(
@@ -168,6 +191,64 @@ def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> i
         return 1
     return 0
 
+
+def _l1_container() -> str:
+    """The running vLLM container of this Compose project (no host port)."""
+
+    project = SPEC["environment"].replace(".", "-")
+    listed = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            "label=com.docker.compose.service=vllm",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    if len(listed) != 1:
+        raise RuntimeError(f"expected one running vllm container in {project}, found {listed}")
+    return listed[0]
+
+
+def api_equivalence(run_dir: Path) -> int:
+    """The same Responses requests to vLLM L1 directly and to Kairyu L3."""
+
+    container = _l1_container()
+    served = SPEC["model"]["served_name"]
+    return _run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
+            "--l1",
+            "http://127.0.0.1:8000/v1",
+            "--l1-docker",
+            container,
+            "--l1-model",
+            served,
+            "--l1-metrics",
+            f"{container}=http://127.0.0.1:8000/metrics",
+            "--l3",
+            f"{_api_url()}/v1",
+            "--l3-model",
+            served,
+            "--cases",
+            "text,stream,effort,tools,image,cap,openwebui",
+            # The template clamps every effort to low; each still thinks.
+            "--efforts",
+            "low,high,xhigh",
+            "--expect-reasoning",
+            "--exact-input-tokens",
+            "--out",
+            str(run_dir / "api-equivalence.json"),
+        ],
+        log=run_dir / "api-equivalence.log",
+        check=False,
+    )
 
 
 def _served_config_sha256() -> str:
@@ -183,12 +264,19 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("verification", choices=("serving", "list"))
+    parser.add_argument("verification", choices=("serving", "api-equivalence", "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.verification == "list":
-        print("serving  fixed 8K-input/256-output TTFT and throughput at c=1,8,16,32")
+        print(
+            "serving          8K input, up to 256 output (natural completion) TTFT and "
+            "throughput at c=1,8,16,32 on /v1/responses"
+        )
+        print(
+            "api-equivalence  the same Responses requests to vLLM L1 and Kairyu L3 agree, "
+            "and L3 reached L1 on /v1/responses"
+        )
         return
 
     _ensure_environment(args.no_start)
@@ -205,13 +293,14 @@ def main() -> None:
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    target = serving if args.verification == "serving" else api_equivalence
     try:
-        code = serving(run_dir)
+        code = target(run_dir)
     except Exception as error:
-        print(f"serving failed: {error}", file=sys.stderr)
+        print(f"{args.verification} failed: {error}", file=sys.stderr)
         code = 1
     manifest["completed_at"] = datetime.now(UTC).isoformat()
-    manifest["exit_codes"] = {"serving": code}
+    manifest["exit_codes"] = {args.verification: code}
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

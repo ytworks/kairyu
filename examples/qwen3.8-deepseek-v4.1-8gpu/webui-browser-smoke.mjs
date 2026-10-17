@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI v0.11.0 surface (DTO-D16/D17).
+ * Browser gate for this example's Open WebUI v0.12.3 surface (DTO-D16/D17).
  *
- * Checks the one public product model, then sends one chat and requires the
- * folded, attributed internal-work item and a separate final answer. Both
- * routes publish from DeepSeek-V4.1; the ensemble also shows its Qwen stages.
+ * Checks the one public product model and the Responses connection (m11 D7
+ * amendment 2026-10-17), then sends one chat and requires the folded,
+ * attributed internal-work item and a separate final answer. Both routes
+ * publish from DeepSeek-V4.1; the ensemble also shows its Qwen stages.
  */
 
 import { chromium } from 'playwright';
@@ -314,6 +315,7 @@ async function sendUiMessage(modelId, marker, prompt = `Reply with this exact lo
 async function assertTieredProductInventory() {
 	const inventory = await browserJson('/api/models');
 	const modelConfig = await browserJson('/api/v1/configs/models');
+	const connection = await browserJson('/openai/config');
 	invariant(
 		inventory.status === 200 && Array.isArray(inventory.body?.data),
 		`Open WebUI model inventory failed: HTTP ${inventory.status}: ${inventory.text}`
@@ -324,8 +326,15 @@ async function assertTieredProductInventory() {
 		`Open WebUI must expose only ${productModel}; got ${JSON.stringify(modelIds)}`
 	);
 	invariant(
-		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response === false,
-		`Open WebUI effective model params did not disable streaming: ${modelConfig.text}`
+		connection.status === 200 &&
+			connection.body?.OPENAI_API_CONFIGS?.['0']?.api_type === 'responses',
+		`Open WebUI connection 0 is not the Responses API: ${connection.text}`
+	);
+	// A non-streaming Responses result loses its reasoning items in Open WebUI
+	// v0.12.3, so the folded internal-work section needs streaming.
+	invariant(
+		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response !== false,
+		`Open WebUI effective model params disabled streaming: ${modelConfig.text}`
 	);
 	await selectModel(productModel);
 }

@@ -28,7 +28,13 @@ def test_effort_patch_rejects_drift_and_is_idempotent():
         "{'low':25,'high':50,'xhigh':75,'max':100}\n"
     )
     changed = patch.align_efforts(original)
-    assert ast.literal_eval(ast.parse(changed).body[1].value) == {"low": 50, "high": 75, "max": 100}
+    # xhigh is L3 max on the Responses wire (m11 D4 amendment 2026-10-17).
+    assert ast.literal_eval(ast.parse(changed).body[1].value) == {
+        "low": 50,
+        "high": 75,
+        "xhigh": 100,
+        "max": 100,
+    }
     assert patch.align_efforts(changed) == changed
     with pytest.raises(ValueError, match="Unrecognized"):
         patch.align_efforts(original.replace("'high':50", "'high':60"))
@@ -87,10 +93,12 @@ def test_ui_restores_default_and_forwards_only_supported_effort_fields():
 
     body["chat_template_kwargs"] = {"thinking": False, "enable_thinking": False}
     choose("default")
-    assert body == {"max_tokens": 32768}
+    assert body == {"max_tokens": 32768, "store": False}
     for effort in ("low", "high", "max"):
         choose(effort)
-        assert body["reasoning_effort"] == effort
+        # The Chat UI's Responses connection carries it as reasoning.effort.
+        assert body["reasoning"] == {"effort": effort}
+        assert "reasoning_effort" not in body
         assert "chat_template_kwargs" not in body
     with pytest.raises(ValueError):
         choose("off")
@@ -138,24 +146,34 @@ def test_evidence_rejects_stale_pcie_candidate_with_identical_command(monkeypatc
 
 def test_readiness_rejects_absent_tool_calls(monkeypatch):
     control = load("control")
+    sent = []
+
+    def post(url, payload, **kw):
+        sent.append((url, payload))
+        return {"status": "completed", "output": [], "usage": {}}
+
+    monkeypatch.setattr(control, "_post_json", post)
+    with pytest.raises(SystemExit, match="did not return an executable"):
+        control._validate_tool_calling("http://unused")
+    ((url, payload),) = sent
+    assert url == "http://unused/v1/responses"
+    assert payload["tools"][0]["name"] == "bash" and payload["store"] is False
+
+
+@pytest.mark.parametrize(
+    "answer,status", [("blue", "completed"), ("red", "incomplete"), ("", "completed")]
+)
+def test_readiness_image_requires_correct_completed_content(monkeypatch, answer, status):
+    control = load("control")
+    message = {"type": "message", "content": [{"type": "output_text", "text": answer}]}
     monkeypatch.setattr(
         control,
         "_post_json",
         lambda *a, **kw: {
-            "choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": []}}]
+            "status": status,
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [message],
         },
-    )
-    with pytest.raises(SystemExit, match="did not return an executable"):
-        control._validate_tool_calling("http://unused")
-
-
-@pytest.mark.parametrize("answer,finish", [("blue", "stop"), ("red", "length"), ("", "stop")])
-def test_readiness_image_requires_correct_completed_content(monkeypatch, answer, finish):
-    control = load("control")
-    monkeypatch.setattr(
-        control,
-        "_post_json",
-        lambda *a, **kw: {"choices": [{"finish_reason": finish, "message": {"content": answer}}]},
     )
     with pytest.raises(SystemExit, match="image probe"):
         control._validate_vision("http://unused")
@@ -166,34 +184,41 @@ async def test_benchmark_records_reasoning_ttft_without_inventing_visible_conten
     benchmark = load("benchmark")
 
     async def lines():
-        for item in (
-            {"choices": [{"delta": {"reasoning_content": "Let me compute."}}]},
-            {"choices": [{"delta": {}, "finish_reason": "length"}]},
-            {"choices": [], "usage": {"prompt_tokens": 8, "completion_tokens": 4}},
+        for event in (
+            {"type": "response.reasoning_text.delta", "delta": "Let me compute."},
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 8, "output_tokens": 4},
+                },
+            },
         ):
-            yield "data: " + json.dumps(item)
-        yield "data: [DONE]"
+            yield f"event: {event['type']}"
+            yield "data: " + json.dumps(event)
 
     result = await benchmark.collect(lines(), time.perf_counter())
     assert result["model_ttft_ms"] >= 0
     assert result["content_ttft_ms"] is None
     assert result["content"] == ""
+    assert result["finish_reason"] == "length"
     assert result["completion_tokens"] == 4
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["done", "finish", "usage"])
+@pytest.mark.parametrize("missing", ["terminal", "usage", "output"])
 async def test_benchmark_rejects_partial_streams(missing):
     benchmark = load("benchmark")
 
     async def lines():
-        yield 'data: {"choices":[{"delta":{"content":"323"}}]}'
-        if missing != "finish":
-            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
-        if missing != "usage":
-            yield 'data: {"usage":{"completion_tokens":1}}'
-        if missing != "done":
-            yield "data: [DONE]"
+        if missing != "output":
+            yield 'data: {"type":"response.output_text.delta","delta":"323"}'
+        if missing != "terminal":
+            response = {"status": "completed"}
+            if missing != "usage":
+                response["usage"] = {"output_tokens": 1}
+            yield "data: " + json.dumps({"type": "response.completed", "response": response})
 
     with pytest.raises(ValueError, match="Incomplete"):
         await benchmark.collect(lines(), time.perf_counter())

@@ -7,6 +7,21 @@ example's System One adapter): `quyet-route` on GPU 6 (route judge only),
 `quyet-judge` on GPU 7 (judgments and form check).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The Chat UI and every public-model gate moved to `/v1/responses`, and the
+DeepSeek pool now receives each role call in the caller's API (m9 D2, m11 D4/D7
+amendments of 2026-10-17); a new `api-equivalence` gate compares DeepSeek's L1
+and the public model on the same Responses requests. No gate has been run on
+GPU since; the results below were measured over Chat Completions and remain
+the evidence for that configuration only.
+
+The DeepSeek overlay is rebuilt so that `xhigh` renders the max budget. The
+served vLLM image (`local/vllm-openai:deepseek-v41-quyet-responses`) is
+rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:9d9bcedc90ac31327d60f4c6a78990628413192c6b5e9da658d7f41bb8a4dddd`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
+
 ## Quyet layout: TOOL floor and strict form check (VCO-D21/D22 amendment)
 
 GPU run 2026-10-11 10:32-11:45 JST (gates; UTC 01:32-02:45) at `fa82424f`

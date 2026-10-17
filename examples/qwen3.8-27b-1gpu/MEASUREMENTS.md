@@ -1,5 +1,16 @@
 # Measured performance
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The 2026-10-17 configuration changes how the rows below were produced: the
+Chat UI and `verify.sh serving` use Kairyu's `/v1/responses`, and Kairyu
+forwards each request to vLLM in its caller's API (a chat as the caller's own
+messages instead of one flattened user message). Serving rows now end naturally
+within 256 output tokens (the Responses API has no `ignore_eos`/`min_tokens`),
+so they are not comparable with the fixed-length chat rows below. The L1
+envelope is unchanged. No measurement of this configuration exists yet;
+`verify.sh serving` and `verify.sh api-equivalence` on the GPU host are pending.
+
 ## Qwen3.8 result (vLLM v0.23.0)
 
 The selected single-GPU configuration uses the attested

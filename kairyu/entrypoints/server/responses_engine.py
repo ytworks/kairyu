@@ -21,6 +21,7 @@ from kairyu.entrypoints.server.chat_service import (
     ValidatedChatRequest,
     execute_chat,
 )
+from kairyu.entrypoints.server.direct_trace import _direct_stage_trace, _direct_trace_lines
 from kairyu.entrypoints.server.metering import (
     metered_prompt,
     record_state_usage,
@@ -138,6 +139,23 @@ def _failure_payload(error: BaseException) -> dict:
     }
 
 
+def _attach_trace(
+    emitter: ResponseEmitter,
+    trace_started_at: str | None,
+    stage_metrics,
+) -> None:
+    """The direct-engine ``kairyu_trace``/``kairyu_trace_v2`` extensions."""
+
+    if trace_started_at is None:
+        return
+    emitter.extensions["kairyu_trace"] = _direct_trace_lines(stage_metrics)
+    emitter.extensions["kairyu_trace_v2"] = _direct_stage_trace(
+        emitter.response_id,
+        started_at=trace_started_at,
+        stage_metrics=stage_metrics,
+    ).as_dict()
+
+
 async def engine_stream(
     request: ResponsesRequest,
     validated: ValidatedChatRequest,
@@ -146,6 +164,7 @@ async def engine_stream(
     saver: PendingSave,
     owner: str,
     http_request: Request,
+    trace_started_at: str | None = None,
 ) -> AsyncIterator[str | bytes]:
     """Stream a direct-engine turn: reasoning, prose, and calls as they decode."""
 
@@ -244,6 +263,11 @@ async def engine_stream(
             for frame in frames:
                 yield frame
             return
+        _attach_trace(
+            emitter,
+            trace_started_at,
+            last.stage_metrics if last is not None else (),
+        )
         envelope, terminal = emitter.complete(status, usage(), details)
         # Stored before the terminal frame: a client that disconnects on it
         # cancels this generator mid-send.
@@ -298,6 +322,7 @@ async def engine_unary(
     *,
     emitter: ResponseEmitter,
     http_request: Request,
+    trace_started_at: str | None = None,
 ) -> dict:
     """Run a direct-engine turn to completion and return its envelope."""
 
@@ -332,6 +357,7 @@ async def engine_unary(
         assembler.finish(incomplete=status == "incomplete")
     if assembler.failure is not None:
         raise _BufferedFailure(assembler.failure, 502)
+    _attach_trace(emitter, trace_started_at, result.stage_metrics)
     envelope, _frames = emitter.complete(status, usage, details)
     return envelope
 

@@ -667,6 +667,7 @@ class Conductor:
         public_output_floor: int | None = None,
         decision_workers: Mapping[str, DecisionBackend] | None = None,
         conversation: Sequence[Mapping[str, object]] = (),
+        caller_api: str = "chat",
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -683,6 +684,9 @@ class Conductor:
             )
         self._roles = tuple(roles)
         self._workers = dict(workers)
+        # Every role call carries the caller's public API; a worker upstream
+        # declared to serve it receives the call in that API.
+        self._caller_api = caller_api
         self._shared_prefix = shared_prefix
         self._prefix_fingerprint = prefix_root_fingerprint(shared_prefix)
         public_sampling = sampling_params or SamplingParams(max_tokens=1024)
@@ -1576,6 +1580,7 @@ class Conductor:
                         tool_call_protocol=tool_call_protocol,
                         reasoning_effort=self._role_reasoning_effort(spec),
                         conversation_prefix=self._conversation_prefix(spec, role_prompt),
+                        caller_api=self._caller_api,
                     ),
                 )
             )
@@ -1626,6 +1631,7 @@ class Conductor:
             reasoning_effort=self._role_reasoning_effort(spec),
             assistant_prefill=assistant_prefill,
             conversation_prefix=self._conversation_prefix(spec, request_prompt),
+            caller_api=self._caller_api,
         )
         if attempt != 0:
             return candidate

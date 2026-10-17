@@ -112,6 +112,12 @@ class OpenAIRequestCapabilities:
     # The upstream chat template renders a caller's conversation (tool calls
     # and tool results included) sent as native messages before the prompt.
     conversation_prefix: bool = False
+    # The upstream serves the OpenAI Responses (``/responses``) and Anthropic
+    # Messages (``/messages``) APIs over the same model, so a caller's request
+    # can reach it in the API the caller used (m9 D2 amendment 2026-10-17). A
+    # deployment still declares per model which of them its upstream runs.
+    responses_api: bool = False
+    messages_api: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -135,6 +141,8 @@ class OpenAIRequestCapabilities:
             raise ValueError("assistant_prefill capability must be a boolean")
         if type(self.conversation_prefix) is not bool:
             raise ValueError("conversation_prefix capability must be a boolean")
+        if type(self.responses_api) is not bool or type(self.messages_api) is not bool:
+            raise ValueError("responses_api and messages_api capabilities must be booleans")
         if self.repetition_penalty_wire_name not in {
             "repetition_penalty",
             "repeat_penalty",
@@ -209,6 +217,8 @@ _PROFILES = {
         priority=True,
         assistant_prefill=True,
         conversation_prefix=True,
+        responses_api=True,
+        messages_api=True,
     ),
     # llama.cpp ``llama-server``: the controls its request schema executes.
     # Unknown JSON keys are silently ignored upstream, so ``min_tokens``,
@@ -247,6 +257,11 @@ _PROFILES = {
         max_tokens_wire_name="max_completion_tokens",
         parallel_tool_calls=True,
         priority=True,
+        # A Kairyu replica is itself an L3: it renders a caller's native
+        # messages with its own chat policy and serves Responses and Messages.
+        conversation_prefix=True,
+        responses_api=True,
+        messages_api=True,
     ),
     # Anthropic documents that these are the compatible controls it executes;
     # n>1 and temperature>1 are not truthful passthrough.

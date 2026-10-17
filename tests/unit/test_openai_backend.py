@@ -1005,8 +1005,7 @@ async def test_generate_sends_the_callers_conversation_as_native_messages(prompt
     await backend.shutdown()
 
 
-@pytest.mark.parametrize("upstream", ["llamacpp", "kairyu"])
-async def test_conversation_prefix_fails_closed_without_upstream_support(upstream):
+async def test_conversation_prefix_fails_closed_without_upstream_support():
     import dataclasses
 
     backend = OpenAICompatBackend(
@@ -1014,7 +1013,7 @@ async def test_conversation_prefix_fails_closed_without_upstream_support(upstrea
         model="m",
         api_key_env=None,
         transport=_ok_transport({}),
-        upstream=upstream,
+        upstream="llamacpp",
         max_model_len=4096,
     )
 
@@ -2980,7 +2979,7 @@ def test_validation_key_is_exactly_the_immutable_capability_contract():
         upstream="generic",
     )
 
-    assert first.request_validation_key == (first.capabilities, None, False)
+    assert first.request_validation_key == (first.capabilities, None, False, frozenset())
     assert first.request_validation_key == second.request_validation_key
     assert first.request_validation_key != different.request_validation_key
     assert isinstance(hash(first.request_validation_key), int)

@@ -94,8 +94,8 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:qwen38-deepseek-v41-ensemble",
-      "image_id": "sha256:c70d91086275a55c82a58da4fc53adc09ca8ee68e49e8eeb9bfb271041f97f30",
+      "image": "local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh",
+      "image_id": "sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc",
       "distribution": "overlay",
       "dockerfile": "vllm-sm120.Dockerfile",
       "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",
@@ -174,7 +174,7 @@
     }
   },
   "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
     "port": 3009
   },
   "api_port": 8009,

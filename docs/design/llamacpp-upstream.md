@@ -228,6 +228,10 @@ reason `strict_tools` stays off for this profile.
 
 ## Winnow-12B examples
 
+Removed (2026-10-18, owner decision, PR #656): both Winnow examples were
+deleted; the `llamacpp` upstream and its CPU contract gate stay in `kairyu/`,
+and the record below stays as history.
+
 `examples/winnow-12b-q8-1gpu` and `examples/winnow-12b-q8-dp8-8gpu` serve
 EldanRing/Winnow-12B Q8_0, a merged Gemma 4 12B fine-tune for typed decisions.
 

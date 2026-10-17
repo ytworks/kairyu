@@ -4,7 +4,8 @@ Run after ``run.sh up``. Each candidate restarts only this example's vLLM
 service with a Compose override, must pass the readiness probes (exact
 finite answers, a tool call, an image) and the prefix-cache consistency probe
 (exact answers behind a shared cached prefix, cold and warm), and is then
-measured with fixed 8K-in / 256-out rows. Raw evidence, the exact command,
+measured with 8K-in rows of up to 256 output tokens (natural completion over
+Kairyu's Responses API, so output lengths vary). Raw evidence, the exact command,
 and failures are kept; the committed configuration is restored in
 ``finally``. Final numbers come from ``verify.sh`` on the committed
 configuration, not from these exploratory rows.
@@ -174,7 +175,7 @@ def main() -> None:
                     with peak:
                         code = verification.bench(
                             dataset,
-                            mode="fixed",
+                            mode="capped",
                             requests=args.requests,
                             concurrency=level,
                             max_tokens=256,

@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from kairyu.engine.backend import CALLER_APIS
 from kairyu.engine.prompt import MultimodalPrompt
 from kairyu.orchestration.trace import TraceEvent
 from kairyu.sampling_params import (
@@ -221,9 +222,15 @@ class OrchestrationRequest:
     # plain prompt, which such a role receives as one user message; it is
     # never parsed out of ``prompt`` text (PR #641 review).
     conversation: tuple[Mapping[str, object], ...] | None = None
+    # The public API the caller used (chat, responses or messages). Every L1
+    # role call carries it, so a worker whose upstream is declared to serve
+    # that API receives the call in it (m1 D8 amendment 2026-10-17).
+    caller_api: str = "chat"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
+        if self.caller_api not in CALLER_APIS:
+            raise ValueError("caller_api must be chat, responses or messages")
         if self.conversation is not None:
             if isinstance(self.conversation, (str, bytes)) or any(
                 not isinstance(message, Mapping) or not isinstance(message.get("role"), str)

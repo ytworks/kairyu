@@ -116,6 +116,7 @@ class _MoASetup:
     synthesis_params: SamplingParams
     cache_hint: CacheHint
     reasoning_effort: str | None
+    caller_api: str = "chat"
 
 
 _prepared_setup: contextvars.ContextVar[_MoASetup | None] = contextvars.ContextVar(
@@ -143,6 +144,7 @@ def _build_moa_setup(
     shared_prefix: str,
     session: str | None = None,
     reasoning_effort: str | None = None,
+    caller_api: str = "chat",
 ) -> _MoASetup:
     """Build request-sized proposal prompts on the prompt CPU lane."""
 
@@ -183,10 +185,18 @@ def _build_moa_setup(
             ),
             cache_hint=hint,
             reasoning_effort=reasoning_effort,
+            caller_api=caller_api,
         )
         for index in range(n_samples)
     )
-    return _MoASetup(session, requests, synthesis_params, hint, reasoning_effort)
+    return _MoASetup(
+        session,
+        requests,
+        synthesis_params,
+        hint,
+        reasoning_effort,
+        caller_api,
+    )
 
 
 def _build_synthesis_request(
@@ -214,6 +224,7 @@ def _build_synthesis_request(
         parallel_tool_calls=final_parallel_tool_calls,
         tool_call_protocol=final_tool_call_protocol,
         reasoning_effort=setup.reasoning_effort,
+        caller_api=setup.caller_api,
     )
 
 
@@ -233,6 +244,7 @@ async def _prepare_moa(
     usage_observer: Callable[[GenerationUsage], None] | None,
     prepared_setup: _MoASetup | None,
     reasoning_effort: str | None,
+    caller_api: str,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
     setup = prepared_setup
     if setup is None:
@@ -245,6 +257,7 @@ async def _prepare_moa(
             shared_prefix,
             None,
             reasoning_effort,
+            caller_api,
         )
 
     usage_totals = [0, 0, 0]
@@ -323,6 +336,7 @@ async def run_moa(
     final_parallel_tool_calls: bool | None = None,
     final_tool_call_protocol: str = "generic",
     reasoning_effort: str | None = None,
+    caller_api: str = "chat",
 ) -> MoAResult:
     proposals, usage_totals, synthesis_request = await _prepare_moa(
         backend,
@@ -339,6 +353,7 @@ async def run_moa(
         usage_observer=usage_observer,
         prepared_setup=_prepared_setup.get(),
         reasoning_effort=reasoning_effort,
+        caller_api=caller_api,
     )
     synthesis_backend = synthesizer or backend
     try:
@@ -387,6 +402,7 @@ def stream_moa(
     final_parallel_tool_calls: bool | None = None,
     final_tool_call_protocol: str = "generic",
     reasoning_effort: str | None = None,
+    caller_api: str = "chat",
 ) -> AsyncIterator[MoAEvent]:
     """Capture any exact internal setup before returning the public iterator."""
 
@@ -406,6 +422,7 @@ def stream_moa(
         final_tool_call_protocol=final_tool_call_protocol,
         prepared_setup=_prepared_setup.get(),
         reasoning_effort=reasoning_effort,
+        caller_api=caller_api,
     )
 
 
@@ -426,6 +443,7 @@ async def _stream_moa(
     final_tool_call_protocol: str,
     prepared_setup: _MoASetup | None,
     reasoning_effort: str | None,
+    caller_api: str,
 ) -> AsyncIterator[MoAEvent]:
     """Generate proposals concurrently and pull synthesis deltas through.
 
@@ -449,6 +467,7 @@ async def _stream_moa(
         usage_observer=usage_observer,
         prepared_setup=prepared_setup,
         reasoning_effort=reasoning_effort,
+        caller_api=caller_api,
     )
     synthesis_backend = synthesizer or backend
     emitted = 0

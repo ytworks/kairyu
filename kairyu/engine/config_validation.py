@@ -53,6 +53,9 @@ _OPENAI_OPTIONS = frozenset(
         "container_image_digest",
         "client",
         "client_factory",
+        # Injected by the deployment builder from upstream_responses_models /
+        # upstream_messages_models; never written in a backend's own options.
+        "upstream_apis",
     }
 )
 _KAIRYU_OPTIONS = frozenset(

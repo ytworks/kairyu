@@ -16,13 +16,26 @@ one server with eight times the capacity of the
 envelope every replica carries unchanged (official FP8 checkpoint, 262,144-token
 context, FP8 KV cache, FP16 Gated-DeltaNet state, prefix caching, chunked
 prefill, FlashInfer autotuning, piecewise CUDA Graphs, MTP off, and the same
-adapted chat template mounted from that example). Ordinary requests default to
-direct answers; an explicit `reasoning_effort` enables Qwen's thinking mode at
-the fixed low effort level, as in the single-GPU example. The replicas also
-pass `--default-chat-template-kwargs '{"enable_thinking": false}'` so vLLM's
-`qwen3` reasoning parser shares the template's default: without it a direct
-answer (which contains no `</think>`) is filed as `reasoning_content` and
-`content` comes back empty. `reasoning_effort` still switches thinking on.
+adapted chat template mounted from that example). Kairyu forwards each
+request to vLLM in the API its caller used (m9 D2 amendment 2026-10-17): Chat
+Completions as the caller's own messages, the Responses API as Responses, and
+Anthropic Messages as Messages (`upstream_chat_models`,
+`upstream_responses_models` and `upstream_messages_models` in
+[`kairyu.yaml`](kairyu.yaml); Kairyu refuses to start if a replica does not
+serve one of them). Ordinary requests default to direct answers; an explicit
+effort (`reasoning.effort` on Responses, `reasoning_effort` on chat) enables
+Qwen's thinking mode at the fixed low effort level, as in the single-GPU
+example (the template treats every effort, including the `xhigh` Kairyu sends
+for L3 `max` on the Responses wire, as low). The replicas also pass
+`--default-chat-template-kwargs '{"enable_thinking": false}'` so vLLM's `qwen3`
+reasoning parser shares the template's default: without it a direct answer
+(which contains no `</think>`) is filed as reasoning and the answer text comes
+back empty. An explicit effort still switches thinking on.
+
+**Status (2026-10-17): the Responses connection and the native forwarding are
+implemented; GPU verification is pending.** The locked results in
+[MEASUREMENTS.md](MEASUREMENTS.md) were measured on the earlier chat-only
+configuration.
 
 ## How requests are spread over the replicas
 
@@ -56,8 +69,8 @@ its GPU's NUMA-local CPUs, prepares bind-backed storage below
 reuses the single-GPU example's attested checkpoint download (or downloads and
 hashes it), builds Kairyu, waits for all ten services, checks that Kairyu
 reports exactly one public model with eight healthy replicas, proves one live
-bash tool call round-trip (the environment is not "ready" if `tool_calls`
-comes back null), and prints:
+bash tool call over `/v1/responses` (the environment is not "ready" without a
+`function_call`), installs the Chat UI filter (below), and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8004/v1
@@ -72,29 +85,63 @@ cache per replica, and the placement log live below
 `VERIFY_MODEL=1 ./run.sh` rehashes the checkpoint. Lifecycle commands are
 `./run.sh up`, `./run.sh status`, `./run.sh logs`, and `./run.sh down`.
 
+## Chat UI
+
+Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
+`api_type: responses` in [`compose.yaml`](compose.yaml); m11 D7 amendment
+2026-10-17). Open WebUI converts its chat body into a Responses body but keeps
+a few fields the strict Responses API does not have, so `run.sh up` installs
+[`webui-responses-filter.py`](webui-responses-filter.py) as a global filter:
+Chat Controls' reasoning effort becomes `reasoning.effort`, sampling keys
+outside the Responses API (`seed`, `top_k`, ...) are dropped, saved output
+items keep only their Responses fields, and `store` is false because the UI
+sends the whole conversation every turn. Installing it needs the admin
+account, so it happens only when `WEBUI_ADMIN_EMAIL` and
+`WEBUI_ADMIN_PASSWORD` are set (they also create that account on the first
+start); otherwise `run.sh up` prints a warning and an admin installs the file
+under Admin Panel > Functions and sets Admin Panel > Settings > Connections >
+API Type to Responses. With the credentials set, `run.sh up` also switches the
+saved Kairyu connection to the Responses API when an existing `webui-data`
+volume still has the chat connection it saved earlier.
+
 ## Serving verification
 
 ```sh
 ./verify.sh list
 ./verify.sh serving
 ./verify.sh tool-calling
+./verify.sh api-equivalence
 ```
 
+Every gate calls Kairyu's public `/v1/responses`, the API the Chat UI uses.
+
 `tool-calling` gates the OpenAI agent contract (auto-choice `bash` tool call
-fanned across all eight replicas, the `role: "tool"` follow-up turn, the
+fanned across all eight replicas, the follow-up turn with the tool result —
+the task still needs a call after the listing, "List the files in the current
+directory, then show the first line of README.md.", the PR #647 wording — the
 streamed variant, thinking mode with tools, and the non-thinking default);
-vLLM's `qwen3_coder` tool parser produces the calls and Kairyu normalizes
-them. `serving` warms every replica with one short request, then records TTFT,
-TPOT, requests/s, and output tokens/s for fixed approximately 8K-token inputs
-and exactly 256 generated tokens at concurrency 1, 8, 16, 32, and 64 (64
-requests per row). Each row's prompts carry a row-unique prefix first, so
+vLLM's `qwen3_coder` tool parser produces the calls. `api-equivalence` sends
+the same Responses requests (text, stream, each effort, a tool round trip, an
+image, a length cap, and Open WebUI's request shape) to replica 0 directly and
+to Kairyu, requires the same Responses structure and input-token count from
+both
+([`upstream_api_equivalence.py`](../../verification/product/correctness/upstream_api_equivalence.py)),
+and reads all eight replicas' own request counters to confirm Kairyu reached
+them on `/v1/responses`, never `/v1/chat/completions`. `serving` warms every
+replica with one short request, then records TTFT, TPOT, requests/s, and
+output tokens/s for approximately 8K-token inputs and up to 256 generated
+tokens at concurrency 1, 8, 16, 32, and 64 (64 requests per row). The
+Responses API has no `ignore_eos`/`min_tokens`, so each request ends naturally
+within 256 tokens and the row is valid when every request generated 1-256
+tokens; these rows are not comparable with the locked fixed-length chat rows.
+Each row's prompts carry a row-unique prefix first, so
 neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix. For every row it also reads the placement log delta and writes
 `placement.json` with the per-replica request counts; at concurrency >= 8 the
 row **fails** unless every replica received traffic and no replica took more
 than 1.25x the even share (10 of 64 requests). Artifacts go to
 `/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-dp8-8gpu/verification-results/<UTC-run-id>/`
-(override with `VERIFICATION_RESULTS_ROOT`). The locked results are in
+(override with `VERIFICATION_RESULTS_ROOT`). The locked chat-era results are in
 [MEASUREMENTS.md](MEASUREMENTS.md).
 
 Model and product evaluations are invoked explicitly through `python -m evals`;
@@ -106,7 +153,7 @@ see the repository benchmark documentation for the retained evaluation suites.
 - Model tree SHA-256: `9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e`
 - vLLM release/source: `v0.23.0` / `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`
 - vLLM image digest: `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. Override prebuilt
 images with `QWEN_VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM

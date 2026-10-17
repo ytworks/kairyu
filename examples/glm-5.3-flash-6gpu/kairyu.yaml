@@ -26,8 +26,11 @@ pools:
         upstream: vllm
         # vLLM owns the prompt: it renders the checkpoint's official chat
         # template (tools, image placeholders, "Reasoning Effort: Low|High|Max")
-        # and parses GLM tool calls and reasoning, so Kairyu forwards messages,
-        # tools and reasoning_effort (low/high/max, the template's own values).
+        # and parses GLM tool calls and reasoning, so Kairyu forwards each
+        # request as the caller sent it (see the lists at the end). The effort
+        # arrives as low/high/max on chat and Messages, and as low/high/xhigh
+        # on Responses, where the template renders xhigh (any effort other
+        # than low/high) as Max.
         capabilities:
           allow_prompt_kinds: [multimodal]
         # The processor caps each image at 8,000 tokens; these are Kairyu-side
@@ -61,5 +64,12 @@ pools:
 # vLLM renders the checkpoint's chat template from the caller's own messages
 # (earlier turns, tool calls and tool results) and parses tool calls, so
 # Kairyu sends each chat's messages as they are (m9 D2 amendment 2026-10-12).
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one.
 upstream_chat_models:
+- glm-5.3-flash
+upstream_responses_models:
+- glm-5.3-flash
+upstream_messages_models:
 - glm-5.3-flash

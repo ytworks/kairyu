@@ -490,6 +490,51 @@ Acceptance:
     example uses the legacy renderer, which drops it as Chat does), and
     `reasoning_tokens` (vLLM reports them, but the L1 usage carries none)
 
+**Caller-API forwarding amendment (2026-10-17, owner authorization).** The
+public `/v1/responses` contract is unchanged (strict OpenAI surface, effort
+normalized to low/high/max, `none` rejected). What changes behind it:
+- An engine or pool model declared in `upstream_responses_models` receives
+  the request on its upstream's `/v1/responses` with the conversation as it
+  is (m9 D2 caller-API amendment 2026-10-17). Kairyu still expands
+  `previous_response_id`, decodes `krs1.`/`kcp1.` tokens, flattens namespace
+  tools and drops web-search declarations before forwarding; the upstream
+  request is stateless (`store: false`) and Kairyu's store, metering, gates,
+  heartbeats and single emitter stay as they are, so the public events never
+  carry vLLM-only events such as `response.reasoning_part.*`.
+- Effort travels as OpenAI's enum: Kairyu's `max` becomes `xhigh` on the
+  Responses wire (low/high unchanged) and each L1 template or encoder maps
+  `xhigh` back to the model's top level; an L1 whose template already treats
+  `xhigh` as its top level needs no change.
+- AUTO models: the role calls of a Responses request reach their workers on
+  `/v1/responses` when the worker's model is declared (m1 D8 amendment
+  2026-10-17); System One judges are unchanged.
+- `max_chat_body_bytes` now bounds `/v1/responses`, `/v1/responses/compact`
+  and `/v1/responses/input_tokens` like the other conversation front doors.
+  Why (framework boundary): (1) the operator-configured body bound covered
+  Chat and Messages only (`ChatBodyLimitMiddleware._PATHS`), so a UI moved to
+  Responses lost it; (2) the path set is internal; (3) any Responses client
+  (Codex) could send an unbounded body; (4) three paths, the limit stays in
+  each deployment. Test: the `/v1/responses` case of
+  `test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies`.
+- Kairyu extension fields: an `X-Kairyu-Trace: 1` request, or an AUTO
+  verification, now reports `kairyu_trace`, `kairyu_trace_v2`, `kairyu_route`
+  and `kairyu_verification` on the response object (unary body and the
+  terminal event's `response`), with the AUTO usage's
+  `orchestration_input_tokens`/`orchestration_output_tokens` inside `usage`;
+  OpenAI clients ignore unknown keys. Engine paths pass `trace_requested` to
+  the backend as Chat does. Why: the example gates move to `/v1/responses`
+  and read `kairyu_verification` there (owner decision 2026-10-17). Test:
+  `test_trace_extensions_ride_the_response_object`.
+- Equivalence gate: `verification/product/correctness/upstream_api_equivalence.py`
+  sends the same Responses requests (text, stream, efforts, a tool round trip,
+  an image, a length cap, and the Open WebUI v0.12.3 body in
+  `verification/product/correctness/fixtures/`) to an L1 directly and to L3,
+  validates L3 against the openai-python types, records L1-only events as
+  extensions, compares status, item types, collapsed events, usage keys and
+  function names (status and usage keys only for an AUTO model), and sums every
+  L1 replica's `http_requests_total` to confirm L3 reached them on
+  `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
+
 ### D5 — Vision wire format
 
 `protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat
@@ -678,7 +723,7 @@ and in-flight generation is never interrupted.
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal
 Kairyu endpoint `http://kairyu:8000/v1` and mounts standalone CPU-safe direct
 and legacy-orchestration specs that expose `default` and `kairyu-auto`.
-Open WebUI v0.11.0-slim and Playwright v1.60.0-noble are pinned to immutable
+Open WebUI v0.12.3 and Playwright v1.60.0-noble are pinned to immutable
 linux/amd64 manifests. Normal Compose startup brings up only healthy Kairyu and
 Open WebUI services; the browser runner is profile-scoped.
 `scripts/webui_smoke.sh` validates literal binds and the rendered endpoint
@@ -719,6 +764,55 @@ CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
 8× RTX PRO 6000; the retained result is
 `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
 
+**Responses connection amendment (2026-10-17, owner decision).** Every
+non-Jev example's Open WebUI talks to Kairyu over `/v1/responses`: the pinned
+v0.11.0 connection sets `OPENAI_API_CONFIGS` `api_type: responses`, under
+which Open WebUI converts its chat body to a Responses body (system turns to
+`instructions`, `max_tokens` to `max_output_tokens`, tools flattened, saved
+`output` items replayed) and parses Responses events. Replaying v0.11.0's own
+conversion and event code against Kairyu (CPU, 2026-10-17) showed what a
+strict Responses server needs from the UI side, so each example installs a
+normalization filter (`inlet`): the effort selector or Chat Controls'
+top-level `reasoning_effort` becomes `reasoning.effort`; non-Responses
+sampling keys (`seed`, `top_k`, `min_p`, `chat_template_kwargs`, Ollama
+options) are removed; saved output items keep only their Responses fields
+(chat-era items carry Open WebUI bookkeeping such as `attributes`); and
+`store: false` is set because the UI is stateless. Non-streaming Responses
+results lose reasoning items in v0.11.0's converter, so a UI that needs the
+Thought section streams (`stream_response` removed). Examples with sign-in
+enabled install the filter with `WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD`
+when set and warn otherwise. `docker-compose.webui.yaml` (P-B3) uses the
+same connection type. Jev examples (OpenJev, Quyet System One, Winnow) keep
+their chat connection and playgrounds.
+
+**Open WebUI v0.12.3 and the compose demo's filter (2026-10-18, owner review
+of PR #656).** `docker-compose.webui.yaml` had moved to the Responses
+connection without the filter, so Chat Controls `reasoning_effort` or `seed`
+and chat-era saved items answered 400. It now ships its own
+`webui-responses-filter.py` and a `webui-setup` service (`webui_setup.py`,
+run in the Open WebUI image) that the operator runs once after `up`
+(`run --rm webui-setup`, profile `setup`: an exited one-shot service fails
+`up --wait`; owner decision 2026-10-18): with
+`WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD` set, Open WebUI creates that admin
+and the setup installs the filter as active and global and switches a saved
+chat connection to Responses; otherwise it warns, as the sign-in examples do.
+`scripts/webui_smoke.sh` runs the browser `signup` phase (first account, the
+admin), then `webui-setup` as that account, then `initial` from sign-in; no
+check is dropped. Every example with an Open WebUI and the demo pin the
+standard Open WebUI v0.12.3 image (the OpenJev and Winnow examples took it
+too, then were removed the same day, FN example removal amendment): from
+v0.12 the slim image stores RAG vectors only in PostgreSQL/pgvector (an
+unset `PGVECTOR_DB_URL` answers 503 on a document upload, which failed the
+demo's RAG step), while the standard image keeps the bundled vector store at
+v0.11.0-slim's size (1.62 vs 1.54 GB compressed; owner decision 2026-10-18).
+The v0.11.0 replay was repeated on v0.12.3 (CPU, 2026-10-18) with the same result:
+Chat Controls fields and chat-era items answer 400 raw and 200 filtered,
+Responses-born items 200; v0.12.3 also converts a named `tool_choice`, which
+v0.11.0 sent in chat form (400). Its non-streaming converter still drops
+reasoning items, the Advanced Params effort stays a free-text field and enum
+user valves still render as a select, and its converted fixture body equals
+v0.11.0's. Why: owner review finding (P2) and owner request.
+
 `verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
@@ -728,7 +822,9 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/server/test_systemone_api.py`; GPU-verified with OpenJev in
 `examples/openjev-diffusiongemma-26b-1gpu` (`systemone-live`,
-`systemone-serving`, `systemone-isolation`).
+`systemone-serving`, `systemone-isolation`). That example was removed on
+2026-10-18 (owner decision, PR #656); System One stays GPU-verified through
+`quyet-1.0-large-1gpu` and the two Quyet 8-GPU examples.
 
 Kairyu serves `POST /v1/systemone`, the System One API that TypeSafe's Jev,
 OpenJev and Codiv share: a `state` and typed `questions` in, per-question

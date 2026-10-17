@@ -172,6 +172,10 @@ class ResponseEmitter:
         self._items: list[_Item] = []
         self._text_encoder: ResponsesTextDeltaSSEEncoder | None = None
         self.last_data_at = time.monotonic()
+        # Kairyu extension fields (kairyu_trace, kairyu_trace_v2, kairyu_route,
+        # kairyu_verification), the same values Chat Completions reports. They
+        # ride the response object; OpenAI clients ignore unknown keys.
+        self.extensions: dict[str, object] = {}
 
     def _event(self, event_type: str, **payload) -> str:
         frame = _sse(event_type, self._sequence, **payload)
@@ -190,7 +194,7 @@ class ResponseEmitter:
         error: dict | None = None,
         incomplete_details: dict | None = None,
     ) -> dict:
-        return _response_envelope(
+        envelope = _response_envelope(
             self.request,
             response_id=self.response_id,
             created_at=self.created_at,
@@ -200,6 +204,8 @@ class ResponseEmitter:
             error=error,
             incomplete_details=incomplete_details,
         )
+        envelope.update(self.extensions)
+        return envelope
 
     @property
     def open_kind(self) -> str | None:

@@ -1,8 +1,13 @@
 # m11 D7: Open WebUI against the kairyu gateway (chat UI surface).
 # Usage:
-#   docker compose -f deploy/compose/docker-compose.webui.yaml up
+#   export WEBUI_ADMIN_EMAIL=... WEBUI_ADMIN_PASSWORD=...
+#   docker compose -f deploy/compose/docker-compose.webui.yaml up -d --build --wait
+#   docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup
 #   docker compose -f deploy/compose/docker-compose.webui.yaml \
 #     --profile browser-smoke run --rm browser
+# With the admin credentials set, Open WebUI creates that admin on its first
+# start and webui-setup installs the Responses filter; without them the first
+# account is created in the browser and webui-setup only warns.
 services:
   kairyu:
     build:
@@ -33,12 +38,15 @@ services:
 
   webui:
     image: >-
-      ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01
+      ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de
     ports:
       - "3000:8080"
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local
+      # m11 D7 amendment 2026-10-17: the chat UI talks to Kairyu over
+      # /v1/responses (connection index 0 is OPENAI_API_BASE_URL).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       # The admin-visible "new version available" toast lands bottom-right at
       # an unpredictable moment after login and intercepts pointer events on
       # the model selector (flaky webui-e2e "AUTO UI chat" click timeouts).
@@ -59,6 +67,8 @@ services:
       WEBUI_AUTH: "true"
       ENABLE_SIGNUP: "true"
       WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
       DEFAULT_MODELS: default
     depends_on:
       kairyu:
@@ -77,6 +87,27 @@ services:
       timeout: 3s
       retries: 90
       start_period: 10s
+
+  # m11 D7 amendment 2026-10-18: Kairyu's /v1/responses rejects the Chat
+  # Controls fields outside the Responses API, so the admin installs the
+  # Responses filter (webui_setup.py) once Open WebUI is healthy. Run it after
+  # `up` (`run --rm webui-setup`): an exited one-shot service fails `up --wait`.
+  webui-setup:
+    profiles: [setup]
+    image: >-
+      ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de
+    depends_on:
+      webui:
+        condition: service_healthy
+    environment:
+      WEBUI_URL: http://webui:8080
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+    volumes:
+      - ./webui_setup.py:/setup/webui_setup.py:ro
+      - ./webui-responses-filter.py:/setup/webui-responses-filter.py:ro
+    entrypoint: ["python3", "/setup/webui_setup.py"]
+    restart: "no"
 
   browser:
     build:

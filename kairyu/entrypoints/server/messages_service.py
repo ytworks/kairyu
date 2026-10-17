@@ -65,6 +65,7 @@ from kairyu.entrypoints.server.metering import (
 )
 from kairyu.entrypoints.server.middleware import (
     _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
+    _CALLER_API_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
 )
 from kairyu.entrypoints.server.protocol import (
@@ -1473,6 +1474,7 @@ async def _orchestrated_message(
     itself.
     """
 
+    setattr(http_request.state, _CALLER_API_STATE_KEY, "messages")
     if _tools_active(chat_request):
         # #573: tool-bearing AUTO requests consume the in-process raw stream
         # (the state sentinel is unreachable from the wire) for BOTH stream
@@ -1777,6 +1779,7 @@ def add_messages_route(
                     ),
                     legacy_chat_models=legacy_chat_models,
                     upstream_chat_models=upstream_chat_models,
+                    caller_api="messages",
                 )
         except ChatRequestError as error:
             return chat_error(error)

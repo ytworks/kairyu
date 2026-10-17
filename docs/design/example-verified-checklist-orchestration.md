@@ -973,6 +973,19 @@ the misread (0.098 -> 0.131 on replay). The vLLM grammar error (MTP with a
 `json_schema` call, reported upstream as vllm#44006) and the `dedup-case` think
 route stay recorded limits.
 
+Amendment 2026-10-17 (owner decision, plan
+`docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`), both Quyet
+examples: the writer pool (DeepSeek-V4.1 or GLM-5.3-Flash) is also in
+`upstream_responses_models` and `upstream_messages_models`, so each writer
+call reaches vLLM in the public request's API (m1 D8 / m9 D2 amendments);
+the Chat UI connects with `api_type: responses` (m11 D7 amendment), and the
+gates call `/v1/responses` and read `kairyu_verification` from the Responses
+object. `verify.sh api-equivalence` compares `kairyu-verified-tool` with the
+writer's L1 on status and usage keys. The DeepSeek overlay maps the
+encoder's `xhigh` to the max budget (Kairyu's Responses wire form of L3 max);
+GLM's template is checked on GPU. Quyet, System One and the questions,
+thresholds, fixes and budget are unchanged. GPU verification is pending.
+
 ## Limitations
 
 The items below describe the checklist configuration (VCO-D1..D17), which

@@ -268,6 +268,20 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "verification/product/correctness/upstream_api_equivalence.py"
+module = "verification.product.correctness.upstream_api_equivalence"
+id = "product.correctness.upstream_api_equivalence"
+scope = "product"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["openai", "service"]
+documentation = ["verification/README.md", "docs/design/m11-product.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "verification/product/performance/frontier_compare.py"
 module = "verification.product.performance.frontier_compare"
 id = "product.performance.frontier_compare"

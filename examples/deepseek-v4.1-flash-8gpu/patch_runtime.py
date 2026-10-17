@@ -1,7 +1,9 @@
 """Align the pinned V4.1 runtime with official efforts and SM120 page sizes.
 
 The selected runtime's Python frontend is used so a separate Rust renderer
-cannot bypass this change. No Kairyu L2/L3 effort policy is modified.
+cannot bypass this change. No Kairyu L2/L3 effort policy is modified. Kairyu
+sends L3 ``max`` to L1's /v1/responses as OpenAI ``xhigh`` (m11 D4 amendment
+2026-10-17), so ``xhigh`` renders the max budget too.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from pathlib import Path
 
 OFFICIAL_EFFORTS = {"low": 50, "high": 75, "max": 100}
 INITIAL_VLLM_EFFORTS = {"low": 25, "high": 50, "xhigh": 75, "max": 100}
+# Kairyu's Responses spelling of L3 max (OpenAI's effort vocabulary has no max).
+RESPONSES_EFFORTS = {"low": 50, "high": 75, "xhigh": 100, "max": 100}
 
 
 def replace_once(source: str, before: str, after: str) -> str:
@@ -124,16 +128,33 @@ def align_efforts(source: str) -> str:
         raise ValueError("Expected one pinned V4.1 effort mapping")
     node = matches[0]
     current = ast.literal_eval(node.value)
-    if current not in (INITIAL_VLLM_EFFORTS, OFFICIAL_EFFORTS):
+    if current not in (INITIAL_VLLM_EFFORTS, OFFICIAL_EFFORTS, RESPONSES_EFFORTS):
         raise ValueError(f"Unrecognized upstream effort mapping: {current!r}")
     lines = source.splitlines(keepends=True)
     lines[node.lineno - 1 : node.end_lineno] = [
-        f"REASONING_EFFORT_MAPPINGS: Dict[str, int] = {OFFICIAL_EFFORTS!r}\n"
+        f"REASONING_EFFORT_MAPPINGS: Dict[str, int] = {RESPONSES_EFFORTS!r}\n"
     ]
     return "".join(lines)
 
 
+def accept_responses_text_parts(source: str) -> str:
+    """Read Responses text parts as text, as upstream vLLM later does.
+
+    Kairyu forwards a Responses caller's conversation to /v1/responses; vLLM's
+    Responses renderer keeps the ``input_text``/``output_text`` part types,
+    which this build's V4.1 tokenizer rejected (GPU final test 2026-10-18:
+    every image request answered HTTP 400). The nightly that the 6-GPU
+    example uses accepts the same three text types.
+    """
+    return replace_once(
+        source,
+        '                if part_type == "text":\n',
+        '                if part_type in ("text", "input_text", "output_text"):\n',
+    )
+
+
 def main() -> None:
+    import importlib
     import importlib.util
     import runpy
 
@@ -144,11 +165,22 @@ def main() -> None:
     path.write_text(align_efforts(path.read_text()))
     encoder = runpy.run_path(str(path))
     render = encoder["render_reasoning_effort"]
-    for name, budget in OFFICIAL_EFFORTS.items():
+    for name, budget in RESPONSES_EFFORTS.items():
         assert f"Reasoning Effort: {budget} " in render(0, "thinking", name)
     assert "Reasoning Effort: 75 " in render(0, "thinking", None)
     assert render(0, "chat", None) == ""
-    print("V4.1 encoder verified: low=50, high=75, max=100; default=high")
+    print("V4.1 encoder verified: low=50, high=75, max=xhigh=100; default=high")
+
+    tokenizer = importlib.util.find_spec("vllm.tokenizers.deepseek_v41")
+    assert tokenizer is not None and tokenizer.origin is not None
+    tokenizer_path = Path(tokenizer.origin)
+    tokenizer_path.write_text(accept_responses_text_parts(tokenizer_path.read_text()))
+    normalize = importlib.import_module("vllm.tokenizers.deepseek_v41")._normalize_messages
+    parts = [{"type": t, "text": t} for t in ("text", "input_text", "output_text")]
+    assert normalize([{"role": "user", "content": parts}])[0]["content"] == (
+        "text\n\ninput_text\n\noutput_text"
+    )
+    print("V4.1 tokenizer reads Responses input_text/output_text parts")
 
     vllm = importlib.util.find_spec("vllm")
     flashinfer = importlib.util.find_spec("flashinfer")

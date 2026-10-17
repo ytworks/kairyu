@@ -7,7 +7,10 @@ any other version fails the build.
 
 1. Effort aliases: the model author's encoder defines low=50, high=75, max=100
    with high as the default (checkpoint ``encoding/README.md``). The pinned
-   runtime already renders them; the build only checks it.
+   runtime renders them. Kairyu sends L3 ``max`` to L1's /v1/responses as
+   OpenAI ``xhigh`` (m11 D4 amendment 2026-10-17), which the pinned encoder
+   renders as 75, so the build maps ``xhigh`` to the max budget (100) and
+   checks all four.
 2. Page sizes: FlashInfer's SM120 sparse-MLA kernels need 64-token SWA pages,
    V4.1's C1/C2 compression needs 64-token manager blocks (C1=64, C2=32), and
    DeepGEMM's SM120 indexer accepts only those page sizes.
@@ -34,6 +37,8 @@ import runpy
 from pathlib import Path
 
 OFFICIAL_EFFORTS = {"low": 50, "high": 75, "max": 100}
+# Kairyu's Responses spelling of L3 max (OpenAI's effort vocabulary has no max).
+RESPONSES_EFFORTS = {**OFFICIAL_EFFORTS, "xhigh": OFFICIAL_EFFORTS["max"]}
 
 
 def replace_once(source: str, before: str, after: str) -> str:
@@ -49,10 +54,27 @@ def replace_once(source: str, before: str, after: str) -> str:
 # --- 1. effort aliases ---------------------------------------------------------
 
 
+EFFORT_MAPPINGS_ANCHOR = """REASONING_EFFORT_MAPPINGS: Dict[str, int] = {
+    "low": 50,
+    "high": 75,
+    "xhigh": 75,
+    "max": 100,
+}
+"""
+
+
+def xhigh_is_max(source: str) -> str:
+    return replace_once(
+        source,
+        EFFORT_MAPPINGS_ANCHOR,
+        EFFORT_MAPPINGS_ANCHOR.replace('"xhigh": 75', '"xhigh": 100'),
+    )
+
+
 def check_efforts(encoder_path: Path) -> None:
     encoder = runpy.run_path(str(encoder_path))
     render = encoder["render_reasoning_effort"]
-    for name, budget in OFFICIAL_EFFORTS.items():
+    for name, budget in RESPONSES_EFFORTS.items():
         if f"Reasoning Effort: {budget} " not in render(0, "thinking", name):
             raise ValueError(f"encoder renders {name!r} without budget {budget}")
     if "Reasoning Effort: 75 " not in render(0, "thinking", None):
@@ -242,6 +264,7 @@ FLASHINFER_SM120 = "data/include/flashinfer/attention/sparse_mla_sm120"
 # vllm/vllm-openai:nightly of 2026-09-30 (FlashInfer 0.7.0.post1 bundled).
 VLLM_VERSION = "0.30.1rc1.dev396+gac68c3087"
 VLLM_EDITS = [
+    ("vllm", "tokenizers/deepseek_v41_encoding.py", (xhigh_is_max,)),
     ("vllm", "models/deepseek_v41/attention.py", (configurable_swa_pages,)),
     (
         "vllm",
@@ -275,9 +298,6 @@ def main() -> None:
 
     if vllm.__version__ != VLLM_VERSION:
         raise SystemExit(f"patches target vLLM {VLLM_VERSION}, found {vllm.__version__}")
-    check_efforts(_package_root("vllm") / "tokenizers/deepseek_v41_encoding.py")
-    print("V4.1 encoder: low=50, high=75, max=100; default high")
-
     # Transform everything first; write only when every anchor matched.
     updates: list[tuple[Path, str]] = []
     for package, relative, edits in [*VLLM_EDITS, *FLASHINFER_EDITS]:
@@ -289,6 +309,8 @@ def main() -> None:
     for path, source in updates:
         path.write_text(source)
         print(f"patched {path}")
+    check_efforts(_package_root("vllm") / "tokenizers/deepseek_v41_encoding.py")
+    print("V4.1 encoder: low=50, high=75, max=xhigh=100; default high")
 
 
 if __name__ == "__main__":

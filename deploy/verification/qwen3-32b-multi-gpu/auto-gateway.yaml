@@ -38,4 +38,9 @@ orchestrators:
   kairyu-auto-max:
     spec: auto-max-orchestrator.yaml
 
-legacy_chat_models: [qwen3-32b, kairyu-auto, kairyu-auto-max]
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]
+# The replicas are Kairyu L3 servers: a request reaches them in the API its
+# caller used, with the conversation as it is (m9 D2 amendment 2026-10-17).
+upstream_chat_models: [qwen3-32b]
+upstream_responses_models: [qwen3-32b]
+upstream_messages_models: [qwen3-32b]

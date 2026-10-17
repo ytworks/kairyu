@@ -148,7 +148,30 @@ Responses, and batch-worker construction has no mock exception: omitting both
 policies logs an explicit construction warning, and chat requests are rejected
 before dispatch. Completion-only programmatic apps remain valid, but every
 served chat model must provide a `ChatTemplate` or model-scoped legacy
-membership. A local path is required for offline auto-loading; a Hub identifier that has not been
+membership.
+
+A vLLM or Kairyu upstream that renders chat itself takes the caller's own
+messages instead of either policy, and can also take each request in the API
+its caller used (m9 D2 amendments 2026-10-12 and 2026-10-17):
+
+```yaml
+upstream_chat_models: [served-model]       # chat goes as the caller's messages
+upstream_responses_models: [served-model]  # /v1/responses goes as Responses
+upstream_messages_models: [served-model]   # /v1/messages goes as Messages
+```
+
+The second and third lists must name `upstream_chat_models` models whose
+replicas are all `upstream: vllm` or `upstream: kairyu`. A Responses caller
+reaches a listed upstream on `/v1/responses`; a Messages caller prefers
+`/v1/messages`, then `/v1/responses`; an unlisted API is converted to chat as
+before. AUTO role calls follow the public request's API the same way. A
+request a wire cannot carry exactly takes the next one: an assistant prefill
+(the public-output floor's retry) skips Messages, and `parallel_tool_calls:
+false` on vLLM goes as chat, the only vLLM path that keeps a single call. Each
+listed upstream is checked at startup without generating (an empty
+`POST /v1/responses` or `/v1/messages` that answers 404 or 405 fails startup).
+
+A local path is required for offline auto-loading; a Hub identifier that has not been
 materialized locally may use only a self-contained explicit template. If that
 template references tokenizer-owned variables such as `bos_token`, preflight
 fails until the effective tokenizer metadata is available locally; static

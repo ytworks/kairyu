@@ -208,6 +208,78 @@ token-granularity TPOT, results files).
   `test_upstream_chat_model_sends_the_callers_conversation_natively`,
   `test_upstream_chat_model_fails_before_construction_without_upstream_support`,
   `test_usage_fallback_counts_a_conversation_sent_as_native_messages`.
+- **Caller-API amendment (2026-10-17, owner authorization):** a request
+  reaches its upstream in the API its caller used at L3 when the deployment
+  declares that the upstream serves it. `DeploymentSpec.upstream_responses_models`
+  and `upstream_messages_models` name `upstream_chat_models` models whose
+  upstream also serves the OpenAI Responses (`/v1/responses`) and Anthropic
+  Messages (`/v1/messages`) APIs; the builder injects them as the
+  `openai` backend's `upstream_apis` (writing that option directly is
+  rejected) and fails the build unless every replica's profile declares the
+  API (`vllm`, `kairyu`). `GenerationRequest.caller_api` records the public
+  API (`chat`, `responses`, `messages`); Responses and Messages front doors
+  set it, and AUTO delegations carry it in request state to every L1 role
+  call (m1 D8 amendment 2026-10-17). The backend picks the wire: a Messages
+  caller prefers Messages, then Responses, then chat; a Responses caller
+  prefers Responses, then chat; chat stays chat. A wire is skipped when it is
+  not declared or cannot express the request (Messages: no seed or penalties;
+  Responses: no `n > 1`, token logprobs, `best_of`; pre-rendered and token
+  prompts keep `/completions`). A field a wire lacks still fits when its value
+  is the one the upstream applies without it, and only then: vLLM's
+  ResponsesRequest never reads `min_p` and always samples with 0, vLLM builds
+  an Anthropic request at priority 0, and a Kairyu replica's Messages boundary
+  takes priority only from its own tenancy; any other value would be dropped
+  silently, so the request takes the next wire (owner decision 2026-10-17;
+  the route judge's explicit `min_p` 0 therefore stays on the caller's API). The conversation keeps Kairyu's
+  backend-neutral form (`conversation_prefix` or a `MultimodalPrompt`) and is
+  expressed turn for turn on the wire (`kairyu/engine/upstream_wire.py`):
+  system turns stay message items, assistant reasoning becomes reasoning
+  items/thinking blocks, tool calls and results become `function_call` /
+  `function_call_output` items or `tool_use` / `tool_result` blocks, an
+  assistant prefill is a continued final turn. Kairyu keeps conversation
+  state: the Responses wire is stateless (`store: false`). Replies are read
+  back into text, reasoning and usage; tool calls keep the `<tool_call>` text
+  form, so every L3/L2 consumer is unchanged. Effort on the Responses wire is
+  OpenAI's enum: `max` is sent as `xhigh` and each L1 template maps it back
+  (m11 D4 amendment 2026-10-17); the Messages wire sends
+  `output_config.effort` unchanged. A declared API the upstream does not
+  serve (404/405 to an empty POST) fails startup. Kairyu-to-Kairyu gateways
+  declare their static replica pools the same way; discovery pools cannot
+  declare native APIs and stay legacy. The upstream-chat known limit is
+  removed: prefix placement hashes a native conversation's canonical turns
+  ahead of the prompt (`replica.placement_text`), so a later turn reaches the
+  replica holding its prefix whichever API carried it.
+  Why (framework boundary): (1) every L3 API converged on one chat request to
+  L1, so an upstream serving Responses or Messages never received a request
+  in the API the caller used, and a native conversation lost prefix
+  placement; (2) no extension point selects the upstream wire (the backend
+  built only chat/completions bodies); (3) observable for any vLLM or Kairyu
+  upstream: the L1 access log shows `/v1/chat/completions` for a Responses
+  caller, and a two-turn native conversation on a multi-replica pool landed
+  on a different replica; (4) two model lists over a capability bit, one
+  request field, and wire codecs in the backend; which models declare them
+  stays in the deployments. Code: `kairyu/engine/upstream_wire.py`,
+  `OpenAICompatBackend._select_wire`/`startup`, `builder._entry_options`;
+  tests: `tests/server/test_upstream_api_forwarding.py`,
+  `test_native_conversation_turns_share_a_replica`.
+- **Caller-API review amendment (2026-10-18, owner review of PR #656):** two
+  wires lost what the chat wire keeps. (1) An assistant prefill never takes
+  Messages: vLLM (v0.31.0) builds its chat request from a Messages body
+  without `continue_final_message`, so the prefill became a closed turn and a
+  new assistant turn began, and the public-output floor's retry published its
+  private reasoning as answer text; such a request takes Responses (the final
+  item marked `incomplete`, which vLLM continues) or chat. (2)
+  `parallel_tool_calls: false` is not expressible on vLLM's native wires:
+  vLLM keeps one tool call only on its chat path (v0.23.0 and v0.31.0), its
+  Responses serving never applies the flag, and v0.23.0's Anthropic
+  `tool_choice` drops `disable_parallel_tool_use`, while Kairyu's Responses
+  and Messages boundaries fail a reply with several calls
+  (`parallel_tool_calls_not_satisfied`); only the default `true` stays on the
+  caller's API, `false` takes chat (the 2026-10-17 neutral-value rule). Why:
+  owner review findings (P1, P2) reproduced against the pinned vLLM sources;
+  the owner extended (2) to the Responses wire. Tests:
+  `test_an_assistant_prefill_continues_on_responses_not_messages`,
+  `test_a_single_call_limit_stays_on_vllm_chat`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and

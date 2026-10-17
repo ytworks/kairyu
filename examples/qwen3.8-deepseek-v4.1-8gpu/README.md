@@ -1,7 +1,7 @@
 # Qwen3.8 × 2 + DeepSeek-V4.1 (six GPUs) judged ensemble on 8 × RTX PRO 6000
 
-This example serves a two-route version of the ensemble product of
-[`qwen3.8-deepseek-v4-8gpu`](../qwen3.8-deepseek-v4-8gpu/README.md).
+This example serves a two-route version of the ensemble product of the former
+`qwen3.8-deepseek-v4-8gpu` (DeepSeek-V4; removed 2026-10-18).
 
 - **L1.** DeepSeek-V4.1-Flash runs on six GPUs and Qwen3.8-27B runs on the
   other two.
@@ -14,7 +14,7 @@ Design: DTO-D16 and DTO-D17 in
 [`example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md).
 
 ```text
-Open WebUI (:3009)
+Open WebUI (:3009, over the Responses API)
     -> Kairyu L3 product API (:8009; model kairyu-auto-max)
         -> Kairyu L2 route judge (one Qwen non-thinking call, DTO-D13/D17):
              DEEPSEEK_THINK  or  ENSEMBLE
@@ -105,9 +105,12 @@ records the verdict, the offered labels, and the judge's token usage, and
     and public `max_tokens`.
   - The 262,144 cap is min()'d with the caller's allowance. From the Chat
     UI (default 65536) the caller's cap binds first.
-- **Every DeepSeek call thinks** (DTO-D16). It sends `reasoning_effort`,
-  which the official V4.1 encoder renders as the thinking budget: low 50,
-  high 75, max 100.
+- **Every DeepSeek call thinks** (DTO-D16). It sends its effort, which the
+  official V4.1 encoder renders as the thinking budget: low 50, high 75,
+  max 100.
+  - On chat the effort is `reasoning_effort`; on the Responses API it is
+    `reasoning.effort`, where L3 `max` travels as `xhigh` (OpenAI's enum has
+    no `max`) and overlay edit 8 renders it as 100.
   - The Qwen judge and head declare no effort, so they are sent
     `enable_thinking: false`.
 - **Public-output floor** (DTO-D9/D15). The thinking final units
@@ -218,9 +221,9 @@ Design notes (details:
     units, 1 empty-output re-dispatch, 3 audit verdicts, 3 inconclusive
     re-verifies, and 2 refinements.
 - **Visible internal work.** Completed L2/L1 stages are sent as
-  model-attributed `reasoning_content`. Open WebUI shows them in an
-  expandable internal-work item; only the final answer is sent as
-  `content`.
+  model-attributed reasoning (`reasoning_content` on chat, reasoning items on
+  the Responses API). Open WebUI shows them in an expandable internal-work
+  item; only the final answer is sent as the message text.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one embedding
 model, `embed-small`. L2 borrows the deployment-owned L1 pools through
@@ -257,6 +260,36 @@ The ensemble accepts one image per request, because that is the Qwen
 pool's image policy. A request with more images is rejected by the
 ensemble's Qwen roles. `deepseek_think` alone accepts up to eight.
 
+## Chat UI and the L1 APIs (2026-10-17)
+
+GPU verification of this section is pending.
+
+- **The Chat UI uses the Responses API** (m11 D7 amendment). Its connection
+  sets `api_type: responses` in `OPENAI_API_CONFIGS`, so Open WebUI sends each
+  turn to Kairyu's `/v1/responses`. It streams: Open WebUI v0.12.3 drops the
+  reasoning items of a non-streaming Responses result, which would hide the
+  internal-work item, so `stream_response: false` is gone.
+- **The effort dropdown filter also normalizes the body.** Kairyu's
+  `/v1/responses` is the strict OpenAI contract, so
+  `webui-reasoning-effort-filter.py` sends the effort as `reasoning.effort`,
+  drops sampling keys the Responses API lacks (`seed`, `top_k`, `min_p`,
+  `chat_template_kwargs`, …), keeps only Responses fields on saved output
+  items, and sets `store: false` (the UI sends the whole conversation every
+  turn). `up` checks through `/openai/config` that the connection really is
+  `api_type: responses`.
+- **L1 receives the caller's API** (m9 D2 amendment). Both pools are listed
+  in `upstream_chat_models`, `upstream_responses_models`, and
+  `upstream_messages_models`, so chat reaches vLLM as the caller's own
+  messages, Responses as Responses, and Anthropic Messages as Messages.
+  Kairyu checks at startup that each L1 serves the declared routes.
+- **The AUTO roles follow the public request's API** (m1 D8 amendment). A
+  Chat UI turn reaches both pools on `/v1/responses`; the role prompts need
+  no `/completions` (no prompt prefix or suffix, no pre-rendered template).
+  The DAG roles' sampling (`top_k`, `presence_penalty`, seeds) and the
+  floor's assistant prefill (sent as an `incomplete` assistant item, which
+  vLLM continues) have a Responses form; so does the route judge's request
+  (its `min_p` is 0, the value vLLM's Responses request always samples with).
+
 ## DeepSeek L1 and its overlay
 
 The DeepSeek service copies the committed six-GPU command and differs in two
@@ -281,9 +314,21 @@ turn as an open continuation:
 - the span becomes the turn's reasoning;
 - the end-of-sentence token is omitted.
 
+**Edit 8** (2026-10-17) maps the encoder's `xhigh` to the max budget (100).
+The pinned encoder treats `xhigh` as 75 (= high), but Kairyu sends an L3
+`max` to `/v1/responses` as `xhigh`, so without the edit a Responses role at
+max would think at high. The build checks both the official efforts before
+patching and `xhigh` = 100 after it.
+
 Other renderings are byte-identical. `check_sm120_kernels.py` is the
 numerical kernel gate; run it inside the built image as the six-GPU README
 describes.
+
+Edit 8 changed the overlay. The served vLLM image
+(`local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh`) is rebuilt by this
+change; its 2026-10-18 build is pinned as
+`sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 ## Start
 
@@ -301,16 +346,19 @@ export QWEN_MODEL_SEED=/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/models/qw
   needs 256 GiB available for the Engram tables.
 - Pins DeepSeek to the NUMA nodes of GPUs 0–5 and each Qwen replica to its
   GPU's node.
-- Builds the overlay and refuses any image ID other than the pinned one.
+- Builds the overlay and refuses any image ID other than the pinned one
+  (edit 8's build is pinned; see above).
 - Attests both checkpoints by tree SHA-256; a seeded copy is re-hashed.
 - Waits for the stack.
 - Probes the DeepSeek L1 directly:
-  - rendered efforts, chat mode, and the edit-7 continuation;
+  - rendered efforts (including `xhigh` = max, edit 8), chat mode, and the
+    edit-7 continuation;
   - exact finite `323` answers from every DP rank in default, low, and chat
     mode;
   - one image.
 - Validates the served L2 policy against `example.json`.
-- Installs the Chat UI effort dropdown.
+- Installs the Chat UI effort dropdown filter and checks that the Chat UI's
+  connection uses the Responses API.
 
 `run.sh down|status|logs` manage the stack.
 
@@ -322,23 +370,41 @@ export QWEN_MODEL_SEED=/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/models/qw
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max-coding --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh vision --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh tool-calling --no-start
+./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh api-equivalence --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/browser-smoke.sh
 ```
 
+Every gate calls L3 on `/v1/responses`, the API the Chat UI uses (2026-10-17;
+GPU verification pending). The launcher's DeepSeek L1 probes stay on vLLM's
+chat API: they read log-probabilities and `/tokenize` renderings, which the
+Responses API does not carry.
+
 - **`serving-auto-max` and `serving-auto-max-coding`** are the V4 example's
-  route-aware matrices. The coding matrix's TTFT gate is ≤ 2 × the paired
-  direct V4.1 row. No pinned fallback denominator exists yet, so a failed
-  paired row fails the gate.
+  route-aware matrices, run with `serving_bench.py --api responses`. Rows end
+  naturally within the combined cap and are counted in public tokens; the
+  Responses API has no `seed`, so the rows no longer send one. The coding
+  matrix's TTFT gate is ≤ 2 × the paired direct V4.1 row, which also runs
+  over the Responses API so both sides time the first output-text delta. No
+  pinned fallback denominator exists yet, so a failed paired row fails the
+  gate. Rows measured on chat before 2026-10-17 are not directly comparable.
 - **`vision`** sends one-image requests through the judge. Every answer must
   name the image colour, and at least one request must take the ensemble.
   The DeepSeek L1's `vllm:mm_cache_queries_total` must grow by at least one
   image per DeepSeek generation stage, which proves those stages received
   the image itself.
 - **`tool-calling`** requires one executable bash tool call through L3.
+- **`api-equivalence`** sends the same Responses requests (text, stream,
+  efforts low/high/xhigh, a tool round trip, an image, a length cap, and the
+  Open WebUI v0.12.3 body) to the DeepSeek L1 and to `kairyu-auto-max`
+  (`verification/product/correctness/upstream_api_equivalence.py`). Both
+  sides are validated against the OpenAI Responses types; because the AUTO
+  model's output items come from its roles, they are compared on status and
+  usage keys. The request counters of the DeepSeek L1 and both Qwen replicas
+  must show every L3 call on `/v1/responses` and none on chat.
 - **`browser-smoke.sh`** runs this example's own browser gate,
-  `webui-browser-smoke.mjs`. It checks the one product model, the folded
-  internal-work item, and the separate final answer. It requires the
-  DeepSeek-V4.1 (`tier2`) attribution, plus the Qwen one when the ensemble
-  ran.
+  `webui-browser-smoke.mjs`. It checks the one product model, the Responses
+  connection, streaming, the folded internal-work item, and the separate
+  final answer. It requires the DeepSeek-V4.1 (`tier2`) attribution, plus
+  the Qwen one when the ensemble ran.
 
 Results and every measured deviation go to [`MEASUREMENTS.md`](MEASUREMENTS.md).

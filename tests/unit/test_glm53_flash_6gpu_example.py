@@ -90,8 +90,8 @@ def test_a_tp_group_must_share_a_numa_node(example):
         control.dp_rank_numa_layout({0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 2}, pairs)
 
 
-def test_chat_ui_filter_sends_only_the_public_effort():
-    """Kairyu rejects chat_template_kwargs on this model's text requests (HTTP 400)."""
+def test_chat_ui_filter_sends_only_responses_fields():
+    """Kairyu's /v1/responses rejects chat-only fields such as chat_template_kwargs (400)."""
     spec = importlib.util.spec_from_file_location(
         "glm_effort_filter", EXAMPLE / "webui-reasoning-effort-filter.py"
     )
@@ -103,8 +103,8 @@ def test_chat_ui_filter_sends_only_the_public_effort():
         return {"valves": flt.UserValves(reasoning_effort=effort)}
 
     body = flt.inlet({"reasoning_effort": "low", "chat_template_kwargs": {"x": 1}}, user("default"))
-    assert "reasoning_effort" not in body and "chat_template_kwargs" not in body
-    assert flt.inlet({}, user("high")) == {"reasoning_effort": "high"}
+    assert body == {"store": False}
+    assert flt.inlet({}, user("high")) == {"reasoning": {"effort": "high"}, "store": False}
 
 
 @pytest.mark.parametrize(
@@ -202,30 +202,38 @@ def test_api_check_follows_the_bind_address(example):
     )
 
 
-_CALL = {"index": 0, "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+_CALL = {
+    "type": "function_call",
+    "call_id": "call_1",
+    "name": "bash",
+    "arguments": '{"command": "ls"}',
+}
+_CALL_EVENTS = [
+    {"type": "response.created", "response": {}},
+    {"type": "response.output_item.added", "output_index": 0, "item": {**_CALL, "arguments": ""}},
+    {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": '{"command"'},
+    {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": ': "ls"}'},
+    {"type": "response.output_item.done", "output_index": 0, "item": _CALL},
+]
+_COMPLETED = {
+    "type": "response.completed",
+    "response": {"status": "completed", "output": [_CALL], "usage": {}},
+}
 
 
 @pytest.mark.parametrize(
     "events,error",
     [
-        ([{"tool_calls": [_CALL]}, "tool_calls", "[DONE]"], None),
-        ([{"tool_calls": [_CALL]}, "tool_calls", {"error": {"message": "x"}}], "stream error"),
-        ([{"tool_calls": [_CALL]}, "tool_calls"], "terminal markers"),
+        ([*_CALL_EVENTS, _COMPLETED], None),
+        ([*_CALL_EVENTS, {"type": "error", "message": "x"}], "stream error"),
+        (_CALL_EVENTS, "finish_reason is None"),
     ],
 )
 def test_streamed_tool_call_gate_rejects_broken_streams(example, events, error):
-    lines = []
-    for event in events:
-        if event == "[DONE]":
-            body = "[DONE]"
-        elif event == "tool_calls":
-            body = json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
-        elif "error" in event:
-            body = json.dumps(event)
-        else:
-            body = json.dumps({"choices": [{"delta": event}]})
-        lines.append(f"data: {body}")
-    result = example("verification").streamed_tool_call_error("\n".join(lines))
+    """A Responses stream (read back as chat chunks) passes only when it completes."""
+    control = example("control")
+    sse = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+    result = example("verification").streamed_tool_call_error(control.chat_stream_view(sse))
     assert (result is None) if error is None else (error in result)
 
 
