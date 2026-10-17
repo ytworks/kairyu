@@ -12,8 +12,12 @@ Kairyu L3, then requires the same Responses structure from both:
 - per case, L1 and L3 agree on status, output item types, the collapsed event
   types, the usage keys, function names and the case's own check (an exact
   answer, a reasoning item, a tool round trip, an image answer, a length cap);
-- with ``--l1-metrics``, L1's own request counters show that L3 reached it on
-  ``/v1/responses``.
+- with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
+  replica publishes no host port), the replicas' own request counters show
+  that L3 reached them on ``/v1/responses``;
+- with ``--l3-orchestrated`` the L3 model is an AUTO model whose output items
+  come from its roles, so L1 and L3 are compared on status and usage keys
+  only; both sides are still validated in full.
 
 Requests are captured by a stdlib program that runs locally, or inside the L1
 container (``--l1-docker``) when L1 publishes no host port.
@@ -198,12 +202,15 @@ def summarize(cap: Capture, *, strict: bool) -> tuple[dict, list[str]]:
 
 
 _COMPARED = ("status", "incomplete_reason", "items", "events", "usage_keys", "functions")
+_COMPARED_ORCHESTRATED = ("status", "incomplete_reason", "usage_keys")
 
 
-def compare(l1: dict, l3: dict, *, exact_input_tokens: bool = False) -> list[str]:
+def compare(
+    l1: dict, l3: dict, *, exact_input_tokens: bool = False, orchestrated: bool = False
+) -> list[str]:
     findings = [
         f"{key}: L1 {l1.get(key)!r} != L3 {l3.get(key)!r}"
-        for key in _COMPARED
+        for key in (_COMPARED_ORCHESTRATED if orchestrated else _COMPARED)
         if l1.get(key) != l3.get(key)
     ]
     if exact_input_tokens and l1.get("input_tokens") != l3.get("input_tokens"):
@@ -258,7 +265,9 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
                 if problem:
                     record["findings"].append(f"{target.name}: {problem}")
             summaries.append(summary)
-        record["findings"] += compare(*summaries, exact_input_tokens=exact)
+        record["findings"] += compare(
+            *summaries, exact_input_tokens=exact, orchestrated=args.l3_orchestrated
+        )
         record.setdefault("summaries", []).append(summaries)
         return summaries[0], summaries[1]
 
@@ -365,22 +374,28 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
     return record
 
 
-def _metric_counts(target: Target, metrics_url: str) -> dict[str, float]:
-    command = (
-        ["docker", "exec", "-i", target.docker, "python3", "-c", _METRICS_PROGRAM, metrics_url]
-        if target.docker
-        else [sys.executable, "-c", _METRICS_PROGRAM, metrics_url]
-    )
-    text = subprocess.run(command, capture_output=True, check=True, text=True).stdout
+def _metric_counts(endpoints: list[str]) -> dict[str, float]:
+    """Request counts per handler, summed over every L1 replica's /metrics."""
+
     counts: dict[str, float] = {}
-    for line in text.splitlines():
-        if not line.startswith("http_requests_total{"):
-            continue
-        handler = re.search(r'handler="([^"]+)"', line)
-        if handler:
-            counts[handler.group(1)] = counts.get(handler.group(1), 0.0) + float(
-                line.rsplit(" ", 1)[1]
-            )
+    for endpoint in endpoints:
+        container, _, url = endpoint.partition("=")
+        if "://" in container:
+            container, url = "", endpoint
+        command = (
+            ["docker", "exec", "-i", container, "python3", "-c", _METRICS_PROGRAM, url]
+            if container
+            else [sys.executable, "-c", _METRICS_PROGRAM, url]
+        )
+        text = subprocess.run(command, capture_output=True, check=True, text=True).stdout
+        for line in text.splitlines():
+            if not line.startswith("http_requests_total{"):
+                continue
+            handler = re.search(r'handler="([^"]+)"', line)
+            if handler:
+                counts[handler.group(1)] = counts.get(handler.group(1), 0.0) + float(
+                    line.rsplit(" ", 1)[1]
+                )
     return counts
 
 
@@ -389,7 +404,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--l1", required=True, help="L1 OpenAI base URL (…/v1)")
     parser.add_argument("--l1-model", required=True)
     parser.add_argument("--l1-docker", default=None, help="run L1 captures inside this container")
-    parser.add_argument("--l1-metrics", default=None, help="L1 Prometheus URL (…/metrics)")
+    parser.add_argument(
+        "--l1-metrics",
+        action="append",
+        default=[],
+        help="an L1 replica's Prometheus URL (…/metrics), or CONTAINER=URL to read it "
+        "inside that container; repeat once per replica L3 can reach",
+    )
     parser.add_argument("--l3", required=True, help="Kairyu OpenAI base URL (…/v1)")
     parser.add_argument("--l3-model", required=True)
     parser.add_argument("--api-key", default="")
@@ -401,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--efforts", default="low,high,xhigh")
     parser.add_argument("--expect-reasoning", action="store_true")
     parser.add_argument("--exact-input-tokens", action="store_true")
+    parser.add_argument(
+        "--l3-orchestrated",
+        action="store_true",
+        help="the L3 model is an AUTO model: compare status and usage keys only",
+    )
     parser.add_argument("--max-output-tokens", type=int, default=4096)
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
@@ -409,11 +435,11 @@ def main(argv: list[str] | None = None) -> int:
         Target("l1", args.l1, args.l1_model, args.api_key, args.l1_docker),
         Target("l3", args.l3, args.l3_model, args.api_key),
     )
-    before = _metric_counts(targets[0], args.l1_metrics) if args.l1_metrics else None
+    before = _metric_counts(args.l1_metrics) if args.l1_metrics else None
     records = [run_case(case, targets, args) for case in args.cases.split(",") if case]
     report: dict = {"cases": records}
     if before is not None:
-        after = _metric_counts(targets[0], args.l1_metrics)
+        after = _metric_counts(args.l1_metrics)
         delta = {h: after.get(h, 0.0) - before.get(h, 0.0) for h in after}
         report["l1_request_delta"] = delta
         report["requests_sent"] = dict(_SENT)
