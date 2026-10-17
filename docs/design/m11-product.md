@@ -531,8 +531,9 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   `verification/product/correctness/fixtures/`) to an L1 directly and to L3,
   validates L3 against the openai-python types, records L1-only events as
   extensions, compares status, item types, collapsed events, usage keys and
-  function names, and reads L1's `http_requests_total` to confirm L3 reached it
-  on `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
+  function names (status and usage keys only for an AUTO model), and sums every
+  L1 replica's `http_requests_total` to confirm L3 reached them on
+  `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
 
 ### D5 — Vision wire format
 

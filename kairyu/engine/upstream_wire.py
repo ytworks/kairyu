@@ -273,16 +273,16 @@ def responses_text_format(response_format: object) -> dict[str, object] | None:
     raise WireError(f"response_format type {kind!r} cannot be sent on the Responses wire")
 
 
-# Chat-wire sampling fields the Responses wire expresses, by upstream: vLLM
-# executes its documented sampling extensions; a Kairyu replica's Responses
-# boundary is the strict OpenAI surface.
+# Chat-wire sampling fields the Responses wire expresses, by upstream: vLLM's
+# ResponsesRequest executes these extensions (it has no ``min_p``, which it
+# would ignore, so such a request stays on chat); a Kairyu replica's
+# Responses boundary is the strict OpenAI surface.
 _RESPONSES_FIELDS = {
     "vllm": frozenset(
         {
             "temperature",
             "top_p",
             "top_k",
-            "min_p",
             "presence_penalty",
             "frequency_penalty",
             "repetition_penalty",
@@ -312,7 +312,7 @@ _RESPONSES_FIELDS = {
     ),
 }
 # Fields a chat body carries with neutral values that need no translation.
-_NEUTRAL_CHAT_FIELDS = {"n": 1}
+_NEUTRAL_CHAT_FIELDS = {"n": 1, "priority": 0}
 
 
 def _unsupported(fields: AbstractSet[str], validated: Mapping[str, object]) -> list[str]:
@@ -365,7 +365,6 @@ def responses_body(
         "temperature",
         "top_p",
         "top_k",
-        "min_p",
         "presence_penalty",
         "frequency_penalty",
         "repetition_penalty",
@@ -684,7 +683,6 @@ _MESSAGES_FIELDS = {
             "max_tokens",
             "max_completion_tokens",
             "parallel_tool_calls",
-            "priority",
             "reasoning_effort",
             "chat_template_kwargs",
             "response_format",
@@ -699,7 +697,6 @@ _MESSAGES_FIELDS = {
             "max_tokens",
             "max_completion_tokens",
             "parallel_tool_calls",
-            "priority",
             "reasoning_effort",
         }
     ),
