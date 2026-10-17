@@ -355,6 +355,12 @@ a Responses caller); (4) one immutable field threaded to the existing request
 builders; which worker declares which API stays in the deployment. Test:
 `test_auto_role_calls_follow_the_callers_api`.
 
+Review amendment (2026-10-18, owner review of PR #656): MoA built its setup
+with the caller's API only when `prepare_request()` ran first; `run_moa` and
+`stream_moa` now take `caller_api` and the orchestrator passes the request's,
+so proposals and synthesis keep the caller's API with or without a prepared
+handle. Test: `test_unprepared_moa_keeps_the_callers_api`.
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in

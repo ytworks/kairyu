@@ -1637,7 +1637,9 @@ class OpenAICompatBackend:
         The caller's own API wins when the deployment declares that this
         upstream serves it and the request can be expressed there; otherwise
         the next API in the caller's preference order, finally chat.
-        Pre-rendered and token prompts keep their completions/chat path.
+        Pre-rendered and token prompts keep their completions/chat path. An
+        assistant prefill never takes Messages: vLLM converts a Messages
+        request into a fresh assistant turn, not a continuation of the last.
         """
 
         if (
@@ -1656,11 +1658,15 @@ class OpenAICompatBackend:
             upstream = self._capabilities.upstream
             if wire == "responses" and responses_expressible(upstream, validated):
                 return wire
-            if wire == "messages" and messages_expressible(
-                upstream,
-                validated,
-                self._message_shape(request),
-                max_model_len=self.max_model_len,
+            if (
+                wire == "messages"
+                and request.assistant_prefill is None
+                and messages_expressible(
+                    upstream,
+                    validated,
+                    self._message_shape(request),
+                    max_model_len=self.max_model_len,
+                )
             ):
                 return wire
         return None

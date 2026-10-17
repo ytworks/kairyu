@@ -290,7 +290,6 @@ _RESPONSES_FIELDS = {
             "ignore_eos",
             "max_tokens",
             "max_completion_tokens",
-            "parallel_tool_calls",
             "priority",
             "reasoning_effort",
             "chat_template_kwargs",
@@ -314,11 +313,15 @@ _RESPONSES_FIELDS = {
 # one the upstream applies without it, by (upstream, wire): vLLM's
 # ResponsesRequest never reads min_p and always samples with 0.0; vLLM builds
 # an Anthropic request with the default priority 0; a Kairyu replica's
-# Messages boundary takes priority only from its own tenancy, else 0. Any
-# other value would be silently dropped, so the request takes the next wire.
+# Messages boundary takes priority only from its own tenancy, else 0. vLLM
+# keeps a single tool call only on its chat path (v0.23.0 and v0.31.0): its
+# Responses serving never applies parallel_tool_calls=false and v0.23.0's
+# Anthropic tool_choice drops disable_parallel_tool_use, so only the default
+# true is expressible there. Any other value would be silently dropped, so the
+# request takes the next wire.
 _NEUTRAL_FIELDS: dict[tuple[str, str], dict[str, object]] = {
-    ("vllm", "responses"): {"n": 1, "min_p": 0.0},
-    ("vllm", "messages"): {"n": 1, "priority": 0},
+    ("vllm", "responses"): {"n": 1, "min_p": 0.0, "parallel_tool_calls": True},
+    ("vllm", "messages"): {"n": 1, "priority": 0, "parallel_tool_calls": True},
     ("kairyu", "responses"): {"n": 1},
     ("kairyu", "messages"): {"n": 1, "priority": 0},
 }
@@ -697,7 +700,6 @@ _MESSAGES_FIELDS = {
             "stop",
             "max_tokens",
             "max_completion_tokens",
-            "parallel_tool_calls",
             "reasoning_effort",
             "chat_template_kwargs",
             "response_format",

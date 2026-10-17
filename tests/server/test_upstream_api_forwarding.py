@@ -5,7 +5,9 @@ the request its fake OpenAI-compatible upstream received: a Responses caller
 reaches an upstream declared in ``upstream_responses_models`` on
 ``/v1/responses`` with the conversation as it is, a Messages caller prefers
 ``/v1/messages`` then ``/v1/responses``, everything else stays on chat, and an
-AUTO model's role calls follow the caller's API.
+AUTO model's role calls follow the caller's API. An assistant prefill skips
+Messages (vLLM opens a new turn there) and a single-call limit stays on vLLM's
+chat path, the only one that applies it.
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ import pytest
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.registry import create_backend
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS, SamplingParams
 
 
 def _sse(events: list[dict], *, named: bool = True) -> bytes:
@@ -317,6 +321,72 @@ async def test_messages_caller_prefers_messages_then_responses_then_chat(
         assert body["messages"] == [{"role": "user", "content": "Hi"}]
         assert body["max_tokens"] == 64
         assert body["output_config"] == {"effort": "max"}
+
+
+async def test_an_assistant_prefill_continues_on_responses_not_messages(upstream):
+    backend = OpenAICompatBackend(
+        base_url="http://vllm.test/v1",
+        model="m",
+        api_key_env=None,
+        upstream="vllm",
+        upstream_apis=("responses", "messages"),
+        transport=httpx.MockTransport(upstream.handler),
+    )
+    await backend.generate(
+        GenerationRequest(
+            request_id="prefill",
+            prompt="Hi",
+            # As the HTTP boundary leaves them: model-owned defaults omitted.
+            sampling_params=SamplingParams(max_tokens=16).with_generation_config_omitted(
+                GENERATION_CONFIG_SAMPLING_FIELDS
+            ),
+            assistant_prefill="Partial answer",
+            caller_api="messages",
+        )
+    )
+    await backend.shutdown()
+
+    ((_host, path, body),) = upstream.calls
+    assert path == "/v1/responses"
+    assert body["input"][-1] == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Partial answer"}],
+        "status": "incomplete",
+    }
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "request_body"),
+    [
+        ("/v1/responses", {"input": "Look k up.", "tools": [_TOOL], "parallel_tool_calls": False}),
+        (
+            "/v1/messages",
+            {
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Look k up."}],
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "description": "Look a value up.",
+                        "input_schema": _TOOL["parameters"],
+                    }
+                ],
+                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+            },
+        ),
+    ],
+    ids=["responses", "messages"],
+)
+async def test_a_single_call_limit_stays_on_vllm_chat(upstream, endpoint, request_body):
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=True, messages=True)))
+    async with _client(app) as client:
+        response = await client.post(endpoint, json={"model": "remote", **request_body})
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    assert path == "/v1/chat/completions"
+    assert body["parallel_tool_calls"] is False
 
 
 async def test_auto_role_calls_follow_the_callers_api(upstream, tmp_path):

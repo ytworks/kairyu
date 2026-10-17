@@ -2355,6 +2355,7 @@ class Orchestrator:
                             final_tool_call_protocol=call.tool_call_protocol,
                             shared_prefix=self._shared_prefix,
                             reasoning_effort=self._effective_reasoning_effort(call),
+                            caller_api=call.caller_api,
                         )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
                     # Reconcile proposals + synthesis with the actual result cost;
@@ -3161,6 +3162,7 @@ class Orchestrator:
                         shared_prefix=self._shared_prefix,
                         usage_observer=observe_moa_usage,
                         reasoning_effort=self._effective_reasoning_effort(call),
+                        caller_api=call.caller_api,
                     )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:

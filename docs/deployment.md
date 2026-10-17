@@ -164,7 +164,10 @@ The second and third lists must name `upstream_chat_models` models whose
 replicas are all `upstream: vllm` or `upstream: kairyu`. A Responses caller
 reaches a listed upstream on `/v1/responses`; a Messages caller prefers
 `/v1/messages`, then `/v1/responses`; an unlisted API is converted to chat as
-before. AUTO role calls follow the public request's API the same way. Each
+before. AUTO role calls follow the public request's API the same way. A
+request a wire cannot carry exactly takes the next one: an assistant prefill
+(the public-output floor's retry) skips Messages, and `parallel_tool_calls:
+false` on vLLM goes as chat, the only vLLM path that keeps a single call. Each
 listed upstream is checked at startup without generating (an empty
 `POST /v1/responses` or `/v1/messages` that answers 404 or 405 fails startup).
 

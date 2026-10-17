@@ -1072,6 +1072,27 @@ async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
     assert [request.reasoning_effort for request in synthesis_requests] == ["high"]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_unprepared_moa_keeps_the_callers_api(stream) -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2}, moa_samples=2)
+    call = OrchestrationRequest(
+        prompt=COMPLEX, sampling_params=SamplingParams(), caller_api="responses"
+    )
+
+    if stream:
+        result_stream = await orchestrator.run_chat(call, stream=True)
+        assert [event async for event in result_stream][-1].kind == "result"
+    else:
+        assert (await orchestrator.run(call)).completions
+
+    requests = tier1.generated + (tier2.streamed if stream else tier2.generated)
+    assert len(requests) == 3
+    assert {request.caller_api for request in requests} == {"responses"}
+
+
 async def test_async_prepare_rejects_exact_moa_seed_before_dispatch() -> None:
     events: list[tuple[str, str]] = []
 

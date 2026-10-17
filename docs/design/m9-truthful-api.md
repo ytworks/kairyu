@@ -262,6 +262,24 @@ token-granularity TPOT, results files).
   `OpenAICompatBackend._select_wire`/`startup`, `builder._entry_options`;
   tests: `tests/server/test_upstream_api_forwarding.py`,
   `test_native_conversation_turns_share_a_replica`.
+- **Caller-API review amendment (2026-10-18, owner review of PR #656):** two
+  wires lost what the chat wire keeps. (1) An assistant prefill never takes
+  Messages: vLLM (v0.31.0) builds its chat request from a Messages body
+  without `continue_final_message`, so the prefill became a closed turn and a
+  new assistant turn began, and the public-output floor's retry published its
+  private reasoning as answer text; such a request takes Responses (the final
+  item marked `incomplete`, which vLLM continues) or chat. (2)
+  `parallel_tool_calls: false` is not expressible on vLLM's native wires:
+  vLLM keeps one tool call only on its chat path (v0.23.0 and v0.31.0), its
+  Responses serving never applies the flag, and v0.23.0's Anthropic
+  `tool_choice` drops `disable_parallel_tool_use`, while Kairyu's Responses
+  and Messages boundaries fail a reply with several calls
+  (`parallel_tool_calls_not_satisfied`); only the default `true` stays on the
+  caller's API, `false` takes chat (the 2026-10-17 neutral-value rule). Why:
+  owner review findings (P1, P2) reproduced against the pinned vLLM sources;
+  the owner extended (2) to the Responses wire. Tests:
+  `test_an_assistant_prefill_continues_on_responses_not_messages`,
+  `test_a_single_call_limit_stays_on_vllm_chat`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and
