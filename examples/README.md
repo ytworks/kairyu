@@ -21,8 +21,7 @@
 | [`winnow-12b-q8-1gpu`](winnow-12b-q8-1gpu/README.md) | Winnow-12B Q8_0 GGUF on llama.cpp (`winnow-server`), one selected RTX PRO 6000 Blackwell | text + image, OpenAI tools, 8 slots x 65,536 tokens; Winnow's typed decisions on `/v1/systemone` |
 | [`winnow-12b-q8-dp8-8gpu`](winnow-12b-q8-dp8-8gpu/README.md) | Winnow-12B Q8_0 GGUF on llama.cpp x 8 replicas, one per card | one public model behind a Kairyu ReplicaPool (`upstream: llamacpp`); System One over the same 8 servers |
 
-All of them use Kairyu as L3 and Open WebUI as the public chat surface (the
-checklist-verified example uses its own answer page instead), except
+All of them use Kairyu as L3 and Open WebUI as the public chat surface, except
 `quyet-1.0-large-1gpu`, a System One decision model with no chat: Kairyu publishes
 only `/v1/systemone`, and an example-owned adapter reads the answers from an
 internal vLLM. L1 is
@@ -30,6 +29,14 @@ vLLM, except in `openjev-diffusiongemma-26b-1gpu`, whose L1 is OpenJev (vLLM
 inside its container), and in the two `winnow-12b-q8` environments, whose L1 is
 llama.cpp serving a GGUF checkpoint (`upstream: llamacpp`,
 `docs/design/llamacpp-upstream.md`).
+Every non-Jev Open WebUI (all but the OpenJev, Quyet and Winnow environments)
+talks to Kairyu over `/v1/responses` (`api_type: responses`, m11 D7 amendment
+2026-10-17) through an example-owned filter that leaves only Responses fields,
+and Kairyu forwards each request to vLLM in the API its caller used
+(`upstream_chat_models`, `upstream_responses_models`, `upstream_messages_models`);
+the example gates call `/v1/responses` and `verify.sh api-equivalence` checks
+that L1 and L3 answer the same Responses requests alike. GPU verification of
+this change is pending in every one of these environments.
 The four `dp` environments add no orchestration: Kairyu L2 only spreads requests
 over identical L1 replicas, and their `verify.sh` proves the per-replica split
 and the OpenAI tool-calling agent contract (`tool-calling`); the two vision
