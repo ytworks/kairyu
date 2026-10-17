@@ -116,6 +116,7 @@ class _MoASetup:
     synthesis_params: SamplingParams
     cache_hint: CacheHint
     reasoning_effort: str | None
+    caller_api: str = "chat"
 
 
 _prepared_setup: contextvars.ContextVar[_MoASetup | None] = contextvars.ContextVar(
@@ -143,6 +144,7 @@ def _build_moa_setup(
     shared_prefix: str,
     session: str | None = None,
     reasoning_effort: str | None = None,
+    caller_api: str = "chat",
 ) -> _MoASetup:
     """Build request-sized proposal prompts on the prompt CPU lane."""
 
@@ -183,10 +185,18 @@ def _build_moa_setup(
             ),
             cache_hint=hint,
             reasoning_effort=reasoning_effort,
+            caller_api=caller_api,
         )
         for index in range(n_samples)
     )
-    return _MoASetup(session, requests, synthesis_params, hint, reasoning_effort)
+    return _MoASetup(
+        session,
+        requests,
+        synthesis_params,
+        hint,
+        reasoning_effort,
+        caller_api,
+    )
 
 
 def _build_synthesis_request(
@@ -214,6 +224,7 @@ def _build_synthesis_request(
         parallel_tool_calls=final_parallel_tool_calls,
         tool_call_protocol=final_tool_call_protocol,
         reasoning_effort=setup.reasoning_effort,
+        caller_api=setup.caller_api,
     )
 
 

@@ -904,6 +904,7 @@ class Orchestrator:
                 temperature=0.0,
             ),
             chat_template_kwargs=chat_template_kwargs,
+            caller_api=call.caller_api,
         )
 
     @staticmethod
@@ -1338,6 +1339,7 @@ class Orchestrator:
                             if conductor is not None
                             else ()
                         ),
+                        caller_api=call.caller_api,
                     ),
                 )
             )
@@ -1383,6 +1385,7 @@ class Orchestrator:
             chat_template_kwargs=(
                 call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
             ),
+            caller_api=call.caller_api,
         )
 
     def _engine_prompt(
@@ -1413,6 +1416,7 @@ class Orchestrator:
                 self._shared_prefix,
                 session="validation-moa",
                 reasoning_effort=self._effective_reasoning_effort(call),
+                caller_api=call.caller_api,
             )
             key = self._internal_engine_keys(call, decision)[0]
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
@@ -1436,6 +1440,7 @@ class Orchestrator:
                             if isinstance(prompt, MultimodalPrompt)
                             else None
                         ),
+                        caller_api=call.caller_api,
                     ),
                 )
             )
@@ -1597,6 +1602,7 @@ class Orchestrator:
                 self._shared_prefix,
                 session=f"preflight-moa-{suffix}",
                 reasoning_effort=self._effective_reasoning_effort(call),
+                caller_api=call.caller_api,
             )
             proposal_key = self._internal_engine_keys(call, decision)[0]
             internal_requests = tuple(
@@ -2065,6 +2071,7 @@ class Orchestrator:
             public_output_floor=self._profile_output_floor(roles),
             decision_workers=self._decision_workers,
             conversation=self._native_conversation(call, roles),
+            caller_api=call.caller_api,
         )
 
     @staticmethod

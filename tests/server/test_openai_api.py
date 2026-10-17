@@ -677,20 +677,25 @@ async def test_invalid_body_returns_422(app):
 
 
 @pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "x" * 256}]}),
+        # The Responses front door carries the same conversations (m11 D4).
+        ("/v1/responses", {"input": "x" * 256}),
+    ],
+)
 async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
     chunked,
+    path,
+    body,
 ):
     backend = MockBackend()
     app = create_legacy_app(
         engines={"m": backend},
         settings=ServerSettings(max_chat_body_bytes=128),
     )
-    encoded = json.dumps(
-        {
-            "model": "m",
-            "messages": [{"role": "user", "content": "x" * 256}],
-        }
-    ).encode()
+    encoded = json.dumps({"model": "m", **body}).encode()
 
     async def body_chunks():
         yield encoded[:96]
@@ -699,7 +704,7 @@ async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
     content = body_chunks() if chunked else encoded
     async with _client(app) as client:
         response = await client.post(
-            "/v1/chat/completions",
+            path,
             content=content,
             headers={"content-type": "application/json"},
         )

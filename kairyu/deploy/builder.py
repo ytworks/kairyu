@@ -132,19 +132,45 @@ def _entry_preserves_templated_prompt(entry) -> bool:
     )
 
 
-def _entry_renders_native_chat(entry) -> bool:
-    """Whether a replica's upstream renders a caller's native messages."""
-
+def _entry_capabilities(entry):
     if entry.backend != "openai":
-        return False
+        return None
     try:
-        capabilities = resolve_openai_capabilities(
+        return resolve_openai_capabilities(
             entry.options.get("upstream", "generic"),
             entry.options.get("capabilities"),
         )
     except ValueError:
-        return False
-    return capabilities.conversation_prefix
+        return None
+
+
+def _entry_renders_native_chat(entry) -> bool:
+    """Whether a replica's upstream renders a caller's native messages."""
+
+    capabilities = _entry_capabilities(entry)
+    return capabilities is not None and capabilities.conversation_prefix
+
+
+def _declared_upstream_apis(spec: DeploymentSpec, model_name: str) -> tuple[str, ...]:
+    """Native APIs (besides chat) the deployment declares for a served model."""
+
+    return tuple(
+        api
+        for api, names in (
+            ("messages", spec.upstream_messages_models),
+            ("responses", spec.upstream_responses_models),
+        )
+        if model_name in names
+    )
+
+
+def _entry_options(spec: DeploymentSpec, model_name: str, entry) -> dict[str, object]:
+    """Backend factory options, plus the declared native upstream APIs."""
+
+    apis = _declared_upstream_apis(spec, model_name)
+    if not apis:
+        return dict(entry.options)
+    return {**entry.options, "upstream_apis": apis}
 
 
 def _metadata_identity(metadata: TokenizerChatMetadata) -> tuple[object, ...]:
@@ -208,8 +234,23 @@ def _resolve_chat_policy(
                 raise ValueError(
                     f"upstream_chat_models model {model_name!r} needs every replica "
                     "to render native chat messages upstream (an openai backend with "
-                    "upstream: vllm); not supported by: " + ", ".join(incompatible)
+                    "upstream: vllm or kairyu); not supported by: "
+                    + ", ".join(incompatible)
                 )
+            for api in _declared_upstream_apis(spec, model_name):
+                unsupported = sorted(
+                    {
+                        f"openai upstream {entry.options.get('upstream', 'generic')!r}"
+                        for entry in entries
+                        if not getattr(_entry_capabilities(entry), f"{api}_api", False)
+                    }
+                )
+                if unsupported:
+                    raise ValueError(
+                        f"upstream_{api}_models model {model_name!r} needs every replica "
+                        f"to serve the {api} API upstream (upstream: vllm or kairyu); "
+                        "not supported by: " + ", ".join(unsupported)
+                    )
             # The upstream owns the model's template; Kairyu renders nothing.
             continue
         if model_name in legacy_models:
@@ -693,7 +734,8 @@ def build_app_from_spec(
         for name, section in spec.systemone.items()
     }
     engines: dict[str, EngineBackend] = {
-        name: create_backend(entry.backend, **entry.options) for name, entry in spec.engines.items()
+        name: create_backend(entry.backend, **_entry_options(spec, name, entry))
+        for name, entry in spec.engines.items()
     }
     execution_backends = {
         name: HttpExecutionBackend(
@@ -737,7 +779,10 @@ def build_app_from_spec(
         pool_log = (
             JsonlRouterLog(placement_log_paths[name]) if name in placement_log_paths else None
         )
-        replicas = [create_backend(entry.backend, **entry.options) for entry in pool_spec.replicas]
+        replicas = [
+            create_backend(entry.backend, **_entry_options(spec, name, entry))
+            for entry in pool_spec.replicas
+        ]
         dynamic = pool_spec.discovery is not None
         pool = ReplicaPool(
             replicas,

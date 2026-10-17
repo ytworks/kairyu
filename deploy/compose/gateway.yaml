@@ -18,4 +18,8 @@ pools:
     unhealthy_after: 1
     probe_interval_s: 1.0
 
-legacy_chat_models: [llama]
+# The replicas are Kairyu L3 servers: a request reaches them in the API its
+# caller used, with the conversation as it is (m9 D2 amendment 2026-10-17).
+upstream_chat_models: [llama]
+upstream_responses_models: [llama]
+upstream_messages_models: [llama]

@@ -109,11 +109,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
+- Caller-API forwarding (2026-10-17): implemented and CPU-tested; GPU verification of the 13 non-Jev examples (route checks, all gates on `/v1/responses`, `api-equivalence`, L1 `xhigh` renders) pending
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-17 — [design] L1 receives the caller's API; example UIs on Responses (m9 D2, m11 D4/D7, m1 D8)
+- What: `upstream_responses_models`/`upstream_messages_models` declare L1s that serve Responses/Messages; such a model gets the request in the caller's API (Messages → Responses → chat; AUTO role calls too; Jev roles unchanged), `max` sent as `xhigh`, startup fails on a missing route. Native prefix placement, `kairyu_*` on Responses, body limit on Responses paths. 13 non-Jev examples: Open WebUI `api_type: responses` + normalization filter, native chat, gates on `/v1/responses` plus `api-equivalence`. GPU verification pending.
+- Why: owner request 2026-10-17: UI and L1 on the same OpenAI-compliant Responses API as L3; Jev examples untouched.
+- Refs: m9 D2, m11 D4/D7, m1 D8 amendments 2026-10-17; plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
 
 ### 2026-10-13 — [progress] GLM + Quyet example: all nine GPU gates pass (VCO-D23, PR #648)
 - What: at `90ab8016` (after the three 2026-10-13 amendments) every gate passes in one run: verified-tool-route 12/12, serving 72/72 structured calls (p50 c1/c16 151.5/185.6 s, 95/506 tok/s; DeepSeek version at high effort 74.8/134.2 s), serving-routed 72/72; 0 GLM grammar errors, 0 Kairyu errors, no fix ran; 3 of 69 serving TOOL replies published with a form failure reported (F1 x2, F7). A targeted run of `reschedule` and `announced-no-call` (10 each) first: 20/20 with a call.

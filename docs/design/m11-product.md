@@ -490,6 +490,42 @@ Acceptance:
     example uses the legacy renderer, which drops it as Chat does), and
     `reasoning_tokens` (vLLM reports them, but the L1 usage carries none)
 
+**Caller-API forwarding amendment (2026-10-17, owner authorization).** The
+public `/v1/responses` contract is unchanged (strict OpenAI surface, effort
+normalized to low/high/max, `none` rejected). What changes behind it:
+- An engine or pool model declared in `upstream_responses_models` receives
+  the request on its upstream's `/v1/responses` with the conversation as it
+  is (m9 D2 caller-API amendment 2026-10-17). Kairyu still expands
+  `previous_response_id`, decodes `krs1.`/`kcp1.` tokens, flattens namespace
+  tools and drops web-search declarations before forwarding; the upstream
+  request is stateless (`store: false`) and Kairyu's store, metering, gates,
+  heartbeats and single emitter stay as they are, so the public events never
+  carry vLLM-only events such as `response.reasoning_part.*`.
+- Effort travels as OpenAI's enum: Kairyu's `max` becomes `xhigh` on the
+  Responses wire (low/high unchanged) and each L1 template or encoder maps
+  `xhigh` back to the model's top level; an L1 whose template already treats
+  `xhigh` as its top level needs no change.
+- AUTO models: the role calls of a Responses request reach their workers on
+  `/v1/responses` when the worker's model is declared (m1 D8 amendment
+  2026-10-17); System One judges are unchanged.
+- `max_chat_body_bytes` now bounds `/v1/responses`, `/v1/responses/compact`
+  and `/v1/responses/input_tokens` like the other conversation front doors.
+  Why (framework boundary): (1) the operator-configured body bound covered
+  Chat and Messages only (`ChatBodyLimitMiddleware._PATHS`), so a UI moved to
+  Responses lost it; (2) the path set is internal; (3) any Responses client
+  (Codex) could send an unbounded body; (4) three paths, the limit stays in
+  each deployment. Test: the `/v1/responses` case of
+  `test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies`.
+- Kairyu extension fields: an `X-Kairyu-Trace: 1` request, or an AUTO
+  verification, now reports `kairyu_trace`, `kairyu_trace_v2`, `kairyu_route`
+  and `kairyu_verification` on the response object (unary body and the
+  terminal event's `response`), with the AUTO usage's
+  `orchestration_input_tokens`/`orchestration_output_tokens` inside `usage`;
+  OpenAI clients ignore unknown keys. Engine paths pass `trace_requested` to
+  the backend as Chat does. Why: the example gates move to `/v1/responses`
+  and read `kairyu_verification` there (owner decision 2026-10-17). Test:
+  `test_trace_extensions_ride_the_response_object`.
+
 ### D5 — Vision wire format
 
 `protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat
@@ -718,6 +754,27 @@ Open WebUI backend before reaching Kairyu. This GPU gate remains separate from
 CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
 8× RTX PRO 6000; the retained result is
 `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
+
+**Responses connection amendment (2026-10-17, owner decision).** Every
+non-Jev example's Open WebUI talks to Kairyu over `/v1/responses`: the pinned
+v0.11.0 connection sets `OPENAI_API_CONFIGS` `api_type: responses`, under
+which Open WebUI converts its chat body to a Responses body (system turns to
+`instructions`, `max_tokens` to `max_output_tokens`, tools flattened, saved
+`output` items replayed) and parses Responses events. Replaying v0.11.0's own
+conversion and event code against Kairyu (CPU, 2026-10-17) showed what a
+strict Responses server needs from the UI side, so each example installs a
+normalization filter (`inlet`): the effort selector or Chat Controls'
+top-level `reasoning_effort` becomes `reasoning.effort`; non-Responses
+sampling keys (`seed`, `top_k`, `min_p`, `chat_template_kwargs`, Ollama
+options) are removed; saved output items keep only their Responses fields
+(chat-era items carry Open WebUI bookkeeping such as `attributes`); and
+`store: false` is set because the UI is stateless. Non-streaming Responses
+results lose reasoning items in v0.11.0's converter, so a UI that needs the
+Thought section streams (`stream_response` removed). Examples with sign-in
+enabled install the filter with `WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD`
+when set and warn otherwise. `docker-compose.webui.yaml` (P-B3) uses the
+same connection type. Jev examples (OpenJev, Quyet System One, Winnow) keep
+their chat connection and playgrounds.
 
 `verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/

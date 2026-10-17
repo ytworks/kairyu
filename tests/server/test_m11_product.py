@@ -549,6 +549,36 @@ class TestOrchestratedResponses:
             )
             assert follow_up.status_code == 200
 
+    @pytest.mark.parametrize(
+        ("model", "stream"),
+        [("m", False), ("m", True), ("kairyu-auto", False), ("kairyu-auto", True)],
+    )
+    def test_trace_extensions_ride_the_response_object(self, tmp_path, model, stream):
+        """X-Kairyu-Trace reports the Kairyu extension fields Chat Completions
+        reports, on the response object (m11 D4 amendment 2026-10-17)."""
+
+        with TestClient(_auto_app(tmp_path)) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": model, "input": "hello", "stream": stream},
+                headers={"X-Kairyu-Trace": "1"},
+            )
+        assert response.status_code == 200, response.text
+        if stream:
+            events = [
+                json.loads(line[len("data:") :])
+                for line in response.text.splitlines()
+                if line.startswith("data:")
+            ]
+            final = events[-1]["response"]
+        else:
+            final = response.json()
+        assert final["status"] == "completed"
+        assert isinstance(final["kairyu_trace"], list)
+        assert final["kairyu_trace_v2"]["request_id"]
+        if model == "kairyu-auto":
+            assert final["kairyu_route"]["target"]
+
 
 class TestTenancy:
     @pytest.mark.parametrize(

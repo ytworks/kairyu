@@ -164,6 +164,36 @@ class TestPrefixIndex:
 
 
 class TestPrefixRouting:
+    async def test_native_conversation_turns_share_a_replica(self):
+        """A conversation forwarded natively (empty prompt) places by its own
+        turns, so the next turn reaches the replica holding its prefix
+        (m9 D2 amendment 2026-10-17)."""
+
+        from dataclasses import replace
+
+        class NativeBackend(MockBackend):
+            def validate_request(self, request):
+                return None
+
+        pool = ReplicaPool(
+            {"r0": NativeBackend(), "r1": NativeBackend()},
+            prefix_index=PrefixIndex(),
+        )
+        opening = ({"role": "user", "content": "shared conversation opening " * 40},)
+        await pool.generate(replace(_request(""), conversation_prefix=opening))
+        await pool.generate(
+            replace(
+                _request(""),
+                conversation_prefix=(
+                    *opening,
+                    {"role": "assistant", "content": "ok"},
+                    {"role": "user", "content": "And then?"},
+                ),
+            )
+        )
+
+        assert pool.decision_counts.get("prefix_match") == 1
+
     def test_native_index_preallocates_dynamic_replica_stores(self):
         index = PrefixIndex(chunk_chars=4)
         pool = ReplicaPool(

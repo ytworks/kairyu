@@ -24,7 +24,11 @@ pools:
     queue_depth_threshold: 256
     placement_log_path: /evidence/placements.jsonl
 
-legacy_chat_models: [qwen3-32b]
+# The replicas are Kairyu L3 servers: a request reaches them in the API its
+# caller used, with the conversation as it is (m9 D2 amendment 2026-10-17).
+upstream_chat_models: [qwen3-32b]
+upstream_responses_models: [qwen3-32b]
+upstream_messages_models: [qwen3-32b]
 
 tenants:
   default_tenant: default
