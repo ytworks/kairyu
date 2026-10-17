@@ -274,9 +274,8 @@ def responses_text_format(response_format: object) -> dict[str, object] | None:
 
 
 # Chat-wire sampling fields the Responses wire expresses, by upstream: vLLM's
-# ResponsesRequest executes these extensions (it has no ``min_p``, which it
-# would ignore, so such a request stays on chat); a Kairyu replica's
-# Responses boundary is the strict OpenAI surface.
+# ResponsesRequest executes these extensions; a Kairyu replica's Responses
+# boundary is the strict OpenAI surface.
 _RESPONSES_FIELDS = {
     "vllm": frozenset(
         {
@@ -311,15 +310,29 @@ _RESPONSES_FIELDS = {
         }
     ),
 }
-# Fields a chat body carries with neutral values that need no translation.
-_NEUTRAL_CHAT_FIELDS = {"n": 1, "priority": 0}
+# A chat field a wire cannot carry is still expressible when its value is the
+# one the upstream applies without it, by (upstream, wire): vLLM's
+# ResponsesRequest never reads min_p and always samples with 0.0; vLLM builds
+# an Anthropic request with the default priority 0; a Kairyu replica's
+# Messages boundary takes priority only from its own tenancy, else 0. Any
+# other value would be silently dropped, so the request takes the next wire.
+_NEUTRAL_FIELDS: dict[tuple[str, str], dict[str, object]] = {
+    ("vllm", "responses"): {"n": 1, "min_p": 0.0},
+    ("vllm", "messages"): {"n": 1, "priority": 0},
+    ("kairyu", "responses"): {"n": 1},
+    ("kairyu", "messages"): {"n": 1, "priority": 0},
+}
 
 
-def _unsupported(fields: AbstractSet[str], validated: Mapping[str, object]) -> list[str]:
+def _unsupported(
+    fields: AbstractSet[str],
+    validated: Mapping[str, object],
+    neutral: Mapping[str, object],
+) -> list[str]:
     return sorted(
         key
         for key, value in validated.items()
-        if key not in fields and _NEUTRAL_CHAT_FIELDS.get(key, object()) != value
+        if key not in fields and neutral.get(key, object()) != value
     )
 
 
@@ -327,7 +340,7 @@ def responses_expressible(upstream: str, validated: Mapping[str, object]) -> boo
     fields = _RESPONSES_FIELDS.get(upstream)
     if fields is None:
         return False
-    if _unsupported(fields, validated):
+    if _unsupported(fields, validated, _NEUTRAL_FIELDS[(upstream, "responses")]):
         return False
     response_format = validated.get("response_format")
     if response_format is not None:
@@ -350,7 +363,9 @@ def responses_body(
 ) -> dict[str, object]:
     """A complete stateless Responses request for the same generation."""
 
-    unsupported = _unsupported(_RESPONSES_FIELDS[upstream], validated)
+    unsupported = _unsupported(
+        _RESPONSES_FIELDS[upstream], validated, _NEUTRAL_FIELDS[(upstream, "responses")]
+    )
     if unsupported:
         raise WireError(
             "request fields cannot be sent on the Responses wire: " + ", ".join(unsupported)
@@ -711,7 +726,9 @@ def messages_expressible(
     max_model_len: int | None,
 ) -> bool:
     fields = _MESSAGES_FIELDS.get(upstream)
-    if fields is None or _unsupported(fields, validated):
+    if fields is None or _unsupported(
+        fields, validated, _NEUTRAL_FIELDS[(upstream, "messages")]
+    ):
         return False
     response_format = validated.get("response_format")
     if response_format is not None and (
@@ -744,7 +761,9 @@ def messages_body(
 ) -> dict[str, object]:
     """A complete Anthropic Messages request for the same generation."""
 
-    unsupported = _unsupported(_MESSAGES_FIELDS[upstream], validated)
+    unsupported = _unsupported(
+        _MESSAGES_FIELDS[upstream], validated, _NEUTRAL_FIELDS[(upstream, "messages")]
+    )
     if unsupported:
         raise WireError(
             "request fields cannot be sent on the Anthropic Messages wire: "

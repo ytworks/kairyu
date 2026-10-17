@@ -732,6 +732,55 @@ five routes and four policies.
   timeouts: 3 of 269 judged requests, all served by `deepseek_think`. The
   earlier amendment's runs are kept in MEASUREMENTS.md as superseded.
 
+### DTO-D18 — Role calls in the caller's API; the V4 example on the official encoder (owner decision, 2026-10-17)
+
+Status: accepted; implemented and CPU-checked; GPU verification pending
+(plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`,
+decision 12).
+
+- **Both examples.** Every pool is in `upstream_chat_models`,
+  `upstream_responses_models` and `upstream_messages_models`, so each role
+  call (the route judge included) reaches its L1 in the public request's API
+  (m1 D8 / m9 D2 amendments): a Chat UI turn, which now arrives on
+  `/v1/responses` (m11 D7 amendment; `stream_response: false` dropped because
+  a non-streaming Responses result loses the internal-work item), reaches
+  both pools on `/v1/responses`. Messages callers fall to Responses for roles
+  whose sampling (`top_k`, `seed`) the Messages wire cannot carry. The gates
+  call `/v1/responses`; serving rows end naturally within their caps, so they
+  are not comparable with earlier rows; `verify.sh api-equivalence` compares
+  the AUTO model with L1 on status and usage keys and sums every L1's request
+  counters.
+- **V4 example (`qwen3.8-deepseek-v4-8gpu`).** DeepSeek roles leave the
+  inline completion scaffolds of D6/D7 for the checkpoint's own encoder on
+  the chat path, as DTO-D16 did for V4.1: prompts carry no
+  `<｜begin▁of▁sentence｜><｜User｜>` / `<｜Assistant｜><think>`, and no role
+  needs `/v1/completions`. One DeepSeek pool serves every DeepSeek role;
+  `tier2-direct`, the `-thinking` pool, `completion_reasoning_end_tag`, the
+  Kairyu `chat_templates`, `deepseek-thinking.jinja` and
+  `deepseek-role-effort.jinja` are removed. `inherit` roles send the L3
+  effort, which turns thinking on and renders the encoder's official
+  preamble; the effort-less `deepseek_answer` keeps `reasoning_closed` and
+  sends `enable_thinking: false`. The L1 runs `--tokenizer-mode deepseek_v4`
+  with thinking off by default (the dp2 example's setting), so the coding
+  gate's DeepSeek-direct TTFT denominator stays a non-thinking call. The D9
+  floor on `synthesis` and `deepseek_think_answer` uses D15's `chat`
+  continuation. An example-owned overlay (`vllm-overlay.Dockerfile`,
+  `patch_tokenizer.py`) on the pinned `aa0d513027` build renders the
+  Responses `xhigh` (Kairyu's wire form of L3 max) as `max` and continues a
+  final `<think>` assistant prefill as an open turn; readiness checks both
+  through L1 `/tokenize`. Unchanged: five routes and four policies (DTO-D17
+  is V4.1 only), D11's Qwen `image_description` (0731 is text-only), prompt
+  bodies, sampling, budget `{19, 2}`, floor 256.
+- **V4.1 example (`qwen3.8-deepseek-v4.1-8gpu`).** The overlay's new edit 8
+  maps the encoder's `xhigh` (75) to the max budget (100); readiness checks
+  the rendering. Routes, policies and roles are unchanged.
+- **Why.** Owner request 2026-10-17: L1 receives the same API as L3, and the
+  V4 example's L2 is rebuilt like DTO-D16 so it no longer depends on
+  Kairyu-rendered DeepSeek prompts.
+- **GPU consequences.** The served-config digests change; the rebuilt
+  overlays have no recorded image ID until the GPU build; both serving gates,
+  `api-equivalence` and the browser smoke must be re-measured.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test

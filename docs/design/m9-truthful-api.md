@@ -224,7 +224,13 @@ token-granularity TPOT, results files).
   prefers Responses, then chat; chat stays chat. A wire is skipped when it is
   not declared or cannot express the request (Messages: no seed or penalties;
   Responses: no `n > 1`, token logprobs, `best_of`; pre-rendered and token
-  prompts keep `/completions`). The conversation keeps Kairyu's
+  prompts keep `/completions`). A field a wire lacks still fits when its value
+  is the one the upstream applies without it, and only then: vLLM's
+  ResponsesRequest never reads `min_p` and always samples with 0, vLLM builds
+  an Anthropic request at priority 0, and a Kairyu replica's Messages boundary
+  takes priority only from its own tenancy; any other value would be dropped
+  silently, so the request takes the next wire (owner decision 2026-10-17;
+  the route judge's explicit `min_p` 0 therefore stays on the caller's API). The conversation keeps Kairyu's
   backend-neutral form (`conversation_prefix` or a `MultimodalPrompt`) and is
   expressed turn for turn on the wire (`kairyu/engine/upstream_wire.py`):
   system turns stay message items, assistant reasoning becomes reasoning

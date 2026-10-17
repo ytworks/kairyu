@@ -109,12 +109,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- Caller-API forwarding (2026-10-17): implemented and CPU-tested; GPU verification of the 13 non-Jev examples (route checks, all gates on `/v1/responses`, `api-equivalence`, L1 `xhigh` renders) pending
+- Caller-API forwarding / example UIs on Responses (2026-10-17): implemented and CPU-tested in one PR; remaining: review and fix rounds, then the final test in a separate GPU environment for the 13 non-Jev examples (overlay image IDs, route checks, all gates on `/v1/responses`, `api-equivalence`, browser gates, L1 `xhigh` renders); plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-17 — [amendment] Per-example decisions for the Responses move (FN-D8, DTO-D18, VCO, m9 D2)
+- What: 0731-8gpu L1 on the dp2 settings (no identity template); qwen3.8-deepseek-v4 L2 rebuilt on the official encoder (DTO-D18); DeepSeek overlays render `xhigh` as max, rebuilt images unpinned until the GPU build; readiness probes on Responses without logprobs; sign-in UIs switch a saved chat connection; native wires take a lacking field only at its upstream default (`min_p` 0, priority 0).
+- Why: owner answers 2026-10-17 (plan decisions 12, 15-22); order is implement → CPU checks → review/fix rounds → separate GPU final test.
+- Refs: FN-D8/FN Responses amendments, DTO-D18, VCO 2026-10-17 amendment, m9 D2; plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
 
 ### 2026-10-17 — [design] L1 receives the caller's API; example UIs on Responses (m9 D2, m11 D4/D7, m1 D8)
 - What: `upstream_responses_models`/`upstream_messages_models` declare L1s that serve Responses/Messages; such a model gets the request in the caller's API (Messages → Responses → chat; AUTO role calls too; Jev roles unchanged), `max` sent as `xhigh`, startup fails on a missing route. Native prefix placement, `kairyu_*` on Responses, body limit on Responses paths. 13 non-Jev examples: Open WebUI `api_type: responses` + normalization filter, native chat, gates on `/v1/responses` plus `api-equivalence`. GPU verification pending.

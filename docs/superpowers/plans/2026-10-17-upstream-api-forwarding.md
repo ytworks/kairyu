@@ -1,7 +1,12 @@
 # Plan: every example web UI on the Responses API, and L1 in the same API as L3
 
-Status: implemented in one PR; GPU verification of the 13 examples is the
-remaining task (owner decision 2026-10-17: code review and fixes in this PR).
+Status: implementation and CPU verification in one PR, up to receiving
+review. Remaining tasks after that: review and fix rounds, then the final
+test in a separate GPU environment (see "Remaining tasks").
+
+Order (owner decision 2026-10-17): implement → run every check a CPU can run
+→ review, fix, repeat → final test in a separate GPU environment. This plan
+covers the work up to receiving review.
 
 ## Context
 
@@ -43,6 +48,27 @@ the same API as L3.
     `qwen3.8-deepseek-v4-8gpu` rebuilds its L2 like DTO-D16.
 13. Kairyu-to-Kairyu gateways follow the same rule.
 14. One PR; GPU verification is a remaining task.
+
+Second round (2026-10-17, after implementation started):
+
+15. Readiness `17 * 19` probes through Kairyu move to `/v1/responses` and
+    drop their log-probability check there (Responses has none); the L1
+    gates keep it.
+16. Qwen3.8-Flash-Next's Chat UI drops `presence_penalty` 1.5 (no Responses
+    field; documented).
+17. Sign-in examples rewrite a saved chat connection to `api_type: responses`
+    with the admin credentials.
+18. AUTO models are compared with L1 on status and usage keys in
+    `api-equivalence`.
+19. A field a native wire lacks is sent there only when its value is the one
+    the upstream applies without it (vLLM Responses: `min_p` 0; vLLM
+    Messages: priority 0; Kairyu Messages: priority 0); otherwise the next
+    wire.
+20. Locked measurement hashes keep the old hash as history and record the
+    current one under "no measurement yet (GPU verification pending)".
+21. Rebuilt L1 images have no recorded image ID until the GPU build;
+    `run.sh up` stops unless the example's allow-unpinned variable is set.
+22. DeepSeek V4 `xhigh`→max is an example-owned overlay image.
 
 ## Phase 0 findings (CPU, 2026-10-17)
 
@@ -100,8 +126,27 @@ upstream lists (Quyet pools stay legacy); `xhigh`→`max` in DeepSeek overlays;
 `/v1/responses` with the `api-equivalence` gate
 (`verification/product/correctness/upstream_api_equivalence.py`).
 
-## Verification
+## Verification in this PR (CPU)
 
-CPU: `uv run pytest` (base/head counts), `uv run ruff check .`,
-`uv run python -m verification check`. GPU (remaining): every example's
-gates, `api-equivalence`, browser gates, and the L1 effort renders.
+`uv run pytest` (base/head collection counts), `uv run ruff check .`,
+`uv run python -m verification check`, each example's own tests, the
+P-B3 compose/browser smoke harness tests, and the filter test over every
+example's Chat UI filter. The Open WebUI image cannot be pulled in this
+session, so the browser gates themselves run with the GPU tasks.
+
+## Remaining tasks (after this PR's CPU work)
+
+1. Review: receive review of the PR, fix, and repeat until approved.
+2. Final test in a separate GPU environment, per example (13):
+   - build the rebuilt L1 overlays and record their image IDs
+     (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`);
+   - `run.sh up` (Kairyu's startup check of `/v1/responses` and
+     `/v1/messages` on every declared L1);
+   - every `verify.sh` gate on `/v1/responses`, `verify.sh api-equivalence`,
+     the browser gates (repo P-B3 and the examples' own);
+   - the L1 effort renders: `xhigh` as max on DeepSeek V4/V4.1 overlays and
+     GLM-5.3's template, Anthropic `output_config.effort`;
+   - manual Chat UI pass (multi-turn thinking, image, tools, effort), checking
+     in Kairyu and L1 logs that requests travel on `/v1/responses`;
+   - update each MEASUREMENTS.md; report any failing gate to the owner
+     before changing a gate or a design.
