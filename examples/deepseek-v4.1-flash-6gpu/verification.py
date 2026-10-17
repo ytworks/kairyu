@@ -618,16 +618,33 @@ def tool_calling(run_dir: Path) -> int:
     cases["streamed_tool_call"] = (
         tool_call_error(*_stream_tool_message(body)) if status == 200 else f"HTTP {status}"
     )
+    # An explicit effort must reach the model as thinking. On this one-step
+    # call the model may still skip thinking (about 1 in 5 replies at max, the
+    # same on L1 directly and on its chat API, GPU final test 2026-10-18), so
+    # a reply without reasoning is asked again, up to three attempts; every
+    # attempt must be a valid tool call.
+    attempts: dict[str, int] = {}
     for effort in ("low", "max"):
-        status, body, _ = post_responses(_tool_request(reasoning_effort=effort), timeout_s=1800)
-        if status != 200 or not isinstance(body, dict):
-            cases[f"tool_call_effort_{effort}"] = f"HTTP {status}"
-            continue
-        message = body["choices"][0]["message"]
-        cases[f"tool_call_effort_{effort}"] = tool_call_error(
-            message, body["choices"][0]["finish_reason"]
-        ) or (None if message.get("reasoning_content") else "no reasoning under thinking")
-    report = {"cases": cases, "passed": not any(cases.values())}
+        case = f"tool_call_effort_{effort}"
+        for attempt in range(1, 4):
+            attempts[effort] = attempt
+            status, body, _ = post_responses(
+                _tool_request(reasoning_effort=effort), timeout_s=1800
+            )
+            if status != 200 or not isinstance(body, dict):
+                cases[case] = f"HTTP {status}"
+                break
+            message = body["choices"][0]["message"]
+            cases[case] = tool_call_error(message, body["choices"][0]["finish_reason"]) or (
+                None if message.get("reasoning_content") else "no reasoning under thinking"
+            )
+            if cases[case] != "no reasoning under thinking":
+                break
+    report = {
+        "cases": cases,
+        "effort_attempts": attempts,
+        "passed": not any(cases.values()),
+    }
     (run_dir / "tool-calling.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"tool-calling: {'PASS' if report['passed'] else 'FAIL'} {cases}")
     return int(not report["passed"])
