@@ -322,6 +322,13 @@ def _ensure_deepseek_image(env: dict[str, str]) -> None:
     if os.environ.get("DEEPSEEK_ALLOW_UNPINNED_IMAGE") == "1":
         print(f"WARNING: serving unpinned image {image} ({actual}); not evidence", flush=True)
         return
+    if source["image_id"] is None:
+        raise SystemExit(
+            f"vLLM image {image} ({actual}) has no recorded image ID: it was rebuilt for "
+            "the Responses xhigh->max effort edit and awaits GPU verification; record this "
+            "ID as example.json image_id and kairyu.yaml container_image_digest, or serve it "
+            "anyway (not evidence) with DEEPSEEK_ALLOW_UNPINNED_IMAGE=1"
+        )
     if actual != source["image_id"]:
         raise SystemExit(
             f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
@@ -495,13 +502,27 @@ def _webui_api(
         return json.loads(response.read())
 
 
+def _check_chat_ui_connection(ui_url: str, token: str) -> None:
+    """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
+
+    config = _webui_api(ui_url, "/openai/config", token=token)
+    api_type = ((config.get("OPENAI_API_CONFIGS") or {}).get("0") or {}).get("api_type")
+    if api_type != "responses":
+        raise SystemExit(
+            "Chat UI connection 0 must use api_type=responses, got "
+            f"{api_type!r}; an existing Open WebUI volume keeps its saved connection, so set "
+            "Admin Panel > Settings > Connections > Kairyu > API Type to Responses"
+        )
+
+
 def _provision_chat_ui_effort_selector(ui_url: str) -> None:
     """Install the Reasoning Effort dropdown into the pinned Open WebUI.
 
     The stock v0.11.0 Advanced Params control is a free-text field; the
     product knob (DTO-D6) must be selectable. A global filter whose
-    enum-typed user valve renders as a dropdown in Chat Controls forwards
-    the selection as the OpenAI-compatible ``reasoning_effort`` body field.
+    enum-typed user valve renders as a dropdown in Chat Controls sends the
+    selection as ``reasoning.effort`` and keeps every Chat UI body a valid
+    Responses body (m11 D7 amendment 2026-10-17).
     """
 
     filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
@@ -561,6 +582,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
             token=token,
         )
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
+        _check_chat_ui_connection(ui_url, token)
     except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
     if enum != _CHAT_UI_EFFORT_LEVELS:
@@ -748,7 +770,8 @@ def rendering_errors(render: Callable[..., str]) -> list[str]:
 
     Thinking roles send ``reasoning_effort``; effort-less roles send
     ``enable_thinking: false``; the public-output floor continues a final
-    ``<think>`` prefill (patch_sm120.py edit 7).
+    ``<think>`` prefill (patch_sm120.py edit 7); a Responses role at L3 max
+    arrives as ``xhigh`` and renders the max budget (edit 8).
     """
 
     user = [{"role": "user", "content": "Q?"}]
@@ -766,6 +789,12 @@ def rendering_errors(render: Callable[..., str]) -> list[str]:
         )
         if f"Reasoning Effort: {budget} " not in prompt:
             errors.append(f"reasoning_effort {effort} does not render budget {budget}")
+    xhigh = render(
+        messages=user,
+        chat_template_kwargs={"reasoning_effort": "xhigh", "enable_thinking": True},
+    )
+    if f"Reasoning Effort: {budgets['max']} " not in xhigh:
+        errors.append(f"reasoning_effort xhigh does not render the max budget {budgets['max']}")
     chat = render(messages=user, chat_template_kwargs={"enable_thinking": False})
     if not chat.endswith("<｜Assistant｜></think>") or "Reasoning Effort" in chat:
         errors.append(f"enable_thinking=false is not chat mode: {chat[-160:]!r}")
@@ -936,6 +965,7 @@ def up() -> None:
     print("Chat model:      kairyu-auto-max (the only Chat UI model; text + image)")
     print("Embedding model: embed-small")
     print("Reasoning effort: Chat Controls -> Valves -> Reasoning Effort (default/low/high/max)")
+    print("Chat UI connection: Responses API (/v1/responses)")
 
 
 def main() -> None:

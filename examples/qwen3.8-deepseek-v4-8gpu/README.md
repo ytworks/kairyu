@@ -69,8 +69,8 @@ How a request flows:
 |---|---|---|---|---|---|
 | `QWEN` | `qwen_direct` | one Qwen3.8 call (`qwen_answer`) | no | T=0.7, top_p=0.8, top_k=20, presence_penalty=1.5 | 131,072 |
 | `QWEN_THINK` | `qwen_think_medium` | one Qwen3.8 call (`qwen_think_answer`) | fixed `medium` (spec `high`) | T=1.0, top_p=0.95, top_k=20 | 131,072 |
-| `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
-| `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `DEEPSEEK` | `deepseek_direct` | one DeepSeek call with thinking off (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
 | `ENSEMBLE` | `primary` | the eleven-role dual-track DAG below | as before | as before | as before |
 
 ### What the judge optimizes — and what it is not
@@ -126,7 +126,7 @@ measured and the criteria adjusted from evidence.
   caller cap binds first; send a larger `max_tokens` over the API to reach the
   official caps.
 - **Non-thinking calls are declared explicitly**: the judge and every
-  effort-less role on a worker that accepts `enable_thinking` (the Qwen pool)
+  effort-less role on a worker that accepts `enable_thinking` (both pools)
   are sent with `chat_template_kwargs: {enable_thinking: false}`. vLLM's Qwen3
   reasoning parser defaults to "thinking enabled" and drops a non-streamed
   answer that never emits `</think>` unless told otherwise — without this the
@@ -136,9 +136,10 @@ measured and the criteria adjusted from evidence.
   and audit loop are exactly DTO-D1..D12. The spec-level `budget {19, 2}`
   applies to every profile; a direct route spends one step plus the bounded
   empty-output re-dispatch.
-- **The Qwen thinking route keeps the floor too (DTO-D15)**: the vLLM chat
-  template opens Qwen's `<think>` span, so `qwen_think_answer` declares
-  `reasoning_close_tag`/`reasoning_open_tag` with
+- **The thinking routes keep the floor too (DTO-D15)**: the L1 opens the
+  `<think>` span (Qwen's chat template, DeepSeek's encoder), so
+  `qwen_think_answer`, `deepseek_think_answer`, and the ensemble's `synthesis`
+  declare `reasoning_close_tag`/`reasoning_open_tag` with
   `reasoning_continuation: chat`. When a small caller cap (an agent harness
   sending `max_tokens: 8192`) is eaten by medium-tier deliberation, the one
   bounded re-dispatch continues the captured reasoning as a closed assistant
@@ -218,11 +219,14 @@ Design notes (see
   unset, placement follows session affinity and the queue-depth valve rather
   than `prefix_index`; only the leading REQUEST block may receive
   replica-local reuse from a preceding `head` or `draft` call.
-- Every DeepSeek v4 flash role thinks (owner decision, DTO-D7): `policies`,
-  `critique`, and `synthesis` all end their scaffolds with
-  `<｜Assistant｜><think>` and deliberate privately before their public text.
-  The TTFT gate stays on the non-thinking Qwen head, and each role's token
-  cap now bounds its `<think>` span plus its output together.
+- Every DeepSeek v4 flash ensemble role thinks (owner decision, DTO-D7):
+  `policies`, `critique`, and `synthesis` deliberate privately before their
+  public text. Their prompts carry no chat scaffold (DTO amendment
+  2026-10-17, as DTO-D16): each call is one user message that the L1 renders
+  with the checkpoint's own encoder (vLLM `--tokenizer-mode deepseek_v4`) and
+  whose private span its `deepseek_v4` reasoning parser separates. The TTFT
+  gate stays on the non-thinking Qwen head, and each role's token cap bounds
+  its `<think>` span plus its output together.
 - Qwen sampling and thinking are fixed per role in `auto-max.yaml`, never
   derived from the caller's request: `draft`, `image_description`, and
   `answer_1..4` declare `reasoning_effort: high` (T=1.0) — the medium tier
@@ -234,11 +238,12 @@ Design notes (see
 - The caller's L3 `reasoning_effort` reaches the DeepSeek roles: `policies`,
   `critique`, and `synthesis` declare `reasoning_effort: inherit`,
   and a request without an explicit effort runs at the spec's
-  `default_reasoning_effort: high`. The DeepSeek service's chat template
-  (`deepseek-role-effort.jinja`) is a scaffold passthrough that splices the
-  graded high/max reasoning preamble after `<｜begin▁of▁sentence｜>` into
-  thinking-scaffold calls — all three DeepSeek roles — so `low` yields plain
-  thinking and `high`/`max` strengthen every DeepSeek deliberation. The
+  `default_reasoning_effort: high`. The effort turns thinking on and the
+  encoder renders its official preamble (none for `low`, the graded texts for
+  `high`/`max`), so `high`/`max` strengthen every DeepSeek deliberation. On
+  the Responses wire Kairyu sends the L3 `max` as `xhigh`; this example's
+  tokenizer overlay (`patch_tokenizer.py` edit 1) renders `xhigh` as `max`,
+  which the pinned tokenizer would otherwise treat as `high`. The
   effort also grades the DeepSeek token budgets (DTO-D8, halved by
   DTO-D12): `policies` and `critique` declare
   `max_tokens_by_effort` `{low: 8192, high: 32768, max: 65536}` — half the
@@ -298,7 +303,18 @@ saturation rows regressed. Re-enable it only after the deployed high-concurrency
 envelope passes without regression (see [MEASUREMENTS.md](MEASUREMENTS.md)).
 Qwen runs on official vLLM v0.23.0. DeepSeek intentionally stays on the measured
 `aa0d513027` SM120 build because v0.23.0 does not support this checkpoint's
-DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
+DSpark path and its generic MTP loader cannot load the 0731 MTP weights. The
+served DeepSeek image is that build plus this example's tokenizer overlay
+(`vllm-overlay.Dockerfile`, `patch_tokenizer.py`): `xhigh` renders as `max`,
+and a final `<think>…</think>` assistant prefill (the public-output floor's
+continuation, DTO-D15) renders as an open turn instead of a closed one. Each
+edit replaces exactly one anchor of the pinned source and fails the build
+otherwise.
+The served vLLM image (`local/vllm-openai:qwen38-deepseek-v4-ensemble`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
 embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
@@ -328,10 +344,13 @@ remain open. See
 ```
 
 The command validates the exact eight-card inventory and NUMA affinity, pulls
-the pinned Qwen vLLM release, reuses or builds the pinned DeepSeek SM120 image,
-verifies or downloads both exact model revisions, builds Kairyu with the
-pinned offline MiniLM bundle, waits for all eight services, verifies
-`/routing`, sends a two-input embedding smoke, and prints:
+the pinned Qwen vLLM release, reuses or builds the pinned DeepSeek SM120 image
+and this example's tokenizer overlay on it, verifies or downloads both exact
+model revisions, builds Kairyu with the pinned offline MiniLM bundle, waits for
+all eight services, checks the DeepSeek encoder renderings through the
+loopback L1 (`/tokenize`: each effort's preamble, `xhigh` as `max`, thinking
+off, the continued prefill) and that a direct L1 call stays non-thinking,
+verifies `/routing`, sends a two-input embedding smoke, and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8003/v1
@@ -347,9 +366,18 @@ public IDs or Chat UI choices. The launcher validates that exact public
 inventory, the explicit eleven-role dual-track primary DAG (including the
 streamed head and the `{max_steps: 19, max_refine_depth: 2}` budget), the
 four direct-route profiles and the Qwen route judge with its five choices
-(DTO-D13), the `tier1`/`tier2`/`tier2-direct` engine bindings, and two
-ordered finite 384-dimensional embedding vectors with positive usage before
-printing the URL.
+(DTO-D13), the `tier1`/`tier2` engine bindings, and two ordered finite
+384-dimensional embedding vectors with positive usage before printing the URL.
+
+The Chat UI reaches Kairyu over `/v1/responses` (Open WebUI `api_type:
+responses`, m11 D7 amendment 2026-10-17) and streams, because a
+non-streaming Responses result loses its reasoning items (the separate
+internal-work item) in Open WebUI v0.11.0. The launcher checks that
+connection type. Kairyu then sends every L2 role call to its L1 in the same
+API — `/v1/responses` for a Chat UI turn, chat for a chat caller, Anthropic
+Messages where the request allows it — because `kairyu.yaml` declares both
+pools in `upstream_chat_models`, `upstream_responses_models`, and
+`upstream_messages_models`.
 
 ### Choosing the reasoning effort from the Chat UI
 
@@ -363,8 +391,11 @@ self-verifies on every `up`, and it owns the field: an explicit level
 overrides any `reasoning_effort` set elsewhere — including the stock
 v0.11.0 Advanced Params free-text input, which stays visible but never
 reaches Kairyu — and `default` removes such values so the server default
-applies. The selection is forwarded as the OpenAI-compatible
-`reasoning_effort` body field.
+applies. The selection is forwarded as the Responses body's
+`reasoning.effort`; the same filter keeps the rest of the body within the
+Responses API (sampling keys the API lacks are dropped, saved output items
+keep only their Responses fields, and `store` is false because the Chat UI
+sends the whole conversation every turn).
 The chosen level flows through the `inherit`-declared DeepSeek roles and
 grades every DeepSeek deliberation (`policies`, `critique`, `synthesis`)
 as well as their thinking+answer token budgets
@@ -418,9 +449,13 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh list
 ./verify.sh serving-auto-max
 ./verify.sh serving-auto-max-coding
+./verify.sh api-equivalence
 ```
 
-`serving-auto-max` records the generic-workload product serving matrix and
+Every L3 row is measured on the public Responses API (`serving_bench.py
+--api responses`) and ends naturally within its cap; these rows are not
+comparable with the earlier chat rows. The L1-direct rows and probes stay on
+chat. `serving-auto-max` records the generic-workload product serving matrix and
 proves, for every request, the route judge classification stage and exactly
 one profile's final unit; requests the judge sends to the ensemble must
 additionally trace the head/synthesis public stream, every internal stage,
@@ -435,7 +470,17 @@ loopback L1 endpoint, and
 row** (pinned `example.json` denominators are the fallback ceiling); samples
 the judge sent to a thinking direct route are reported per route but not
 gated, and a row with no gated-route sample records `not_applicable` in
-`ttft-gate.json`. The
+`ttft-gate.json`. `api-equivalence` sends the same Responses requests (text,
+stream, efforts, the Open WebUI body) to the DeepSeek L1 directly and to
+`kairyu-auto-max`, validates both against the OpenAI types, compares status
+and usage keys (`--l3-orchestrated`: the AUTO model's items come from its
+roles), and reads every L1 replica's request counters to confirm the role
+calls reached L1 on `/v1/responses`.
+
+**GPU verification pending (2026-10-17).** The rebuilt L2 (no DeepSeek
+scaffolds, one DeepSeek pool, the tokenizer overlay), the Responses Chat UI,
+and the Responses gates have not run on GPUs yet; nothing below is evidence
+for them. The
 last green runs are the dated 2026-08-25 section of `MEASUREMENTS.md`
 (`20260825T161729Z` coding + `20260825T173343Z` generic, both gates green
 on the DTO-D8..D14 served config): the judge routed every coding request
@@ -460,8 +505,10 @@ frontier APIs is owned by the external `kairyu-bench` repository.
 - Qwen vLLM image digest:
   `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
 - DeepSeek vLLM source: `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`
-- DeepSeek vLLM image digest:
-  `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
+- DeepSeek vLLM base image digest:
+  `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`;
+  the served overlay image (`local/vllm-openai:qwen38-deepseek-v4-ensemble`)
+  is attested in `example.json` after its GPU verification
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
 Set `KAIRYU_RESPONSES_COMPACTION_SECRET` to at least 32 random bytes before

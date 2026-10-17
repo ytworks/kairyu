@@ -13,9 +13,14 @@ prefill, FlashInfer autotuning, and piecewise CUDA Graphs. Kairyu validates
 one inline PNG/JPEG/WebP image up to 8 MiB and 2,097,152 pixels, then preserves
 the OpenAI content parts for the checkpoint-owned processor and the example's
 adapted Qwen chat template (`chat_template.jinja`, mounted into vLLM); ordinary
-requests default to direct answers, and an explicit `reasoning_effort` enables
+requests default to direct answers, and an explicit reasoning effort enables
 Qwen's thinking mode at a fixed low effort level (the template clamps `high`
-and `max` to `low`). The committed batching, cache-state, graph, and
+and `max`, and `xhigh` — `max` on the Responses wire — to `low`). Kairyu sends
+each request to vLLM in the API its caller used (`kairyu.yaml` lists the model
+in `upstream_chat_models`, `upstream_responses_models` and
+`upstream_messages_models`, m9 D2 amendment 2026-10-17): a chat as the caller's
+own messages, a Responses request to vLLM's `/v1/responses`, an Anthropic
+Messages request to vLLM's `/v1/messages`. The committed batching, cache-state, graph, and
 speculative-decoding values are selected by the local Qwen3.8 tuning run in
 [MEASUREMENTS.md](MEASUREMENTS.md). Open WebUI always talks to Kairyu L3 rather
 than directly to L1.
@@ -23,7 +28,8 @@ than directly to L1.
 The selected L1 envelope is `max_num_batched_tokens=32768`,
 `max_num_seqs=32`, `kv_cache_dtype=fp8`, `cudagraph_mode=PIECEWISE`, and MTP
 disabled. It reached 867.58 output tok/s at concurrency 32 in the fixed 8K/256
-matrix; 64K failed startup and MTP-3 reduced saturated throughput.
+matrix (fixed-length chat rows measured before 2026-10-17); 64K failed
+startup and MTP-3 reduced saturated throughput.
 
 ## Start
 
@@ -52,18 +58,46 @@ starts use its content attestation; `VERIFY_MODEL=1 ./run.sh` rehashes it.
 Lifecycle commands are `./run.sh up`, `./run.sh status`, `./run.sh logs`, and
 `./run.sh down`. Select another matching card with `GPU_ID=<index>`.
 
-## Serving verification
+## Chat UI
+
+Open WebUI talks to Kairyu over the OpenAI Responses API (m11 D7 amendment,
+2026-10-17): `compose.yaml` sets the connection's `api_type` to `responses`.
+Open WebUI then forwards some chat-only fields unchanged (Chat Controls'
+reasoning effort, `seed`, `top_k`) and replays saved answers with its own
+bookkeeping fields, which Kairyu's strict `/v1/responses` rejects, so the UI
+needs the global filter in `webui-responses-filter.py`: it moves the effort to
+`reasoning.effort`, drops fields the Responses API lacks, keeps only Responses
+fields on saved items, and sends `store: false`. Sign-in is enabled here, so
+`./run.sh up` installs the filter only when `WEBUI_ADMIN_EMAIL` and
+`WEBUI_ADMIN_PASSWORD` are set (the administrator Open WebUI creates on a fresh
+volume) and switches the saved Kairyu connection to `api_type=responses` when
+an existing Open WebUI volume still has the chat connection it saved earlier;
+without them it prints a warning, and an administrator installs the file under
+Admin Panel > Functions as a global filter and sets Admin Panel > Settings >
+Connections > Kairyu > API Type to Responses.
+
+## Verification
 
 ```sh
 ./verify.sh list
 ./verify.sh serving
+./verify.sh api-equivalence
 ```
 
-`serving` records TTFT, TPOT, requests/s, and output tokens/s for fixed
-approximately 8K-token inputs and exactly 256 generated tokens at concurrency
-1, 8, 16, and 32. Its deterministic prompts do not share a first prefix block,
-so prefix-cache reuse cannot inflate the matrix. Artifacts go to
-`verification/results/examples/qwen3.8-27b-1gpu/<UTC-run-id>/`.
+`serving` records TTFT, TPOT, requests/s, and output tokens/s on Kairyu's
+`/v1/responses` for approximately 8K-token inputs and up to 256 generated tokens
+at concurrency 1, 8, 16, and 32. The Responses API has no
+`ignore_eos`/`min_tokens`, so each request ends naturally within
+`max_output_tokens`; a row passes when every request returns 1 to 256 output
+tokens. These rows are not comparable with the fixed-length chat rows recorded
+before 2026-10-17. Its deterministic prompts do not share a first prefix block,
+so prefix-cache reuse cannot inflate the matrix. `api-equivalence` sends the
+same Responses requests (text, stream, each effort, a tool round trip, an image,
+a length cap, and Open WebUI's body) to vLLM directly and through Kairyu,
+requires the same Responses structure from both, and reads vLLM's request
+counters to confirm that Kairyu reached it on `/v1/responses`. Artifacts go to
+`verification/results/examples/qwen3.8-27b-1gpu/<UTC-run-id>/`. GPU
+verification of the 2026-10-17 configuration is pending.
 
 Model and product evaluations are invoked explicitly through `python -m evals`;
 see the repository benchmark documentation for the retained evaluation suites.

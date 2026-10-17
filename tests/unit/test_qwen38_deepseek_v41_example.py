@@ -2,7 +2,9 @@
 
 The example's own configs drive the production DSL/deployment loaders and the
 real OpenAI backends against a fake vLLM, so the tests observe the requests
-the deployed L1 services would receive.
+the deployed L1 services would receive, on the API the caller used (m9 D2
+amendment 2026-10-17: the Chat UI's Responses turn reaches every role on
+/v1/responses).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
 from kairyu.orchestration.request import OrchestrationRequest
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS, SamplingParams
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/qwen3.8-deepseek-v4.1-8gpu"
 # A 64x64 solid-red PNG.
@@ -32,9 +34,17 @@ RED_PNG = (
 _JUDGE_MARKER = "Reply with exactly one word"
 
 
+def _turns(body: dict) -> list[dict]:
+    """Chat messages, or the message items of a Responses input."""
+
+    if "messages" in body:
+        return body["messages"]
+    return [item for item in body["input"] if item.get("type", "message") == "message"]
+
+
 def _text(body: dict) -> str:
-    parts = []
-    for message in body["messages"]:
+    parts = [body["instructions"]] if body.get("instructions") else []
+    for message in _turns(body):
         content = message["content"]
         if isinstance(content, str):
             parts.append(content)
@@ -45,8 +55,8 @@ def _text(body: dict) -> str:
 
 def _has_image(body: dict) -> bool:
     return any(
-        part.get("type") == "image_url"
-        for message in body["messages"]
+        part.get("type") in {"image_url", "input_image"}
+        for message in _turns(body)
         if isinstance(message["content"], list)
         for part in message["content"]
     )
@@ -55,7 +65,7 @@ def _has_image(body: dict) -> bool:
 def _orchestrator(verdict: str, seen: list[dict]):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        seen.append(body)
+        seen.append({"path": request.url.path, **body})
         text = _text(body)
         if _JUDGE_MARKER in text:
             answer = verdict
@@ -65,6 +75,23 @@ def _orchestrator(verdict: str, seen: list[dict]):
             answer = "\n".join(f"POLICY {n}: approach {n}" for n in range(1, 3))
         else:
             answer = "The image is red."
+        if request.url.path.endswith("/responses"):
+            message = {
+                "type": "message",
+                "id": "msg_fake",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": answer, "annotations": []}],
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp_fake",
+                    "status": "completed",
+                    "output": [message],
+                    "usage": {"input_tokens": 16, "output_tokens": 4, "total_tokens": 20},
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -83,9 +110,19 @@ def _orchestrator(verdict: str, seen: list[dict]):
     deployment = load_deployment_spec(
         (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
+    # The upstream APIs the builder declares for each pool from kairyu.yaml.
     engines = {
         name: OpenAICompatBackend(
-            **pool.replicas[0].options, transport=httpx.MockTransport(handler)
+            **pool.replicas[0].options,
+            upstream_apis=tuple(
+                api
+                for api, models in (
+                    ("responses", deployment.upstream_responses_models),
+                    ("messages", deployment.upstream_messages_models),
+                )
+                if name in models
+            ),
+            transport=httpx.MockTransport(handler),
         )
         for name, pool in deployment.pools.items()
     }
@@ -120,12 +157,17 @@ def test_gateway_builds_from_the_example_configs(tmp_path: Path, monkeypatch) ->
     build_app_from_spec(deployment, EXAMPLE)
 
 
-def _image_call() -> OrchestrationRequest:
+def _image_call(caller_api: str = "chat") -> OrchestrationRequest:
     query = "What color is this image?"
     return OrchestrationRequest(
         prompt=query,
-        sampling_params=SamplingParams(max_tokens=4096),
+        # As L3 builds it: the caller set only max_tokens, so the model-owned
+        # sampling fields stay omitted.
+        sampling_params=SamplingParams(max_tokens=4096).with_generation_config_omitted(
+            GENERATION_CONFIG_SAMPLING_FIELDS
+        ),
         multimodal_prompt=MultimodalPrompt(query, (MultimodalItem("image", "uri", RED_PNG),)),
+        caller_api=caller_api,
     )
 
 
@@ -136,7 +178,8 @@ def _deepseek(seen: list[dict]) -> list[dict]:
 async def test_image_ensemble_sends_the_image_to_every_deepseek_role() -> None:
     seen: list[dict] = []
     orchestrator = _orchestrator("ENSEMBLE", seen)
-    call = await orchestrator.judge_role_profile(_image_call())
+    # The Chat UI's turn arrives on /v1/responses.
+    call = await orchestrator.judge_role_profile(_image_call("responses"))
     assert call.role_profile_judgment == "primary"
     judge_prompt = next(_text(body) for body in seen if _JUDGE_MARKER in _text(body))
     # Both routes' workers accept images, so neither is withheld (DTO-D16/D17).
@@ -146,6 +189,8 @@ async def test_image_ensemble_sends_the_image_to_every_deepseek_role() -> None:
     result = await orchestrator.run(call)
 
     assert result.text
+    # The route judge and every DAG role reach their L1 on the caller's API.
+    assert {body["path"] for body in seen} == {"/v1/responses"}
     deepseek = _deepseek(seen)
     roles = {tag for body in deepseek for tag in ("[policies]", "[critique]", "[synthesis]")
              if tag in _text(body)}
@@ -154,7 +199,7 @@ async def test_image_ensemble_sends_the_image_to_every_deepseek_role() -> None:
         assert _has_image(body)
         # Thinking roles carry the L3 effort (default high) and no thinking
         # toggle, so the V4.1 encoder renders the official thinking budget.
-        assert body["reasoning_effort"] == "high"
+        assert body["reasoning"] == {"effort": "high"}
         assert "chat_template_kwargs" not in body
 
 
@@ -166,6 +211,7 @@ async def test_direct_deepseek_route_thinks_at_the_request_effort() -> None:
     await orchestrator.run(call)
 
     (body,) = _deepseek(seen)
+    assert body["path"] == "/v1/chat/completions"
     assert "[deepseek_think_answer]" in _text(body)
     assert _has_image(body)
     assert body["reasoning_effort"] == "high"

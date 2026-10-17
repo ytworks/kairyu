@@ -9,6 +9,15 @@ on GPU 7 (judgments and the strict form check).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/glm-5.3-flash-quyet-8gpu/results/`
 and `run-logs/`.
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The Chat UI and every public-model gate moved to `/v1/responses`, and the
+GLM pool now receives each role call in the caller's API (m9 D2, m11 D4/D7
+amendments of 2026-10-17); a new `api-equivalence` gate compares GLM's L1
+and the public model on the same Responses requests. No gate has been run on
+GPU since; the results below were measured over Chat Completions and remain
+the evidence for that configuration only. GLM's rendering of `xhigh` (L3 `max` on the Responses wire) is checked there.
+
 ## Final run: all nine gates pass
 
 GPU run 2026-10-13 12:28-14:24 JST (UTC 03:28-05:24) at `90ab8016`: GLM pool

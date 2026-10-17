@@ -94,8 +94,8 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:qwen38-deepseek-v41-ensemble",
-      "image_id": "sha256:c70d91086275a55c82a58da4fc53adc09ca8ee68e49e8eeb9bfb271041f97f30",
+      "image": "local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh",
+      "image_id": null,
       "distribution": "overlay",
       "dockerfile": "vllm-sm120.Dockerfile",
       "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",

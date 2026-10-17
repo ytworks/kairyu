@@ -114,6 +114,9 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI reaches Kairyu over
+      # /v1/responses; control.py installs webui-responses-filter.py.
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: qwen3.8-27b
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":0.95}'
       ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}

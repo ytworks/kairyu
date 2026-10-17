@@ -8,6 +8,33 @@ default, image input enabled) against an already-running stack, with
 row-unique prompt prefixes so neither vLLM prefix caching nor Kairyu's
 prefix-aware placement can inflate the matrix.
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The served configuration changed after the locked run below: Kairyu forwards
+each request to vLLM in its caller's API (`upstream_chat_models`,
+`upstream_responses_models`, `upstream_messages_models` instead of
+`legacy_chat_models`; m9 D2 amendment), the Chat UI and every gate use
+`/v1/responses` (m11 D7 amendment), the served vLLM image adds the
+`xhigh`->`max` effort patch, and the serving rows end naturally within 256
+output tokens because the Responses API has no `ignore_eos`/`min_tokens`. No
+GPU run of this configuration exists yet. The results below describe the
+previous chat-only configuration (served-config `a6b34046…`) and are not
+comparable with the new natural-completion rows; `serving`, `tool-calling`,
+`vision`, the new `api-equivalence` gate and the Chat UI will be recorded here
+after the GPU run.
+
+- Served-config SHA-256:
+  `691b96e5f9ec24e59c5ef3e284c490ea79d37c261a9e39d76e29110280f48eb6`
+  (the committed configuration this section describes, with no measurement
+  yet; enforced by `tests/unit/test_example_measurement_hashes.py`).
+
+The served vLLM image
+(`local/vllm-openai:deepseek-v4-flash-vision-exp-dp2-xhigh`) is rebuilt by
+this change and has no recorded image ID yet: `example.json` `image_id` and
+`kairyu.yaml` `container_image_digest` stay null until the GPU build records
+them, and until then `run.sh up` stops unless
+`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+
 ## Locked system
 
 - Hardware: 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB per
@@ -19,7 +46,7 @@ prefix-aware placement can inflate the matrix.
   nightly wheel) with FlashInfer `60b49158ab4fb81718aef486c2d3c89aec4c1901`
   overlaid from source (`vllm-sm120.Dockerfile`), image ID
   `sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4`
-- Served-config SHA-256:
+- Served-config SHA-256 at measurement time:
   `a6b34046431b668d064dbe54f97cd5f45220c4fe501651660fdecf5344cf6362`
   (identical across the three gate runs below).
 - L1: 2 x TP4+EP4 replicas (GPU 0-3, GPU 4-7), each with DSpark-3

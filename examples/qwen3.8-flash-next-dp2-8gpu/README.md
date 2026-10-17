@@ -46,42 +46,62 @@ per-request cap; Kairyu's `image_input_policy` bounds admission to 4 images
 of up to 16 Mpx / 8 MiB each, and video input is closed (`--limit-mm-per-prompt.video 0`)
 because the policy validates images only.
 
-vLLM renders every chat request with the example-local template
+vLLM renders every request with the example-local template
 ([`qwen3.8-flash-next-chat.jinja`](qwen3.8-flash-next-chat.jinja): the
-official template plus a two-line effort alias, see below), so **OpenAI
-function-tool calling works end to end**: declared `tools` are rendered into
-Qwen's XML tool prompt, the model's tool calls are parsed by vLLM's
-`qwen3_xml` parser, Kairyu normalizes them into
-`choices[0].message.tool_calls`, and `role: "tool"` results round-trip on the
-next turn. Ordinary requests default to direct (non-thinking) chat; an
-explicit `reasoning_effort` selects thinking mode.
+official template plus a two-line effort alias, see below), and Kairyu
+forwards each request to vLLM in the API its caller used (m9 D2 amendment
+2026-10-17): Chat Completions as the caller's own messages, the Responses API
+as Responses, and Anthropic Messages as Messages (`upstream_chat_models`,
+`upstream_responses_models` and `upstream_messages_models` in
+[`kairyu.yaml`](kairyu.yaml); Kairyu refuses to start if a replica does not
+serve one of them). **OpenAI function-tool calling works end to end**:
+declared `tools` are rendered into Qwen's XML tool prompt, the model's tool
+calls are parsed by vLLM's `qwen3_xml` parser, and tool results round-trip on
+the next turn. Ordinary requests default to direct (non-thinking) chat; an
+explicit effort (`reasoning.effort` on Responses, `reasoning_effort` on chat)
+selects thinking mode.
+
+**Status (2026-10-17): the Responses connection and the native forwarding are
+implemented; GPU verification is pending.** The locked results in
+[MEASUREMENTS.md](MEASUREMENTS.md) were measured on the earlier chat-only
+configuration.
 
 ## Reasoning effort in the Chat UI
 
 The Chat UI runs without login (single auto-admin session, as in the
-[tiered example](../qwen3.8-deepseek-v4-8gpu/README.md)). `run.sh up`
+[tiered example](../qwen3.8-deepseek-v4-8gpu/README.md)) and talks to Kairyu
+over `/v1/responses` (`OPENAI_API_CONFIGS` `api_type: responses` in
+[`compose.yaml`](compose.yaml); m11 D7 amendment 2026-10-17). `run.sh up`
 installs a global Open WebUI filter
 ([`webui-reasoning-effort-filter.py`](webui-reasoning-effort-filter.py)) whose
 user valve renders as a dropdown under **Chat Controls -> Valves -> Reasoning
 Effort** with Qwen's official levels `default / low / medium / xhigh`:
 
-- `default` leaves `reasoning_effort` out, so the non-thinking direct-chat
-  default applies with Qwen's published instruct sampling
-  (temperature 0.7, top_p 0.8, presence_penalty 1.5 from the Chat UI's
-  `DEFAULT_MODEL_PARAMS`).
-- `low / medium / xhigh` are sent as the OpenAI `reasoning_effort` body
-  field, and the filter drops the instruct sampling fields from the request
-  so vLLM applies the checkpoint's thinking `generation_config`
-  (temperature 1.0, top_p 0.95, top_k 20) — the sampling Qwen publishes for
-  thinking mode.
+- `default` leaves the effort out, so the non-thinking direct-chat default
+  applies with Qwen's published instruct temperature 0.7 and top_p 0.8 (the
+  Chat UI's `DEFAULT_MODEL_PARAMS`). Qwen's instruct `presence_penalty` 1.5
+  is not sent: the Responses API has no such field (Open WebUI drops it from
+  a Responses body), so the UI's direct-chat sampling differs from Qwen's
+  published instruct values in that one penalty.
+- `low / medium / xhigh` are sent as the Responses body's `reasoning.effort`,
+  and the filter drops the instruct sampling fields from the request so vLLM
+  applies the checkpoint's thinking `generation_config` (temperature 1.0,
+  top_p 0.95, top_k 20) — the sampling Qwen publishes for thinking mode.
+
+The same filter keeps Open WebUI's converted body to Responses fields:
+sampling keys outside the Responses API (`seed`, `top_k`, ...) are dropped,
+saved output items keep only their Responses fields, and `store` is false
+because the UI sends the whole conversation every turn.
 
 Kairyu L3 accepts the OpenAI wire vocabulary and normalizes `medium -> high`
-and `xhigh -> max` before forwarding, while the official template rejects
+and `xhigh -> max`; it forwards `max` to vLLM's Chat Completions API as `max`
+and to its Responses API as `xhigh`, while the official template rejects
 anything outside `low / medium / xhigh` with HTTP 400. The example-local
 template therefore maps `high -> medium` and `max -> xhigh` at the top and is
 otherwise byte-identical to the checkpoint's template, so the model receives
-exactly the effort the client selected. Provisioning is fail-closed:
-`run.sh up` verifies the installed dropdown exposes exactly those levels.
+exactly the effort the client selected on either API. Provisioning is
+fail-closed: `run.sh up` verifies the installed dropdown exposes exactly those
+levels and that the connection uses the Responses API.
 
 ## How requests are spread over the replicas
 
@@ -133,9 +153,9 @@ exact model revision into
 `/mnt/nvme/kairyu/model-volumes/qwen3.8-flash-next-dp2-8gpu/models`, builds
 Kairyu with the `vision` extra, waits for readiness, checks that Kairyu
 reports exactly one public model with two healthy replicas, proves one live
-bash tool call round-trip and one live image request (the environment is
-not "ready" if `tool_calls` comes back null or an image request returns no
-content), installs the Reasoning Effort dropdown, and prints:
+bash tool call and one live image request over `/v1/responses` (the
+environment is not "ready" without a `function_call` or if an image request
+returns no text), installs the Reasoning Effort dropdown, and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8007/v1
@@ -157,21 +177,36 @@ Lifecycle commands are `./run.sh up`, `./run.sh status`, `./run.sh logs`, and
 ./verify.sh serving
 ./verify.sh tool-calling
 ./verify.sh vision
+./verify.sh api-equivalence
 ```
+
+Every gate calls Kairyu's public `/v1/responses`, the API the Chat UI uses.
 
 `tool-calling` gates the OpenAI agent contract the serving claim depends on:
 an auto-choice `bash` tool call (the SWE-bench Pro mini-swe-agent request
-shape) fanned across both replicas, the follow-up turn with the `role: "tool"`
-result, the streamed variant, thinking mode (`reasoning_effort`) with tools,
-and the non-thinking default. `vision` fans image requests (two per replica,
+shape) fanned across both replicas, the follow-up turn with the tool result
+(the task still needs a call after the listing: "List the files in the current
+directory, then show the first line of README.md.", the PR #647 wording), the
+streamed variant, thinking mode (an explicit effort) with tools, and the
+non-thinking default. `vision` fans image requests (two per replica,
 concurrently) through Kairyu and requires visible content from every one of
-them and, from the placement log, that both replicas served images. Artifacts
-land in the same results directory as `serving`.
+them and, from the placement log, that both replicas served images.
+`api-equivalence` sends the same Responses requests (text, stream, each
+effort, a tool round trip, an image, a length cap, and Open WebUI's request
+shape) to replica 0 directly and to Kairyu, requires the same Responses
+structure and input-token count from both
+([`upstream_api_equivalence.py`](../../verification/product/correctness/upstream_api_equivalence.py)),
+and reads both replicas' own request counters to confirm Kairyu reached them on
+`/v1/responses`, never `/v1/chat/completions`. Artifacts land in the same
+results directory as `serving`.
 
 `serving` warms both replicas with one short request each, then records TTFT,
-TPOT, requests/s, and output tokens/s for fixed approximately 8K-token inputs
-and exactly 256 generated tokens at concurrency 1, 8, 16, and 32 (64 requests
-per row; 32 is the admission limit of 2 x 16 sequences). Each row's prompts
+TPOT, requests/s, and output tokens/s for approximately 8K-token inputs and up
+to 256 generated tokens at concurrency 1, 8, 16, and 32 (64 requests per row;
+32 is the admission limit of 2 x 16 sequences). The Responses API has no
+`ignore_eos`/`min_tokens`, so each request ends naturally within 256 tokens
+and the row is valid when every request generated 1-256 tokens; these rows are
+not comparable with the locked fixed-length chat rows. Each row's prompts
 carry a row-unique prefix first, so neither vLLM prefix caching nor Kairyu's
 prefix-aware placement can inflate the matrix. For every row it also reads
 the placement log delta and writes `placement.json` with the per-replica
@@ -179,7 +214,7 @@ request counts; at concurrency >= 8 the row **fails** unless both replicas
 received traffic and neither took more than 1.25x the even share (40 of 64
 requests). Artifacts go to
 `/mnt/nvme/kairyu/model-volumes/qwen3.8-flash-next-dp2-8gpu/verification-results/<UTC-run-id>/`
-(override with `VERIFICATION_RESULTS_ROOT`). The locked results are in
+(override with `VERIFICATION_RESULTS_ROOT`). The locked chat-era results are in
 [MEASUREMENTS.md](MEASUREMENTS.md). Model and product evaluations are invoked
 explicitly through `python -m evals`.
 

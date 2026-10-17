@@ -4,13 +4,17 @@ import importlib.util
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 
+from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
-from kairyu.dsl.loader import load_spec
+from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.config_validation import validate_backend_options
-from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS, SamplingParams
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "examples/qwen3.8-deepseek-v4-8gpu"
@@ -56,7 +60,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
         "tier1",
         "tier2",
         "qwen3.8-27b",
-        "deepseek-v4-flash-0731-thinking",
+        "deepseek-v4-flash-0731",
     ):
         assert attribution in browser
 
@@ -177,14 +181,17 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert "--enable-auto-tool-choice" in deepseek["command"]
     assert _option(deepseek["command"], "--tool-call-parser") == "deepseek_v4"
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
-    # Scaffold passthrough plus inherited-effort preamble injection (DTO-D6).
-    assert _option(deepseek["command"], "--chat-template") == (
-        "/etc/kairyu/deepseek-role-effort.jinja"
-    )
-    assert (
-        "./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro"
-        in deepseek["volumes"]
-    )
+    # The checkpoint's own encoder renders every role call (DTO amendment
+    # 2026-10-17); thinking defaults off, so the coding gate's DeepSeek-direct
+    # TTFT row stays non-thinking while thinking roles send their effort.
+    assert _option(deepseek["command"], "--tokenizer-mode") == "deepseek_v4"
+    assert "--chat-template" not in deepseek["command"]
+    assert json.loads(_option(deepseek["command"], "--default-chat-template-kwargs")) == {
+        "thinking": False,
+        "enable_thinking": False,
+    }
+    assert spec["vllm"]["deepseek"]["dockerfile"] == "vllm-overlay.Dockerfile"
+    assert len(deepseek["volumes"]) == 2
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
     assert deepseek["environment"] | {
         "XDG_CACHE_HOME": "/root/.cache",
@@ -229,15 +236,13 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     ]
 
 
-def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
+def test_tiered_gateway_owns_l2_pools_and_orchestrators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     raw = (EXAMPLE / "kairyu.yaml").read_text()
     deployment = load_deployment_spec(raw, resolve_credentials=False)
 
-    assert set(deployment.pools) == {
-        "qwen3.8-27b",
-        "deepseek-v4-flash-0731",
-        "deepseek-v4-flash-0731-thinking",
-    }
+    assert set(deployment.pools) == {"qwen3.8-27b", "deepseek-v4-flash-0731"}
     qwen = deployment.pools["qwen3.8-27b"]
     assert len(qwen.replicas) == 4
     assert qwen.prefix_index is True
@@ -260,12 +265,10 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deepseek.replicas[0].options["tensor_parallel_size"] == 4
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
     assert deepseek.replicas[0].options["dspark_enabled"] is True
-    assert deepseek.replicas[0].options["container_image_digest"] == (
-        "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1"
-    )
-    assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
-    thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
-    assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
+    # The effort-less deepseek_answer turns thinking off explicitly.
+    assert deepseek.replicas[0].options["capabilities"] == {
+        "allow_chat_template_kwargs": ["enable_thinking"]
+    }
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
@@ -289,66 +292,197 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deployment.public_models == frozenset(
         {"kairyu-auto-max", "embed-small"}
     )
-    assert deployment.chat_templates == {
-        "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
-        "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
-    }
-    assert deployment.legacy_chat_models == frozenset({"qwen3.8-27b"})
+    assert deployment.chat_templates == {}
+    assert deployment.legacy_chat_models == frozenset()
+    pools = frozenset({"qwen3.8-27b", "deepseek-v4-flash-0731"})
+    assert deployment.upstream_chat_models == pools
+    assert deployment.upstream_responses_models == pools
+    assert deployment.upstream_messages_models == pools
     assert deployment.server.max_chat_body_bytes == 16_777_216
 
-
-def test_deepseek_role_effort_template_grades_only_thinking_scaffolds() -> None:
-    template = ChatTemplate.load(str(EXAMPLE / "deepseek-role-effort.jinja"))
-    thinking = (
-        "<｜begin▁of▁sentence｜><｜User｜>[critique] judge<｜Assistant｜><think>"
+    # The gateway builds from these configs (the loader alone accepts chat
+    # policies the builder rejects at startup).
+    monkeypatch.setenv("KAIRYU_RESPONSES_COMPACTION_SECRET", "0" * 64)
+    spec_path = tmp_path / "auto-max.yaml"
+    spec_path.write_text(
+        (EXAMPLE / "auto-max.yaml")
+        .read_text()
+        .replace("/etc/kairyu/router.json", str(EXAMPLE / "router.json"))
     )
-    direct = (
-        "<｜begin▁of▁sentence｜><｜User｜>[policies] write<｜Assistant｜></think>"
+    built = load_deployment_spec(
+        raw.replace("/etc/kairyu/auto-max.yaml", str(spec_path)),
+        resolve_credentials=False,
     )
+    # The embedding bundle and the sandbox socket exist only in the images.
+    built = built.model_copy(
+        update={"embeddings": {}, "executors": {}, "public_models": ["kairyu-auto-max"]}
+    )
+    build_app_from_spec(built, EXAMPLE)
 
-    def render(content: str, effort: str | None) -> str:
-        return template.render(
-            [{"role": "user", "content": content}],
-            template_kwargs=(
-                {"reasoning_effort": effort} if effort is not None else None
-            ),
+
+_JUDGE_MARKER = "Reply with exactly one word"
+
+
+def _turn_text(body: dict) -> str:
+    """The text of a chat request's messages or a Responses request's items."""
+
+    turns = body.get("messages") or [
+        item for item in body.get("input", ()) if item.get("type", "message") == "message"
+    ]
+    parts = []
+    for turn in turns:
+        content = turn["content"]
+        if isinstance(content, str):
+            parts.append(content)
+        else:
+            parts.extend(part.get("text", "") for part in content)
+    return "\n".join(parts)
+
+
+def _tiered_orchestrator(verdict: str, seen: list[dict]):
+    """The example's L2 over its real L1 backends and a fake vLLM."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append({"path": request.url.path, **body})
+        text = _turn_text(body)
+        if _JUDGE_MARKER in text:
+            answer = verdict
+        elif "[audit]" in text:
+            answer = "PASS"
+        elif "[policies]" in text:
+            answer = "\n".join(f"POLICY {n}: approach {n}" for n in range(1, 5))
+        else:
+            answer = "An answer."
+        if request.url.path.endswith("/responses"):
+            message = {
+                "type": "message",
+                "id": "msg_fake",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": answer, "annotations": []}],
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp_fake",
+                    "status": "completed",
+                    "output": [message],
+                    "usage": {"input_tokens": 16, "output_tokens": 4, "total_tokens": 20},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-fake",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": answer},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 16, "completion_tokens": 4, "total_tokens": 20},
+            },
         )
 
-    assert render(thinking, None) == thinking
-    assert render(thinking, "low") == thinking
-    assert render(direct, "max") == direct
-    high = render(thinking, "high")
-    assert high.startswith(
-        "<｜begin▁of▁sentence｜>Reason privately and carefully"
+    deployment = load_deployment_spec(
+        (EXAMPLE / "kairyu.yaml").read_text(), resolve_credentials=False
     )
-    assert high.endswith("<｜Assistant｜><think>")
-    maxed = render(thinking, "max")
-    assert maxed.startswith(
-        "<｜begin▁of▁sentence｜>Use rigorous private reasoning"
+    # The upstream APIs the builder declares for each pool from kairyu.yaml.
+    engines = {
+        name: OpenAICompatBackend(
+            **pool.replicas[0].options,
+            upstream_apis=tuple(
+                api
+                for api, models in (
+                    ("responses", deployment.upstream_responses_models),
+                    ("messages", deployment.upstream_messages_models),
+                )
+                if name in models
+            ),
+            transport=httpx.MockTransport(handler),
+        )
+        for name, pool in deployment.pools.items()
+    }
+    spec = load_spec(EXAMPLE / "auto-max.yaml")
+    spec = spec.model_copy(
+        update={
+            "router": spec.router.model_copy(update={"artifact": str(EXAMPLE / "router.json")})
+        }
     )
-    assert maxed.endswith("<｜User｜>[critique] judge<｜Assistant｜><think>")
+    return build_orchestrator(spec, engine_refs=engines)
 
 
-def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
-    template = (EXAMPLE / "deepseek-thinking.jinja").read_text()
+def _responses_call(effort: str) -> OrchestrationRequest:
+    return OrchestrationRequest(
+        prompt="Explain the trade-offs of two sorting algorithms.",
+        # As L3 builds it: the caller set only max_tokens, so the model-owned
+        # sampling fields stay omitted.
+        sampling_params=SamplingParams(max_tokens=4096).with_generation_config_omitted(
+            GENERATION_CONFIG_SAMPLING_FIELDS
+        ),
+        reasoning_effort=effort,
+        caller_api="responses",
+    )
 
-    assert "Reason privately and carefully" in template
-    assert "converge promptly" in template
-    assert "non-empty final answer immediately follows </think>" in template
-    assert "entire deliberation process" not in template
-    assert "Do not stop reasoning" not in template
+
+def _deepseek_bodies(seen: list[dict]) -> list[dict]:
+    return [body for body in seen if body["model"] == "deepseek-v4-flash-0731"]
+
+
+async def test_tiered_ensemble_roles_reach_l1_on_the_callers_responses_api() -> None:
+    """DTO amendment 2026-10-17: a Chat UI turn (Responses) reaches every DAG
+    role on /v1/responses; DeepSeek roles are plain role text for the L1
+    encoder, carrying the L3 effort (max travels as the Responses xhigh)."""
+
+    seen: list[dict] = []
+    orchestrator = _tiered_orchestrator("ENSEMBLE", seen)
+    call = await orchestrator.judge_role_profile(_responses_call("max"))
+    assert call.role_profile_judgment == "primary"
+
+    result = await orchestrator.run(call)
+
+    assert result.text
+    assert {body["path"] for body in seen} == {"/v1/responses"}
+    deepseek = _deepseek_bodies(seen)
+    roles = {
+        tag
+        for body in deepseek
+        for tag in ("[policies]", "[critique]", "[synthesis]")
+        if _turn_text(body).startswith(tag)
+    }
+    assert roles == {"[policies]", "[critique]", "[synthesis]"}
+    for body in deepseek:
+        assert "<｜" not in _turn_text(body)
+        assert body["reasoning"] == {"effort": "xhigh"}
+        assert "chat_template_kwargs" not in body
+
+
+async def test_tiered_direct_deepseek_route_turns_thinking_off() -> None:
+    seen: list[dict] = []
+    orchestrator = _tiered_orchestrator("DEEPSEEK", seen)
+    call = await orchestrator.judge_role_profile(_responses_call("high"))
+    assert call.role_profile_judgment == "deepseek_direct"
+
+    await orchestrator.run(call)
+
+    (body,) = _deepseek_bodies(seen)
+    assert body["path"] == "/v1/responses"
+    assert _turn_text(body).startswith("[deepseek_answer]")
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning" not in body
 
 
 def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2", "tier2-direct"]
+    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
-    # Every primary-profile DeepSeek role thinks (DTO-D7) on tier2; the
-    # non-thinking pool serves only the deepseek_direct route (DTO-D13).
-    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
+    # One DeepSeek pool serves every DeepSeek role, the direct routes included
+    # (DTO amendment 2026-10-17, as DTO-D16).
+    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -452,8 +586,11 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     # public answer.
     assert synthesis.reasoning_closed is False
     # DTO-D9: the public-output floor force-closes synthesis's deliberation
-    # in the empty-output re-dispatch via this tag.
+    # in the empty-output re-dispatch via this tag; the encoder opens the
+    # span, so the continuation is an assistant prefill (DTO-D15/D16).
     assert synthesis.reasoning_close_tag == "</think>"
+    assert synthesis.reasoning_continuation == "chat"
+    assert synthesis.reasoning_open_tag == "<think>"
     assert synthesis.prompt_headless
     # DTO-D10/D14: the audit verifier gates publication of the final unit
     # with the first-line PASS/FAIL protocol; never greedy (issue #509). It
@@ -468,9 +605,10 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert audit.sampling.top_k == 20 and audit.sampling.max_tokens == 16384
     assert audit.sampling.max_tokens_by_effort is None
     assert audit.prompt_suffix == ""
-    # DTO-D7: every DeepSeek role deliberates — all scaffolds end open.
-    for role_name in ("policies", "critique", "synthesis"):
-        assert by_name[role_name].prompt_suffix == "<｜Assistant｜><think>"
+    # Role prompts carry no DeepSeek scaffold: the L1 encoder renders them.
+    for role in maximum.roles:
+        assert role.prompt_suffix == ""
+        assert "<｜" not in role.prompt + (role.prompt_headless or "")
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
     for role_name in ("critique", "synthesis"):
         assert "UNTRUSTED" in by_name[role_name].prompt
@@ -531,18 +669,16 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert (qwen_think.sampling.temperature, qwen_think.sampling.top_p) == (1.0, 0.95)
     assert qwen_think.sampling.top_k == 20 and qwen_think.sampling.presence_penalty is None
     deepseek_answer = finals["deepseek_direct"]
-    assert deepseek_answer.worker == "tier2-direct"
+    assert deepseek_answer.worker == "tier2"
     assert deepseek_answer.reasoning_effort is None
     assert deepseek_answer.reasoning_closed is True
-    assert deepseek_answer.prompt_suffix == "<｜Assistant｜></think>"
     deepseek_think = finals["deepseek_think"]
     assert deepseek_think.worker == "tier2" and deepseek_think.reasoning_effort == "inherit"
-    assert deepseek_think.prompt_suffix == "<｜Assistant｜><think>"
     assert deepseek_think.reasoning_close_tag == "</think>"
+    assert deepseek_think.reasoning_continuation == "chat"
     assert deepseek_think.reasoning_closed is False
     for role in (deepseek_answer, deepseek_think):
         assert (role.sampling.temperature, role.sampling.top_p) == (1.0, 0.95)
-        assert role.prompt.startswith("<｜begin▁of▁sentence｜><｜User｜>")
     for role in finals.values():
         assert "{query}" in role.prompt and role.depends_on == ()
         assert "reply format the conversation demands" in " ".join(role.prompt.split())
@@ -554,13 +690,13 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
-    assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
-        "max_tokens": 65536,
-        "stream_response": False,
+    # Streaming: a non-streamed Responses result loses the Thought section.
+    assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {"max_tokens": 65536}
+    assert json.loads(ui["environment"]["OPENAI_API_CONFIGS"]) == {
+        "0": {"api_type": "responses", "model_ids": ["kairyu-auto-max"]}
     }
     assert ui["environment"] | {
         "DEFAULT_MODELS": "kairyu-auto-max",
-        "OPENAI_API_CONFIGS": '{"0":{"model_ids":["kairyu-auto-max"]}}',
         "ENABLE_PERSISTENT_CONFIG": "false",
         "RESET_CONFIG_ON_START": "true",
         "ENABLE_SIGNUP": "false",
@@ -667,8 +803,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
-                        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
+                        "tier2": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -737,12 +872,15 @@ class _FakeWebUI:
         self.functions: dict[str, dict] = {}
         self.calls: list[str] = []
         self.role = "admin"
+        self.api_type: str | None = "responses"
 
     def __call__(self, ui_url, path, *, token=None, payload=None, method=None):
         self.calls.append(path)
         if path == "/api/v1/auths/signin":
             return {"role": self.role, "token": "session-token"}
         assert token == "session-token"
+        if path == "/openai/config":
+            return {"OPENAI_API_CONFIGS": {"0": {"api_type": self.api_type}}}
         if path == "/api/v1/functions/":
             return [dict(row) for row in self.functions.values()]
         if path == "/api/v1/functions/create":
@@ -775,14 +913,16 @@ def test_tiered_chat_ui_effort_filter_controls_request_body() -> None:
     )
     selector = module.Filter()
 
+    # The Chat UI reaches Kairyu over Responses: the selection travels as
+    # reasoning.effort and the stateless UI asks Kairyu not to store turns.
     for effort in ("low", "high", "max"):
         body = {"reasoning_effort": "stale"}
         user = {"valves": selector.UserValves(reasoning_effort=effort)}
-        assert selector.inlet(body, user) == {"reasoning_effort": effort}
+        assert selector.inlet(body, user) == {"reasoning": {"effort": effort}, "store": False}
 
     body = {"reasoning_effort": "max"}
     user = {"valves": selector.UserValves(reasoning_effort="default")}
-    assert selector.inlet(body, user) == {}
+    assert selector.inlet(body, user) == {"store": False}
 
 
 def test_tiered_chat_ui_effort_selector_provision_is_idempotent(
@@ -808,6 +948,11 @@ def test_tiered_chat_ui_effort_selector_provision_is_idempotent(
     assert "/api/v1/functions/create" not in webui.calls
     assert "/api/v1/functions/id/reasoning_effort/update" in webui.calls
     assert not [call for call in webui.calls if call.endswith(("toggle", "toggle/global"))]
+
+    # A Chat UI still connected over chat completions fails the launch.
+    webui.api_type = None
+    with pytest.raises(SystemExit, match="api_type=responses"):
+        control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
 
     webui.role = "user"
     with pytest.raises(SystemExit, match="admin"):
@@ -891,7 +1036,6 @@ def test_tiered_product_serving_requires_head_and_synthesis_trace(
                 "expected_role": "publisher",
                 "expected_kind": "generation",
                 "warmup_requests": 4,
-                "natural_completion": True,
                 "require_head": True,
                 "expected_generation_nodes": (
                     "draft",
@@ -913,12 +1057,12 @@ def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
     result = {
         "summary": {
             "requests": 1,
-            "completion_tokens_total": 32,
-            "output_tokens_per_s": 1.0,
+            "public_completion_tokens_total": 32,
+            "public_output_tokens_per_s": 1.0,
         },
         "samples": [
             {
-                "completion_tokens": 32,
+                "public_completion_tokens": 32,
                 "trace": {"status": "valid", "stages": stages},
             }
         ],
@@ -971,7 +1115,6 @@ def test_tiered_product_serving_requires_every_internal_stage(
         return benchmark._validate_serving_row(
             tmp_path,
             1,
-            32,
             expected_route="synthesis",
             expected_role="publisher",
             require_head=True,
@@ -1023,7 +1166,6 @@ def test_tiered_product_serving_judged_routes_accept_one_direct_final(
         return benchmark._validate_serving_row(
             tmp_path,
             1,
-            32,
             expected_route="synthesis",
             expected_role="publisher",
             require_head=True,

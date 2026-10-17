@@ -31,6 +31,11 @@ any other version fails the build.
    ``<think>\n{reasoning}\n</think>\n\n`` as that turn. The encoder now
    renders it as the open turn ``<｜Assistant｜><think>\n{reasoning}\n</think>\n\n``:
    the span becomes the turn's reasoning and end-of-sentence is omitted.
+8. Responses effort ``xhigh``: OpenAI's Responses effort enum has no ``max``,
+   so Kairyu sends an L3 ``max`` to this L1's ``/v1/responses`` as ``xhigh``
+   (m11 D4 amendment 2026-10-17). The pinned encoder maps ``xhigh`` to 75
+   (= high); it now renders the max budget (100), so a Responses role at max
+   thinks as a chat role at max does.
 """
 
 # ruff: noqa: E501  (C++ anchors keep their pinned line boundaries)
@@ -41,6 +46,8 @@ import runpy
 from pathlib import Path
 
 OFFICIAL_EFFORTS = {"low": 50, "high": 75, "max": 100}
+# Edit 8: the Responses wire's xhigh is L3 max.
+SERVED_EFFORTS = {**OFFICIAL_EFFORTS, "xhigh": OFFICIAL_EFFORTS["max"]}
 
 
 def replace_once(source: str, before: str, after: str) -> str:
@@ -56,10 +63,10 @@ def replace_once(source: str, before: str, after: str) -> str:
 # --- 1. effort aliases ---------------------------------------------------------
 
 
-def check_efforts(encoder_path: Path) -> None:
+def check_efforts(encoder_path: Path, efforts: dict[str, int] = OFFICIAL_EFFORTS) -> None:
     encoder = runpy.run_path(str(encoder_path))
     render = encoder["render_reasoning_effort"]
-    for name, budget in OFFICIAL_EFFORTS.items():
+    for name, budget in efforts.items():
         if f"Reasoning Effort: {budget} " not in render(0, "thinking", name):
             raise ValueError(f"encoder renders {name!r} without budget {budget}")
     if "Reasoning Effort: 75 " not in render(0, "thinking", None):
@@ -266,6 +273,16 @@ def final_assistant_prefill(source: str) -> str:
     return replace_once(source, CONTINUATION_ANCHOR, CONTINUATION_REPLACEMENT)
 
 
+# --- 8. Responses effort xhigh --------------------------------------------------------
+
+XHIGH_ANCHOR = '    "xhigh": 75,\n'
+XHIGH_REPLACEMENT = '    "xhigh": 100,\n'
+
+
+def responses_xhigh_effort(source: str) -> str:
+    return replace_once(source, XHIGH_ANCHOR, XHIGH_REPLACEMENT)
+
+
 # --- profiles ----------------------------------------------------------------------
 
 FLASHINFER_SM120 = "data/include/flashinfer/attention/sparse_mla_sm120"
@@ -286,6 +303,7 @@ VLLM_EDITS = [
     ),
     ("vllm", "v1/sample/ops/topk_topp_triton.py", (top_p_guard,)),
     ("vllm", "tokenizers/deepseek_v41.py", (final_assistant_prefill,)),
+    ("vllm", "tokenizers/deepseek_v41_encoding.py", (responses_xhigh_effort,)),
 ]
 FLASHINFER_EDITS = [
     ("flashinfer", "data/csrc/sparse_mla_sm120_prefill.cu", (flashinfer_page32_prefill,)),
@@ -307,7 +325,8 @@ def main() -> None:
 
     if vllm.__version__ != VLLM_VERSION:
         raise SystemExit(f"patches target vLLM {VLLM_VERSION}, found {vllm.__version__}")
-    check_efforts(_package_root("vllm") / "tokenizers/deepseek_v41_encoding.py")
+    encoder = _package_root("vllm") / "tokenizers/deepseek_v41_encoding.py"
+    check_efforts(encoder)
     print("V4.1 encoder: low=50, high=75, max=100; default high")
 
     # Transform everything first; write only when every anchor matched.
@@ -321,6 +340,8 @@ def main() -> None:
     for path, source in updates:
         path.write_text(source)
         print(f"patched {path}")
+    check_efforts(encoder, SERVED_EFFORTS)
+    print("V4.1 encoder: Responses xhigh renders the max budget (100)")
 
 
 if __name__ == "__main__":

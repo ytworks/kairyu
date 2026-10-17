@@ -41,18 +41,14 @@
 workers:
   - name: tier1
     engine_ref: qwen3.8-27b
-  # DeepSeek v4 flash always thinks (owner decision, DTO-D7): policies,
-  # critique, synthesis, and audit all run on the thinking pool with the
-  # `<｜Assistant｜><think>` scaffold. The public first byte still comes from
-  # the non-thinking Qwen head (DTO-D3), so the TTFT gate does not depend on
-  # DeepSeek; synthesis's public remainder streams after its private
-  # deliberation and the audit verdict.
+  # DeepSeek v4 flash ensemble roles always think (owner decision, DTO-D7):
+  # policies, critique, and synthesis declare `reasoning_effort: inherit`.
+  # The public first byte still comes from the non-thinking Qwen head
+  # (DTO-D3), so the TTFT gate does not depend on DeepSeek; synthesis's
+  # public remainder streams after its private deliberation and the audit
+  # verdict. One pool serves every DeepSeek role, both direct routes
+  # included (DTO amendment 2026-10-17, as DTO-D16).
   - name: tier2
-    engine_ref: deepseek-v4-flash-0731-thinking
-  # Non-thinking DeepSeek pool for the deepseek_direct route (DTO-D13): the
-  # same vLLM service, reached through a `</think>`-closed scaffold that the
-  # deepseek-role-effort.jinja passthrough leaves byte-identical.
-  - name: tier2-direct
     engine_ref: deepseek-v4-flash-0731
 
 router:
@@ -61,18 +57,17 @@ router:
   sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5
   target_mode: auto-max
 
-# DeepSeek role prompts carry their chat scaffold inline: the DeepSeek vLLM
-# service runs a passthrough chat template (Kairyu owns templating), and its
-# deepseek_v4 reasoning parser classifies generated text as private reasoning
-# until an emitted `</think>`. Every DeepSeek role prompt ends
-# `<｜Assistant｜><think>` — DeepSeek v4 flash always deliberates privately
-# before its public text (owner decision, DTO-D7). DeepSeek roles declare
-# `reasoning_effort: inherit`: the caller's L3 effort (or
-# `default_reasoning_effort` below when the caller sent none) travels on
-# their requests, and the DeepSeek service's chat template
-# (deepseek-role-effort.jinja) injects the graded high/max reasoning preamble
-# into these thinking-scaffold calls. Qwen roles need no
-# scaffold: their vLLM service applies the example-local Qwen chat template
+# Role prompts carry no chat scaffold (DTO amendment 2026-10-17, as DTO-D16):
+# each call is one user message rendered by its L1, in the API the caller
+# used (chat, Responses, or Anthropic Messages). DeepSeek calls use the
+# checkpoint's own encoder (vLLM tokenizer-mode deepseek_v4), not a template
+# Kairyu could replace; its deepseek_v4 reasoning parser separates the private
+# span. DeepSeek roles declare `reasoning_effort: inherit`: the caller's L3
+# effort (or `default_reasoning_effort` below when the caller sent none)
+# travels as the request's effort, which turns thinking on and renders the
+# encoder's official preamble (low none / high / max; the L3 max travels as
+# the Responses `xhigh`, which this example's overlay maps back to max). Qwen
+# roles use the example-local Qwen chat template
 # (qwen3.8-chat.jinja). draft, image_description, and answer_1..4 declare
 # `reasoning_effort: high` — fixed orchestration policy, never derived from
 # the caller's request, and the medium tier under the L3 medium→high alias
@@ -83,9 +78,8 @@ roles:
   # The head runs on Qwen with no effort declared: its vLLM service applies
   # the real Qwen chat template with thinking disabled, so the public opening
   # starts deterministically at Qwen's small-prompt TTFT. DeepSeek public
-  # roles would instead pay a nondeterministic <think> tax under the
-  # passthrough-template/parser contract, which is fatal for the head's TTFT
-  # gate. T=0.7/top_p=0.8/top_k=20/presence_penalty=1.5 are Qwen3.8's official
+  # roles would instead pay a nondeterministic <think> tax before their
+  # first public byte, which is fatal for the head's TTFT gate. T=0.7/top_p=0.8/top_k=20/presence_penalty=1.5 are Qwen3.8's official
   # non-thinking sampling values (DTO-D8); the presence penalty applies only
   # to this <=256-token opener.
   # Qwen role prompts put the shared conversation FIRST and the role
@@ -194,7 +188,7 @@ roles:
       max_tokens_by_effort: {low: 8192, high: 32768, max: 65536}
       seed_offset: 6
     prompt: |-
-      <｜begin▁of▁sentence｜><｜User｜>[policies] Read the request below and
+      [policies] Read the request below and
       write four policies for answering it that are as different from one
       another as possible. Output exactly four numbered sections, each
       starting with "POLICY 1:" through "POLICY 4:" on its own line, and each
@@ -209,7 +203,6 @@ roles:
       --- IMAGE DESCRIPTION (empty when the request has no image) ---
       {image_description}
       --- END IMAGE DESCRIPTION ---
-    prompt_suffix: "<｜Assistant｜><think>"
 
   # Track A fan-out: four policy-bound answers on four Qwen replicas
   # (queue_depth_threshold: 0 spreads concurrent tier1 roles one-per-replica;
@@ -340,7 +333,7 @@ roles:
       max_tokens_by_effort: {low: 8192, high: 32768, max: 65536}
       seed_offset: 7
     prompt: |-
-      <｜begin▁of▁sentence｜><｜User｜>[critique] Below are a request and an
+      [critique] Below are a request and an
       UNTRUSTED internal draft answer. Deliberate privately and briefly with
       critical thinking: identify the draft's concrete flaws, gaps, wrong
       assumptions, and any deviation from the reply format the conversation
@@ -362,7 +355,6 @@ roles:
       --- UNTRUSTED DRAFT ---
       {draft}
       --- END UNTRUSTED DRAFT ---
-    prompt_suffix: "<｜Assistant｜><think>"
 
   # Merge: the selected final unit. It carries the caller's public intent, so
   # it declares no sampling. Thinking DeepSeek (owner decision, DTO-D7):
@@ -378,14 +370,17 @@ roles:
   # caller's budget minus the floor, and if deliberation still consumes the
   # whole cap, the bounded empty-final-output re-dispatch (run before the
   # verdict) continues the captured thinking after a forced
-  # reasoning_close_tag close and answers with the reserved tokens.
+  # reasoning_close_tag close and answers with the reserved tokens. The
+  # encoder opens the span, so that continuation travels as an assistant
+  # prefill (reasoning_continuation: chat, DTO-D15/D16), rendered as an open
+  # turn by this example's overlay (patch_tokenizer.py edit 2).
   - name: synthesis
     worker: tier2
     role_type: publisher
     depends_on: [head, critique, answer_1, answer_2, answer_3, answer_4, image_description]
     reasoning_effort: inherit
     prompt: |-
-      <｜begin▁of▁sentence｜><｜User｜>[synthesis] Stream the remainder of the
+      [synthesis] Stream the remainder of the
       final answer. The user has already seen the COMMITTED OPENING on their
       screen: never repeat any of its sentences. If the COMMITTED OPENING
       already completely answers the request, output exactly NO_CONTINUATION
@@ -432,7 +427,7 @@ roles:
     # in the demanded format, using the tool result at the end of the
     # conversation when one is present (issue #496).
     prompt_headless: |-
-      <｜begin▁of▁sentence｜><｜User｜>[synthesis] Write the complete final
+      [synthesis] Write the complete final
       answer to the request below, in exactly the reply format the
       conversation demands: if it requires a specific structure (for example
       a JSON envelope with fixed fields), produce precisely that structure
@@ -466,8 +461,9 @@ roles:
       --- UNTRUSTED CANDIDATE 5 ---
       {critique}
       --- END UNTRUSTED CANDIDATE 5 ---
-    prompt_suffix: "<｜Assistant｜><think>"
     reasoning_close_tag: "</think>"
+    reasoning_continuation: chat
+    reasoning_open_tag: "<think>"
 
   # Publication gate (DTO-D10; supersedes DTO-D4's "no verifier"): the audit
   # runs inline after every synthesis attempt and judges the whole public
@@ -659,18 +655,19 @@ profiles:
           Output only the answer itself and do not describe any internal
           pipeline.
 
-  # DeepSeek non-thinking: the scaffold closes the reasoning span in the
-  # prompt and reasoning_closed reclaims parser-classified text as the
-  # public answer (issue #496); T=1.0/top_p=0.95 (DTO-D8).
+  # DeepSeek non-thinking: no effort, so Kairyu sends the pool's allowed
+  # `enable_thinking: false` and the encoder renders chat mode; reasoning_closed
+  # reclaims any parser-classified text as the public answer (issue #496);
+  # T=1.0/top_p=0.95 (DTO-D8).
   - name: deepseek_direct
     roles:
       - name: deepseek_answer
-        worker: tier2-direct
+        worker: tier2
         role_type: publisher
         reasoning_closed: true
         sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 393216}
         prompt: |-
-          <｜begin▁of▁sentence｜><｜User｜>[deepseek_answer] Write the complete final
+          [deepseek_answer] Write the complete final
           answer to the request below, in exactly the reply format the
           conversation demands: if it requires a specific structure (for
           example a JSON envelope with fixed fields), produce precisely that
@@ -684,13 +681,14 @@ profiles:
           --- REQUEST ---
           {query}
           --- END REQUEST ---
-        prompt_suffix: "<｜Assistant｜></think>"
 
-  # DeepSeek thinking at the caller's L3 effort (default high): the
-  # deepseek-role-effort.jinja preamble grades high/max; the deepseek_v4
-  # parser separates the private span and the public answer streams after
-  # it. reasoning_close_tag lets the DTO-D9 floor (256) reserve public
-  # tokens behind the think span. T=1.0/top_p=0.95 (DTO-D8).
+  # DeepSeek thinking at the caller's L3 effort (default high): the encoder's
+  # official preamble grades high/max; the deepseek_v4 parser separates the
+  # private span and the public answer streams after it. reasoning_close_tag
+  # lets the DTO-D9 floor (256) reserve public tokens behind the think span;
+  # the encoder opens that span, so the forced close continues as an
+  # assistant prefill (reasoning_continuation: chat, DTO-D15/D16).
+  # T=1.0/top_p=0.95 (DTO-D8).
   - name: deepseek_think
     roles:
       - name: deepseek_think_answer
@@ -699,7 +697,7 @@ profiles:
         reasoning_effort: inherit
         sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 393216}
         prompt: |-
-          <｜begin▁of▁sentence｜><｜User｜>[deepseek_think_answer] Write the complete final
+          [deepseek_think_answer] Write the complete final
           answer to the request below, in exactly the reply format the
           conversation demands: if it requires a specific structure (for
           example a JSON envelope with fixed fields), produce precisely that
@@ -713,8 +711,9 @@ profiles:
           --- REQUEST ---
           {query}
           --- END REQUEST ---
-        prompt_suffix: "<｜Assistant｜><think>"
         reasoning_close_tag: "</think>"
+        reasoning_continuation: chat
+        reasoning_open_tag: "<think>"
 
 moa_samples: 0
 # L3 requests that carry no reasoning_effort run as high (owner-specified

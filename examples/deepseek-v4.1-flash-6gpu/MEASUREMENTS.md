@@ -1,6 +1,8 @@
 # deepseek-v4.1-flash-6gpu evidence
 
 Status: **all final gates PASS on the committed configuration (2026-09-30).**
+Since 2026-10-17 the served configuration uses the Responses API; GPU
+verification of that change is pending (last section).
 
 Hardware: 6 × NVIDIA RTX PRO 6000 Blackwell Server Edition (97,887 MiB,
 SM120, PCIe) out of an 8-GPU host; 1 TiB host memory, 4 NUMA nodes with
@@ -253,3 +255,42 @@ The Kairyu-to-vLLM bodies captured on the compose network (destination the
 vLLM container) carry the 5 messages unchanged with `reasoning_effort: max`;
 vLLM `/tokenize` of that body renders `Reasoning Effort: 100` and counts
 3,645 tokens, equal to Kairyu's `usage.prompt_tokens`.
+
+## 2026-10-17 Responses connection — GPU verification pending
+
+The served configuration changed after every result above (m9 D2, m11 D4/D7
+amendments of 2026-10-17); none of the gates below has run on it yet:
+
+- Open WebUI connects with `api_type: responses`; the effort filter also
+  normalizes the body to strict Responses fields and `store: false`.
+- `kairyu.yaml` adds `upstream_responses_models` and
+  `upstream_messages_models`: Kairyu sends Responses and Anthropic Messages
+  callers to vLLM's `/v1/responses` and `/v1/messages` (startup fails when a
+  route is missing), with L3 `max` spelled `xhigh` on the Responses wire.
+- `patch_sm120.py` maps the encoder's `xhigh` (pinned at 75) to the max
+  budget (100); `l1` also checks the `xhigh` render.
+- Every public gate sends `/v1/responses`. `serving` rows end naturally
+  within 256 output tokens (the Responses API has no `ignore_eos` /
+  `min_tokens`), so they are not comparable with the fixed-length chat rows
+  above; `cancellation` disconnects a natural-completion stream. The new
+  `api-equivalence` gate compares vLLM's and Kairyu's `/v1/responses`.
+  The readiness `17 * 19` probes also use `/v1/responses` and check the
+  exact answer and finish (the Responses API has no log-probabilities);
+  L1-direct checks, which read the finite log-probabilities, stay on chat.
+- `tool_result_turn` keeps the PR #647 wording ("…, then show the first line
+  of README.md.").
+- The overlay changed, so the image is retagged `local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh`
+  and rebuilt on the next `run.sh up`.
+
+To do on GPU: `./run.sh up` (rebuild), record the new image ID in the two
+pins, `./run.sh up` again (route check at startup), then every gate above
+plus `api-equivalence`, and the browser path (multi-turn thinking, image,
+tool and effort switches in the Chat UI with `/v1/responses` in the Kairyu
+and vLLM logs).
+
+The served vLLM image (`local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+

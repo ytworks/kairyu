@@ -2,7 +2,9 @@ name: kairyu-deepseek-v4-flash-0731-8gpu
 
 services:
   vllm:
-    image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+    # The pinned SM120 build plus this example's effort overlay
+    # (vllm-effort.Dockerfile: Responses xhigh renders the max tier).
+    image: ${VLLM_IMAGE:-local/vllm-openai:deepseek-v4-0731-8gpu-effort}
     ipc: host
     environment:
       HF_HOME: /models/.cache
@@ -13,7 +15,6 @@ services:
       VLLM_USE_DEEP_GEMM: "0"
     volumes:
       - models:/models:ro
-      - ./identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
     command:
       - /models/deepseek-v4-flash-0731
       - --served-model-name
@@ -38,8 +39,16 @@ services:
       - deepseek_v4
       - --reasoning-parser
       - deepseek_v4
-      - --chat-template
-      - /etc/kairyu/identity-chat.jinja
+      # The dp2 example's L1 rendering (FN-D8 amendment 2026-10-17): vLLM
+      # renders every request with the checkpoint's own encoder
+      # (tokenizer-mode deepseek_v4) and parses DSML tool calls into OpenAI
+      # tool calls. Thinking defaults off to keep the direct-chat contract;
+      # an explicit reasoning effort re-enables it.
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v4
+      - --default-chat-template-kwargs
+      - '{"thinking": false, "enable_thinking": false}'
       - --enable-prefix-caching
       - --gpu-memory-utilization
       - "0.95"
@@ -72,9 +81,7 @@ services:
     environment:
       KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
     volumes:
-      - models:/models:ro
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ./deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
     depends_on:
       vllm: {condition: service_healthy}
     ports:
@@ -91,6 +98,9 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI reaches Kairyu over
+      # /v1/responses; control.py installs webui-responses-filter.py.
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: deepseek-v4-flash-0731
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
       ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}

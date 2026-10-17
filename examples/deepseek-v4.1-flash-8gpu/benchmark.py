@@ -1,8 +1,13 @@
-"""Fixed-token L1 measurements that distinguish reasoning from final content.
+"""Capped serving measurements that distinguish reasoning from final content.
 
-The shared content-only benchmark treats an all-reasoning response's end as
-TTFT. This example measures the first model delta (reasoning or content),
-and records first visible content separately, leaving it null when absent.
+Every request is a streamed OpenAI Responses request to Kairyu's public
+``/v1/responses`` (m11 D7 amendment 2026-10-17). The Responses API has no
+``ignore_eos``/``min_tokens``, so a request ends naturally within
+``--max-tokens`` output tokens and rows are not comparable with the earlier
+fixed-length chat rows. The shared content-only benchmark treats an
+all-reasoning response's end as TTFT. This example measures the first model
+delta (reasoning or content), and records first visible content separately,
+leaving it null when absent.
 """
 
 from __future__ import annotations
@@ -16,39 +21,48 @@ from pathlib import Path
 
 import httpx
 
+_REASONING_DELTAS = {"response.reasoning_text.delta", "response.reasoning_summary_text.delta"}
+_TERMINAL = {"response.completed", "response.incomplete"}
+
 
 async def collect(lines, start: float) -> dict:
+    """Fold one Responses event stream into its timing and terminal state."""
     first_model = first_content = None
     content = reasoning = ""
-    finish = usage = None
-    done = 0
+    final: dict | None = None
     async for line in lines:
-        if not line.startswith("data: "):
+        if not line.startswith("data:") or not line[5:].strip():
             continue
-        raw = line[6:].strip()
-        if raw == "[DONE]":
-            done += 1
-            continue
-        if done:
-            raise ValueError("JSON after terminal SSE marker")
-        chunk = json.loads(raw)
-        if "error" in chunk:
-            raise ValueError(f"Stream error: {chunk['error']}")
-        usage = chunk.get("usage") or usage
-        for choice in chunk.get("choices", []):
-            delta = choice.get("delta") or {}
-            text, trace = delta.get("content") or "", delta.get("reasoning_content") or ""
-            now = time.perf_counter() - start
-            if (text or trace) and first_model is None:
-                first_model = now
-            if text and first_content is None:
-                first_content = now
-            content += text
-            reasoning += trace
-            finish = choice.get("finish_reason") or finish
-    if done != 1 or finish not in {"stop", "length"} or not usage or first_model is None:
+        if final is not None:
+            raise ValueError("Event after the terminal Responses event")
+        event = json.loads(line[5:])
+        kind = event.get("type")
+        if kind == "error":
+            raise ValueError(f"Stream error: {event}")
+        if kind == "response.failed":
+            raise ValueError(f"Stream error: {(event.get('response') or {}).get('error')}")
+        text = (event.get("delta") or "") if kind == "response.output_text.delta" else ""
+        trace = (event.get("delta") or "") if kind in _REASONING_DELTAS else ""
+        now = time.perf_counter() - start
+        if (text or trace) and first_model is None:
+            first_model = now
+        if text and first_content is None:
+            first_content = now
+        content += text
+        reasoning += trace
+        if kind in _TERMINAL:
+            final = event.get("response") or {}
+    usage = (final or {}).get("usage")
+    reason = ((final or {}).get("incomplete_details") or {}).get("reason")
+    if final is None or not usage or first_model is None:
         raise ValueError("Incomplete stream, missing model output, or absent usage")
-    tokens = usage.get("completion_tokens")
+    if final.get("status") == "completed":
+        finish = "stop"
+    elif reason == "max_output_tokens":
+        finish = "length"
+    else:
+        raise ValueError(f"Response ended {final.get('status')!r} ({reason!r})")
+    tokens = usage.get("output_tokens")
     if not isinstance(tokens, int) or tokens < 1:
         raise ValueError("Missing positive completion-token count")
     elapsed = time.perf_counter() - start
@@ -58,7 +72,7 @@ async def collect(lines, start: float) -> dict:
         "total_ms": elapsed * 1000,
         "tpot_ms": (elapsed - first_model) * 1000 / (tokens - 1) if tokens > 1 else None,
         "completion_tokens": tokens,
-        "prompt_tokens": usage.get("prompt_tokens"),
+        "prompt_tokens": usage.get("input_tokens"),
         "usage": usage,
         "finish_reason": finish,
         "content": content,
@@ -87,21 +101,18 @@ async def measure(args) -> int:
                 try:
                     body = {
                         "model": args.model,
-                        "messages": [{"role": "user", "content": row["conversations"][0]["value"]}],
+                        "input": row["conversations"][0]["value"],
                         "stream": True,
-                        "stream_options": {"include_usage": True},
-                        "max_tokens": args.max_tokens,
-                        "min_tokens": args.min_tokens,
-                        "ignore_eos": args.ignore_eos,
+                        "store": False,
+                        "max_output_tokens": args.max_tokens,
                         "temperature": args.temperature,
-                        "seed": args.seed,
                     }
-                    async with client.stream("POST", "chat/completions", json=body) as response:
+                    async with client.stream("POST", "responses", json=body) as response:
                         response.raise_for_status()
                         result = await collect(response.aiter_lines(), start)
                         result["request_id"] = response.headers.get("x-request-id")
-                    if result["completion_tokens"] != args.max_tokens:
-                        raise ValueError("Response did not reach the fixed output length")
+                    if result["completion_tokens"] > args.max_tokens:
+                        raise ValueError("Response exceeded the output cap")
                     return {"index": index, "passed": True, **result}
                 except Exception as error:
                     return {"index": index, "passed": False, "error": str(error)}
@@ -132,7 +143,8 @@ async def measure(args) -> int:
         }
     report = {
         "schema_version": 1,
-        "measurement": "fixed_length_including_reasoning",
+        "measurement": "capped_natural_completion_including_reasoning",
+        "api": "responses",
         "percentile_method": "nearest_rank",
         "summary": summary,
         "samples": samples,
@@ -151,10 +163,7 @@ def main():
     parser.add_argument("--num-requests", type=int, required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--max-tokens", type=int, required=True)
-    parser.add_argument("--min-tokens", type=int, required=True)
-    parser.add_argument("--ignore-eos", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--tensor-parallel", type=int, default=8)

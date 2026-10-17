@@ -24,11 +24,10 @@ pools:
           # replica slot for a day (issue #495).
           timeout_s: 1800
           upstream: vllm
-          # vLLM owns the prompt: it renders chat with the checkpoint's own
-          # encoder (tokenizer-mode deepseek_v4), so Kairyu forwards messages,
-          # tools, tool_choice, parallel_tool_calls, and reasoning_effort to
-          # /chat/completions and normalizes the parsed tool calls (the same
-          # path the Qwen examples use).
+          # vLLM owns the prompt: it renders every request with the
+          # checkpoint's own encoder (tokenizer-mode deepseek_v4) and parses
+          # the tool calls, in whichever API the caller used (see the lists at
+          # the end of this file).
           capabilities:
             allow_chat_template_kwargs: [thinking, enable_thinking]
           model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
@@ -41,7 +40,10 @@ pools:
           expert_parallel_size: 4
           attention_data_parallel_size: 1
           dspark_enabled: true
-          container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+          # The served image is the pinned source build plus only the xhigh->max effort
+          # patch (vllm-effort.Dockerfile), which changes no kernel or cache layout.
+          # Recorded after the GPU build of the rebuilt image (GPU verification pending).
+          container_image_digest: null
       - backend: openai
         health_url: http://deepseek-1:8000/health
         options: {<<: *deepseek, base_url: http://deepseek-1:8000/v1}
@@ -59,8 +61,12 @@ pools:
     # verify.sh reads it to prove the per-row distribution.
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4-flash-0731.jsonl
 
-# vLLM renders the checkpoint's own chat encoding (including DSML tools) and
-# parses tool calls, so Kairyu uses its legacy chat path here, exactly as in
-# the Qwen examples. Ordinary requests default to direct chat; an explicit
-# reasoning_effort selects thinking mode (vLLM maps it to enable_thinking).
-legacy_chat_models: [deepseek-v4-flash-0731]
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one with the
+# checkpoint's encoder (including DSML tools). Ordinary requests default to
+# direct chat; an explicit effort selects thinking mode (L3 max reaches the
+# Responses wire as xhigh, which the served image renders as max).
+upstream_chat_models: [deepseek-v4-flash-0731]
+upstream_responses_models: [deepseek-v4-flash-0731]
+upstream_messages_models: [deepseek-v4-flash-0731]

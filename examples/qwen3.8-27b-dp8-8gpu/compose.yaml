@@ -286,6 +286,10 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses. An existing webui-data volume keeps its saved
+      # connection; control.py checks it when the admin credentials are set.
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: qwen3.8-27b
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":0.95}'
       ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}

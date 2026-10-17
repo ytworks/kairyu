@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measured serving verification: fixed-token matrix, replica placement gate, tools, images."""
+"""Measured verification over /v1/responses: serving, placement, tools, images, API equivalence."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ SERVED_CONFIG_FILES = (
     HERE / "example.json",
     HERE / "compose.yaml",
     HERE / "kairyu.yaml",
+    HERE / "vllm-effort.Dockerfile",
+    HERE / "patch_deepseek_v4_effort.py",
 )
 
 
@@ -136,15 +138,15 @@ def _bench(
             str(requests),
             "--concurrency",
             str(concurrency),
+            # /v1/responses, the API the Chat UI uses, has no ignore_eos,
+            # min_tokens or seed: each request ends naturally within
+            # --max-tokens (m11 D7 amendment 2026-10-17).
+            "--api",
+            "responses",
             "--max-tokens",
             str(max_tokens),
-            "--min-tokens",
-            str(max_tokens),
-            "--ignore-eos",
             "--temperature",
             "1.0",
-            "--seed",
-            "0",
             "--timeout",
             "86400",
             "--results-dir",
@@ -254,8 +256,13 @@ def _placement_report(
     }
 
 
-def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> int:
-    """Reject partial streams and nominally successful zero-token runs."""
+def _validate_serving_row(row_dir: Path, requests: int, max_output_tokens: int) -> int:
+    """Reject partial streams and nominally successful zero-token runs.
+
+    Rows run on /v1/responses, so each request ends naturally within
+    ``max_output_tokens``: every sample must report 1..max_output_tokens
+    generated tokens and the row total must be their sum.
+    """
 
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -271,14 +278,17 @@ def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> i
     except (KeyError, OSError, TypeError, ValueError) as error:
         print(f"invalid serving result: {error}", file=sys.stderr)
         return 1
-    expected_total = requests * output_tokens
+    tokens = [sample.get("completion_tokens") for sample in samples]
+    bounded = all(
+        isinstance(count, int) and 1 <= count <= max_output_tokens for count in tokens
+    )
     complete = (
         summary.get("requests") == requests
-        and summary.get("completion_tokens_total") == expected_total
+        and len(samples) == requests
+        and bounded
+        and summary.get("completion_tokens_total") == sum(tokens)
         and isinstance(summary.get("output_tokens_per_s"), (int, float))
         and summary["output_tokens_per_s"] > 0
-        and len(samples) == requests
-        and all(sample.get("completion_tokens") == output_tokens for sample in samples)
     )
     if not complete:
         print(
@@ -286,7 +296,7 @@ def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> i
             f"requests={summary.get('requests')!r}, "
             f"completion_tokens_total={summary.get('completion_tokens_total')!r}, "
             f"output_tokens_per_s={summary.get('output_tokens_per_s')!r}, "
-            f"samples={len(samples)!r}",
+            f"samples={len(samples)!r}, completion_tokens={tokens!r}",
             file=sys.stderr,
         )
         return 1
@@ -297,7 +307,7 @@ def serving(run_dir: Path) -> int:
     config = SPEC["verification"]["serving"]
     gate = config["placement_gate"]
     requests = int(config["requests_per_concurrency"])
-    output_tokens = int(config["output_tokens"])
+    max_output_tokens = int(config["max_output_tokens"])
     prompt_tokens = int(config["prompt_tokens_approx"])
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -328,12 +338,12 @@ def serving(run_dir: Path) -> int:
             dataset,
             requests=requests,
             concurrency=concurrency,
-            max_tokens=output_tokens,
+            max_tokens=max_output_tokens,
             results_dir=row_dir,
             log=run_dir / f"serving-c{concurrency}.log",
         )
         if code == 0:
-            code = _validate_serving_row(row_dir, requests, output_tokens)
+            code = _validate_serving_row(row_dir, requests, max_output_tokens)
         if code == 0:
             report = _placement_report(
                 PLACEMENT_LOG,
@@ -363,7 +373,8 @@ def serving(run_dir: Path) -> int:
 # --- Tool-calling gate (PR #584 review: a served example must emit OpenAI
 # tool calls, or tool-driven agents such as SWE-bench Pro's mini-swe-agent
 # fail every turn). The request shape mirrors that agent: an auto-choice
-# `bash` function tool on unary /chat/completions.
+# `bash` function tool, sent through /v1/responses (the API the Chat UI uses,
+# m11 D7 amendment 2026-10-17) and read back into the chat shape checked here.
 _BASH_TOOL = {
     "type": "function",
     "function": {
@@ -460,22 +471,271 @@ def _reassemble_stream_tool_calls(sse_body: str) -> tuple[dict, object]:
     return message, finish_reason
 
 
-def _post_chat(
+# --- Responses gate adapter (m11 D7 amendment 2026-10-17) ---------------------
+# The example gates are written against chat-shaped payloads and replies. These
+# helpers send each payload to Kairyu's public /v1/responses instead (the API
+# the Chat UI uses) and read the Responses reply back into the chat shape the
+# gate checks, so a gate's assertions stay as they were.
+
+# Responses fields a payload may already carry (the Chat UI filter's output
+# has reasoning and store) pass through as they are.
+_RESPONSES_PASSTHROUGH = frozenset(
+    {
+        "model",
+        "stream",
+        "temperature",
+        "top_p",
+        "parallel_tool_calls",
+        "metadata",
+        "user",
+        "reasoning",
+        "store",
+    }
+)
+
+
+def _responses_content(content: object, *, assistant: bool) -> object:
+    if isinstance(content, str) or content is None:
+        return content or ""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            kind = "output_text" if assistant else "input_text"
+            parts.append({"type": kind, "text": part["text"]})
+        elif part.get("type") == "image_url" and not assistant:
+            image = part["image_url"]
+            url = image["url"] if isinstance(image, dict) else image
+            parts.append({"type": "input_image", "image_url": url, "detail": "auto"})
+        else:
+            raise ValueError(f"chat content part {part.get('type')!r} has no Responses form")
+    return parts
+
+
+def _responses_tool(tool: dict) -> dict:
+    function = tool["function"]
+    flat = {"type": "function", "name": function["name"]}
+    for key in ("description", "parameters", "strict"):
+        if key in function:
+            flat[key] = function[key]
+    return flat
+
+
+def responses_request(payload: dict) -> dict:
+    """The /v1/responses body for one chat-shaped gate payload (stateless)."""
+
+    body: dict = {"store": False}
+    for key, value in payload.items():
+        if key == "messages":
+            continue
+        if key in _RESPONSES_PASSTHROUGH:
+            body[key] = value
+        elif key in ("max_tokens", "max_completion_tokens"):
+            body["max_output_tokens"] = value
+        elif key == "reasoning_effort":
+            body["reasoning"] = {"effort": value}
+        elif key == "tools":
+            body["tools"] = [_responses_tool(tool) for tool in value]
+        elif key == "tool_choice":
+            body["tool_choice"] = (
+                {"type": "function", "name": value["function"]["name"]}
+                if isinstance(value, dict)
+                else value
+            )
+        elif key == "response_format":
+            if value.get("type") == "json_schema":
+                schema = value["json_schema"]
+                body["text"] = {"format": {"type": "json_schema", **schema}}
+            else:
+                body["text"] = {"format": {"type": value["type"]}}
+        elif key == "stream_options":
+            continue  # a Responses stream always ends with usage
+        else:
+            raise ValueError(f"chat field {key!r} has no Responses form")
+    items: list[dict] = []
+    for message in payload["messages"]:
+        role = message["role"]
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": message["content"],
+                }
+            )
+            continue
+        if message.get("reasoning_content"):
+            text = message["reasoning_content"]
+            items.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": text}],
+                }
+            )
+        content = message.get("content")
+        if content:
+            items.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": _responses_content(content, assistant=role == "assistant"),
+                }
+            )
+        for call in message.get("tool_calls") or ():
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["function"]["name"],
+                    "arguments": call["function"]["arguments"],
+                }
+            )
+    body["input"] = items
+    return body
+
+
+def _finish_reason(response: dict, calls: list) -> str:
+    if response.get("status") == "completed":
+        return "tool_calls" if calls else "stop"
+    if response.get("status") == "incomplete":
+        reason = (response.get("incomplete_details") or {}).get("reason")
+        return "content_filter" if reason == "content_filter" else "length"
+    return str(response.get("status"))
+
+
+def chat_view(response: dict) -> dict:
+    """One Responses object read back as a chat completion (kairyu_* kept)."""
+
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: list[dict] = []
+    has_message = False
+    for item in response.get("output") or ():
+        kind = item.get("type")
+        if kind == "message":
+            has_message = True
+            text += [
+                part.get("text", "")
+                for part in item.get("content") or ()
+                if part.get("type") == "output_text"
+            ]
+        elif kind == "reasoning":
+            parts = item.get("content") or item.get("summary") or ()
+            reasoning += [part.get("text", "") for part in parts]
+        elif kind == "function_call":
+            calls.append(
+                {
+                    "id": item.get("call_id"),
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item.get("arguments")},
+                }
+            )
+    usage = response.get("usage") or {}
+    chat_usage = {
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens_details": {
+            "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens")
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
+        },
+        **{key: value for key, value in usage.items() if key.startswith("orchestration_")},
+    }
+    return {
+        "id": response.get("id"),
+        "object": "chat.completion",
+        "created": response.get("created_at"),
+        "model": response.get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(text) if has_message else None,
+                    "reasoning_content": "".join(reasoning) or None,
+                    "tool_calls": calls or None,
+                },
+                "finish_reason": _finish_reason(response, calls),
+            }
+        ],
+        "usage": chat_usage,
+        **{key: value for key, value in response.items() if key.startswith("kairyu_")},
+    }
+
+
+def chat_stream_view(sse_text: str) -> str:
+    """A Responses SSE body read back as chat SSE chunks ending in [DONE]."""
+
+    chunks: list[dict] = []
+    indexes: dict[int, int] = {}
+    streamed_arguments: set[int] = set()
+
+    def delta(**fields) -> None:
+        chunks.append({"choices": [{"index": 0, "delta": fields, "finish_reason": None}]})
+
+    for line in sse_text.splitlines():
+        if not line.startswith("data:") or not line[len("data:") :].strip():
+            continue
+        event = json.loads(line[len("data:") :])
+        kind = event.get("type")
+        if kind == "response.output_text.delta":
+            delta(content=event["delta"])
+        elif kind in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+            delta(reasoning_content=event["delta"])
+        elif kind == "response.output_item.added" and event["item"].get("type") == "function_call":
+            index = indexes.setdefault(event["output_index"], len(indexes))
+            item = event["item"]
+            delta(
+                tool_calls=[
+                    {
+                        "index": index,
+                        "id": item.get("call_id"),
+                        "type": "function",
+                        "function": {"name": item.get("name"), "arguments": ""},
+                    }
+                ]
+            )
+        elif kind == "response.function_call_arguments.delta":
+            index = indexes[event["output_index"]]
+            streamed_arguments.add(index)
+            delta(tool_calls=[{"index": index, "function": {"arguments": event["delta"]}}])
+        elif kind == "response.output_item.done" and event["item"].get("type") == "function_call":
+            index = indexes[event["output_index"]]
+            if index not in streamed_arguments:
+                arguments = event["item"].get("arguments") or ""
+                delta(tool_calls=[{"index": index, "function": {"arguments": arguments}}])
+        elif kind in ("response.completed", "response.incomplete"):
+            view = chat_view(event["response"])
+            extensions = {k: v for k, v in view.items() if k.startswith("kairyu_")}
+            finish = view["choices"][0]["finish_reason"]
+            chunks.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+            chunks.append({"choices": [], "usage": view["usage"], **extensions})
+        elif kind in ("error", "response.failed"):
+            error = event if kind == "error" else (event.get("response") or {}).get("error")
+            chunks.append({"error": error})
+    return "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+
+
+def _post_responses(
     payload: dict,
     *,
     timeout_s: float = 600.0,
     include_request_id: bool = False,
 ) -> tuple[int, object] | tuple[int, object, str | None]:
+    """One chat-shaped gate payload through /v1/responses, read back as chat."""
+
     import urllib.error
     import urllib.request
 
     url = (
         f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}"
-        "/v1/chat/completions"
+        "/v1/responses"
     )
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode(),
+        data=json.dumps(responses_request(payload)).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
@@ -487,7 +747,8 @@ def _post_chat(
         result: tuple[int, object] = (error.code, error.read().decode("utf-8", "replace"))
         request_id = error.headers.get("x-request-id") if error.headers else None
     else:
-        result = (status, body if payload.get("stream") else json.loads(body))
+        reply = chat_stream_view(body) if payload.get("stream") else chat_view(json.loads(body))
+        result = (status, reply)
     return (*result, request_id) if include_request_id else result
 
 
@@ -525,7 +786,7 @@ def tool_calling(run_dir: Path) -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=fan) as pool:
         results = list(
             pool.map(
-                lambda _: _post_chat(_tool_call_request(), include_request_id=True),
+                lambda _: _post_responses(_tool_call_request(), include_request_id=True),
                 range(fan),
             )
         )
@@ -572,14 +833,22 @@ def tool_calling(run_dir: Path) -> int:
     )
 
     # Case 2: the agent loop's second turn (assistant tool_calls + tool result).
+    # The task still needs a call after the listing: once the result answers
+    # the request, the model reports it in text (PR #647).
     if first_message is not None:
         call = first_message["tool_calls"][0]
         call_id = call.get("id") or "call_0"
-        status, body = _post_chat(
+        status, body = _post_responses(
             _tool_call_request(
                 messages=[
                     {"role": "system", "content": _TOOL_SYSTEM},
-                    {"role": "user", "content": _TOOL_USER},
+                    {
+                        "role": "user",
+                        "content": (
+                            "List the files in the current directory, "
+                            "then show the first line of README.md."
+                        ),
+                    },
                     {
                         "role": "assistant",
                         "content": None,
@@ -611,7 +880,7 @@ def tool_calling(run_dir: Path) -> int:
         record("tool_result_turn", "skipped: no tool call from case 1")
 
     # Case 3: streaming deltas carry the same call.
-    status, body = _post_chat(_tool_call_request(stream=True))
+    status, body = _post_responses(_tool_call_request(stream=True))
     if status != 200 or not isinstance(body, str):
         record("streamed_tool_call", f"HTTP {status}: {str(body)[:300]}")
     else:
@@ -619,7 +888,7 @@ def tool_calling(run_dir: Path) -> int:
         record("streamed_tool_call", _validate_tool_call_message(message, finish_reason))
 
     # Case 4: explicit reasoning_effort must think AND still emit the call.
-    status, body = _post_chat(_tool_call_request(reasoning_effort="high"), timeout_s=1200.0)
+    status, body = _post_responses(_tool_call_request(reasoning_effort="high"), timeout_s=1200.0)
     if status != 200 or not isinstance(body, dict):
         record("thinking_tool_call", f"HTTP {status}: {str(body)[:300]}")
     else:
@@ -630,7 +899,7 @@ def tool_calling(run_dir: Path) -> int:
         record("thinking_tool_call", error)
 
     # Case 5: ordinary chat stays non-thinking by default.
-    status, body = _post_chat(
+    status, body = _post_responses(
         {
             "model": SERVED_MODEL,
             "messages": [{"role": "user", "content": "Reply with the single word OK."}],
@@ -734,7 +1003,7 @@ def vision(run_dir: Path) -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=fan) as pool:
         results = list(
             pool.map(
-                lambda case: _post_chat(
+                lambda case: _post_responses(
                     _image_request(case, max_tokens=max_tokens),
                     timeout_s=1200.0,
                     include_request_id=True,
@@ -790,6 +1059,77 @@ def vision(run_dir: Path) -> int:
     return 1 if failures else 0
 
 
+# --- api-equivalence gate (m11 D4 amendment 2026-10-17): the same Responses
+# requests sent to one L1 replica directly and to Kairyu L3 must agree, and
+# every replica's own request counters must show L3 reached it on
+# /v1/responses, never /v1/chat/completions.
+L1_SERVICE_PREFIX = "deepseek"
+
+
+def _l1_containers() -> list[str]:
+    """The running L1 replica containers, in replica order."""
+
+    project = SPEC["environment"].replace(".", "-")
+    containers = []
+    for index in range(REPLICAS):
+        service = f"{L1_SERVICE_PREFIX}-{index}"
+        found = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "--quiet",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--filter",
+                f"label=com.docker.compose.service={service}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        if len(found) != 1:
+            raise RuntimeError(f"expected one running {service} container, found {len(found)}")
+        containers.append(found[0])
+    return containers
+
+
+def api_equivalence(run_dir: Path) -> int:
+    containers = _l1_containers()
+    metrics = [
+        argument
+        for container in containers
+        for argument in ("--l1-metrics", f"{container}=http://127.0.0.1:8000/metrics")
+    ]
+    return _run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
+            "--l1",
+            "http://127.0.0.1:8000/v1",
+            "--l1-docker",
+            containers[0],
+            "--l1-model",
+            SERVED_MODEL,
+            *metrics,
+            "--l3",
+            f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
+            "--l3-model",
+            SERVED_MODEL,
+            "--cases",
+            "text,stream,effort,tools,image,cap,openwebui",
+            # L3 max reaches L1 as xhigh; any explicit effort selects thinking.
+            "--efforts",
+            "low,high,xhigh",
+            "--expect-reasoning",
+            "--exact-input-tokens",
+            "--out",
+            str(run_dir / "api-equivalence.json"),
+        ],
+        log=run_dir / "api-equivalence.log",
+        check=False,
+    )
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
     for path in SERVED_CONFIG_FILES:
@@ -802,14 +1142,17 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("verification", choices=("serving", "tool-calling", "vision", "list"))
+    parser.add_argument(
+        "verification",
+        choices=("serving", "tool-calling", "vision", "api-equivalence", "list"),
+    )
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.verification == "list":
         rows = ",".join(str(c) for c in SPEC["verification"]["serving"]["concurrency"])
         print(
-            f"serving       fixed 8K-input/256-output TTFT and throughput at c={rows} "
+            f"serving       Responses 8K-input/up-to-256-output TTFT and throughput at c={rows} "
             "plus the per-row replica placement gate"
         )
         print(
@@ -819,6 +1162,10 @@ def main() -> None:
         print(
             "vision        OpenAI image-part requests answered with visible content on "
             "every replica"
+        )
+        print(
+            "api-equivalence  the same Responses requests to one L1 replica and to L3 "
+            "agree; every replica saw them on /v1/responses"
         )
         return
 
@@ -836,9 +1183,12 @@ def main() -> None:
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    target = {"serving": serving, "tool-calling": tool_calling, "vision": vision}[
-        args.verification
-    ]
+    target = {
+        "serving": serving,
+        "tool-calling": tool_calling,
+        "vision": vision,
+        "api-equivalence": api_equivalence,
+    }[args.verification]
     try:
         code = target(run_dir)
     except Exception as error:

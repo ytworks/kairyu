@@ -43,8 +43,9 @@
   "api_port": 8001,
   "verification": {
     "serving": {
+      "api": "responses",
       "prompt_tokens_approx": 8192,
-      "output_tokens": 256,
+      "max_output_tokens": 256,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32
     }

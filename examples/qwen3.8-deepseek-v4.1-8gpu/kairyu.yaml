@@ -57,8 +57,8 @@ pools:
     probe_interval_s: 2.0
 
   # One DP6 / EP6 replica on GPUs 0-5 (the deepseek-v4.1-flash-6gpu L1).
-  # Every call is a chat request rendered by the official V4.1 encoder
-  # (DTO-D16); every DeepSeek role thinks and sends reasoning_effort.
+  # Every call is rendered by the official V4.1 encoder (DTO-D16) from the
+  # caller's own API; every DeepSeek role thinks and sends its effort.
   deepseek-v4.1-flash:
     replicas:
       - backend: openai
@@ -91,7 +91,8 @@ pools:
           expert_parallel_size: 6
           attention_data_parallel_size: 6
           dspark_enabled: true
-          container_image_digest: sha256:c70d91086275a55c82a58da4fc53adc09ca8ee68e49e8eeb9bfb271041f97f30
+          # Recorded after the GPU build of the rebuilt image (GPU verification pending).
+          container_image_digest: null
     unhealthy_after: 1
     queue_depth_threshold: 8
     prefix_index: true
@@ -118,4 +119,11 @@ orchestrators:
 # remain deployment-owned runtime resources and are not public model IDs.
 public_models: [kairyu-auto-max, embed-small]
 
-legacy_chat_models: [qwen3.8-27b, deepseek-v4.1-flash]
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one. The AUTO roles
+# follow the public request's API (m1 D8 amendment), so a Chat UI turn reaches
+# both pools on /v1/responses.
+upstream_chat_models: [qwen3.8-27b, deepseek-v4.1-flash]
+upstream_responses_models: [qwen3.8-27b, deepseek-v4.1-flash]
+upstream_messages_models: [qwen3.8-27b, deepseek-v4.1-flash]

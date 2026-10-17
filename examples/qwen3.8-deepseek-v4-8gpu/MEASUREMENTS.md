@@ -29,7 +29,36 @@
 > The DTO-D14 served config is GPU-verified — see the 2026-08-25 section
 > below; every older section predates it and does not transfer.
 
-## Judged five-route serving gates (current deployment, 2026-08-25)
+## 2026-10-17 Responses connection and L2 rebuild — GPU verification pending
+
+Nothing in this file measures the served config of 2026-10-17:
+
+- the L2 rebuilt like DTO-D16: DeepSeek roles without inline scaffolds on the
+  checkpoint's own encoder, one DeepSeek pool for every DeepSeek role (the
+  `-thinking` pool and the Kairyu-side DeepSeek chat templates are gone), the
+  DeepSeek L1 thinking off by default (as `deepseek-v4-flash-0731-dp2-8gpu`),
+  and a tokenizer overlay (`patch_tokenizer.py`: `xhigh` renders as `max`; a
+  final `<think>` prefill continues) on the pinned `aa0d513027` build;
+- every L2 role call sent in the caller's API (m9 D2 amendment), so a Chat UI
+  turn reaches both L1 pools on `/v1/responses`;
+- the Chat UI on `/v1/responses` with streaming (Open WebUI `api_type:
+  responses`, `stream_response` removed);
+- the L3 serving rows on the Responses API (`serving_bench.py --api
+  responses`) and the new `api-equivalence` gate.
+
+The 2026-08-25 runs below were measured with chat callers, Kairyu-rendered
+DeepSeek scaffolds on `/v1/completions`, and a passthrough L1 template, so
+their rows are history and are not comparable with the Responses rows. The
+overlay image ID, both serving gates, `api-equivalence`, and the browser smoke
+are re-measured in the next GPU window.
+
+The served vLLM image (`local/vllm-openai:qwen38-deepseek-v4-ensemble`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+
+## Judged five-route serving gates (DTO-D14 served config, 2026-08-25)
 
 Run IDs: `20260825T161729Z` (`./verify.sh serving-auto-max-coding`) and
 `20260825T173343Z` (`./verify.sh serving-auto-max`), both green (exit 0) on

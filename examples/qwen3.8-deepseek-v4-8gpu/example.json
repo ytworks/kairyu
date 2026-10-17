@@ -73,8 +73,12 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:sm120-aa0d513027",
-      "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+      "image": "local/vllm-openai:qwen38-deepseek-v4-ensemble",
+      "image_id": null,
+      "distribution": "overlay",
+      "dockerfile": "vllm-overlay.Dockerfile",
+      "base_image": "local/vllm-openai:sm120-aa0d513027",
+      "base_image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
       "source_repository": "https://github.com/jasl/vllm.git",
       "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
       "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"

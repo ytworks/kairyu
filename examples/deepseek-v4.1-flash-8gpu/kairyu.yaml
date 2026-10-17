@@ -38,11 +38,20 @@ pools:
         expert_parallel_size: 8
         attention_data_parallel_size: 1
         dspark_enabled: true
-        container_image_digest: sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359
+        # Recorded after the GPU build of the rebuilt image (GPU verification pending).
+        container_image_digest: null
     unhealthy_after: 1
     queue_depth_threshold: 0
     prefix_index: true
     probe_interval_s: 2.0
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4.1-flash.jsonl
-legacy_chat_models:
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders the checkpoint's encoder and parses
+# reasoning and tool calls for each one.
+upstream_chat_models:
+- deepseek-v4.1-flash
+upstream_responses_models:
+- deepseek-v4.1-flash
+upstream_messages_models:
 - deepseek-v4.1-flash

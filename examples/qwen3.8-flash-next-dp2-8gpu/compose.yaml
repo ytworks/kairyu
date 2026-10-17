@@ -156,14 +156,20 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses (ENABLE_PERSISTENT_CONFIG=false applies it every start).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: qwen3.8-flash-next
-      # Qwen's published non-thinking (instruct) sampling values; the
+      # Qwen's published non-thinking (instruct) temperature and top_p; the
       # Reasoning Effort filter drops them when an effort is selected so vLLM
-      # applies the checkpoint's thinking generation_config instead.
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":0.7,"top_p":0.8,"presence_penalty":1.5}'
+      # applies the checkpoint's thinking generation_config instead. The
+      # Responses API has no presence_penalty (Open WebUI drops it from a
+      # Responses body), so Qwen's instruct presence_penalty 1.5 is not sent.
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":0.7,"top_p":0.8}'
       # Auth-less single-admin UI (as in the tiered example): `run.sh up`
       # signs in through the auth-disabled session to install the Reasoning
-      # Effort dropdown (webui-reasoning-effort-filter.py).
+      # Effort dropdown, which also keeps the body to Responses fields
+      # (webui-reasoning-effort-filter.py).
       ENABLE_PERSISTENT_CONFIG: "false"
       RESET_CONFIG_ON_START: "true"
       ENABLE_SIGNUP: "false"

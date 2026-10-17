@@ -27,11 +27,10 @@ pools:
           # replica slot for a day (issue #495).
           timeout_s: 1800
           upstream: vllm
-          # vLLM owns the prompt: it renders chat with the example-local
-          # template (official template + L3 effort alias), so Kairyu
-          # forwards messages (including OpenAI image parts), tools,
-          # tool_choice, parallel_tool_calls, and reasoning_effort to
-          # /chat/completions and normalizes the parsed tool calls.
+          # vLLM owns the prompt: it renders every request (including OpenAI
+          # image parts) with the example-local template (official template +
+          # L3 effort alias) and parses the tool calls, in whichever API the
+          # caller used (see the lists at the end of this file).
           capabilities:
             allow_prompt_kinds: [multimodal]
             allow_chat_template_kwargs: [enable_thinking]
@@ -74,10 +73,14 @@ pools:
     # verify.sh reads it to prove the per-row distribution.
     placement_log_path: /var/lib/kairyu/placement/qwen3.8-flash-next.jsonl
 
-# vLLM renders the chat template (including XML tools and image placeholders)
-# and parses tool calls, so Kairyu uses its legacy chat path here, exactly as
-# in the sibling replica examples. Ordinary requests default to direct chat;
-# an explicit reasoning_effort selects thinking mode. Kairyu normalizes the
-# wire values medium -> high and xhigh -> max; the example-local template
-# maps them back to Qwen's official low/medium/xhigh vocabulary.
-legacy_chat_models: [qwen3.8-flash-next]
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders each one with the example-local chat
+# template (including XML tools and image placeholders) and parses the tool
+# calls. Ordinary requests default to direct chat; an explicit effort selects
+# thinking mode. Kairyu normalizes medium -> high and xhigh -> max and sends
+# max as xhigh on the Responses wire; the example-local template maps high
+# and max back to Qwen's official medium and xhigh (xhigh is already Qwen's).
+upstream_chat_models: [qwen3.8-flash-next]
+upstream_responses_models: [qwen3.8-flash-next]
+upstream_messages_models: [qwen3.8-flash-next]

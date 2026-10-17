@@ -20,6 +20,7 @@ Open WebUI (:3007) -> Kairyu (:8007) -> ReplicaPool -> vLLM (TP8, GPUs 0–7)
 ./verify.sh reasoning --no-start
 ./verify.sh cancellation --no-start
 ./verify.sh long-context --no-start
+./verify.sh api-equivalence --no-start
 ```
 
 The model is approximately 510 GB. `run.sh` checks the exact GPU inventory,
@@ -34,12 +35,39 @@ Override ports with `API_PORT` / `CHAT_UI_PORT`.
 `./run.sh down` stops the stack while preserving model, UI, and compilation
 cache storage. `VERIFY_MODEL=1 ./run.sh up` rehashes the cached model.
 
+> **GPU verification pending (2026-10-17).** The Chat UI, the gates and the
+> Kairyu→vLLM hop moved to the OpenAI Responses API (below); none of these
+> gates has run on GPU since. `MEASUREMENTS.md` holds the earlier chat
+> evidence.
+
+## Chat UI and API
+
+Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
+`api_type: responses`; m11 D7 amendment 2026-10-17). `run.sh up` installs
+the Reasoning Effort filter (`webui-reasoning-effort-filter.py`) as a
+global filter and checks the connection type. Besides the effort dropdown,
+the filter turns Open WebUI's chat body into a strict Responses body: the
+effort (including `DEFAULT_MODEL_PARAMS`' `reasoning_effort: high`) becomes
+`reasoning.effort`, Chat Controls fields the Responses API lacks (`seed`,
+`top_k`, ...) are dropped, saved output items keep only their Responses
+fields, and `store` is false because the UI resends the whole conversation
+every turn.
+
+Kairyu sends each request to vLLM in its caller's API (`kairyu.yaml`
+declares the model in `upstream_chat_models`, `upstream_responses_models`
+and `upstream_messages_models`; Kairyu checks at startup that vLLM serves
+`/v1/responses` and `/v1/messages`): chat as the caller's own messages
+(earlier turns, tool calls and results; no longer one flattened user
+message), Responses as Responses, Anthropic Messages as Messages.
+
 ## Thinking and sampling
 
 Omitted effort means **thinking high**, both through the API and in Chat UI.
 The pinned DeepSeek encoder defines `low=50`, `high=75`, and `max=100`.
-The example aligns the L1 encoder with those definitions. The UI's `default`
-selection inherits high; the dropdown exposes default/low/high/max.
+The example aligns the L1 encoder with those definitions and renders `xhigh`
+as max too: Kairyu spells L3 `max` as OpenAI `xhigh` on the Responses wire
+(OpenAI's effort vocabulary has no `max`). The UI's `default` selection
+inherits high; the dropdown exposes default/low/high/max.
 
 ```json
 {"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"What is 17 * 19?"}],"max_tokens":8192}
@@ -83,7 +111,7 @@ directory with GPU 0 available:
 for check in check_sm120_pages.py check_sm120_indexer.py; do
   docker run --rm --gpus device=0 --ipc=host \
     -v "$PWD:/checks:ro" --entrypoint python3 \
-    local/vllm-openai:deepseek-v41-sm120 "/checks/$check"
+    local/vllm-openai:deepseek-v41-sm120-xhigh "/checks/$check"
 done
 ```
 
@@ -97,6 +125,11 @@ The default all-reduce backend is NCCL.
 The local image ID is an evidence pin. A fresh source build can produce a
 different ID; startup then stops until both image pins are updated and the
 GPU gates are rerun for that build.
+The served vLLM image (`local/vllm-openai:deepseek-v41-sm120-xhigh`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
 
 For bounded L1 comparisons after startup:
 
@@ -109,15 +142,24 @@ The retained comparisons cover EP, DSpark, PCIe IPC and an 8K batch limit.
 Additional named batch/memory/graph candidates are optional experiments;
 final measurements use `verify.sh` against the committed configuration.
 
-`serving` uses unique prompt prefixes, approximately 8K input tokens,
-exactly 256 generated tokens, and concurrency 1/8/16/32/64. It verifies all
-requests were placed on the single replica. These fixed-length rows include
-reasoning tokens and do not measure completed-answer quality.
+Every gate sends Kairyu `/v1/responses`, the Chat UI's API. `serving` uses
+unique prompt prefixes, approximately 8K input tokens, at most 256 generated
+tokens, and concurrency 1/8/16/32/64. It verifies all requests were placed
+on the single replica. The Responses API has no `ignore_eos`/`min_tokens`,
+so each request ends naturally within the cap; these rows are not
+comparable with the earlier fixed-length chat rows. They include reasoning
+tokens and do not measure completed-answer quality.
 `tool-calling` and `vision` separately require completed, usable outputs.
 `reasoning` checks default and explicit efforts and records time to final
-content. `cancellation` checks slot release. `long-context` retains retrieval
-smokes at 32K/128K/256K and near the 1M context boundary; these are retrieval
-smokes, not a comprehensive long-context quality evaluation.
+content. `cancellation` checks slot release (a natural-completion stream
+disconnected mid-way). `long-context` retains retrieval smokes at
+32K/128K/256K and near the 1M context boundary; these are retrieval smokes,
+not a comprehensive long-context quality evaluation. `api-equivalence`
+sends the same Responses requests (text, stream, efforts low/high/xhigh, a
+tool round trip, an image, a length cap, the Open WebUI body) to vLLM
+directly and to Kairyu, requires them to agree, and reads vLLM's request
+counters to confirm Kairyu reached it on `/v1/responses`
+(`verification/product/correctness/upstream_api_equivalence.py`).
 
 Results are written under the example's NVMe `verification-results` directory;
 each run records the served-config hash. Sampling outcomes are evidence for

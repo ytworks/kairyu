@@ -68,10 +68,13 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
     services = compose["services"]
     l1 = [f"{prefix}-{index}" for index in range(replicas)]
     assert set(services) == {*l1, "kairyu", "chat-ui"}
+    # A DeepSeek-V4 effort overlay (xhigh -> max) is the image L1 serves.
+    served = spec["vllm"].get("effort_overlay", spec["vllm"])
+    served_image = served["image"]
     claimed: list[int] = []
     for name in l1:
         service = services[name]
-        assert service["image"] == f"${{{prefix.upper()}_VLLM_IMAGE:-{spec['vllm']['image']}}}"
+        assert service["image"].endswith(f":-{served_image}}}")
         devices = service["deploy"]["resources"]["reservations"]["devices"]
         assert len(devices) == 1
         ids = [int(value) for value in devices[0]["device_ids"]]
@@ -109,14 +112,17 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
     for replica in pool.replicas:
         validate_backend_options(replica.backend, replica.options)
         assert replica.options["tensor_parallel_size"] == allocation["tensor_parallel_size"]
-        assert replica.options["container_image_digest"] == spec["vllm"]["image_id"]
+        assert replica.options["container_image_digest"] == served["image_id"]
         hosts.append(replica.options["base_url"].removeprefix("http://").split(":")[0])
     assert hosts == l1
     assert deployment.server.max_concurrency == replicas * spec["vllm"]["max_num_seqs"]
-    # Both examples use the legacy chat path: vLLM owns the chat template and
-    # the tool-call parser, so Kairyu forwards tools to /chat/completions.
-    # The passthrough-to-/completions shape drops tools entirely (PR #584).
-    assert deployment.legacy_chat_models == frozenset({model})
+    # vLLM owns the chat template and the tool-call parser, and each request
+    # reaches it in its caller's API (m9 D2 amendment 2026-10-17). The
+    # passthrough-to-/completions shape drops tools entirely (PR #584).
+    assert deployment.upstream_chat_models == frozenset({model})
+    assert deployment.upstream_responses_models == frozenset({model})
+    assert deployment.upstream_messages_models == frozenset({model})
+    assert not deployment.legacy_chat_models
     assert deployment.chat_templates == {}
     assert "allow_templated_chat_passthrough" not in pool.replicas[0].options
     if prefix == "deepseek":
@@ -195,14 +201,18 @@ def test_flash_next_effort_filter_switches_to_thinking_sampling() -> None:
     vLLM applies the checkpoint's thinking generation_config; default keeps it."""
     module = _load(FLASH_NEXT_EXAMPLE / "webui-reasoning-effort-filter.py", "flash_next_filter")
     selector = module.Filter()
-    instruct = {"temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5, "max_tokens": 32768}
+    instruct = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 32768}
     for effort in ("low", "medium", "xhigh"):
         body = {**instruct, "reasoning_effort": "stale"}
         user = {"valves": selector.UserValves(reasoning_effort=effort)}
-        assert selector.inlet(body, user) == {"max_tokens": 32768, "reasoning_effort": effort}
+        assert selector.inlet(body, user) == {
+            "max_tokens": 32768,
+            "reasoning": {"effort": effort},
+            "store": False,
+        }
     body = {**instruct, "reasoning_effort": "xhigh"}
     user = {"valves": selector.UserValves(reasoning_effort="default")}
-    assert selector.inlet(body, user) == instruct
+    assert selector.inlet(body, user) == {**instruct, "store": False}
 
 
 def _write_log(path: Path, rows: list[dict]) -> None:
@@ -487,11 +497,11 @@ def test_tool_result_turn_requires_a_parsed_tool_call(
     )
     request_ids = iter(f"req-{index}" for index in range(2 * module.REPLICAS))
 
-    def post_chat(payload, *, include_request_id=False, **kwargs):
+    def post_responses(payload, *, include_request_id=False, **kwargs):
         response = next(responses)
         return (*response, next(request_ids)) if include_request_id else response
 
-    monkeypatch.setattr(module, "_post_chat", post_chat)
+    monkeypatch.setattr(module, "_post_responses", post_responses)
     monkeypatch.setattr(module, "_placement_offset", lambda path: 0)
     monkeypatch.setattr(
         module,

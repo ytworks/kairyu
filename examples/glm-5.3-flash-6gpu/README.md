@@ -28,6 +28,7 @@ layers; one MTP layer). It always thinks before it answers; the
 ./verify.sh cancellation --no-start
 ./verify.sh long-context --no-start
 ./verify.sh restart --no-start
+./verify.sh api-equivalence --no-start
 ./run.sh down
 ```
 
@@ -45,24 +46,43 @@ external URLs (set `PUBLIC_HOST` to override the detected address, or
 `API_BIND_ADDRESS` / `CHAT_UI_BIND_ADDRESS=127.0.0.1` to keep them local).
 Model `glm-5.3-flash`; the Chat UI has no authentication.
 
+The Chat UI talks to Kairyu over the OpenAI Responses API (`/v1/responses`,
+Open WebUI `OPENAI_API_CONFIGS` `api_type: responses`), and Kairyu sends each
+request to vLLM in the API its caller used: chat as chat, Responses as
+Responses, Anthropic Messages as Messages (`kairyu.yaml` lists the model in
+`upstream_chat_models`, `upstream_responses_models` and
+`upstream_messages_models`). `run.sh up` installs the effort filter, which
+also leaves only Responses fields in the Chat UI's body (`reasoning.effort`,
+no `seed`/`top_k`/`chat_template_kwargs`, saved output items reduced to their
+Responses fields, `store: false`), and checks that the Chat UI's connection
+is `api_type: responses`. GPU verification of this connection is pending
+(`MEASUREMENTS.md`, 2026-10-17).
+
 ## Usage
 
-- Effort: `"reasoning_effort": "low" | "high" | "max"` (Kairyu also maps
+- Effort: `"reasoning_effort": "low" | "high" | "max"` on chat,
+  `"reasoning": {"effort": ...}` on Responses (Kairyu also maps
   `minimal` → `low`, `medium` → `high`, `xhigh` → `max`); omitted means `max`.
   The Chat UI has a dropdown under Chat Controls → Valves → Reasoning Effort.
+  Kairyu sends `max` to vLLM's `/v1/responses` as `xhigh` (the OpenAI
+  vocabulary has no `max`); the official template renders every effort
+  other than `low`/`high` as Max, which `verify.sh l1` checks (`render_xhigh`)
+  on GPU.
 - Sampling: the checkpoint's `generation_config.json` (temperature 1.0,
   top_p 0.95), the model author's recommendation.
 - `clear_thinking`: the official template's default (`false`) keeps earlier
   turns' reasoning for clients that send `reasoning_content` back (agents).
   The model author asks chat clients to pass `clear_thinking=true`, but
-  Kairyu's chat path for this model forwards no `chat_template_kwargs` on
-  text requests (it rejects them with 400), so neither the Chat UI nor API
-  clients can set it here; the template default applies to every request.
+  Kairyu forwards no `chat_template_kwargs` for this model (chat rejects them
+  with 400 and the Responses API has no such field), so neither the Chat UI
+  nor API clients can set it here; the template default applies to every
+  request.
 - Images: up to 8 per request (8 MiB each); video is not accepted (Kairyu's
   public API carries image parts only).
 - Tools: OpenAI tool calling, parsed by vLLM's `glm47` parser. Kairyu sends
-  each chat's messages as they are (`upstream_chat_models`), so the official
-  template renders an agent's earlier turns, tool calls and tool results.
+  each conversation as it is (chat messages or Responses input items), so the
+  official template renders an agent's earlier turns, tool calls and tool
+  results.
 
 ## Why this configuration
 
@@ -85,7 +105,19 @@ elsewhere).
 | Parsers | `glm47` reasoning and tool-call parsers | Official recipe. |
 
 Verification: `verify.sh l1 | serving | completed | tool-calling | vision |
-reasoning | cancellation | long-context | restart`; the committed
-configuration passes all nine (`MEASUREMENTS.md`, run `20261011-r2`):
-70.6 / 298.3 / 455.7 tok/s at c1 / c16 / c64 (~8K in, 256 out), the planted
-key found in 1,039,890 prompt tokens, 80 default-effort answers completed.
+reasoning | cancellation | long-context | restart | api-equivalence`. The
+public gates run through Kairyu's `/v1/responses` (m11 D7 amendment
+2026-10-17); the L1 render, `/tokenize` and log-probability checks stay on
+vLLM's or Kairyu's chat API because the Responses API has no such fields.
+`serving` rows are ~8K in and up to 256 out with natural completion (the
+Responses API has no `ignore_eos`), and `cancellation` ends naturally within
+its output cap, so their numbers are not comparable with the fixed-length
+chat rows before. `api-equivalence` sends the same Responses requests (text,
+stream, efforts low/high/xhigh, a tool round trip, an image, a length cap,
+the Open WebUI body) to vLLM directly and through Kairyu, and checks from
+vLLM's own request counters that Kairyu reached it on `/v1/responses`. GPU
+verification of the Responses gates is pending. The previous chat
+configuration passed all nine earlier gates (`MEASUREMENTS.md`, run
+`20261011-r2`): 70.6 / 298.3 / 455.7 tok/s at c1 / c16 / c64 (~8K in, 256
+out), the planted key found in 1,039,890 prompt tokens, 80 default-effort
+answers completed.

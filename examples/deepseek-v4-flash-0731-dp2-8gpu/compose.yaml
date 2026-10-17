@@ -5,7 +5,9 @@ name: kairyu-deepseek-v4-flash-0731-dp2-8gpu
 # reuse when that replica is idle, otherwise least-outstanding placement, so
 # concurrent traffic alternates evenly between the two halves (kairyu.yaml).
 x-deepseek: &deepseek
-  image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+  # The pinned SM120 source build plus the xhigh->max effort patch
+  # (vllm-effort.Dockerfile); control.py builds it before `up`.
+  image: ${DEEPSEEK_SERVED_VLLM_IMAGE:-local/vllm-openai:deepseek-v4-flash-0731-dp2-xhigh}
   ipc: host
   environment:
     HF_HOME: /models/.cache
@@ -49,11 +51,11 @@ x-deepseek: &deepseek
     - deepseek_v4
     - --reasoning-parser
     - deepseek_v4
-    # vLLM renders chat with the checkpoint's own encoder (tokenizer-mode
-    # deepseek_v4) and parses DSML tool calls into OpenAI tool_calls; without
-    # --tool-call-parser the markup leaks into message.content and tool-driven
-    # agents fail (PR #584 review). Thinking defaults off to keep the
-    # direct-chat contract; an explicit reasoning_effort re-enables it.
+    # vLLM renders every request (chat, Responses, Messages) with the
+    # checkpoint's own encoder (tokenizer-mode deepseek_v4) and parses DSML
+    # tool calls; without --tool-call-parser the markup leaks into the answer
+    # text and tool-driven agents fail (PR #584 review). Thinking defaults off
+    # to keep the direct-chat contract; an explicit effort re-enables it.
     - --enable-auto-tool-choice
     - --tool-call-parser
     - deepseek_v4
@@ -140,6 +142,10 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses. An existing webui-data volume keeps its saved
+      # connection; control.py checks it when the admin credentials are set.
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: deepseek-v4-flash-0731
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
       ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}

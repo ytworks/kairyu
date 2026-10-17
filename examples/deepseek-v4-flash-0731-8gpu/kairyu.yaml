@@ -15,8 +15,11 @@ engines:
       api_key_env: null
       timeout_s: 86400
       upstream: vllm
-      allow_templated_chat_passthrough: true
-      chat_tokenizer: /models/deepseek-v4-flash-0731
+      # vLLM owns the prompt: it renders every request with the checkpoint's
+      # own encoder (tokenizer-mode deepseek_v4) and parses DSML tool calls,
+      # the same L1 settings as the dp2 example (FN-D8 amendment 2026-10-17).
+      capabilities:
+        allow_chat_template_kwargs: [thinking, enable_thinking]
       model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
       max_model_len: 1048576
       quantization_format: mixed-fp4-fp8
@@ -27,7 +30,14 @@ engines:
       expert_parallel_size: 8
       attention_data_parallel_size: 1
       dspark_enabled: true
-      container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+      # The L1 image is the effort overlay (vllm-effort.Dockerfile) of the
+      # pinned SM120 build.
+      # Recorded after the GPU build of the rebuilt image (GPU verification pending).
+      container_image_digest: null
 
-chat_templates:
-  deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one.
+upstream_chat_models: [deepseek-v4-flash-0731]
+upstream_responses_models: [deepseek-v4-flash-0731]
+upstream_messages_models: [deepseek-v4-flash-0731]

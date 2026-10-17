@@ -170,7 +170,13 @@ def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     assert entry.options["mtp_enabled"] is False
     assert spec.server.max_chat_body_bytes == 16_777_216
     assert spec.chat_templates == {}
-    assert spec.legacy_chat_models == frozenset({"qwen3.8-27b"})
+    assert spec.legacy_chat_models == frozenset()
+    for models in (
+        spec.upstream_chat_models,
+        spec.upstream_responses_models,
+        spec.upstream_messages_models,
+    ):
+        assert models == frozenset({"qwen3.8-27b"})
 
 
 def test_qwen_template_defaults_chat_to_direct_and_allows_explicit_thinking() -> None:
@@ -240,6 +246,16 @@ def test_vllm_command_pins_the_optimized_sm120_contract() -> None:
     assert compose["services"]["vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
     assert "--enable-prefix-caching" in command
     assert "--enforce-eager" not in command
+    # vLLM renders with the checkpoint's encoder and parses DSML tool calls
+    # (the dp2 example's L1; PR #584 lost tool calls without the parser).
+    assert command[command.index("--tokenizer-mode") + 1] == "deepseek_v4"
+    assert "--chat-template" not in command
+    assert "--enable-auto-tool-choice" in command
+    assert command[command.index("--tool-call-parser") + 1] == "deepseek_v4"
+    assert json.loads(command[command.index("--default-chat-template-kwargs") + 1]) == {
+        "thinking": False,
+        "enable_thinking": False,
+    }
     assert json.loads(command[command.index("--attention-config") + 1]) == {
         "use_fp4_indexer_cache": False
     }
@@ -265,57 +281,19 @@ def test_kairyu_l3_declares_the_attested_vllm_l1() -> None:
     assert entry.backend == "openai"
     validate_backend_options(entry.backend, entry.options)
     assert entry.options["upstream"] == "vllm"
-    assert entry.options["allow_templated_chat_passthrough"] is True
+    assert entry.options["capabilities"] == {
+        "allow_chat_template_kwargs": ["thinking", "enable_thinking"]
+    }
     assert entry.options["tensor_parallel_size"] == 8
     assert entry.options["expert_parallel_size"] == 8
     assert entry.options["dspark_enabled"] is True
-    assert spec.chat_templates == {"deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja"}
-
-
-def test_deepseek_template_matches_checkpoint_text_encoding() -> None:
-    template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
-    maximum = (
-        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
-        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to "
-        "chance: exhaustively decompose the problem into its most fundamental components, "
-        "trace every causal chain to its root, and resolve the underlying cause rather "
-        "than any surface symptom.\n"
-        "Do not stop reasoning until you have independently verified the solution from "
-        "multiple angles and are certain that no assumption remains unchecked and no "
-        "error remains undiscovered.\n\n"
-    )
-    rendered = template.render(
-        [{"role": "user", "content": "Write Python."}],
-        template_kwargs={"reasoning_effort": "max", "thinking_mode": "thinking"},
-    )
-    assert rendered == (
-        "<｜begin▁of▁sentence｜>" + maximum + "<｜User｜>Write Python.<｜Assistant｜><think>"
-    )
-
-    multi = template.render(
-        [
-            {"role": "user", "content": "A"},
-            {"role": "assistant", "content": "B"},
-            {"role": "user", "content": "C"},
-        ]
-    )
-    assert multi == (
-        "<｜begin▁of▁sentence｜><｜User｜>A<｜Assistant｜></think>"
-        "B<｜end▁of▁sentence｜><｜User｜>C<｜Assistant｜></think>"
-    )
-
-
-def test_deepseek_template_ignores_client_tool_metadata() -> None:
-    template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
-    expected = "<｜begin▁of▁sentence｜><｜User｜>PAC1の適応は？<｜Assistant｜></think>"
-    for tools in (
-        [],
-        [{"type": "function", "function": {"name": "search"}}],
+    assert spec.chat_templates == {}
+    for models in (
+        spec.upstream_chat_models,
+        spec.upstream_responses_models,
+        spec.upstream_messages_models,
     ):
-        assert (
-            template.render([{"role": "user", "content": "PAC1の適応は？"}], tools=tools)
-            == expected
-        )
+        assert models == frozenset({"deepseek-v4-flash-0731"})
 
 
 def test_control_preflight_requires_exact_gpu_inventory() -> None:
@@ -348,19 +326,20 @@ def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None
     benchmark = _load(QWEN_EXAMPLE / "verification.py", "qwen_example_serving_validation")
     row_dir = tmp_path / "serving-c2"
     row_dir.mkdir()
+    # Responses rows end naturally, so lengths differ within max_output_tokens.
     result = {
         "summary": {
             "requests": 2,
-            "completion_tokens_total": 8,
+            "completion_tokens_total": 7,
             "output_tokens_per_s": 1.0,
         },
-        "samples": [{"completion_tokens": 4}, {"completion_tokens": 4}],
+        "samples": [{"completion_tokens": 3}, {"completion_tokens": 4}],
     }
     output = row_dir / "result-serving.json"
     output.write_text(json.dumps(result))
-    assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 0
+    assert benchmark._validate_serving_row(row_dir, requests=2, max_output_tokens=4) == 0
 
     result["summary"]["completion_tokens_total"] = None
     result["samples"][1]["completion_tokens"] = 0
     output.write_text(json.dumps(result))
-    assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 1
+    assert benchmark._validate_serving_row(row_dir, requests=2, max_output_tokens=4) == 1

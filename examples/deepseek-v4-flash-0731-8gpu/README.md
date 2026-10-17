@@ -10,16 +10,23 @@ Open WebUI -> Kairyu L3 (:8002) -> vLLM L1 (TP8 + EP8, all 8 GPUs)
 The default is tuned for the exact hardware and checkpoint: mixed FP4/FP8
 weights, FP8 KV cache, native 1,048,576-token context, prefix caching,
 full/piecewise CUDA Graphs, and five-token DSpark speculation.
-Five draft tokens match the checkpoint's DSpark block size. Kairyu owns the
-official DeepSeek-V4 text prompt and sends the pre-rendered prompt to vLLM's
-`/completions` endpoint, avoiding a second chat-template pass.
-`tools` metadata emitted by OpenAI-compatible chat clients is ignored by this
-text-only checkpoint template, so Open WebUI's built-in tool declarations do
-not block ordinary questions. Model-side function-tool execution is not
-provided by this example. Ordinary UI requests default to direct chat mode;
-an explicit `reasoning_effort` selects thinking mode for reasoning-intensive calls. Open
-WebUI defaults model output to 32,768 tokens so normal answers are not cut into
-manual **Continue Response** steps.
+Five draft tokens match the checkpoint's DSpark block size. vLLM owns the
+prompt, with the dp2 example's L1 settings (FN-D8 amendment, 2026-10-17): it
+renders every request with the checkpoint's own encoder (`--tokenizer-mode
+deepseek_v4`), separates reasoning, and parses DSML tool calls into OpenAI tool
+calls (`--enable-auto-tool-choice --tool-call-parser deepseek_v4`). Kairyu
+sends each request to vLLM in the API its caller used (`kairyu.yaml` lists the
+model in `upstream_chat_models`, `upstream_responses_models` and
+`upstream_messages_models`): a chat as the caller's own messages, a Responses
+request to vLLM's `/v1/responses`, an Anthropic Messages request to vLLM's
+`/v1/messages`. Ordinary requests default to direct chat mode
+(`--default-chat-template-kwargs` turns thinking off); an explicit reasoning
+effort (`low`, `high`, `max`) selects thinking mode. On the Responses wire,
+whose effort vocabulary ends at `xhigh`, Kairyu sends `max` as `xhigh`; the
+pinned tokenizer would fold `xhigh` to the high tier, so this example builds a
+one-line overlay (`vllm-effort.Dockerfile`, `patch_effort.py`) that renders it
+as the max tier. Open WebUI defaults model output to 32,768 tokens so normal
+answers are not cut into manual **Continue Response** steps.
 The official MegaMoE recommendation is not used: the pinned implementation
 rejects SM120 as SM100-only, so this example explicitly disables DeepGEMM and
 uses vLLM's supported SM120 MoE path.
@@ -33,7 +40,8 @@ implementation supports it on SM100 datacenter Blackwell, not SM120.
 ```
 
 The command verifies exactly eight matching GPUs, reuses or builds the pinned
-SM120 vLLM source revision if its image is absent, downloads and hashes the
+SM120 vLLM source revision and this example's effort overlay if its image is
+absent, downloads and hashes the
 exact model revision unless its content attestation is already present, builds
 Kairyu, waits for readiness, and prints:
 
@@ -46,21 +54,51 @@ The first build/download is large. Later starts use the content attestation.
 Set `VERIFY_MODEL=1` to rehash every checkpoint file. Lifecycle commands are
 `./run.sh up`, `./run.sh status`, `./run.sh logs`, and `./run.sh down`.
 
-## Serving verification
+## Chat UI
+
+Open WebUI talks to Kairyu over the OpenAI Responses API (m11 D7 amendment,
+2026-10-17): `compose.yaml` sets the connection's `api_type` to `responses`.
+Open WebUI then forwards some chat-only fields unchanged (Chat Controls'
+reasoning effort, `seed`, `top_k`) and replays saved answers with its own
+bookkeeping fields, which Kairyu's strict `/v1/responses` rejects, so the UI
+needs the global filter in `webui-responses-filter.py`: it moves the effort to
+`reasoning.effort`, drops fields the Responses API lacks, keeps only Responses
+fields on saved items, and sends `store: false`. Sign-in is enabled here, so
+`./run.sh up` installs the filter only when `WEBUI_ADMIN_EMAIL` and
+`WEBUI_ADMIN_PASSWORD` are set (the administrator Open WebUI creates on a fresh
+volume) and switches the saved Kairyu connection to `api_type=responses` when
+an existing Open WebUI volume still has the chat connection it saved earlier;
+without them it prints a warning, and an administrator installs the file under
+Admin Panel > Functions as a global filter and sets Admin Panel > Settings >
+Connections > Kairyu > API Type to Responses.
+
+## Verification
 
 ```sh
 ./verify.sh list
 ./verify.sh serving
+./verify.sh api-equivalence
 ```
 
-`serving` records TTFT, TPOT, requests/s, and output tokens/s for a fixed
-approximately 8K-token input and exactly 256 generated tokens at concurrency
-1, 8, 16, and 32. Artifacts go to
+`serving` records TTFT, TPOT, requests/s, and output tokens/s on Kairyu's
+`/v1/responses` for an approximately 8K-token input and up to 256 generated
+tokens at concurrency 1, 8, 16, and 32. The Responses API has no
+`ignore_eos`/`min_tokens`, so each request ends naturally within
+`max_output_tokens`; a row passes when every request returns 1 to 256 output
+tokens. These rows are not comparable with the fixed-length chat rows recorded
+before 2026-10-17. `api-equivalence` sends the same Responses requests (text,
+stream, each effort, a tool round trip, a length cap, and Open WebUI's body) to
+vLLM directly and through Kairyu, requires the same Responses structure from
+both, and reads vLLM's request counters to confirm that Kairyu reached it on
+`/v1/responses`. Artifacts go to
 `verification/results/examples/deepseek-v4-flash-0731-8gpu/<UTC-run-id>/`.
 
-The locked serving results are in [MEASUREMENTS.md](MEASUREMENTS.md). The warm
-run reached 168.01 output tokens/s with 220.10 ms median TTFT at concurrency 1
-and 972.93 output tokens/s at concurrency 32. Model and product evaluations are
+GPU verification of the 2026-10-17 configuration (Responses connection, vLLM
+rendering, effort overlay) is pending. The locked results in
+[MEASUREMENTS.md](MEASUREMENTS.md) were measured on the previous configuration
+(Kairyu-rendered `/completions`, fixed 256-token chat rows): the warm run
+reached 168.01 output tokens/s with 220.10 ms median TTFT at concurrency 1 and
+972.93 output tokens/s at concurrency 32. Model and product evaluations are
 invoked explicitly through `python -m evals`.
 
 ## Public performance context
@@ -89,9 +127,15 @@ non-comparable public context is:
 - Model revision: `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`
 - Model tree SHA-256: `90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754`
 - vLLM source: `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`
-- vLLM image digest:
+- vLLM base image digest:
   `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+
+The served vLLM image (`local/vllm-openai:deepseek-v4-0731-8gpu-effort`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`VLLM_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
 
 Override ports with `API_PORT` and `CHAT_UI_PORT`. Override images with
 `VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM override must already

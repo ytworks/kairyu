@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -293,6 +294,113 @@ def _ready(url: str) -> bool:
         return False
 
 
+# Owner decision 2026-10-17: the Chat UI talks to Kairyu over /v1/responses;
+# with WEBUI_ADMIN_EMAIL/WEBUI_ADMIN_PASSWORD set, `up` installs the Responses
+# filter and checks the connection type, otherwise it warns.
+_CHAT_UI_FILTER_ID = "responses_api"
+
+
+def _webui_api(
+    ui_url: str,
+    path: str,
+    *,
+    token: str | None = None,
+    payload: dict | None = None,
+):
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{ui_url}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers=headers,
+        method="POST" if payload is not None else "GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
+_KAIRYU_CONNECTION_URL = "http://kairyu:8000/v1"
+
+
+def _ensure_chat_ui_connection(ui_url: str, token: str) -> None:
+    """Point the Chat UI's Kairyu connection at /v1/responses (m11 D7 amendment).
+
+    Open WebUI keeps the connection a volume saved before this example moved
+    to the Responses API; owner decision 2026-10-17: the admin session
+    rewrites that one connection's API type and leaves everything else.
+    """
+
+    config = _webui_api(ui_url, "/openai/config", token=token)
+    urls = list(config.get("OPENAI_API_BASE_URLS") or [])
+    if _KAIRYU_CONNECTION_URL not in urls:
+        raise SystemExit(f"Chat UI has no connection to {_KAIRYU_CONNECTION_URL}: {urls!r}")
+    index = str(urls.index(_KAIRYU_CONNECTION_URL))
+    configs = dict(config.get("OPENAI_API_CONFIGS") or {})
+    if (configs.get(index) or {}).get("api_type") == "responses":
+        return
+    configs[index] = {**(configs.get(index) or {}), "api_type": "responses"}
+    updated = _webui_api(
+        ui_url,
+        "/openai/config/update",
+        token=token,
+        payload={**config, "OPENAI_API_CONFIGS": configs},
+    )
+    if ((updated.get("OPENAI_API_CONFIGS") or {}).get(index) or {}).get("api_type") != "responses":
+        raise SystemExit("Chat UI Kairyu connection could not be switched to api_type=responses")
+    print("Chat UI: switched the saved Kairyu connection to the Responses API", flush=True)
+
+
+def _provision_chat_ui(ui_url: str) -> None:
+    """Install the Responses filter and check the connection type (admin only)."""
+
+    email = os.environ.get("WEBUI_ADMIN_EMAIL", "")
+    password = os.environ.get("WEBUI_ADMIN_PASSWORD", "")
+    if not (email and password):
+        print(
+            "warning: WEBUI_ADMIN_EMAIL/WEBUI_ADMIN_PASSWORD are unset, so the Chat UI's "
+            "Responses filter was not installed: Chat Controls fields outside the Responses "
+            "API (reasoning effort, seed, top_k) are rejected until an admin installs "
+            "webui-responses-filter.py as a global filter (README, Chat UI)",
+            file=sys.stderr,
+        )
+        return
+    filter_source = (HERE / "webui-responses-filter.py").read_text(encoding="utf-8")
+    base = f"/api/v1/functions/id/{_CHAT_UI_FILTER_ID}"
+    try:
+        signin = _webui_api(
+            ui_url, "/api/v1/auths/signin", payload={"email": email, "password": password}
+        )
+        if not isinstance(signin, dict) or not signin.get("token"):
+            raise SystemExit("Chat UI admin signin did not return a session token")
+        if signin.get("role") != "admin":
+            raise SystemExit("WEBUI_ADMIN_EMAIL must be the Chat UI's admin user")
+        token = signin["token"]
+        listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
+        existing = next((row for row in listed if row.get("id") == _CHAT_UI_FILTER_ID), None)
+        body = {
+            "id": _CHAT_UI_FILTER_ID,
+            "name": "Responses API",
+            "content": filter_source,
+            "meta": {"description": "Keep only OpenAI Responses fields in Chat UI requests."},
+        }
+        if existing is None:
+            state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
+        else:
+            updated = _webui_api(ui_url, f"{base}/update", token=token, payload=body)
+            state = {**existing, **(updated or {})}
+        # The toggle endpoints flip state, so call them only while a flag is off.
+        if not state.get("is_active"):
+            state = _webui_api(ui_url, f"{base}/toggle", token=token, payload={})
+        if not state.get("is_global"):
+            state = _webui_api(ui_url, f"{base}/toggle/global", token=token, payload={})
+        if not (state.get("is_active") and state.get("is_global")):
+            raise SystemExit("Chat UI Responses filter could not be activated globally")
+        _ensure_chat_ui_connection(ui_url, token)
+    except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
+        raise SystemExit(f"Chat UI provisioning failed: {error}") from error
+
+
 def up() -> None:
     env = _compose_env()
     _preflight(env)
@@ -318,6 +426,10 @@ def up() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     if not _ready(f"{api_url}/readyz"):
         raise SystemExit("Kairyu did not become ready")
+    ui_bind = env["CHAT_UI_BIND_ADDRESS"]
+    _provision_chat_ui(
+        f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{env['CHAT_UI_PORT']}"
+    )
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])

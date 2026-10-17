@@ -42,8 +42,8 @@
     "sampling": {"temperature": 1.0, "top_p": 0.95}
   },
   "vllm": {
-    "image": "local/vllm-openai:deepseek-v41-6gpu-nightly",
-    "image_id": "sha256:119afb09d8b71203707c50e8f9da1300c9992aea6c7aaa959cdb18df7e2483c5",
+    "image": "local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh",
+    "image_id": null,
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",

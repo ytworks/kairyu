@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -96,6 +97,7 @@ def _compose_env() -> dict[str, str]:
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["image"]),
+            "DEEPSEEK_SERVED_VLLM_IMAGE": SPEC["vllm"]["effort_overlay"]["image"],
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
@@ -206,6 +208,15 @@ def _preflight(env: dict[str, str]) -> None:
     )
 
 
+def _image_id(image: str) -> str | None:
+    inspected = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture=True,
+        check=False,
+    )
+    return inspected.stdout.strip() if inspected.returncode == 0 else None
+
+
 def _image_exists(image: str) -> bool:
     return _run(["docker", "image", "inspect", image], capture=True, check=False).returncode == 0
 
@@ -232,6 +243,48 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
             f"{source['source_repository']}#{source['source_revision']}",
         ]
     )
+
+
+def _ensure_effort_overlay(env: dict[str, str]) -> None:
+    """Build the served image: the pinned build plus the xhigh->max effort patch.
+
+    Kairyu sends an L3 max request to vLLM's /v1/responses as xhigh (m11 D4
+    amendment 2026-10-17); patch_deepseek_v4_effort.py renders it as max. The
+    layer cache makes an unchanged rebuild instant, and an edited patch is
+    never served stale. The served image is attested by its own recorded ID.
+    """
+
+    overlay = SPEC["vllm"]["effort_overlay"]
+    _run(
+        [
+            "docker",
+            "build",
+            "--file",
+            str(HERE / overlay["dockerfile"]),
+            "--build-arg",
+            f"VLLM_BASE_IMAGE={env['DEEPSEEK_VLLM_IMAGE']}",
+            "--tag",
+            env["DEEPSEEK_SERVED_VLLM_IMAGE"],
+            str(HERE),
+        ]
+    )
+    image = env["DEEPSEEK_SERVED_VLLM_IMAGE"]
+    actual = _image_id(image)
+    if os.environ.get("DEEPSEEK_ALLOW_UNPINNED_IMAGE") == "1":
+        print(f"WARNING: serving unpinned image {image} ({actual}); not evidence", flush=True)
+        return
+    if overlay["image_id"] is None:
+        raise SystemExit(
+            f"vLLM image {image} ({actual}) has no recorded image ID: it was rebuilt for "
+            "the Responses xhigh->max effort edit and awaits GPU verification; record this "
+            "ID as example.json image_id and kairyu.yaml container_image_digest, or serve it "
+            "anyway (not evidence) with DEEPSEEK_ALLOW_UNPINNED_IMAGE=1"
+        )
+    if actual != overlay["image_id"]:
+        raise SystemExit(
+            f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
+            f"{overlay['image_id']} (update both to this build before serving)"
+        )
 
 
 _MODEL_PROGRAM = r"""
@@ -384,8 +437,203 @@ def _validate_ready(api_url: str) -> None:
         )
 
 
+# --- Responses gate adapter (m11 D7 amendment 2026-10-17) ---------------------
+# The example gates are written against chat-shaped payloads and replies. These
+# helpers send each payload to Kairyu's public /v1/responses instead (the API
+# the Chat UI uses) and read the Responses reply back into the chat shape the
+# gate checks, so a gate's assertions stay as they were.
+
+# Responses fields a payload may already carry (the Chat UI filter's output
+# has reasoning and store) pass through as they are.
+_RESPONSES_PASSTHROUGH = frozenset(
+    {
+        "model",
+        "stream",
+        "temperature",
+        "top_p",
+        "parallel_tool_calls",
+        "metadata",
+        "user",
+        "reasoning",
+        "store",
+    }
+)
+
+
+def _responses_content(content: object, *, assistant: bool) -> object:
+    if isinstance(content, str) or content is None:
+        return content or ""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            kind = "output_text" if assistant else "input_text"
+            parts.append({"type": kind, "text": part["text"]})
+        elif part.get("type") == "image_url" and not assistant:
+            image = part["image_url"]
+            url = image["url"] if isinstance(image, dict) else image
+            parts.append({"type": "input_image", "image_url": url, "detail": "auto"})
+        else:
+            raise ValueError(f"chat content part {part.get('type')!r} has no Responses form")
+    return parts
+
+
+def _responses_tool(tool: dict) -> dict:
+    function = tool["function"]
+    flat = {"type": "function", "name": function["name"]}
+    for key in ("description", "parameters", "strict"):
+        if key in function:
+            flat[key] = function[key]
+    return flat
+
+
+def responses_request(payload: dict) -> dict:
+    """The /v1/responses body for one chat-shaped gate payload (stateless)."""
+
+    body: dict = {"store": False}
+    for key, value in payload.items():
+        if key == "messages":
+            continue
+        if key in _RESPONSES_PASSTHROUGH:
+            body[key] = value
+        elif key in ("max_tokens", "max_completion_tokens"):
+            body["max_output_tokens"] = value
+        elif key == "reasoning_effort":
+            body["reasoning"] = {"effort": value}
+        elif key == "tools":
+            body["tools"] = [_responses_tool(tool) for tool in value]
+        elif key == "tool_choice":
+            body["tool_choice"] = (
+                {"type": "function", "name": value["function"]["name"]}
+                if isinstance(value, dict)
+                else value
+            )
+        elif key == "response_format":
+            if value.get("type") == "json_schema":
+                schema = value["json_schema"]
+                body["text"] = {"format": {"type": "json_schema", **schema}}
+            else:
+                body["text"] = {"format": {"type": value["type"]}}
+        elif key == "stream_options":
+            continue  # a Responses stream always ends with usage
+        else:
+            raise ValueError(f"chat field {key!r} has no Responses form")
+    items: list[dict] = []
+    for message in payload["messages"]:
+        role = message["role"]
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": message["content"],
+                }
+            )
+            continue
+        if message.get("reasoning_content"):
+            text = message["reasoning_content"]
+            items.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": text}],
+                }
+            )
+        content = message.get("content")
+        if content:
+            items.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": _responses_content(content, assistant=role == "assistant"),
+                }
+            )
+        for call in message.get("tool_calls") or ():
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["function"]["name"],
+                    "arguments": call["function"]["arguments"],
+                }
+            )
+    body["input"] = items
+    return body
+
+
+def _finish_reason(response: dict, calls: list) -> str:
+    if response.get("status") == "completed":
+        return "tool_calls" if calls else "stop"
+    if response.get("status") == "incomplete":
+        reason = (response.get("incomplete_details") or {}).get("reason")
+        return "content_filter" if reason == "content_filter" else "length"
+    return str(response.get("status"))
+
+
+def chat_view(response: dict) -> dict:
+    """One Responses object read back as a chat completion (kairyu_* kept)."""
+
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: list[dict] = []
+    has_message = False
+    for item in response.get("output") or ():
+        kind = item.get("type")
+        if kind == "message":
+            has_message = True
+            text += [
+                part.get("text", "")
+                for part in item.get("content") or ()
+                if part.get("type") == "output_text"
+            ]
+        elif kind == "reasoning":
+            parts = item.get("content") or item.get("summary") or ()
+            reasoning += [part.get("text", "") for part in parts]
+        elif kind == "function_call":
+            calls.append(
+                {
+                    "id": item.get("call_id"),
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item.get("arguments")},
+                }
+            )
+    usage = response.get("usage") or {}
+    chat_usage = {
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens_details": {
+            "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens")
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
+        },
+        **{key: value for key, value in usage.items() if key.startswith("orchestration_")},
+    }
+    return {
+        "id": response.get("id"),
+        "object": "chat.completion",
+        "created": response.get("created_at"),
+        "model": response.get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(text) if has_message else None,
+                    "reasoning_content": "".join(reasoning) or None,
+                    "tool_calls": calls or None,
+                },
+                "finish_reason": _finish_reason(response, calls),
+            }
+        ],
+        "usage": chat_usage,
+        **{key: value for key, value in response.items() if key.startswith("kairyu_")},
+    }
+
+
 # One fail-closed tool-calling probe (PR #584 review): `run.sh up` must not
-# report a ready environment whose API cannot emit OpenAI tool calls.
+# report a ready environment whose API cannot emit OpenAI tool calls. It goes
+# through /v1/responses, the API the Chat UI uses.
 _BASH_TOOL = {
     "type": "function",
     "function": {
@@ -420,13 +668,13 @@ def _validate_tool_calling(api_url: str) -> None:
         "max_tokens": 2048,
     }
     request = urllib.request.Request(
-        f"{api_url}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
+        f"{api_url}/v1/responses",
+        data=json.dumps(responses_request(payload)).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
-            body = json.loads(response.read())
+            body = chat_view(json.loads(response.read()))
         choice = body["choices"][0]
         calls = choice["message"].get("tool_calls") or []
         arguments = json.loads(calls[0]["function"]["arguments"]) if calls else {}
@@ -444,10 +692,115 @@ def _validate_tool_calling(api_url: str) -> None:
         )
 
 
+_CHAT_UI_FILTER_ID = "responses_api"
+
+
+def _webui_api(
+    ui_url: str,
+    path: str,
+    *,
+    token: str | None = None,
+    payload: dict | None = None,
+):
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{ui_url}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers=headers,
+        method="POST" if payload is not None else "GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
+_KAIRYU_CONNECTION_URL = "http://kairyu:8000/v1"
+
+
+def _ensure_chat_ui_connection(ui_url: str, token: str) -> None:
+    """Point the Chat UI's Kairyu connection at /v1/responses (m11 D7 amendment).
+
+    Open WebUI keeps the connection a volume saved before this example moved
+    to the Responses API; owner decision 2026-10-17: the admin session
+    rewrites that one connection's API type and leaves everything else.
+    """
+
+    config = _webui_api(ui_url, "/openai/config", token=token)
+    urls = list(config.get("OPENAI_API_BASE_URLS") or [])
+    if _KAIRYU_CONNECTION_URL not in urls:
+        raise SystemExit(f"Chat UI has no connection to {_KAIRYU_CONNECTION_URL}: {urls!r}")
+    index = str(urls.index(_KAIRYU_CONNECTION_URL))
+    configs = dict(config.get("OPENAI_API_CONFIGS") or {})
+    if (configs.get(index) or {}).get("api_type") == "responses":
+        return
+    configs[index] = {**(configs.get(index) or {}), "api_type": "responses"}
+    updated = _webui_api(
+        ui_url,
+        "/openai/config/update",
+        token=token,
+        payload={**config, "OPENAI_API_CONFIGS": configs},
+    )
+    if ((updated.get("OPENAI_API_CONFIGS") or {}).get(index) or {}).get("api_type") != "responses":
+        raise SystemExit("Chat UI Kairyu connection could not be switched to api_type=responses")
+    print("Chat UI: switched the saved Kairyu connection to the Responses API", flush=True)
+
+
+def _provision_chat_ui(ui_url: str) -> None:
+    """Install the Responses filter and check the connection type (admin only)."""
+
+    email = os.environ.get("WEBUI_ADMIN_EMAIL", "")
+    password = os.environ.get("WEBUI_ADMIN_PASSWORD", "")
+    if not (email and password):
+        print(
+            "warning: WEBUI_ADMIN_EMAIL/WEBUI_ADMIN_PASSWORD are unset, so the Chat UI's "
+            "Responses filter was not installed: Chat Controls fields outside the Responses "
+            "API (reasoning effort, seed, top_k) are rejected until an admin installs "
+            "webui-responses-filter.py as a global filter (README, Chat UI)",
+            file=sys.stderr,
+        )
+        return
+    filter_source = (HERE / "webui-responses-filter.py").read_text(encoding="utf-8")
+    base = f"/api/v1/functions/id/{_CHAT_UI_FILTER_ID}"
+    try:
+        signin = _webui_api(
+            ui_url, "/api/v1/auths/signin", payload={"email": email, "password": password}
+        )
+        if not isinstance(signin, dict) or not signin.get("token"):
+            raise SystemExit("Chat UI admin signin did not return a session token")
+        if signin.get("role") != "admin":
+            raise SystemExit("WEBUI_ADMIN_EMAIL must be the Chat UI's admin user")
+        token = signin["token"]
+        listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
+        existing = next((row for row in listed if row.get("id") == _CHAT_UI_FILTER_ID), None)
+        body = {
+            "id": _CHAT_UI_FILTER_ID,
+            "name": "Responses API",
+            "content": filter_source,
+            "meta": {"description": "Keep only OpenAI Responses fields in Chat UI requests."},
+        }
+        if existing is None:
+            state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
+        else:
+            updated = _webui_api(ui_url, f"{base}/update", token=token, payload=body)
+            state = {**existing, **(updated or {})}
+        # The toggle endpoints flip state, so call them only while a flag is off.
+        if not state.get("is_active"):
+            state = _webui_api(ui_url, f"{base}/toggle", token=token, payload={})
+        if not state.get("is_global"):
+            state = _webui_api(ui_url, f"{base}/toggle/global", token=token, payload={})
+        if not (state.get("is_active") and state.get("is_global")):
+            raise SystemExit("Chat UI Responses filter could not be activated globally")
+        _ensure_chat_ui_connection(ui_url, token)
+    except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
+        raise SystemExit(f"Chat UI provisioning failed: {error}") from error
+
+
 def up() -> None:
     env = _compose_env()
     _preflight(env)
     _ensure_vllm_image(env)
+    _ensure_effort_overlay(env)
     _ensure_model(env)
     _run(
         [
@@ -469,6 +822,10 @@ def up() -> None:
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     _validate_ready(api_url)
     _validate_tool_calling(api_url)
+    ui_bind = env["CHAT_UI_BIND_ADDRESS"]
+    _provision_chat_ui(
+        f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{env['CHAT_UI_PORT']}"
+    )
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])

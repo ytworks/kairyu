@@ -1,7 +1,9 @@
 """Align the pinned V4.1 runtime with official efforts and SM120 page sizes.
 
 The selected runtime's Python frontend is used so a separate Rust renderer
-cannot bypass this change. No Kairyu L2/L3 effort policy is modified.
+cannot bypass this change. No Kairyu L2/L3 effort policy is modified. Kairyu
+sends L3 ``max`` to L1's /v1/responses as OpenAI ``xhigh`` (m11 D4 amendment
+2026-10-17), so ``xhigh`` renders the max budget too.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from pathlib import Path
 
 OFFICIAL_EFFORTS = {"low": 50, "high": 75, "max": 100}
 INITIAL_VLLM_EFFORTS = {"low": 25, "high": 50, "xhigh": 75, "max": 100}
+# Kairyu's Responses spelling of L3 max (OpenAI's effort vocabulary has no max).
+RESPONSES_EFFORTS = {"low": 50, "high": 75, "xhigh": 100, "max": 100}
 
 
 def replace_once(source: str, before: str, after: str) -> str:
@@ -124,11 +128,11 @@ def align_efforts(source: str) -> str:
         raise ValueError("Expected one pinned V4.1 effort mapping")
     node = matches[0]
     current = ast.literal_eval(node.value)
-    if current not in (INITIAL_VLLM_EFFORTS, OFFICIAL_EFFORTS):
+    if current not in (INITIAL_VLLM_EFFORTS, OFFICIAL_EFFORTS, RESPONSES_EFFORTS):
         raise ValueError(f"Unrecognized upstream effort mapping: {current!r}")
     lines = source.splitlines(keepends=True)
     lines[node.lineno - 1 : node.end_lineno] = [
-        f"REASONING_EFFORT_MAPPINGS: Dict[str, int] = {OFFICIAL_EFFORTS!r}\n"
+        f"REASONING_EFFORT_MAPPINGS: Dict[str, int] = {RESPONSES_EFFORTS!r}\n"
     ]
     return "".join(lines)
 
@@ -144,11 +148,11 @@ def main() -> None:
     path.write_text(align_efforts(path.read_text()))
     encoder = runpy.run_path(str(path))
     render = encoder["render_reasoning_effort"]
-    for name, budget in OFFICIAL_EFFORTS.items():
+    for name, budget in RESPONSES_EFFORTS.items():
         assert f"Reasoning Effort: {budget} " in render(0, "thinking", name)
     assert "Reasoning Effort: 75 " in render(0, "thinking", None)
     assert render(0, "chat", None) == ""
-    print("V4.1 encoder verified: low=50, high=75, max=100; default=high")
+    print("V4.1 encoder verified: low=50, high=75, max=xhigh=100; default=high")
 
     vllm = importlib.util.find_spec("vllm")
     flashinfer = importlib.util.find_spec("flashinfer")

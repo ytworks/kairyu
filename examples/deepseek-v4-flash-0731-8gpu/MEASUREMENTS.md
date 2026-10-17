@@ -1,10 +1,31 @@
 # Measured performance
 
-These are local measurements of the exact example configuration, not
+## 2026-10-17 Responses connection — GPU verification pending
+
+The 2026-10-17 configuration changes what was measured below: the Chat UI and
+`verify.sh serving` use Kairyu's `/v1/responses`, Kairyu forwards each request
+to vLLM in its caller's API instead of rendering a `/completions` prompt, vLLM
+renders with the checkpoint's encoder and parses tool calls (the dp2 example's
+L1 settings), and the vLLM image gains the effort overlay. Serving rows now end
+naturally within 256 output tokens (the Responses API has no
+`ignore_eos`/`min_tokens`), so they are not comparable with the fixed-length
+chat rows below. No measurement of this configuration exists yet; `verify.sh
+serving` and `verify.sh api-equivalence` on the eight-GPU host are pending.
+
+The served vLLM image (`local/vllm-openai:deepseek-v4-0731-8gpu-effort`) is
+rebuilt by this change and has no recorded image ID yet: `example.json`
+`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+build records them, and until then `run.sh up` stops unless
+`VLLM_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+
+## Previous configuration (2026-08-11)
+
+These are local measurements of the example's previous configuration
+(Kairyu-rendered prompts on vLLM's `/completions`, fixed-length chat rows), not
 manufacturer specifications or estimates. The serving run was warm and used
 unique prompt prefixes to prevent prefix-cache reuse from inflating the matrix.
 
-## Locked system
+### Locked system
 
 - Hardware: 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB per
   GPU, compute capability 12.0. `nvidia-smi topo -m` reported PCIe/NUMA paths
@@ -32,7 +53,7 @@ pinned SM120 implementation supports them. No public measurement with this
 exact eight-card/checkpoint/engine combination was found, so the numbers below
 are the authoritative performance evidence for this example.
 
-## Warm serving result
+### Warm serving result
 
 Each operating point completed 32/32 requests with approximately 8K input
 tokens and exactly 256 output tokens per request. Percentiles use the harness's
@@ -51,7 +72,7 @@ simultaneously minimizes queueing latency and maximizes aggregate throughput.
 
 Run ID: `tp8-ep8-dspark5-warm-20260811`.
 
-## Raw evidence identity
+### Raw evidence identity
 
 Historical serving artifacts are under
 `bench/results/examples/deepseek-v4-flash-0731-8gpu/` on the measurement host.

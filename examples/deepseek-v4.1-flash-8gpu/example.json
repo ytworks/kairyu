@@ -69,8 +69,8 @@
     }
   },
   "vllm": {
-    "image": "local/vllm-openai:deepseek-v41-sm120",
-    "image_id": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
+    "image": "local/vllm-openai:deepseek-v41-sm120-xhigh",
+    "image_id": null,
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d",

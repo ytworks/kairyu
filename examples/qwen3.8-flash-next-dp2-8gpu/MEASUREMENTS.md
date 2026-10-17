@@ -8,6 +8,26 @@ input enabled) against an already-running stack, with row-unique prompt
 prefixes so neither vLLM prefix caching nor Kairyu's prefix-aware placement
 can inflate the matrix.
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The served configuration changed after the locked run below: Kairyu forwards
+each request to vLLM in its caller's API (`upstream_chat_models`,
+`upstream_responses_models`, `upstream_messages_models` instead of
+`legacy_chat_models`; m9 D2 amendment), the Chat UI and every gate use
+`/v1/responses` (m11 D7 amendment), the Chat UI no longer sends Qwen's
+instruct `presence_penalty` (the Responses API has none), and the serving rows
+end naturally within 256 output tokens because the Responses API has no
+`ignore_eos`/`min_tokens`. No GPU run of this configuration exists yet. The
+results below describe the previous chat-only configuration (served-config
+`ac3c8f9f…`) and are not comparable with the new natural-completion rows;
+`serving`, `tool-calling`, `vision`, the new `api-equivalence` gate and the
+Chat UI will be recorded here after the GPU run.
+
+- Served-config SHA-256:
+  `f0dd12d5d923e5af0b00c190150f193ad6efcf5f99370ab14609d9cd05f79f6b`
+  (the committed configuration this section describes, with no measurement
+  yet; enforced by `tests/unit/test_example_measurement_hashes.py`).
+
 ## Locked system
 
 - Hardware: 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB per
@@ -19,12 +39,11 @@ can inflate the matrix.
   nightly wheel) with FlashInfer `60b49158ab4fb81718aef486c2d3c89aec4c1901`
   overlaid from source (`vllm-sm120.Dockerfile`), image ID
   `sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4`
-- Served-config SHA-256:
+- Served-config SHA-256 at measurement time:
   `ac3c8f9ff8a7fb1178bfdd797a8410b8ce6052e57f7bac86a9ffe27416d9af8f`
   (identical across the three gate runs below, and equal to what
-  `verification.py` computes from the committed files — enforced by
-  `tests/unit/test_example_measurement_hashes.py`). Three earlier passes are
-  superseded: the runs with the recipe's MTP k=3 enabled
+  `verification.py` computed from the files committed at the time). Three
+  earlier passes are superseded: the runs with the recipe's MTP k=3 enabled
   (`20260904T121052Z`/`121116Z`/`121132Z`, served-config `c8acee3c…`), whose
   vision gate returned `ductduct…` for 2 of 4 batched answers (see "Why MTP
   is off"); the first MTP-off runs (`20260904T130031Z`/`130046Z`/

@@ -7,6 +7,20 @@ warm-up row and one full matrix before it), with row-unique prompt prefixes so
 neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix.
 
+## 2026-10-17 Responses connection — GPU verification pending
+
+The served configuration changed after the locked run below: Kairyu forwards
+each request to vLLM in its caller's API (`upstream_chat_models`,
+`upstream_responses_models`, `upstream_messages_models` instead of
+`legacy_chat_models`; m9 D2 amendment), the Chat UI and every gate use
+`/v1/responses` (m11 D7 amendment), and the serving rows end naturally within
+256 output tokens because the Responses API has no `ignore_eos`/`min_tokens`.
+No GPU run of this configuration exists yet. The results below describe the
+previous chat-only configuration (served-config `140bc1c7…`) and are not
+comparable with the new natural-completion rows; `serving`, `tool-calling`,
+the new `api-equivalence` gate and the Chat UI will be recorded here after the
+GPU run.
+
 ## Locked system
 
 - Hardware: 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB per

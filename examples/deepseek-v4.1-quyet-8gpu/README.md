@@ -16,7 +16,7 @@ for this example.
 |---|---|
 | L1 | DeepSeek-V4.1-Flash, one DP6/EP6 replica on GPUs 0-5 (the six-GPU example's L1, no server-wide thinking default). Two Quyet-1.0-Large replicas served as in `quyet-1.0-large-1gpu` (stock vLLM v0.31.0, bf16, batch-invariant, plus this example's System One adapter that keeps the `quyet` package's prompt and calibration): `quyet-route` on GPU 6 answers only the route judge, `quyet-judge` on GPU 7 the judgments and the form check. |
 | L2 | `verified-tool.yaml`: the Quyet route judge, the verified tool route and the think route. |
-| L3 | Public model `kairyu-verified-tool`; Open WebUI on :3012. |
+| L3 | Public model `kairyu-verified-tool` on the chat and Responses APIs; Open WebUI on :3012 over the Responses API. |
 
 ## L2: how an answer is made
 
@@ -111,8 +111,21 @@ serving.
 
 ## Using it
 
-The OpenAI API listens on `127.0.0.1:8013`. An agent sends its tools with
-each turn:
+The OpenAI API listens on `127.0.0.1:8013` (chat and Responses). An agent
+sends its tools with each turn:
+
+```sh
+curl -s http://127.0.0.1:8013/v1/responses -H 'Content-Type: application/json' -d '{
+  "model": "kairyu-verified-tool",
+  "input": "What is the weather in Paris right now?",
+  "store": false,
+  "tools": [{"type": "function", "name": "get_weather",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                   "required": ["city"]}}]
+}' | jq '.output[] | select(.type == "function_call")'
+```
+
+or, on Chat Completions:
 
 ```sh
 curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -126,9 +139,12 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 
 ## GPU gates (`verify.sh`)
 
+Every request to the public model goes to `/v1/responses`, the API the Chat
+UI uses; the L1 probes of `l1` stay on vLLM's chat API.
+
 | Gate | Checks |
 |---|---|
-| `l1` | every DeepSeek DP rank (thinking and chat JSON), each Quyet replica's vLLM and System One, the strict name refusing a state Quyet would cut, one structured tool call from the public model |
+| `l1` | every DeepSeek DP rank (thinking and chat JSON, on vLLM directly), each Quyet replica's vLLM and System One, the strict name refusing a state Quyet would cut, one structured tool call from the public model |
 | `routing` | `datasets/tool-routing-set.json` under the served rule (TOOL at P(TOOL) ≥ 0.1): TOOL miss rate < 10 % on the calibration and held-out halves; THINK precision ≥ 90 % |
 | `think-route` | everyday requests stream from the think route at the default effort |
 | `effort` | the think route gets the caller's effort; the verified tool route's candidates and answer (fixes included) get it too (default high); the route is judged on `quyet-route` |
@@ -136,6 +152,7 @@ curl -s http://127.0.0.1:8013/v1/chat/completions -H 'Content-Type: application/
 | `fallback` | `quyet-route` down: think route; `quyet-judge` down: still routed, answer without judgments, published unverified; both back: judged and form-checked |
 | `serving` | agent turns at c1/c4/c8/c16 (8/16/16/32 requests): every reply a structured call; per-route latency and tokens |
 | `serving-routed` | the routing set at c1/c4/c8/c16, route mix and per-route latency and tokens |
+| `api-equivalence` | `verification/product/correctness/upstream_api_equivalence.py`: the same Responses requests (text, stream, low/high/xhigh, a tool round trip, a length cap, the Open WebUI body) to DeepSeek's L1 and to the public model; both validate against the OpenAI types and agree on status and usage keys, and DeepSeek's request counters show every role call arrived on `/v1/responses` |
 | `browser` | `browser-smoke.sh`: Open WebUI answers |
 
 Every gate also records each Quyet adapter's reads, states cut at 6,000
@@ -143,6 +160,29 @@ tokens, strict reads refused and read times from the adapters' logs. The two dat
 with generic tools (shell, file read and write, HTTP fetch, web search,
 calendar, email). The routing set's THINK side holds 80 chats without tools
 and 16 tool-declared turns whose next reply is text.
+
+## Responses connection (2026-10-17, GPU verification pending)
+
+- Open WebUI connects with `api_type: responses` (m11 D7 amendment). `run.sh`
+  installs the Reasoning Effort filter, which now also turns the body into a
+  strict Responses body (the effort becomes `reasoning.effort`, fields the
+  Responses API lacks are dropped, saved output items keep their Responses
+  fields, `store: false`), and checks that connection 0 is `responses`.
+- The DeepSeek pool is on `upstream_chat_models`, `upstream_responses_models`
+  and `upstream_messages_models` (m9 D2 amendment): every role call reaches
+  vLLM in the caller's API, so a Responses caller's candidates, answer and
+  fixes go to vLLM's `/v1/responses`. Quyet stays a System One model.
+- On the Responses wire L3's `max` travels as `xhigh`; the pinned V4.1 encoder
+  renders `xhigh` as 75, so `patch_sm120.py` maps it to 100 and checks all
+  four efforts at build time. The overlay is retagged so an older local build
+  is never reused.
+  The served vLLM image (`local/vllm-openai:deepseek-v41-quyet-responses`) is
+  rebuilt by this change and has no recorded image ID yet: `example.json`
+  `image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
+  build records them, and until then `run.sh up` stops unless
+  `DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+- None of the gates above has been run on GPU since this change;
+  `MEASUREMENTS.md` keeps the chat-era results.
 
 ## Limits
 

@@ -181,3 +181,25 @@ Effort: Max` and counts 3,333 tokens, equal to Kairyu's `usage.prompt_tokens`.
 
 Not caused by Kairyu: GLM on vLLM v0.31.0 sometimes returns an em dash as
 mojibake (`â\x80\x94`), 3 of 10 answers sent directly.
+
+## 2026-10-17 Responses connection — GPU verification pending
+
+Owner decision 2026-10-17 (m9 D2, m11 D4/D7 amendments): the Chat UI talks to
+Kairyu over `/v1/responses`, and Kairyu sends each request to vLLM in its
+caller's API (`upstream_responses_models` and `upstream_messages_models`
+beside `upstream_chat_models`). The public gates now run through Kairyu's
+`/v1/responses`; `serving` rows end naturally within 256 output tokens and
+`cancellation` within its 8,192-token cap (the Responses API has no
+`ignore_eos`/`min_tokens`/`seed`), so their numbers are not comparable with
+the fixed-length chat rows above. The L1 render, `/tokenize` and the
+log-probability readiness probe stay on chat. New checks:
+
+- `l1` `render_xhigh`: the template must render `xhigh` (L3 max on the
+  Responses wire) as `Reasoning Effort: Max`.
+- `api-equivalence`: the same Responses requests to vLLM directly and through
+  Kairyu agree on status, output item types, events, usage keys and function
+  names, and vLLM's `http_requests_total` shows Kairyu reached it on
+  `/v1/responses` (no `/v1/chat/completions`).
+
+No gate has run on this configuration yet; every row above was measured on
+the chat configuration.

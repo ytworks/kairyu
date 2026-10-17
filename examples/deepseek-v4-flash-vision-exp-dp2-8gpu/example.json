@@ -40,6 +40,12 @@
     "image_id": "sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4",
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
+    "effort_overlay": {
+      "dockerfile": "vllm-effort.Dockerfile",
+      "patch": "patch_deepseek_v4_effort.py",
+      "image": "local/vllm-openai:deepseek-v4-flash-vision-exp-dp2-xhigh",
+      "image_id": null
+    },
     "base_image": "vllm/vllm-openai:nightly-27a94d1ce4e3fc100c4732439ccec10f8246a804@sha256:7d5128a92db05e6d70661a18f10e40c17cd2d8fcaad9226e170a0d69f822b795",
     "source_repository": "https://github.com/vllm-project/vllm.git",
     "source_revision": "27a94d1ce4e3fc100c4732439ccec10f8246a804",
@@ -62,8 +68,9 @@
   "api_port": 8005,
   "verification": {
     "serving": {
+      "api": "responses",
       "prompt_tokens_approx": 8192,
-      "output_tokens": 256,
+      "max_output_tokens": 256,
       "concurrency": [1, 8, 16, 32, 64],
       "requests_per_concurrency": 64,
       "placement_gate": {

@@ -79,7 +79,10 @@ pools:
     # verify.sh reads it to prove the per-row distribution.
     placement_log_path: /var/lib/kairyu/placement/qwen3.8-27b.jsonl
 
-# vLLM renders the mounted Qwen chat template (enable_thinking / reasoning
-# effort kwargs pass through), so Kairyu uses its legacy chat path here,
-# exactly as in the single-GPU example.
-legacy_chat_models: [qwen3.8-27b]
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders each one with the mounted Qwen chat
+# template (an explicit effort selects thinking) and parses the tool calls.
+upstream_chat_models: [qwen3.8-27b]
+upstream_responses_models: [qwen3.8-27b]
+upstream_messages_models: [qwen3.8-27b]

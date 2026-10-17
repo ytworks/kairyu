@@ -12,6 +12,7 @@ import socket
 import subprocess
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -208,35 +209,83 @@ def _preflight(env: dict[str, str]) -> None:
     )
 
 
-def _image_exists(image: str) -> bool:
-    return _run(["docker", "image", "inspect", image], capture=True, check=False).returncode == 0
-
-
-def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
-    image = env[env_key]
-    if _image_exists(image):
-        return
-    if image != source["image"]:
-        raise SystemExit(f"{env_key} does not exist locally: {image}")
-    if source.get("distribution") == "upstream":
-        print("vLLM image is absent; pulling the pinned upstream release", flush=True)
-        _run(["docker", "pull", image])
-        return
-    print("vLLM image is absent; building the pinned SM120 source revision", flush=True)
-    _run(
-        [
-            "docker",
-            "build",
-            "--pull",
-            "--file",
-            "docker/Dockerfile",
-            "--tag",
-            image,
-            "--label",
-            f"org.opencontainers.image.revision={source['source_revision']}",
-            f"{source['source_repository']}#{source.get('source_ref', source['source_revision'])}",
-        ]
+def _image_id(image: str) -> str | None:
+    inspected = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture=True,
+        check=False,
     )
+    return inspected.stdout.strip() if inspected.returncode == 0 else None
+
+
+def _ensure_qwen_image(env: dict[str, str]) -> None:
+    image = env["QWEN_VLLM_IMAGE"]
+    if _image_id(image) is not None:
+        return
+    if image != SPEC["vllm"]["qwen"]["image"]:
+        raise SystemExit(f"QWEN_VLLM_IMAGE does not exist locally: {image}")
+    print("Qwen vLLM image is absent; pulling the pinned upstream release", flush=True)
+    _run(["docker", "pull", image])
+
+
+def _ensure_deepseek_image(env: dict[str, str]) -> None:
+    """Build the SM120 base and this example's tokenizer overlay when absent."""
+
+    image = env["DEEPSEEK_VLLM_IMAGE"]
+    source = SPEC["vllm"]["deepseek"]
+    actual = _image_id(image)
+    if actual is None:
+        if image != source["image"]:
+            raise SystemExit(f"DEEPSEEK_VLLM_IMAGE does not exist locally: {image}")
+        base = source["base_image"]
+        if _image_id(base) is None:
+            print("vLLM base image is absent; building the pinned SM120 revision", flush=True)
+            _run(
+                [
+                    "docker",
+                    "build",
+                    "--pull",
+                    "--file",
+                    "docker/Dockerfile",
+                    "--tag",
+                    base,
+                    "--label",
+                    f"org.opencontainers.image.revision={source['source_revision']}",
+                    f"{source['source_repository']}#{source['source_revision']}",
+                ]
+            )
+        print("DeepSeek vLLM image is absent; building this example's overlay", flush=True)
+        _run(
+            [
+                "docker",
+                "build",
+                "--file",
+                str(HERE / source["dockerfile"]),
+                "--build-arg",
+                f"VLLM_BASE_IMAGE={base}",
+                "--tag",
+                image,
+                "--label",
+                f"org.opencontainers.image.revision={source['source_revision']}",
+                str(HERE),
+            ]
+        )
+        actual = _image_id(image)
+    if os.environ.get("DEEPSEEK_ALLOW_UNPINNED_IMAGE") == "1":
+        print(f"WARNING: serving unpinned image {image} ({actual}); not evidence", flush=True)
+        return
+    if source["image_id"] is None:
+        raise SystemExit(
+            f"vLLM image {image} ({actual}) has no recorded image ID: it was rebuilt for "
+            "the Responses xhigh->max effort edit and awaits GPU verification; record this "
+            "ID as example.json image_id and kairyu.yaml container_image_digest, or serve it "
+            "anyway (not evidence) with DEEPSEEK_ALLOW_UNPINNED_IMAGE=1"
+        )
+    if actual != source["image_id"]:
+        raise SystemExit(
+            f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
+            f"{source['image_id']} (update both to this build before serving)"
+        )
 
 
 _MODEL_PROGRAM = r"""
@@ -388,13 +437,27 @@ def _webui_api(
         return json.loads(response.read())
 
 
+def _check_chat_ui_connection(ui_url: str, token: str) -> None:
+    """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
+
+    config = _webui_api(ui_url, "/openai/config", token=token)
+    api_type = ((config.get("OPENAI_API_CONFIGS") or {}).get("0") or {}).get("api_type")
+    if api_type != "responses":
+        raise SystemExit(
+            "Chat UI connection 0 must use api_type=responses, got "
+            f"{api_type!r}; an existing Open WebUI volume keeps its saved connection, so set "
+            "Admin Panel > Settings > Connections > Kairyu > API Type to Responses"
+        )
+
+
 def _provision_chat_ui_effort_selector(ui_url: str) -> None:
     """Install the Reasoning Effort dropdown into the pinned Open WebUI.
 
     The stock v0.11.0 Advanced Params control is a free-text field; the
     product knob (DTO-D6) must be selectable. A global filter whose
     enum-typed user valve renders as a dropdown in Chat Controls forwards
-    the selection as the OpenAI-compatible ``reasoning_effort`` body field.
+    the selection as the Responses body's ``reasoning.effort`` (the filter
+    also keeps the rest of the body within the Responses API).
     """
 
     filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
@@ -454,6 +517,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
             token=token,
         )
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
+        _check_chat_ui_connection(ui_url, token)
     except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
     if enum != _CHAT_UI_EFFORT_LEVELS:
@@ -463,13 +527,13 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
         )
 
 
-def _post_json_url(url: str, payload: dict) -> dict:
+def _post_json_url(url: str, payload: dict, *, timeout_s: float = 5) -> dict:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
         return json.loads(response.read())
 
 
@@ -525,7 +589,7 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         )
         token_count = _post_json_url(
             tokenizer_url,
-            {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
+            {"model": DEEPSEEK_MODEL, "prompt": "kairyu"},
         )["count"]
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
@@ -610,17 +674,98 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     configured = policy.get("configured_engines", {})
     if configured.get("tier1", {}).get("model") != "qwen3.8-27b":
         raise SystemExit("Kairyu Tier1 L2 worker is not bound to the Qwen L1 pool")
-    if (
-        configured.get("tier2", {}).get("model")
-        != "deepseek-v4-flash-0731-thinking"
+    if set(configured) != {"tier1", "tier2"} or (
+        configured.get("tier2", {}).get("model") != DEEPSEEK_MODEL
     ):
-        raise SystemExit(
-            "Kairyu Tier2 L2 worker is not bound to the thinking DeepSeek L1 pool"
+        raise SystemExit("Kairyu Tier2 L2 worker is not bound to the one DeepSeek L1 pool")
+
+
+DEEPSEEK_MODEL = SPEC["models"]["tier2"]["served_name"]
+# The encoder's official reasoning preambles (low has none).
+_DEEPSEEK_EFFORT_PREAMBLES = {
+    "high": "Reasoning Effort: Absolute maximum",
+    "max": "Reasoning Effort: Beyond maximum",
+}
+
+
+def rendered_prompt(l1_url: str, **request: object) -> str:
+    """The exact prompt the DeepSeek encoder renders for one chat request."""
+
+    body = {"model": DEEPSEEK_MODEL, **request}
+    tokens = _post_json_url(f"{l1_url}/tokenize", body, timeout_s=30)["tokens"]
+    return _post_json_url(
+        f"{l1_url}/detokenize", {"model": DEEPSEEK_MODEL, "tokens": tokens}, timeout_s=30
+    )["prompt"]
+
+
+def rendering_errors(render: Callable[..., str]) -> list[str]:
+    """The DeepSeek renderings the L2 roles rely on (DTO amendment 2026-10-17).
+
+    Thinking roles send their effort (Responses carries the L3 max as
+    ``xhigh``, patch_tokenizer.py edit 1); the effort-less role sends
+    ``enable_thinking: false``; the public-output floor continues a final
+    ``<think>`` prefill (patch_tokenizer.py edit 2).
+    """
+
+    user = [{"role": "user", "content": "Q?"}]
+    errors = []
+    for effort, preamble in (
+        ("low", None),
+        ("high", _DEEPSEEK_EFFORT_PREAMBLES["high"]),
+        ("xhigh", _DEEPSEEK_EFFORT_PREAMBLES["max"]),
+        ("max", _DEEPSEEK_EFFORT_PREAMBLES["max"]),
+    ):
+        # /tokenize has no top-level effort; these are the template arguments
+        # vLLM's chat and Responses servers derive from it.
+        prompt = render(
+            messages=user,
+            chat_template_kwargs={"reasoning_effort": effort, "enable_thinking": True},
         )
-    if configured.get("tier2-direct", {}).get("model") != "deepseek-v4-flash-0731":
-        raise SystemExit(
-            "Kairyu tier2-direct L2 worker is not bound to the non-thinking DeepSeek L1 pool"
+        rendered = next(
+            (text for text in _DEEPSEEK_EFFORT_PREAMBLES.values() if text in prompt), None
         )
+        if not prompt.endswith("<｜Assistant｜><think>") or rendered != preamble:
+            errors.append(f"effort {effort} renders {rendered!r}, expected {preamble!r}")
+    chat = render(messages=user, chat_template_kwargs={"enable_thinking": False})
+    if not chat.endswith("<｜Assistant｜></think>") or "Reasoning Effort" in chat:
+        errors.append(f"enable_thinking=false is not chat mode: {chat[-160:]!r}")
+    prefill = "<think>\nR\n</think>\n\n"
+    continued = render(
+        messages=[*user, {"role": "assistant", "content": prefill}],
+        add_generation_prompt=False,
+        continue_final_message=True,
+        chat_template_kwargs={"reasoning_effort": "high", "enable_thinking": True},
+    )
+    if not continued.endswith("<｜Assistant｜>" + prefill):
+        errors.append(f"assistant prefill is not continued: {continued[-160:]!r}")
+    return errors
+
+
+def _validate_deepseek_l1(l1_url: str) -> None:
+    """Encoder renderings, and a direct call that stays non-thinking.
+
+    The coding gate's DeepSeek-direct TTFT denominator is a plain chat call,
+    so the L1's thinking-off default must hold for it.
+    """
+
+    try:
+        errors = rendering_errors(lambda **request: rendered_prompt(l1_url, **request))
+        direct = _post_json_url(
+            f"{l1_url}/v1/chat/completions",
+            {
+                "model": DEEPSEEK_MODEL,
+                "messages": [{"role": "user", "content": "Reply with the single word OK."}],
+                "max_tokens": 512,
+            },
+            timeout_s=900,
+        )
+        message = direct["choices"][0]["message"]
+    except (KeyError, IndexError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
+        raise SystemExit(f"DeepSeek L1 probe failed: {error}") from error
+    if not message.get("content") or message.get("reasoning") or message.get("reasoning_content"):
+        errors.append(f"a direct call is not a non-thinking answer: {json.dumps(message)[:200]}")
+    if errors:
+        raise SystemExit("DeepSeek L1 probe failed: " + "; ".join(errors))
 
 
 def _public_ui_host() -> str:
@@ -652,8 +797,8 @@ def up() -> None:
         "WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}"
     )
     _preflight(env)
-    _ensure_vllm_image(env, "QWEN_VLLM_IMAGE", SPEC["vllm"]["qwen"])
-    _ensure_vllm_image(env, "DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["deepseek"])
+    _ensure_qwen_image(env)
+    _ensure_deepseek_image(env)
     _ensure_models(env)
     _run(
         [
@@ -679,8 +824,9 @@ def up() -> None:
     advertised_api_host = (
         ui_host if env["API_BIND_ADDRESS"] == "0.0.0.0" else env["API_BIND_ADDRESS"]
     )
-    tokenizer_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/tokenize"
-    _validate_ready(api_url, tokenizer_url)
+    l1_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}"
+    _validate_deepseek_l1(l1_url)
+    _validate_ready(api_url, f"{l1_url}/tokenize")
     validation_ui_host = (
         "127.0.0.1"
         if env["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
