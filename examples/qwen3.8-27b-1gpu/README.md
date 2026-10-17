@@ -13,8 +13,10 @@ prefill, FlashInfer autotuning, and piecewise CUDA Graphs. Kairyu validates
 one inline PNG/JPEG/WebP image up to 8 MiB and 2,097,152 pixels, then preserves
 the OpenAI content parts for the checkpoint-owned processor and the example's
 adapted Qwen chat template (`chat_template.jinja`, mounted into vLLM); ordinary
-requests default to direct answers, and an explicit reasoning effort enables
-Qwen's thinking mode at a fixed low effort level (the template clamps `high`
+requests default to direct answers (vLLM's `--default-chat-template-kwargs
+'{"enable_thinking": false}'` tells its `qwen3` reasoning parser the same, so a
+direct answer or tool call is not filed as reasoning), and an explicit
+reasoning effort enables Qwen's thinking mode at a fixed low effort level (the template clamps `high`
 and `max`, and `xhigh` — `max` on the Responses wire — to `low`). Kairyu sends
 each request to vLLM in the API its caller used (`kairyu.yaml` lists the model
 in `upstream_chat_models`, `upstream_responses_models` and

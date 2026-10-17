@@ -63,6 +63,12 @@ services:
       - /etc/kairyu/qwen3.8-chat.jinja
       - --reasoning-parser
       - qwen3
+      # vLLM's qwen3 parser treats a request without enable_thinking=false as
+      # thinking and files a direct answer or tool call as reasoning; the
+      # template already renders those requests non-thinking, and an explicit
+      # effort still enables thinking (2026-10-18 GPU final test).
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder

@@ -482,6 +482,15 @@ and the GLM-5.3-Flash single-replica examples.
   comparable with the earlier fixed-length rows. `tool_result_turn` uses PR
   #647's wording. `verify.sh api-equivalence` runs
   `verification/product/correctness/upstream_api_equivalence.py`.
+- GPU final test fix (2026-10-18): `qwen3.8-27b-1gpu` adds
+  `--default-chat-template-kwargs '{"enable_thinking": false}'`, as
+  `qwen3.8-27b-dp8-8gpu` already did. With vLLM rendering the native
+  messages, vLLM v0.23.0's `qwen3` parser treated a request without
+  `enable_thinking: false` as thinking and filed the direct answer or tool
+  call as reasoning (`api-equivalence`: the L1 returned only a reasoning item;
+  through L3 a unary answer was empty). The template already rendered those
+  requests non-thinking, so prompts are unchanged; an explicit effort still
+  sets `enable_thinking` per request ahead of the default.
 
 ### Example removal amendment (2026-10-18, owner decision)
 
