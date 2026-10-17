@@ -14,6 +14,10 @@ Kairyu L3, then requires the same Responses structure from both:
 - per case, L1 and L3 agree on status, output item types, the collapsed event
   types, the usage keys, function names and the case's own check (an exact
   answer, a reasoning item, a tool round trip, an image answer, a length cap);
+  a message item without text carries no answer and is left out of the item
+  types (Kairyu closes every response with a message item, so a reply cut
+  inside its reasoning is reasoning + an empty message on L3 and reasoning
+  alone on vLLM);
 - with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
   replica publishes no host port), the replicas' own request counters show
   that L3 reached them on ``/v1/responses``;
@@ -195,7 +199,11 @@ def summarize(cap: Capture, *, strict: bool) -> tuple[dict, list[str]]:
     summary = {
         "status": cap.response.get("status"),
         "incomplete_reason": (cap.response.get("incomplete_details") or {}).get("reason"),
-        "items": [item.get("type") for item in cap.response.get("output") or ()],
+        "items": [
+            item.get("type")
+            for item in cap.response.get("output") or ()
+            if not (item.get("type") == "message" and not _output_text({"output": [item]}))
+        ],
         "events": collapsed,
         "usage_keys": sorted(key for key in usage if not key.startswith("orchestration_")),
         "functions": [

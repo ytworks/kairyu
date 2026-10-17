@@ -82,3 +82,25 @@ def test_a_stream_without_its_terminal_event_fails():
 
     assert any("terminal event" in finding for finding in findings)
     assert compare(good, summary)
+
+
+def test_an_empty_message_item_carries_no_answer():
+    reasoning = {"type": "reasoning", "id": "rs_1", "summary": [], "content": []}
+    empty = {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "incomplete",
+        "content": [{"type": "output_text", "text": "", "annotations": []}],
+    }
+    base = {
+        "id": "resp_1",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+    }
+    l1, _ = summarize(Capture(200, [], {**base, "output": [reasoning]}), strict=False)
+    l3, _ = summarize(Capture(200, [], {**base, "output": [reasoning, empty]}), strict=False)
+
+    assert l1["items"] == l3["items"] == ["reasoning"]
+    assert compare(l1, l3) == []
+
