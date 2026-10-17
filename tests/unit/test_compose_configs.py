@@ -96,7 +96,8 @@ def _webui_smoke_env(
         '  *" config --format json")\n'
         "    printf "
         "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\","
-        "\"OPENAI_API_CONFIGS\":\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}}}}' "
+        "\"OPENAI_API_CONFIGS\":"
+        "\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}}}}' "
         '"$WEBUI_RENDERED_BASE_URL"\n'
         "    ;;\n"
         f"{fail_case}"
