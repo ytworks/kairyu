@@ -95,7 +95,7 @@
     },
     "deepseek": {
       "image": "local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh",
-      "image_id": null,
+      "image_id": "sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc",
       "distribution": "overlay",
       "dockerfile": "vllm-sm120.Dockerfile",
       "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",

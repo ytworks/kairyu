@@ -15,7 +15,24 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
-RESULTS_ROOT = ROOT / "verification/results/examples" / SPEC["environment"]
+
+
+def _nvme_root() -> Path:
+    configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
+    if not configured.is_absolute():
+        raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
+    root = configured.resolve()
+    nvme = Path("/mnt/nvme")
+    if root != nvme and nvme not in root.parents:
+        raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
+    return root
+
+
+# Gate results stay on the environment's NVMe storage, beside its model and cache.
+ENVIRONMENT_STORAGE = _nvme_root() / "model-volumes" / SPEC["environment"]
+RESULTS_ROOT = Path(
+    os.environ.get("VERIFICATION_RESULTS_ROOT", ENVIRONMENT_STORAGE / "verification-results")
+)
 
 
 def _run(command: list[str], *, log: Path | None = None, check: bool = True) -> int:

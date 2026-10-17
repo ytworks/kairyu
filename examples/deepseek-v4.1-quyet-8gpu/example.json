@@ -104,7 +104,7 @@
   "served_name": "deepseek-v4.1-flash",
   "max_context_tokens": 1048576,
   "image": "local/vllm-openai:deepseek-v41-quyet-responses",
-  "image_id": null,
+  "image_id": "sha256:9d9bcedc90ac31327d60f4c6a78990628413192c6b5e9da658d7f41bb8a4dddd",
   "dockerfile": "vllm-sm120.Dockerfile",
   "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",
   "source_revision": "ac68c3087",

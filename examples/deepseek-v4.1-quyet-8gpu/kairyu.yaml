@@ -46,7 +46,7 @@ pools:
         attention_data_parallel_size: 6
         dspark_enabled: true
         # Recorded after the GPU build of the rebuilt image (GPU verification pending).
-        container_image_digest: null
+        container_image_digest: sha256:9d9bcedc90ac31327d60f4c6a78990628413192c6b5e9da658d7f41bb8a4dddd
     unhealthy_after: 1
     queue_depth_threshold: 0
     prefix_index: true

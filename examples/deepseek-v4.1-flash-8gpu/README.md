@@ -123,13 +123,12 @@ batch limit, 64 sequences, GPU-resident Engram and breakable CUDA graphs.
 The default all-reduce backend is NCCL.
 
 The local image ID is an evidence pin. A fresh source build can produce a
-different ID; startup then stops until both image pins are updated and the
-GPU gates are rerun for that build.
-The served vLLM image (`local/vllm-openai:deepseek-v41-sm120-xhigh`) is
-rebuilt by this change and has no recorded image ID yet: `example.json`
-`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
-build records them, and until then `run.sh up` stops unless
-`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+different ID; startup then stops until both image pins are updated and the GPU
+gates are rerun for that build. The served vLLM image
+(`local/vllm-openai:deepseek-v41-sm120-xhigh`) is rebuilt by this change; its
+2026-10-18 build is pinned as
+`sha256:3609c4222fa9efb9505e3f960a1075054e6f7248e64b16b71f284f64161ba67d`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 For bounded L1 comparisons after startup:
 

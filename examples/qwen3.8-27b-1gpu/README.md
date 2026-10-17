@@ -96,7 +96,9 @@ same Responses requests (text, stream, each effort, a tool round trip, an image,
 a length cap, and Open WebUI's body) to vLLM directly and through Kairyu,
 requires the same Responses structure from both, and reads vLLM's request
 counters to confirm that Kairyu reached it on `/v1/responses`. Artifacts go to
-`verification/results/examples/qwen3.8-27b-1gpu/<UTC-run-id>/`. GPU
+the environment's NVMe storage,
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/verification-results/<UTC-run-id>/`
+(override with `VERIFICATION_RESULTS_ROOT`). GPU
 verification of the 2026-10-17 configuration is pending.
 
 Model and product evaluations are invoked explicitly through `python -m evals`;

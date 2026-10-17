@@ -93,10 +93,9 @@ Each of the six DP engines holds about 8.3M KV tokens, so a full
 ## SM120 runtime overlay
 
 The served vLLM image (`local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh`) is
-rebuilt by this change and has no recorded image ID yet: `example.json`
-`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
-build records them, and until then `run.sh up` stops unless
-`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 `vllm-sm120.Dockerfile` builds on the pinned vLLM image and runs
 `patch_sm120.py`, which edits exactly one known source anchor per change and

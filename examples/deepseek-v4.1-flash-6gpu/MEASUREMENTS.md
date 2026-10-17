@@ -289,8 +289,7 @@ tool and effort switches in the Chat UI with `/v1/responses` in the Kairyu
 and vLLM logs).
 
 The served vLLM image (`local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh`) is
-rebuilt by this change and has no recorded image ID yet: `example.json`
-`image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
-build records them, and until then `run.sh up` stops unless
-`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 

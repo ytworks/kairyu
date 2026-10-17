@@ -177,10 +177,9 @@ and 16 tool-declared turns whose next reply is text.
   four efforts at build time. The overlay is retagged so an older local build
   is never reused.
   The served vLLM image (`local/vllm-openai:deepseek-v41-quyet-responses`) is
-  rebuilt by this change and has no recorded image ID yet: `example.json`
-  `image_id` and `kairyu.yaml` `container_image_digest` stay null until the GPU
-  build records them, and until then `run.sh up` stops unless
-  `DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+  rebuilt by this change; its 2026-10-18 build is pinned as
+  `sha256:9d9bcedc90ac31327d60f4c6a78990628413192c6b5e9da658d7f41bb8a4dddd`
+  (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 - None of the gates above has been run on GPU since this change;
   `MEASUREMENTS.md` keeps the chat-era results.
 

@@ -326,10 +326,9 @@ describes.
 
 Edit 8 changed the overlay. The served vLLM image
 (`local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh`) is rebuilt by this
-change and has no recorded image ID yet: `example.json` `image_id` and
-`kairyu.yaml` `container_image_digest` stay null until the GPU build records
-them, and until then `run.sh up` stops unless
-`DEEPSEEK_ALLOW_UNPINNED_IMAGE=1` serves it as non-evidence.
+change; its 2026-10-18 build is pinned as
+`sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 ## Start
 
@@ -348,7 +347,7 @@ export QWEN_MODEL_SEED=/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/models/qw
 - Pins DeepSeek to the NUMA nodes of GPUs 0–5 and each Qwen replica to its
   GPU's node.
 - Builds the overlay and refuses any image ID other than the pinned one
-  (none is pinned until the GPU build of edit 8; see above).
+  (edit 8's build is pinned; see above).
 - Attests both checkpoints by tree SHA-256; a seeded copy is re-hashed.
 - Waits for the stack.
 - Probes the DeepSeek L1 directly:

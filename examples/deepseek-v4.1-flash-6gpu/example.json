@@ -43,7 +43,7 @@
   },
   "vllm": {
     "image": "local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh",
-    "image_id": null,
+    "image_id": "sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c",
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",
