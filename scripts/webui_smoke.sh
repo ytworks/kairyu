@@ -12,6 +12,10 @@ BASE_URL="${BASE_URL:-http://localhost:8000}"
 EXPECTED_WEBUI_BASE_URL="http://kairyu:8000/v1"
 COMPOSE_WAIT_SECONDS="${COMPOSE_WAIT_SECONDS:-240}"
 SMOKE_PROJECT_NAME="${WEBUI_SMOKE_PROJECT_NAME:-kairyu-webui-smoke-$$-${RANDOM}}"
+# The demo's admin credentials (README) would make Open WebUI create that admin
+# and close sign-up, so the browser's fresh first-user signup could not run.
+# Empty values also override a deploy/compose/.env file.
+export WEBUI_ADMIN_EMAIL="" WEBUI_ADMIN_PASSWORD=""
 
 # A dedicated project gives every run its own network, containers, and data
 # volume. Cleanup must never remove a developer's normal Compose demo data.
@@ -123,14 +127,16 @@ if api_type != "responses":
 
 # The fresh browser account is Open WebUI's admin; webui-setup signs in as it
 # to install the Responses filter.
-mapfile -t smoke_account < <(printf '%s' "$rendered_config" | python3 -c '
+browser_account() { # browser_account <WEBUI_SMOKE_EMAIL|WEBUI_SMOKE_PASSWORD>
+  printf '%s' "$rendered_config" | python3 -c '
 import json
 import sys
 
-environment = json.load(sys.stdin)["services"]["browser"]["environment"]
-print(environment["WEBUI_SMOKE_EMAIL"])
-print(environment["WEBUI_SMOKE_PASSWORD"])
-')
+print(json.load(sys.stdin)["services"]["browser"]["environment"][sys.argv[1]])
+' "$1"
+}
+smoke_email="$(browser_account WEBUI_SMOKE_EMAIL)"
+smoke_password="$(browser_account WEBUI_SMOKE_PASSWORD)"
 
 # From the first startup attempt onward, always remove containers and the
 # ephemeral first-user database so every run starts from the same state.
@@ -174,8 +180,8 @@ browser_phase signup || fail "fresh first-user signup failed"
 
 echo "== admin installs the Responses filter =="
 compose run --rm --no-deps \
-  -e WEBUI_ADMIN_EMAIL="${smoke_account[0]}" \
-  -e WEBUI_ADMIN_PASSWORD="${smoke_account[1]}" \
+  -e WEBUI_ADMIN_EMAIL="$smoke_email" \
+  -e WEBUI_ADMIN_PASSWORD="$smoke_password" \
   webui-setup || fail "Open WebUI Responses filter setup failed"
 
 echo "== direct/auto streaming and persistence =="

@@ -672,7 +672,8 @@ secret が保存され、mock バックエンドはこのローカルデモ専�
 deployment / orchestrator の spec と認証ポリシーを置き換えてください。
 
 Open WebUI は `/v1/responses` で Kairyu に接続します。`WEBUI_ADMIN_EMAIL` と
-`WEBUI_ADMIN_PASSWORD` を export して起動すると Open WebUI がその管理者を作成し、
+`WEBUI_ADMIN_PASSWORD` を export して起動すると Open WebUI がその管理者を作成して
+新規登録を閉じます（最初のアカウントは作らず、その管理者でサインインします）。
 続けて
 `docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
 を一度実行すると

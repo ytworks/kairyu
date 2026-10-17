@@ -92,6 +92,7 @@ def _webui_smoke_env(
         fake_bin / "docker",
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'printf "[%s|%s]\\n" "$WEBUI_ADMIN_EMAIL" "$WEBUI_ADMIN_PASSWORD" >> "$DOCKER_LOG.admin"\n'
         'case "$*" in\n'
         '  *" config --format json")\n'
         "    printf "
@@ -818,6 +819,9 @@ def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path
 
 def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
     env, docker_log, curl_log = _webui_smoke_env(tmp_path)
+    # The README's demo admin credentials must not reach the smoke's stack:
+    # Open WebUI would create that admin and close the fresh signup.
+    env.update(WEBUI_ADMIN_EMAIL="demo-admin@example.invalid", WEBUI_ADMIN_PASSWORD="demo")
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -829,6 +833,8 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    admin_env = Path(f"{docker_log}.admin").read_text(encoding="utf-8").splitlines()
+    assert set(admin_env) == {"[|]"}
     commands = docker_log.read_text(encoding="utf-8").splitlines()
     compose = (
         f"compose --project-name {WEBUI_SMOKE_PROJECT} "

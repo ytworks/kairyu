@@ -657,7 +657,8 @@ authentication policy for production.
 
 Open WebUI reaches Kairyu over `/v1/responses`. Start the demo with
 `WEBUI_ADMIN_EMAIL` and `WEBUI_ADMIN_PASSWORD` exported, so that Open WebUI
-creates that admin, then run
+creates that admin and closes sign-up (sign in as that admin instead of
+creating the first account), then run
 `docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
 once: it installs
 [`webui-responses-filter.py`](deploy/compose/webui-responses-filter.py) as a
