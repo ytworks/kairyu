@@ -11,6 +11,7 @@ Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the EO-D3 role graph in `example-layered-orchestration.md`
 (EO-D1/D2/D4/D5/D6 remain in force).
+Removed (2026-10-18, owner decision, PR #656): `examples/qwen3.8-deepseek-v4-8gpu/` was deleted with every DeepSeek-V4 example; this record stays as history.
 
 ## Goal
 

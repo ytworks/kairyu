@@ -482,3 +482,21 @@ and the GLM-5.3-Flash single-replica examples.
   comparable with the earlier fixed-length rows. `tool_result_turn` uses PR
   #647's wording. `verify.sh api-equivalence` runs
   `verification/product/correctness/upstream_api_equivalence.py`.
+
+### Example removal amendment (2026-10-18, owner decision)
+
+Status: implemented in PR #656.
+
+The owner keeps only the examples that serve DeepSeek-V4.1, Qwen3.8-27B,
+GLM-5.3-Flash or Quyet. Removed from `examples/` with their own tests:
+`deepseek-v4-flash-0731-8gpu` (FN-D8), the FN-D9 replica examples
+`deepseek-v4-flash-0731-dp2-8gpu`, `deepseek-v4-flash-vision-exp-dp2-8gpu`
+and `qwen3.8-flash-next-dp2-8gpu`, and `openjev-diffusiongemma-26b-1gpu`
+(also the Winnow examples of `llamacpp-upstream.md` and the DeepSeek-V4
+tiered example of `example-dual-track-orchestration.md`). Their decisions and
+evidence above stay as history. FN-D9's replica pattern continues in
+`qwen3.8-27b-dp8-8gpu`; the V4.1 Flash, GLM-5.3-Flash and Quyet amendments
+are unchanged. No framework mechanism is removed: DeepSeek-V4 model support,
+System One and the llama.cpp upstream stay in `kairyu/`.
+Why: owner decision 2026-10-18; the removed examples' model storage (about
+723 GiB on the host's NVMe) was needed for the remaining examples.

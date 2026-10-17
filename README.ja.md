@@ -314,7 +314,7 @@ vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ�
 ```bash
 uv run pytest                                        # フルスイート, カバレッジゲート 80%
 uv run --frozen python -m verification list               # 検証 registry 一覧
-./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
+./examples/deepseek-v4.1-flash-8gpu/run.sh           # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
 そのまま [単一モデル版](#5-単一モデル版--セットアップと使い方) か

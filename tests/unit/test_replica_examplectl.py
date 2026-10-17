@@ -17,33 +17,21 @@ import yaml
 
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.config_validation import validate_backend_options
-from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = {
     "qwen3.8-27b-dp8-8gpu": "qwen",
-    "deepseek-v4-flash-0731-dp2-8gpu": "deepseek",
-    "deepseek-v4-flash-vision-exp-dp2-8gpu": "deepseek",
-    "qwen3.8-flash-next-dp2-8gpu": "qwen",
     "deepseek-v4.1-flash-8gpu": "deepseek",
 }
 # vLLM-side tool parser and non-thinking default kwarg per example.
 TOOL_PARSER = {
     "qwen3.8-27b-dp8-8gpu": "qwen3_coder",
-    "deepseek-v4-flash-0731-dp2-8gpu": "deepseek_v4",
-    "deepseek-v4-flash-vision-exp-dp2-8gpu": "deepseek_v4",
-    "qwen3.8-flash-next-dp2-8gpu": "qwen3_xml",
     "deepseek-v4.1-flash-8gpu": "deepseek_v41",
 }
 THINKING_KEY = {
     "qwen3.8-27b-dp8-8gpu": "enable_thinking",
-    "deepseek-v4-flash-0731-dp2-8gpu": "thinking",
-    "deepseek-v4-flash-vision-exp-dp2-8gpu": "thinking",
-    "qwen3.8-flash-next-dp2-8gpu": "enable_thinking",
     "deepseek-v4.1-flash-8gpu": "thinking",
 }
-VISION_EXAMPLE = ROOT / "examples/deepseek-v4-flash-vision-exp-dp2-8gpu"
-FLASH_NEXT_EXAMPLE = ROOT / "examples/qwen3.8-flash-next-dp2-8gpu"
 
 
 def _load(path: Path, name: str):
@@ -145,76 +133,6 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
         )
 
 
-def test_vision_examples_share_one_sm120_image_and_admit_images() -> None:
-    """The two VLM examples must build the same overlay image and pair the
-    multimodal prompt kind with an image policy, or the first image request
-    is rejected at admission (config_validation) or lands on a different
-    vLLM build than the one the sibling example measured."""
-    specs = {
-        path: json.loads((path / "example.json").read_text())
-        for path in (VISION_EXAMPLE, FLASH_NEXT_EXAMPLE)
-    }
-    vision, flash_next = (specs[VISION_EXAMPLE]["vllm"], specs[FLASH_NEXT_EXAMPLE]["vllm"])
-    shared = ("image", "image_id", "base_image", "source_revision", "flashinfer_revision")
-    assert {key: vision[key] for key in shared} == {key: flash_next[key] for key in shared}
-    assert (VISION_EXAMPLE / "vllm-sm120.Dockerfile").read_bytes() == (
-        FLASH_NEXT_EXAMPLE / "vllm-sm120.Dockerfile"
-    ).read_bytes()
-    for path, spec in specs.items():
-        assert spec["model"]["modalities"] == ["text", "image"]
-        deployment = load_deployment_spec((path / "kairyu.yaml").read_text())
-        options = deployment.pools[spec["allocation"]["model"]].replicas[0].options
-        assert options["capabilities"]["allow_prompt_kinds"] == ["multimodal"]
-        assert (
-            options["image_input_policy"]["max_processed_prompt_tokens"]
-            == (spec["model"]["max_context_tokens"])
-        )
-        compose = yaml.safe_load((path / "compose.yaml").read_text())
-        assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
-        levels = spec["webui"]["reasoning_effort_levels"]
-        assert levels[0] == "default" and len(set(levels)) == len(levels)
-
-
-def test_flash_next_template_maps_l3_efforts_back_to_qwen_vocabulary() -> None:
-    """Kairyu L3 forwards medium -> high and xhigh -> max; the official Qwen
-    template rejects both with HTTP 400, so the example-local copy must alias
-    them back while leaving low and the non-thinking default untouched."""
-    template = ChatTemplate.load(str(FLASH_NEXT_EXAMPLE / "qwen3.8-flash-next-chat.jinja"))
-    messages = [{"role": "user", "content": "Return OK."}]
-    direct = template.render(messages, template_kwargs={"enable_thinking": False})
-    assert direct.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-    rendered = {
-        effort: template.render(messages, template_kwargs={"reasoning_effort": effort})
-        for effort in ("low", "high", "max")
-    }
-    assert "Reasoning effort is set to low." in rendered["low"]
-    assert "Reasoning effort is set to xhigh." in rendered["max"]
-    # medium is the template's no-instruction tier: plain thinking prompt.
-    assert "Reasoning effort is set to" not in rendered["high"]
-    assert all(text.endswith("<|im_start|>assistant\n<think>\n") for text in rendered.values())
-    with pytest.raises(Exception, match="Unexpected reasoning effort"):
-        template.render(messages, template_kwargs={"reasoning_effort": "minimal"})
-
-
-def test_flash_next_effort_filter_switches_to_thinking_sampling() -> None:
-    """Selecting an effort must drop the Chat UI's pinned instruct sampling so
-    vLLM applies the checkpoint's thinking generation_config; default keeps it."""
-    module = _load(FLASH_NEXT_EXAMPLE / "webui-reasoning-effort-filter.py", "flash_next_filter")
-    selector = module.Filter()
-    instruct = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 32768}
-    for effort in ("low", "medium", "xhigh"):
-        body = {**instruct, "reasoning_effort": "stale"}
-        user = {"valves": selector.UserValves(reasoning_effort=effort)}
-        assert selector.inlet(body, user) == {
-            "max_tokens": 32768,
-            "reasoning": {"effort": effort},
-            "store": False,
-        }
-    body = {**instruct, "reasoning_effort": "xhigh"}
-    user = {"valves": selector.UserValves(reasoning_effort="default")}
-    assert selector.inlet(body, user) == {**instruct, "store": False}
-
-
 def _write_log(path: Path, rows: list[dict]) -> None:
     with path.open("a", encoding="utf-8") as stream:
         for row in rows:
@@ -247,49 +165,6 @@ def test_placement_gate_reads_only_the_row_delta_and_rejects_skew(tmp_path: Path
     assert report["passed"] is False  # two replicas idle, one above 2x the mean
     ungated = module._placement_report(log, offset, gated=False, **gate)
     assert ungated["passed"] is None and ungated["per_replica"] == {"0": 15, "1": 1}
-
-
-def test_deepseek_two_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
-    module = _load(
-        ROOT / "examples/deepseek-v4-flash-0731-dp2-8gpu/verification.py",
-        "deepseek_dp2_verification",
-    )
-    log = tmp_path / "placement.jsonl"
-    skewed = [{"kind": "replica", "replica_id": "0"}] * 63 + [
-        {"kind": "replica", "replica_id": "1"}
-    ]
-    _write_log(log, skewed)
-    gate = module.SPEC["verification"]["serving"]["placement_gate"]
-    report = module._placement_report(
-        log,
-        0,
-        expected_requests=64,
-        replicas=2,
-        gated=True,
-        max_share_of_mean=float(gate["max_share_of_mean"]),
-        settle_s=0,
-    )
-    assert report["per_replica"] == {"0": 63, "1": 1}
-    assert report["largest_share_of_mean"] == pytest.approx(1.969)
-    assert report["passed"] is False
-
-    offset = module._placement_offset(log)
-    balanced = [{"kind": "replica", "replica_id": "0"}] * 33 + [
-        {"kind": "replica", "replica_id": "1"}
-    ] * 31
-    _write_log(log, balanced)
-    report = module._placement_report(
-        log,
-        offset,
-        expected_requests=64,
-        replicas=2,
-        gated=True,
-        max_share_of_mean=float(gate["max_share_of_mean"]),
-        settle_s=0,
-    )
-    assert report["per_replica"] == {"0": 33, "1": 31}
-    assert report["largest_share_of_mean"] == pytest.approx(1.031)
-    assert report["passed"] is True
 
 
 def test_qwen_eight_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
@@ -356,9 +231,6 @@ def test_qwen_eight_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
             (16, 16, 16, 8, 2, 2, 2, 2),
             (0, 0, 0, 8, 14, 14, 14, 14),
         ),
-        ("deepseek-v4-flash-0731-dp2-8gpu", 2, (63, 1), (1, 63)),
-        ("deepseek-v4-flash-vision-exp-dp2-8gpu", 2, (63, 1), (1, 63)),
-        ("qwen3.8-flash-next-dp2-8gpu", 2, (63, 1), (1, 63)),
     ],
 )
 def test_placement_gate_rejects_extra_requests_that_mask_skew(
@@ -394,53 +266,6 @@ def test_placement_gate_rejects_extra_requests_that_mask_skew(
     assert report["placements"] == sum(benchmark_counts) + sum(unrelated_counts)
     assert report["largest_share_of_mean"] == 2.0
     assert report["passed"] is False
-
-
-def test_tool_call_message_validator_rejects_unusable_responses(tmp_path: Path) -> None:
-    module = _load(
-        ROOT / "examples/deepseek-v4-flash-0731-dp2-8gpu/verification.py",
-        "deepseek_dp2_tool_gate",
-    )
-    good_call = {"function": {"name": "bash", "arguments": json.dumps({"command": "ls"})}}
-    assert module._validate_tool_call_message({"tool_calls": [good_call]}, "tool_calls") is None
-    # The reviewed live failure: markup in content, tool_calls null, stop.
-    assert module._validate_tool_call_message({"tool_calls": None}, "stop") is not None
-    assert module._validate_tool_call_message({"tool_calls": []}, "tool_calls") is not None
-    assert (
-        module._validate_tool_call_message(
-            {"tool_calls": [{"function": {"name": "python", "arguments": "{}"}}]},
-            "tool_calls",
-        )
-        is not None
-    )
-    assert (
-        module._validate_tool_call_message(
-            {"tool_calls": [{"function": {"name": "bash", "arguments": "{not json"}}]},
-            "tool_calls",
-        )
-        is not None
-    )
-    assert (
-        module._validate_tool_call_message(
-            {"tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}]},
-            "tool_calls",
-        )
-        is not None
-    )
-
-    sse = "\n".join(
-        [
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash"}}]}}]}',
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
-            '"function":{"arguments":"{\\"command\\""}}]}}]}',
-            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
-            '"function":{"arguments":": \\"ls\\"}"}}]}}]}',
-            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
-            "data: [DONE]",
-        ]
-    )
-    message, finish_reason = module._reassemble_stream_tool_calls(sse)
-    assert module._validate_tool_call_message(message, finish_reason) is None
 
 
 @pytest.mark.parametrize("environment", sorted(EXAMPLES))

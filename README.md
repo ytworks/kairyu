@@ -306,7 +306,7 @@ environment).
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
 uv run --frozen python -m verification list                  # inspect the verification registry
-./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
+./examples/deepseek-v4.1-flash-8gpu/run.sh           # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
 Then pick your path: [single model](#5-single-model-setup--usage) or

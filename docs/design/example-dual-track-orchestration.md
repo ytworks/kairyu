@@ -14,6 +14,9 @@ Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes; DTO-D16 applies the
 same policy to `examples/qwen3.8-deepseek-v4.1-8gpu/`, reduced there to two
 routes and two policies by DTO-D17.
+Removed (2026-10-18, owner decision, PR #656): `examples/qwen3.8-deepseek-v4-8gpu/`
+was deleted with every DeepSeek-V4 example; DTO-D16..D18 continue in
+`examples/qwen3.8-deepseek-v4.1-8gpu/`, and the V4 decisions stay as history.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
 `example-coding-orchestration.md` (owner decision, 2026-08-18: the coding DAG,
 the general ensemble profile, the LLM profile judge, and the sandbox execution

@@ -11,7 +11,6 @@ from kairyu.engine.config_validation import validate_backend_options
 from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / "examples/deepseek-v4-flash-0731-8gpu"
 QWEN_EXAMPLE = ROOT / "examples/qwen3.8-27b-1gpu"
 
 
@@ -21,39 +20,6 @@ def _load(path: Path, name: str):
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
     return module
-
-
-def test_examples_surface_contains_the_seven_hardware_examples() -> None:
-    environments = sorted(
-        path.name
-        for path in (ROOT / "examples").iterdir()
-        if path.is_dir() and (path / "example.json").is_file()
-    )
-    assert environments == [
-        "deepseek-v4-flash-0731-8gpu",
-        "deepseek-v4-flash-0731-dp2-8gpu",
-        "deepseek-v4-flash-vision-exp-dp2-8gpu",
-        "deepseek-v4.1-flash-6gpu",
-        "deepseek-v4.1-flash-8gpu",
-        "deepseek-v4.1-quyet-8gpu",
-        "glm-5.3-flash-6gpu",
-        "glm-5.3-flash-quyet-8gpu",
-        "openjev-diffusiongemma-26b-1gpu",
-        "quyet-1.0-large-1gpu",
-        "qwen3.8-27b-1gpu",
-        "qwen3.8-27b-dp8-8gpu",
-        "qwen3.8-deepseek-v4-8gpu",
-        "qwen3.8-deepseek-v4.1-8gpu",
-        "qwen3.8-flash-next-dp2-8gpu",
-        "winnow-12b-q8-1gpu",
-        "winnow-12b-q8-dp8-8gpu",
-    ]
-    qwen = json.loads((QWEN_EXAMPLE / "example.json").read_text())
-    deepseek = json.loads((EXAMPLE / "example.json").read_text())
-    assert qwen["vllm"]["release"] == "v0.23.0"
-    assert deepseek["vllm"]["source_revision"] == (
-        "aa0d51302747ea80f282e26949708b3253409fe2"
-    )
 
 
 def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
@@ -197,114 +163,6 @@ def test_qwen_control_selects_one_gpu_and_forces_nvme_storage() -> None:
     rows = control._gpu_inventory(text)
     assert rows[0]["memory_mib"] == 97887
     assert control.SPEC["storage"]["root"] == "/mnt/nvme/kairyu"
-
-
-def test_example_is_exact_eight_gpu_kairyu_to_vllm_to_webui() -> None:
-    spec = json.loads((EXAMPLE / "example.json").read_text())
-    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
-
-    assert spec["hardware"] == {
-        "gpu_count": 8,
-        "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
-        "minimum_compute_capability": 12.0,
-        "minimum_vram_mib": 90000,
-    }
-    assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
-    assert spec["vllm"]["source_revision"] == (
-        "aa0d51302747ea80f282e26949708b3253409fe2"
-    )
-    assert compose["services"]["vllm"]["image"] == (
-        f"${{VLLM_IMAGE:-{spec['vllm']['image']}}}"
-    )
-    webui = compose["services"]["chat-ui"]
-    assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
-    assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {"max_tokens": 32768}
-    assert webui["ports"] == ["${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080"]
-    assert compose["services"]["kairyu"]["ports"] == ["127.0.0.1:${API_PORT:-8002}:8000"]
-    assert webui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
-    assert compose["services"]["kairyu"]["depends_on"] == {"vllm": {"condition": "service_healthy"}}
-    devices = compose["services"]["vllm"]["deploy"]["resources"]["reservations"]["devices"][0]
-    assert devices["device_ids"] == [str(index) for index in range(8)]
-
-
-def test_vllm_command_pins_the_optimized_sm120_contract() -> None:
-    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
-    command = compose["services"]["vllm"]["command"]
-
-    expected_pairs = {
-        "--max-model-len": "1048576",
-        "--kv-cache-dtype": "fp8",
-        "--block-size": "256",
-        "--tensor-parallel-size": "8",
-        "--max-num-seqs": "64",
-        "--max-num-batched-tokens": "16384",
-    }
-    for option, value in expected_pairs.items():
-        assert command[command.index(option) + 1] == value
-    assert "--enable-expert-parallel" in command
-    assert "--moe-backend" not in command
-    assert compose["services"]["vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
-    assert "--enable-prefix-caching" in command
-    assert "--enforce-eager" not in command
-    # vLLM renders with the checkpoint's encoder and parses DSML tool calls
-    # (the dp2 example's L1; PR #584 lost tool calls without the parser).
-    assert command[command.index("--tokenizer-mode") + 1] == "deepseek_v4"
-    assert "--chat-template" not in command
-    assert "--enable-auto-tool-choice" in command
-    assert command[command.index("--tool-call-parser") + 1] == "deepseek_v4"
-    assert json.loads(command[command.index("--default-chat-template-kwargs") + 1]) == {
-        "thinking": False,
-        "enable_thinking": False,
-    }
-    assert json.loads(command[command.index("--attention-config") + 1]) == {
-        "use_fp4_indexer_cache": False
-    }
-    assert (
-        json.loads(command[command.index("--speculative-config") + 1])["num_speculative_tokens"]
-        == 5
-    )
-    assert (
-        json.loads(command[command.index("--speculative-config") + 1])["method"]
-        == "dspark"
-    )
-    assert (
-        json.loads(command[command.index("--compilation-config") + 1])["cudagraph_mode"]
-        == "FULL_AND_PIECEWISE"
-    )
-
-
-def test_kairyu_l3_declares_the_attested_vllm_l1() -> None:
-    raw = (EXAMPLE / "kairyu.yaml").read_text()
-    spec = load_deployment_spec(raw)
-    assert set(spec.engines) == {"deepseek-v4-flash-0731"}
-    entry = spec.engines["deepseek-v4-flash-0731"]
-    assert entry.backend == "openai"
-    validate_backend_options(entry.backend, entry.options)
-    assert entry.options["upstream"] == "vllm"
-    assert entry.options["capabilities"] == {
-        "allow_chat_template_kwargs": ["thinking", "enable_thinking"]
-    }
-    assert entry.options["tensor_parallel_size"] == 8
-    assert entry.options["expert_parallel_size"] == 8
-    assert entry.options["dspark_enabled"] is True
-    assert spec.chat_templates == {}
-    for models in (
-        spec.upstream_chat_models,
-        spec.upstream_responses_models,
-        spec.upstream_messages_models,
-    ):
-        assert models == frozenset({"deepseek-v4-flash-0731"})
-
-
-def test_control_preflight_requires_exact_gpu_inventory() -> None:
-    control = _load(EXAMPLE / "control.py", "deepseek_example_control")
-    text = "\n".join(
-        f"{index}, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887, 12.0" for index in range(8)
-    )
-    rows = control._gpu_inventory(text)
-    assert len(rows) == 8
-    assert rows[-1]["index"] == 7
-
 
 
 def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> None:

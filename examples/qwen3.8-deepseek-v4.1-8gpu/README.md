@@ -1,7 +1,7 @@
 # Qwen3.8 × 2 + DeepSeek-V4.1 (six GPUs) judged ensemble on 8 × RTX PRO 6000
 
-This example serves a two-route version of the ensemble product of
-[`qwen3.8-deepseek-v4-8gpu`](../qwen3.8-deepseek-v4-8gpu/README.md).
+This example serves a two-route version of the ensemble product of the former
+`qwen3.8-deepseek-v4-8gpu` (DeepSeek-V4; removed 2026-10-18).
 
 - **L1.** DeepSeek-V4.1-Flash runs on six GPUs and Qwen3.8-27B runs on the
   other two.

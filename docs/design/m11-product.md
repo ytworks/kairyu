@@ -798,8 +798,9 @@ and the setup installs the filter as active and global and switches a saved
 chat connection to Responses; otherwise it warns, as the sign-in examples do.
 `scripts/webui_smoke.sh` runs the browser `signup` phase (first account, the
 admin), then `webui-setup` as that account, then `initial` from sign-in; no
-check is dropped. Every example (Jev examples included, owner decision
-2026-10-18) and the demo pin the standard Open WebUI v0.12.3 image: from
+check is dropped. Every example with an Open WebUI and the demo pin the
+standard Open WebUI v0.12.3 image (the OpenJev and Winnow examples took it
+too, then were removed the same day, FN example removal amendment): from
 v0.12 the slim image stores RAG vectors only in PostgreSQL/pgvector (an
 unset `PGVECTOR_DB_URL` answers 503 on a document upload, which failed the
 demo's RAG step), while the standard image keeps the bundled vector store at
@@ -821,7 +822,9 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 Status: accepted by the owner (2026-10-01); CPU tests in
 `tests/server/test_systemone_api.py`; GPU-verified with OpenJev in
 `examples/openjev-diffusiongemma-26b-1gpu` (`systemone-live`,
-`systemone-serving`, `systemone-isolation`).
+`systemone-serving`, `systemone-isolation`). That example was removed on
+2026-10-18 (owner decision, PR #656); System One stays GPU-verified through
+`quyet-1.0-large-1gpu` and the two Quyet 8-GPU examples.
 
 Kairyu serves `POST /v1/systemone`, the System One API that TypeSafe's Jev,
 OpenJev and Codiv share: a `state` and typed `questions` in, per-question

@@ -90,6 +90,14 @@ Review round 1 (owner review of `6c011416`, decisions 2026-10-18):
     PostgreSQL/pgvector, and the standard image is v0.11.0-slim's size.
 30. The Jev examples (OpenJev, both Winnow) take the same Open WebUI image;
     nothing else in them changes (decision 8 otherwise stands).
+31. Examples are reduced to those serving DeepSeek-V4.1, Qwen3.8-27B,
+    GLM-5.3-Flash or Quyet: the DeepSeek-V4 examples (0731, 0731 dp2,
+    vision-exp, qwen3.8-deepseek-v4), qwen3.8-flash-next, OpenJev and both
+    Winnow examples are deleted in this PR with their own tests (decision 30
+    lapses); no `kairyu/` mechanism is removed; the host's unused model
+    storage is deleted.
+32. The GPU final test runs on this host (the live deployments are stopped)
+    once the review is complete.
 
 ## Phase 0 findings (CPU, 2026-10-17)
 
@@ -158,18 +166,17 @@ session, so the browser gates themselves run with the GPU tasks.
 ## Remaining tasks (after this PR's CPU work)
 
 1. Review: receive review of the PR, fix, and repeat until approved.
-2. Final test in a separate GPU environment, per example (13):
+2. Final test on this host after the review (decision 32), per remaining
+   example with an Open WebUI (8):
    - build the rebuilt L1 overlays and record their image IDs
      (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`);
    - `run.sh up` (Kairyu's startup check of `/v1/responses` and
      `/v1/messages` on every declared L1);
    - every `verify.sh` gate on `/v1/responses`, `verify.sh api-equivalence`,
      the browser gates (repo P-B3 and the examples' own);
-   - the L1 effort renders: `xhigh` as max on DeepSeek V4/V4.1 overlays and
+   - the L1 effort renders: `xhigh` as max on the DeepSeek V4.1 overlays and
      GLM-5.3's template, Anthropic `output_config.effort`;
    - manual Chat UI pass (multi-turn thinking, image, tools, effort), checking
      in Kairyu and L1 logs that requests travel on `/v1/responses`;
    - update each MEASUREMENTS.md; report any failing gate to the owner
      before changing a gate or a design.
-3. In the same GPU environment, the 3 Jev examples' Chat UI on Open WebUI
-   v0.12.3 (decision 30): `run.sh up` and their own UI checks.

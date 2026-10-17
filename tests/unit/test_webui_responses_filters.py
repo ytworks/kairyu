@@ -39,8 +39,6 @@ def _load(path: Path):
 
 def test_every_non_jev_example_with_a_chat_ui_ships_a_filter():
     assert {path.parent.name for path in FILTERS} >= {
-        "deepseek-v4-flash-0731-8gpu",
-        "deepseek-v4-flash-0731-dp2-8gpu",
         "qwen3.8-27b-1gpu",
         "qwen3.8-27b-dp8-8gpu",
     }

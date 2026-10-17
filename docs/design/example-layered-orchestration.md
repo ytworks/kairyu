@@ -2,6 +2,7 @@
 
 Status: **Accepted; implementation in progress** (2026-08-13).
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/`.
+Removed (2026-10-18, owner decision, PR #656): `examples/qwen3.8-deepseek-v4-8gpu/` was deleted with every DeepSeek-V4 example; this record stays as history.
 
 ## Goal
 
