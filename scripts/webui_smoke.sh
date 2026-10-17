@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end Open WebUI smoke: first-user setup, direct/auto streaming,
-# persistence, gateway outage, and recovery without restarting Open WebUI.
+# End-to-end Open WebUI smoke: first-user setup, the admin's Responses filter,
+# direct/auto streaming, persistence, gateway outage, and recovery without
+# restarting Open WebUI.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -96,7 +97,7 @@ uv run --frozen --project "$REPO_ROOT" --no-dev \
   python "$COMPOSE_VALIDATOR" "$COMPOSE_FILE"
 
 echo "== validate rendered WebUI endpoint contract =="
-rendered_config="$(compose config --format json)"
+rendered_config="$(compose --profile browser-smoke config --format json)"
 printf '%s' "$rendered_config" | python3 -c '
 import json
 import sys
@@ -119,6 +120,17 @@ if api_type != "responses":
     )
     raise SystemExit(1)
 ' "$EXPECTED_WEBUI_BASE_URL"
+
+# The fresh browser account is Open WebUI's admin; webui-setup signs in as it
+# to install the Responses filter.
+mapfile -t smoke_account < <(printf '%s' "$rendered_config" | python3 -c '
+import json
+import sys
+
+environment = json.load(sys.stdin)["services"]["browser"]["environment"]
+print(environment["WEBUI_SMOKE_EMAIL"])
+print(environment["WEBUI_SMOKE_PASSWORD"])
+')
 
 # From the first startup attempt onward, always remove containers and the
 # ephemeral first-user database so every run starts from the same state.
@@ -157,7 +169,16 @@ compose --profile browser-smoke build browser \
 echo "== production embedding dimensions, order, normalization, and exact usage =="
 assert_embedding_contract
 
-echo "== fresh-user direct/auto streaming and persistence =="
+echo "== fresh first-user signup =="
+browser_phase signup || fail "fresh first-user signup failed"
+
+echo "== admin installs the Responses filter =="
+compose run --rm --no-deps \
+  -e WEBUI_ADMIN_EMAIL="${smoke_account[0]}" \
+  -e WEBUI_ADMIN_PASSWORD="${smoke_account[1]}" \
+  webui-setup || fail "Open WebUI Responses filter setup failed"
+
+echo "== direct/auto streaming and persistence =="
 browser_phase initial || fail "initial browser contract failed"
 assert_embedding_metrics 4 "initial ingest/retrieval/chat"
 assert_responses_wire 5 "initial RAG/streaming/UI chat"

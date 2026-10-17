@@ -229,7 +229,7 @@ explicitly through `python -m evals`.
 - vLLM image ID: `example.json` / `kairyu.yaml` (`container_image_digest`)
 - Chat template: `qwen3.8-flash-next-chat.jinja` (part of the served-config
   SHA-256 recorded by `verify.sh`)
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 Override ports with `API_PORT` and `CHAT_UI_PORT`. Override images with
 `QWEN_VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM override must

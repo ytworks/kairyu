@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI v0.11.0 surface (DTO-D16/D17).
+ * Browser gate for this example's Open WebUI v0.12.3 surface (DTO-D16/D17).
  *
  * Checks the one public product model and the Responses connection (m11 D7
  * amendment 2026-10-17), then sends one chat and requires the folded,
@@ -331,7 +331,7 @@ async function assertTieredProductInventory() {
 		`Open WebUI connection 0 is not the Responses API: ${connection.text}`
 	);
 	// A non-streaming Responses result loses its reasoning items in Open WebUI
-	// v0.11.0, so the folded internal-work section needs streaming.
+	// v0.12.3, so the folded internal-work section needs streaming.
 	invariant(
 		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response !== false,
 		`Open WebUI effective model params disabled streaming: ${modelConfig.text}`

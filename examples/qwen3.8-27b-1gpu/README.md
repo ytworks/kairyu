@@ -133,7 +133,7 @@ different quantizations, contexts, prompts, or software revisions:
 - Model tree SHA-256: `9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e`
 - vLLM release/source: `v0.23.0` / `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`
 - vLLM image digest: `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. Override prebuilt
 images with `VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM override

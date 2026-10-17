@@ -767,7 +767,7 @@ def _check_chat_ui_connection(ui_url: str, token: str) -> None:
 def _provision_chat_ui_effort_selector(ui_url: str) -> None:
     """Install the Reasoning Effort dropdown into the pinned Open WebUI.
 
-    The stock v0.11.0 Advanced Params control is a free-text field; the
+    The stock v0.12.3 Advanced Params control is a free-text field; the
     product knob (DTO-D6) must be selectable. A global filter whose
     enum-typed user valve renders as a dropdown in Chat Controls forwards
     the selection as ``reasoning.effort`` on the Responses body it keeps to

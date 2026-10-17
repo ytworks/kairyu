@@ -109,12 +109,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- Caller-API forwarding / example UIs on Responses (2026-10-17): implemented and CPU-tested in one PR; remaining: review and fix rounds, then the final test in a separate GPU environment for the 13 non-Jev examples (overlay image IDs, route checks, all gates on `/v1/responses`, `api-equivalence`, browser gates, L1 `xhigh` renders); plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
+- Caller-API forwarding / example UIs on Responses (2026-10-17): implemented and CPU-tested in one PR; remaining: review and fix rounds, then the final test in a separate GPU environment for the 13 non-Jev examples (overlay image IDs, route checks, all gates on `/v1/responses`, `api-equivalence`, browser gates, L1 `xhigh` renders) and the Open WebUI v0.12.3 Chat UI of the 3 Jev examples; plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-18 — [amendment] PR #656 review fixes; Open WebUI v0.12.3 (m9 D2, m1 D8, m11 D4/D7)
+- What: a prefill retry no longer takes Messages (vLLM opened a new turn and the retry's reasoning became answer text); `parallel_tool_calls: false` reaches vLLM as chat (its Responses never applies it, v0.23.0 Messages drops it); unprepared MoA keeps the caller's API; `api-equivalence` compares vLLM's `reasoning_part.*` as `content_part.*`; the compose demo installs its own Responses filter (`webui-setup`) and P-B3 runs signup → filter → checks. Every example and the demo pin the standard Open WebUI v0.12.3 image (v0.12's slim needs pgvector for RAG).
+- Why: owner review of PR #656 (P1 + four P2), reproduced against the pinned vLLM sources; owner extended the single-call fix to Responses, asked for the latest Open WebUI, chose the standard image and included the Jev examples (2026-10-18); the v0.12.3 replay matches v0.11.0's.
+- Refs: m9 D2, m1 D8, m11 D4/D7 amendments 2026-10-18; PR #656
 
 ### 2026-10-17 — [amendment] Per-example decisions for the Responses move (FN-D8, DTO-D18, VCO, m9 D2)
 - What: 0731-8gpu L1 on the dp2 settings (no identity template); qwen3.8-deepseek-v4 L2 rebuilt on the official encoder (DTO-D18); DeepSeek overlays render `xhigh` as max, rebuilt images unpinned until the GPU build; readiness probes on Responses without logprobs; sign-in UIs switch a saved chat connection; native wires take a lacking field only at its upstream default (`min_p` 0, priority 0).

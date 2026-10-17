@@ -170,7 +170,7 @@ explicitly through `python -m evals`.
 - vLLM image digest (source build):
   `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`;
   the served image adds `vllm-effort.Dockerfile` on top
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 The served vLLM image (`local/vllm-openai:deepseek-v4-flash-0731-dp2-xhigh`)
 is rebuilt by this change and has no recorded image ID yet: `example.json`

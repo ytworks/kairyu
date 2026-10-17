@@ -320,13 +320,13 @@ services:
     restart: unless-stopped
 
   chat-ui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
       # m11 D7 amendment 2026-10-17: the Chat UI reaches Kairyu over
       # /v1/responses. It streams: a non-streaming Responses result loses its
-      # reasoning items (the Thought section) in Open WebUI v0.11.0.
+      # reasoning items (the Thought section) in Open WebUI v0.12.3.
       OPENAI_API_CONFIGS: '{"0":{"api_type":"responses","model_ids":["kairyu-auto-max"]}}'
       DEFAULT_MODELS: kairyu-auto-max
       DEFAULT_MODEL_PARAMS: '{"max_tokens":65536}'

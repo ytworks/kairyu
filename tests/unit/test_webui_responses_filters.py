@@ -1,9 +1,10 @@
-"""Every example Chat UI filter leaves an OpenAI Responses body (m11 D7 amendment).
+"""Every Chat UI filter (examples, compose demo) leaves an OpenAI Responses body (m11 D7).
 
-Open WebUI v0.11.0 forwards unknown top-level keys and replays saved output
-items verbatim when it converts its chat body for an ``api_type: responses``
-connection, and Kairyu's /v1/responses rejects both (Phase 0 replay,
-2026-10-17: ``reasoning_effort`` and chat-era ``attributes`` answered 400).
+Open WebUI v0.12.3 (as v0.11.0) forwards unknown top-level keys and replays
+saved reasoning items verbatim when it converts its chat body for an
+``api_type: responses`` connection, and Kairyu's /v1/responses rejects both
+(replays 2026-10-17 and 2026-10-18: ``reasoning_effort`` and chat-era
+``attributes`` answered 400).
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-FILTERS = sorted(ROOT.glob("examples/*/webui-*filter.py"))
+FILTERS = sorted(
+    [*ROOT.glob("examples/*/webui-*filter.py"), ROOT / "deploy/compose/webui-responses-filter.py"]
+)
 # Keys the pinned Open WebUI either converts (messages, max_tokens) or drops
 # itself (stream_options, presence_penalty, ...); everything else must already
 # be a Responses field when the filter returns.

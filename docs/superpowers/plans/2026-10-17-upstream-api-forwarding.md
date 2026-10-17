@@ -70,6 +70,27 @@ Second round (2026-10-17, after implementation started):
     `run.sh up` stops unless the example's allow-unpinned variable is set.
 22. DeepSeek V4 `xhigh`→max is an example-owned overlay image.
 
+Review round 1 (owner review of `6c011416`, decisions 2026-10-18):
+
+23. A request with an assistant prefill never takes Messages (vLLM opens a new
+    turn there); it takes Responses or chat.
+24. `parallel_tool_calls: false` is not sent on vLLM's Responses or Messages
+    wire (neither keeps one call on the pinned versions); it takes chat.
+25. MoA passes the caller's API with or without a prepared handle.
+26. `api-equivalence` compares vLLM's `response.reasoning_part.*` as the
+    `response.content_part.*` events Kairyu emits.
+27. The compose demo ships its own Responses filter and a `webui-setup`
+    service run once after `up` (`run --rm webui-setup`; an exited one-shot
+    service fails `up --wait`), admin credentials → install, else warn; P-B3 runs the
+    browser `signup` phase, then `webui-setup` as that account, then
+    `initial` from sign-in.
+28. Open WebUI v0.12.3 (linux/amd64 digest) for the demo and every example;
+    the v0.11.0 replay is repeated on v0.12.3.
+29. The standard image, not slim: v0.12's slim stores RAG vectors only in
+    PostgreSQL/pgvector, and the standard image is v0.11.0-slim's size.
+30. The Jev examples (OpenJev, both Winnow) take the same Open WebUI image;
+    nothing else in them changes (decision 8 otherwise stands).
+
 ## Phase 0 findings (CPU, 2026-10-17)
 
 The pinned Open WebUI image could not be pulled (its blob host is blocked by
@@ -150,3 +171,5 @@ session, so the browser gates themselves run with the GPU tasks.
      in Kairyu and L1 logs that requests travel on `/v1/responses`;
    - update each MEASUREMENTS.md; report any failing gate to the owner
      before changing a gate or a design.
+3. In the same GPU environment, the 3 Jev examples' Chat UI on Open WebUI
+   v0.12.3 (decision 30): `run.sh up` and their own UI checks.

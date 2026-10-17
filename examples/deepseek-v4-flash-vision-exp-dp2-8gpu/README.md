@@ -206,7 +206,7 @@ explicitly through `python -m evals`.
   `flashinfer-ai/flashinfer@60b49158ab4fb81718aef486c2d3c89aec4c1901`
 - vLLM image ID: `example.json` `image_id` for the shared build; the served
   image adds `vllm-effort.Dockerfile` on top
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 The served vLLM image
 (`local/vllm-openai:deepseek-v4-flash-vision-exp-dp2-xhigh`) is rebuilt by

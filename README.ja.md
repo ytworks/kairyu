@@ -666,10 +666,21 @@ Open WebUI デモは [`deploy/compose/config.yaml`](deploy/compose/config.yaml) 
 `/etc/kairyu/config.yaml` にマウントし、keyless で CPU-safe な直接モデル
 `default` と、レガシーのオーケストレートモデル `kairyu-auto` を提供します。
 `http://localhost:3000` を開いて最初のアカウントを作成し、どちらかのモデルを
-選択してください。このトポロジーは Open WebUI v0.11.0 を immutable な
+選択してください。このトポロジーは Open WebUI v0.12.3 を immutable な
 linux/amd64 digest で固定します。名前付きデータボリュームには自動生成された
 secret が保存され、mock バックエンドはこのローカルデモ専用です。本番では
 deployment / orchestrator の spec と認証ポリシーを置き換えてください。
+
+Open WebUI は `/v1/responses` で Kairyu に接続します。`WEBUI_ADMIN_EMAIL` と
+`WEBUI_ADMIN_PASSWORD` を export して起動すると Open WebUI がその管理者を作成し、
+続けて
+`docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
+を一度実行すると
+[`webui-responses-filter.py`](deploy/compose/webui-responses-filter.py) が
+グローバルフィルターとして導入されます。これにより、Responses API にない
+Chat Controls の項目（seed、top_k、effort 欄）が Responses の形に直されます。
+未設定なら `webui-setup` は警告だけを出し、管理者がフィルターを導入するまで
+それらの項目は拒否されます。
 `scripts/webui_smoke.sh` は完全なトポロジーを起動し、別途固定した Playwright
 イメージで、新規ユーザーセットアップ・モデル選択・ストリーミング・リロード後の
 永続性・可視的なゲートウェイ障害・Open WebUI を再起動しない復旧を証明します。

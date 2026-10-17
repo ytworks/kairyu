@@ -24,7 +24,7 @@ comparable with the new natural-completion rows; `serving`, `tool-calling`,
 after the GPU run.
 
 - Served-config SHA-256:
-  `691b96e5f9ec24e59c5ef3e284c490ea79d37c261a9e39d76e29110280f48eb6`
+  `9f05f947f732f9a46680464f414cbf532657ffee0e810ac20ef761f6074e21fb`
   (the committed configuration this section describes, with no measurement
   yet; enforced by `tests/unit/test_example_measurement_hashes.py`).
 

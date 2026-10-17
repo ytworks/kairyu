@@ -1,24 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for the pinned Open WebUI v0.11.0 compose surface.
+ * Browser gate for the pinned Open WebUI v0.12.3 compose surface.
  *
  * The surrounding shell smoke owns service lifecycle and invokes this script
- * three times:
+ * once per phase:
  *
+ *   WEBUI_SMOKE_PHASE=signup   node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=initial  node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=outage   node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=recovery node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=tiered   node scripts/webui_browser_smoke.mjs
  *
- * `initial` requires a fresh Open WebUI data volume. `outage` runs while
+ * `signup` requires a fresh Open WebUI data volume; the shell then installs the
+ * admin's Responses filter before `initial`. `outage` runs while
  * Kairyu is stopped, and `recovery` runs after Kairyu is started again without
  * restarting Open WebUI.
  */
 
 import { chromium } from 'playwright';
 
-const PHASES = new Set(['initial', 'outage', 'recovery', 'tiered']);
+const PHASES = new Set(['signup', 'initial', 'outage', 'recovery', 'tiered']);
 const phase = process.env.WEBUI_SMOKE_PHASE ?? 'initial';
 const baseUrl = new URL(
 	process.env.WEBUI_SMOKE_BASE_URL ??
@@ -852,8 +854,12 @@ async function assertUiOutage(modelId) {
 	);
 }
 
-async function runInitialPhase() {
+async function runSignupPhase() {
 	await step('fresh user signup', signupFreshUser);
+}
+
+async function runInitialPhase() {
+	await step('first user sign-in', signinExistingUser);
 	await step('direct and AUTO model discovery', assertModelsSelectable);
 	await step('document ingest, vector retrieval, and RAG answer', assertRagEndToEnd);
 	await step('default browser-visible SSE', () =>
@@ -906,7 +912,7 @@ async function assertTieredProductInventory() {
 	invariant(
 		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response !== false,
 		// A non-streaming Responses result loses its reasoning items in
-		// Open WebUI v0.11.0, so the Thought section needs streaming.
+		// Open WebUI v0.12.3, so the Thought section needs streaming.
 		`Open WebUI effective model params disabled streaming: ${modelConfig.text}`
 	);
 	await selectModel(productModel);
@@ -1004,7 +1010,7 @@ async function runTieredPhase() {
 async function main() {
 	invariant(
 		PHASES.has(phase),
-		`WEBUI_SMOKE_PHASE must be initial, outage, recovery, or tiered; got ${phase}`
+		`WEBUI_SMOKE_PHASE must be signup, initial, outage, recovery, or tiered; got ${phase}`
 	);
 	invariant(
 		['http:', 'https:'].includes(baseUrl.protocol),
@@ -1041,7 +1047,9 @@ async function main() {
 		}
 	});
 
-	if (phase === 'initial') {
+	if (phase === 'signup') {
+		await runSignupPhase();
+	} else if (phase === 'initial') {
 		await runInitialPhase();
 	} else if (phase === 'outage') {
 		await runOutagePhase();

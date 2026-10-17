@@ -6,7 +6,7 @@ version: 0.2.0
 
 from pydantic import BaseModel
 
-# Open WebUI v0.11.0 reaches Kairyu over the Responses API (api_type
+# Open WebUI v0.12.3 reaches Kairyu over the Responses API (api_type
 # "responses" in compose.yaml): it converts this chat body with
 # convert_to_responses_payload, which forwards unknown top-level keys verbatim
 # and replays saved output items as they were stored. Kairyu's /v1/responses is

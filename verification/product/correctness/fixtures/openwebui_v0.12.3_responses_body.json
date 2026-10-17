@@ -1,5 +1,5 @@
 {
-  "source": "open-webui v0.11.0 convert_to_responses_payload (backend/open_webui/routers/openai.py) applied to a streamed Chat UI turn with the example filter's store:false",
+  "source": "open-webui v0.12.3 convert_to_responses_payload (backend/open_webui/routers/openai.py) applied to a streamed Chat UI turn with the example filter's store:false",
   "body": {
     "model": "MODEL",
     "stream": true,

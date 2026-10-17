@@ -61,7 +61,10 @@ MoA unary/streaming paths expose cumulative internal usage; retry, fallback,
 partial-failure, cancellation, structured-trace, and privacy cases are fixed
 server tests.
 
-P-B3 is closed on the pinned Open WebUI v0.11.0-slim surface (issue #197).
+P-B3 is closed on the pinned Open WebUI v0.11.0-slim surface (issue #197); it
+now runs on v0.12.3 (standard image) over the Responses connection, with the admin's
+Responses filter installed between first-user signup and the chat checks
+(m11 D7 amendment 2026-10-18).
 One normal Compose command starts healthy Kairyu and Open WebUI services with
 the direct `default` and orchestrated `kairyu-auto` models. A profile-scoped,
 digest-pinned Playwright v1.60.0 runner creates the first user through the UI,

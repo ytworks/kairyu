@@ -24,7 +24,7 @@ results below describe the previous chat-only configuration (served-config
 Chat UI will be recorded here after the GPU run.
 
 - Served-config SHA-256:
-  `f0dd12d5d923e5af0b00c190150f193ad6efcf5f99370ab14609d9cd05f79f6b`
+  `81fdc01e5f4542068b6ad2b83de6ec1d892f2ace930c379e4c143ad69c7f4404`
   (the committed configuration this section describes, with no measurement
   yet; enforced by `tests/unit/test_example_measurement_hashes.py`).
 

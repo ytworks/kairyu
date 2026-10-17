@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_FIXTURE = Path(__file__).with_name("fixtures") / "openwebui_v0.11.0_responses_body.json"
+_FIXTURE = Path(__file__).with_name("fixtures") / "openwebui_v0.12.3_responses_body.json"
 _TERMINAL = {"response.completed", "response.incomplete", "response.failed"}
 # vLLM opens and closes a reasoning item's content part with its own event names.
 _SAME_EVENT = {

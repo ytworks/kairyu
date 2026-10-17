@@ -527,7 +527,7 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   `test_trace_extensions_ride_the_response_object`.
 - Equivalence gate: `verification/product/correctness/upstream_api_equivalence.py`
   sends the same Responses requests (text, stream, efforts, a tool round trip,
-  an image, a length cap, and the Open WebUI v0.11.0 body in
+  an image, a length cap, and the Open WebUI v0.12.3 body in
   `verification/product/correctness/fixtures/`) to an L1 directly and to L3,
   validates L3 against the openai-python types, records L1-only events as
   extensions, compares status, item types, collapsed events, usage keys and
@@ -723,7 +723,7 @@ and in-flight generation is never interrupted.
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal
 Kairyu endpoint `http://kairyu:8000/v1` and mounts standalone CPU-safe direct
 and legacy-orchestration specs that expose `default` and `kairyu-auto`.
-Open WebUI v0.11.0-slim and Playwright v1.60.0-noble are pinned to immutable
+Open WebUI v0.12.3 and Playwright v1.60.0-noble are pinned to immutable
 linux/amd64 manifests. Normal Compose startup brings up only healthy Kairyu and
 Open WebUI services; the browser runner is profile-scoped.
 `scripts/webui_smoke.sh` validates literal binds and the rendered endpoint
@@ -784,6 +784,33 @@ enabled install the filter with `WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD`
 when set and warn otherwise. `docker-compose.webui.yaml` (P-B3) uses the
 same connection type. Jev examples (OpenJev, Quyet System One, Winnow) keep
 their chat connection and playgrounds.
+
+**Open WebUI v0.12.3 and the compose demo's filter (2026-10-18, owner review
+of PR #656).** `docker-compose.webui.yaml` had moved to the Responses
+connection without the filter, so Chat Controls `reasoning_effort` or `seed`
+and chat-era saved items answered 400. It now ships its own
+`webui-responses-filter.py` and a `webui-setup` service (`webui_setup.py`,
+run in the Open WebUI image) that the operator runs once after `up`
+(`run --rm webui-setup`, profile `setup`: an exited one-shot service fails
+`up --wait`; owner decision 2026-10-18): with
+`WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD` set, Open WebUI creates that admin
+and the setup installs the filter as active and global and switches a saved
+chat connection to Responses; otherwise it warns, as the sign-in examples do.
+`scripts/webui_smoke.sh` runs the browser `signup` phase (first account, the
+admin), then `webui-setup` as that account, then `initial` from sign-in; no
+check is dropped. Every example (Jev examples included, owner decision
+2026-10-18) and the demo pin the standard Open WebUI v0.12.3 image: from
+v0.12 the slim image stores RAG vectors only in PostgreSQL/pgvector (an
+unset `PGVECTOR_DB_URL` answers 503 on a document upload, which failed the
+demo's RAG step), while the standard image keeps the bundled vector store at
+v0.11.0-slim's size (1.62 vs 1.54 GB compressed; owner decision 2026-10-18).
+The v0.11.0 replay was repeated on v0.12.3 (CPU, 2026-10-18) with the same result:
+Chat Controls fields and chat-era items answer 400 raw and 200 filtered,
+Responses-born items 200; v0.12.3 also converts a named `tool_choice`, which
+v0.11.0 sent in chat form (400). Its non-streaming converter still drops
+reasoning items, the Advanced Params effort stays a free-text field and enum
+user valves still render as a select, and its converted fixture body equals
+v0.11.0's. Why: owner review finding (P2) and owner request.
 
 `verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/

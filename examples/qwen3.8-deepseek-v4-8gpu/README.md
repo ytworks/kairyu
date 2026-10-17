@@ -372,7 +372,7 @@ four direct-route profiles and the Qwen route judge with its five choices
 The Chat UI reaches Kairyu over `/v1/responses` (Open WebUI `api_type:
 responses`, m11 D7 amendment 2026-10-17) and streams, because a
 non-streaming Responses result loses its reasoning items (the separate
-internal-work item) in Open WebUI v0.11.0. The launcher checks that
+internal-work item) in Open WebUI v0.12.3. The launcher checks that
 connection type. Kairyu then sends every L2 role call to its L1 in the same
 API — `/v1/responses` for a Chat UI turn, chat for a chat caller, Anthropic
 Messages where the request allows it — because `kairyu.yaml` declares both
@@ -389,7 +389,7 @@ charge). The dropdown is a globally active Open WebUI filter
 (`webui-reasoning-effort-filter.py`) that the launcher installs and
 self-verifies on every `up`, and it owns the field: an explicit level
 overrides any `reasoning_effort` set elsewhere — including the stock
-v0.11.0 Advanced Params free-text input, which stays visible but never
+v0.12.3 Advanced Params free-text input, which stays visible but never
 reaches Kairyu — and `default` removes such values so the server default
 applies. The selection is forwarded as the Responses body's
 `reasoning.effort`; the same filter keeps the rest of the body within the
@@ -509,7 +509,7 @@ frontier APIs is owned by the external `kairyu-bench` repository.
   `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`;
   the served overlay image (`local/vllm-openai:qwen38-deepseek-v4-ensemble`)
   is attested in `example.json` after its GPU verification
-- Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
+- Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 Set `KAIRYU_RESPONSES_COMPACTION_SECRET` to at least 32 random bytes before
 `docker compose up` (e.g. `export KAIRYU_RESPONSES_COMPACTION_SECRET=$(openssl

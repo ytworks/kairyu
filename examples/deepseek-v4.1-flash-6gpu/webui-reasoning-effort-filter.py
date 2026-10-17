@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Open WebUI v0.11.0 reaches Kairyu over the Responses API (api_type
+# Open WebUI v0.12.3 reaches Kairyu over the Responses API (api_type
 # "responses" in compose.yaml): it converts this chat body with
 # convert_to_responses_payload, which forwards unknown top-level keys verbatim
 # and replays saved output items as they were stored. Kairyu's /v1/responses is
@@ -67,7 +67,7 @@ def _responses_body(body: dict) -> dict:
 class Filter:
     """Open WebUI global filter that turns the effort knob into a dropdown.
 
-    Open WebUI v0.11.0 renders an enum-typed user valve as a ``<select>`` in
+    Open WebUI v0.12.3 renders an enum-typed user valve as a ``<select>`` in
     Chat Controls. The choice reaches Kairyu as the Responses body's
     ``reasoning.effort`` using the model author's vocabulary (low=50, high=75,
     max=100); ``default`` omits it so the L1 default (thinking high) applies.

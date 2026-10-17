@@ -97,7 +97,9 @@ def _webui_smoke_env(
         "    printf "
         "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\","
         "\"OPENAI_API_CONFIGS\":"
-        "\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}}}}' "
+        "\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}},"
+        "\"browser\":{\"environment\":{\"WEBUI_SMOKE_EMAIL\":\"smoke@example.invalid\","
+        "\"WEBUI_SMOKE_PASSWORD\":\"smoke-password\"}}}}' "
         '"$WEBUI_RENDERED_BASE_URL"\n'
         "    ;;\n"
         f"{fail_case}"
@@ -305,7 +307,7 @@ def test_webui_compose_pins_full_authenticated_browser_topology():
     assert "healthcheck" in webui
 
     _assert_immutable_image(
-        webui["image"], "ghcr.io/open-webui/open-webui:v0.11.0-slim"
+        webui["image"], "ghcr.io/open-webui/open-webui:v0.12.3"
     )
     assert browser["image"] == "kairyu-webui-browser:playwright-1.60.0"
     assert browser["build"] == {
@@ -809,7 +811,7 @@ def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path
     assert docker_log.read_text(encoding="utf-8").splitlines() == [
         (
             f"compose --project-name {WEBUI_SMOKE_PROJECT} "
-            f"-f {WEBUI_COMPOSE.resolve()} config --format json"
+            f"-f {WEBUI_COMPOSE.resolve()} --profile browser-smoke config --format json"
         )
     ]
 
@@ -833,12 +835,20 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
         f"-f {WEBUI_COMPOSE.resolve()}"
     )
     assert commands == [
-        f"{compose} config --format json",
+        f"{compose} --profile browser-smoke config --format json",
         (
             f"{compose} up -d --build --wait "
             "--wait-timeout 240 kairyu webui"
         ),
         f"{compose} --profile browser-smoke build browser",
+        (
+            f"{compose} --profile browser-smoke run --rm --no-deps "
+            "-e WEBUI_SMOKE_PHASE=signup browser"
+        ),
+        (
+            f"{compose} run --rm --no-deps -e WEBUI_ADMIN_EMAIL=smoke@example.invalid "
+            "-e WEBUI_ADMIN_PASSWORD=smoke-password webui-setup"
+        ),
         (
             f"{compose} --profile browser-smoke run --rm --no-deps "
             "-e WEBUI_SMOKE_PHASE=initial browser"

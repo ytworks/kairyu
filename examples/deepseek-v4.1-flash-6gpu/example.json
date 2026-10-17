@@ -69,7 +69,7 @@
     "indexer_sparse_logits": false
   },
   "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
     "port": 3008,
     "reasoning_effort_levels": ["default", "low", "high", "max"]
   },

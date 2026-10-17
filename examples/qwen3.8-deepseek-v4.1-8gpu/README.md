@@ -266,7 +266,7 @@ GPU verification of this section is pending.
 
 - **The Chat UI uses the Responses API** (m11 D7 amendment). Its connection
   sets `api_type: responses` in `OPENAI_API_CONFIGS`, so Open WebUI sends each
-  turn to Kairyu's `/v1/responses`. It streams: Open WebUI v0.11.0 drops the
+  turn to Kairyu's `/v1/responses`. It streams: Open WebUI v0.12.3 drops the
   reasoning items of a non-streaming Responses result, which would hide the
   internal-work item, so `stream_response: false` is gone.
 - **The effort dropdown filter also normalizes the body.** Kairyu's
@@ -396,7 +396,7 @@ Responses API does not carry.
 - **`tool-calling`** requires one executable bash tool call through L3.
 - **`api-equivalence`** sends the same Responses requests (text, stream,
   efforts low/high/xhigh, a tool round trip, an image, a length cap, and the
-  Open WebUI v0.11.0 body) to the DeepSeek L1 and to `kairyu-auto-max`
+  Open WebUI v0.12.3 body) to the DeepSeek L1 and to `kairyu-auto-max`
   (`verification/product/correctness/upstream_api_equivalence.py`). Both
   sides are validated against the OpenAI Responses types; because the AUTO
   model's output items come from its roles, they are compared on status and
