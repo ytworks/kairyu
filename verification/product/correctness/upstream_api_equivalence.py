@@ -5,7 +5,9 @@ Kairyu L3, then requires the same Responses structure from both:
 
 - every L3 event and final response validates against the openai-python
   Responses types; an L1 event outside them (vLLM's
-  ``response.reasoning_part.*``) is recorded as an L1 extension;
+  ``response.reasoning_part.*``) is recorded as an L1 extension, and vLLM's
+  reasoning part events are compared as the ``response.content_part.*``
+  events the OpenAI types (and Kairyu) emit for the same part;
 - each stream is a well-formed sequence (``response.created`` first, one
   terminal event last, increasing ``sequence_number``) whose output-text
   deltas join to the final output text;
@@ -39,6 +41,11 @@ from pathlib import Path
 
 _FIXTURE = Path(__file__).with_name("fixtures") / "openwebui_v0.11.0_responses_body.json"
 _TERMINAL = {"response.completed", "response.incomplete", "response.failed"}
+# vLLM opens and closes a reasoning item's content part with its own event names.
+_SAME_EVENT = {
+    "response.reasoning_part.added": "response.content_part.added",
+    "response.reasoning_part.done": "response.content_part.done",
+}
 _CAPTURE_PROGRAM = r"""
 import json, sys, urllib.error, urllib.request
 url, key = sys.argv[1], sys.argv[2]
@@ -171,7 +178,9 @@ def summarize(cap: Capture, *, strict: bool) -> tuple[dict, list[str]]:
                         extensions.append(str(event.get("type")))
         collapsed: list[str] = []
         for kind in kinds:
-            if kind in extensions or kind == "response.in_progress":
+            if kind in _SAME_EVENT:
+                kind = _SAME_EVENT[kind]
+            elif kind in extensions or kind == "response.in_progress":
                 continue
             if not collapsed or collapsed[-1] != kind or not str(kind).endswith(".delta"):
                 collapsed.append(str(kind))
