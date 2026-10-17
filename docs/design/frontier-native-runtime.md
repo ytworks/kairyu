@@ -491,6 +491,12 @@ and the GLM-5.3-Flash single-replica examples.
   through L3 a unary answer was empty). The template already rendered those
   requests non-thinking, so prompts are unchanged; an explicit effort still
   sets `enable_thinking` per request ahead of the default.
+- GPU final test fix (2026-10-18): `deepseek-v4.1-flash-8gpu`'s overlay (the
+  older `deepseekv41-flash-0909` base) lets the V4.1 tokenizer read the
+  Responses `input_text`/`output_text` parts as text, as the nightly used by
+  the other V4.1 examples already does; its image probe through Kairyu
+  answered HTTP 400 ("supports text and image content only; got
+  'input_text'"). The rebuilt overlay is pinned again.
 
 ### Example removal amendment (2026-10-18, owner decision)
 

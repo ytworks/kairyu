@@ -270,6 +270,6 @@ and vLLM logs).
 
 The served vLLM image (`local/vllm-openai:deepseek-v41-sm120-xhigh`) is
 rebuilt by this change; its 2026-10-18 build is pinned as
-`sha256:3609c4222fa9efb9505e3f960a1075054e6f7248e64b16b71f284f64161ba67d`
+`sha256:be8fa3f4fa4824910567b81f2ad0543d9eaca2d3c68abfcbbb022ecaa39e7f0e`
 (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 

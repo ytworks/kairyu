@@ -67,7 +67,11 @@ The pinned DeepSeek encoder defines `low=50`, `high=75`, and `max=100`.
 The example aligns the L1 encoder with those definitions and renders `xhigh`
 as max too: Kairyu spells L3 `max` as OpenAI `xhigh` on the Responses wire
 (OpenAI's effort vocabulary has no `max`). The UI's `default` selection
-inherits high; the dropdown exposes default/low/high/max.
+inherits high; the dropdown exposes default/low/high/max. The overlay also
+lets this build's V4.1 tokenizer read the Responses `input_text`/`output_text`
+part types as text, as later upstream builds do: without it, every request
+with an image that Kairyu forwards to `/v1/responses` answered HTTP 400 (GPU
+final test 2026-10-18).
 
 ```json
 {"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"What is 17 * 19?"}],"max_tokens":8192}
@@ -127,7 +131,7 @@ different ID; startup then stops until both image pins are updated and the GPU
 gates are rerun for that build. The served vLLM image
 (`local/vllm-openai:deepseek-v41-sm120-xhigh`) is rebuilt by this change; its
 2026-10-18 build is pinned as
-`sha256:3609c4222fa9efb9505e3f960a1075054e6f7248e64b16b71f284f64161ba67d`
+`sha256:be8fa3f4fa4824910567b81f2ad0543d9eaca2d3c68abfcbbb022ecaa39e7f0e`
 (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 For bounded L1 comparisons after startup:
