@@ -10,9 +10,11 @@ observe what the deployed L1 services would receive and which route answers.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -26,6 +28,8 @@ from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.systemone import HTTPSystemOneBackend
 from kairyu.entrypoints.server.chat_service import validate_orchestration_chat_input
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.responses_events import ResponseEmitter
+from kairyu.entrypoints.server.responses_protocol import ResponsesRequest
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.sampling_params import SamplingParams
 
@@ -450,3 +454,60 @@ def test_free_space_counts_a_leftover_glm_directory_as_missing(tmp_path, monkeyp
     assert not control.glm_present(leftover)
     (leftover / "config.json").write_text("{}")
     assert control.glm_present(leftover)
+
+
+def _verification():
+    # verification.py imports this example's control as ``control``: no other
+    # example's may stand in for it, and this one must not stay behind.
+    path, saved = list(sys.path), sys.modules.pop("control", None)
+    try:
+        module_spec = importlib.util.spec_from_file_location(
+            "glm_quyet_verification", EXAMPLE / "verification.py"
+        )
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = path
+        sys.modules.pop("control", None)
+        if saved is not None:
+            sys.modules["control"] = saved
+    return module
+
+
+def test_a_streamed_reply_is_judged_on_its_deltas(monkeypatch) -> None:
+    # The think-route and verified-tool-route gates judge the streamed answer
+    # (PR #656 review): a stream that lost its text or call-argument deltas
+    # fails, although reasoning set its first token and the terminal response
+    # holds the whole reply.
+    verification = _verification()
+    emitter = ResponseEmitter(ResponsesRequest(model="auto"), response_id="resp_x", created_at=0)
+    frames = [*emitter.start(), *emitter.begin_reasoning(), *emitter.reasoning_delta("Look.")]
+    frames += [*emitter.close(), *emitter.begin_message(), *emitter.text_delta("Checking.")]
+    frames += [*emitter.close(), *emitter.begin_call("call_1", "get_weather", None)]
+    frames += emitter.arguments_delta('{"city": "Paris"}')
+    frames += emitter.complete("completed", {"input_tokens": 1, "output_tokens": 2})[1]
+    frames = [frame if isinstance(frame, str) else frame.decode() for frame in frames]
+
+    def row(dropped: str | None) -> dict:
+        lines = [
+            line.encode()
+            for frame in frames
+            if dropped is None or not frame.startswith(f"event: {dropped}\n")
+            for line in frame.splitlines(keepends=True)
+        ]
+        monkeypatch.setattr(
+            verification.urllib.request, "urlopen", lambda *_, **__: contextlib.nullcontext(lines)
+        )
+        return verification.chat({"API_PORT": "0"}, "Weather in Paris?", stream=True)
+
+    intact = row(None)
+    assert (intact["status"], intact["content"]) == (200, "Checking.")
+    assert intact["tool_calls"][0]["function"] == {
+        "name": "get_weather",
+        "arguments": '{"city": "Paris"}',
+    }
+    for dropped in ("response.output_text.delta", "response.function_call_arguments.delta"):
+        broken = row(dropped)
+        assert broken["ttft_s"] is not None
+        assert broken["status"] == 0
+        assert broken["error"].startswith("the streamed reply differs"), dropped

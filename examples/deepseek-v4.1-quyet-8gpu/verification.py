@@ -342,8 +342,10 @@ def _post_stream(
 ) -> tuple[dict, float | None]:
     """Stream one Responses request; returns the terminal response in the chat
     shape (``control.chat_view``, kairyu_* extensions kept) and the time to
-    first token. A stream without a completed or incomplete response returns
-    an ``error`` body."""
+    first token. The answer text and calls are assembled from the stream's
+    deltas and must equal the terminal response's, so a stream that lost its
+    body is caught; such a stream, or one without a completed or incomplete
+    response, returns an ``error`` body."""
 
     request = urllib.request.Request(
         url,
@@ -352,6 +354,8 @@ def _post_stream(
     )
     started = time.monotonic()
     first: float | None = None
+    text: list[str] = []
+    calls: dict[int, list[str]] = {}  # output_index -> [name, arguments]
     body: dict = {"error": "the stream ended without a terminal response"}
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for raw in response:
@@ -360,16 +364,34 @@ def _post_stream(
                 continue
             event = json.loads(line[len("data: ") :])
             kind = event.get("type")
-            if first is None and (
-                kind in _FIRST_TOKEN_EVENTS
-                or (
-                    kind == "response.output_item.added"
-                    and (event.get("item") or {}).get("type") == "function_call"
-                )
-            ):
+            added_call = (
+                kind == "response.output_item.added"
+                and (event.get("item") or {}).get("type") == "function_call"
+            )
+            if first is None and (kind in _FIRST_TOKEN_EVENTS or added_call):
                 first = time.monotonic() - started
+            if kind == "response.output_text.delta":
+                text.append(event.get("delta") or "")
+            elif added_call:
+                calls[event.get("output_index")] = [event["item"].get("name") or "", ""]
+            elif kind == "response.function_call_arguments.delta":
+                calls.setdefault(event.get("output_index"), ["", ""])[1] += event.get("delta") or ""
             if kind in ("response.completed", "response.incomplete"):
                 body = control.chat_view(event["response"])
+                message = body["choices"][0]["message"]
+                streamed = ("".join(text), [tuple(calls[index]) for index in sorted(calls)])
+                terminal = (
+                    message.get("content") or "",
+                    [
+                        (call["function"]["name"] or "", call["function"]["arguments"] or "")
+                        for call in message.get("tool_calls") or []
+                    ],
+                )
+                if streamed != terminal:
+                    body = {
+                        "error": "the streamed reply differs from the terminal response: "
+                        f"streamed={str(streamed)[:200]} terminal={str(terminal)[:200]}"
+                    }
             elif kind in ("error", "response.failed"):
                 failure = event if kind == "error" else (event.get("response") or {}).get("error")
                 body = {"error": str(failure)[:500]}
