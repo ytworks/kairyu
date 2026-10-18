@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [amendment] A streamed AUTO response names the final answer's L1 model first (m11 D1)
+- What: with `expose_intermediate_outputs`, the Conductor stream sends the selected final unit's "Final answer attribution" (L2 role, L1 worker, engine, model) as its first reasoning event, before any head or answer delta, and its result's `reasoning_content` has the unary shape; chat streams carry it as the first `reasoning_content` delta, Responses streams as a reasoning item before the message. Only unary results carried it before (`75efaae0`, when the Chat UIs were non-streaming). Limits: a head-streamed DAG's stage sections form a second Responses reasoning item after the message; a budget stand-in without a head is named only by its own section.
+- Why: after PR #656 moved the Chat UIs to streaming, the V4.1 ensemble's browser smoke found no attribution on `deepseek_think`; owner decision 2026-10-18 (PR #656 GPU final test).
+- Refs: m11 D1 amendment 2026-10-18; EO-D4; `kairyu/orchestration/conductor.py`; `test_visible_intermediates_use_reasoning_content_with_model_attribution`; PR #656
+
 ### 2026-10-18 — [progress] A client disconnect stops the upstream on Responses and tool Messages streams
 - What: the heartbeat wrapper (`iter_with_idle_markers`, `buffered_stream`) forwarded the disconnect's repeated cancellation into the task reading the upstream and cut httpcore's connection close short, so public `/v1/responses` (AUTO included), tool-bearing `/v1/messages` and the compaction stream never closed their upstream request: vLLM generated to the natural end (GPU: 2–11 s after the disconnect against chat's 0.01–0.3 s) and each leaked connection stayed ACTIVE in the backend's pool (100 by default). `cancel_and_wait` cancels once and waits shielded.
 - Why: GPU final test cancellation re-measure; reproduced on CPU with real sockets, gc on and off.

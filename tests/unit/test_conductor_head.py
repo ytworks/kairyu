@@ -194,7 +194,12 @@ async def test_reasoning_events_emit_incrementally_while_units_pending():
     saw_reasoning_while_slow_pending = False
     events = []
     async for event in conductor.stream("task"):
-        if event.kind == "reasoning" and not slow_unit.release.is_set():
+        if (
+            event.kind == "reasoning"
+            and "fast unit output" in event.text
+            and not slow_unit.release.is_set()
+        ):
+            # The stage's own section, not the attribution that leads the stream.
             saw_reasoning_while_slow_pending = True
         if event.kind in {"delta", "reasoning"} and not slow_unit.release.is_set():
             # Only release once the fast unit's section proved incremental.

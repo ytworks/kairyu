@@ -1848,23 +1848,15 @@ class Conductor:
             )
         )
 
-    def _reasoning_content(
-        self,
-        run: _RunState,
-        *,
-        include_final_attribution: bool = True,
-    ) -> str | None:
-        if not self._expose_intermediate_outputs:
+    def _reasoning_content(self, run: _RunState, final: RoleSpec | None) -> str | None:
+        """Exposed sections, ``final``'s attribution first (EO-D4)."""
+
+        if not self._expose_intermediate_outputs or final is None:
             return None
-        sections = [output.as_markdown() for output in run.intermediate_outputs]
+        sections = [self._attribution_summary(final)]
+        sections.extend(output.as_markdown() for output in run.intermediate_outputs)
         if run.verification is not None:
             sections.append(run.verification.as_markdown())
-        if not include_final_attribution:
-            return "\n\n---\n\n".join(sections) or None
-        final = self._final_output_unit(run)
-        if final is None:
-            return None
-        sections.insert(0, self._attribution_summary(final))
         return "\n\n---\n\n".join(sections)
 
     async def _generate(
@@ -3742,7 +3734,7 @@ class Conductor:
             trace=tuple(run.trace),
             usage=tuple(run.usage),
             cached_tokens=run.cached_tokens,
-            reasoning_content=self._reasoning_content(run),
+            reasoning_content=self._reasoning_content(run, self._final_output_unit(run)),
             public_completion_tokens=self._public_completion_tokens(run),
             final_unit_ok=not run.final_unit_unusable,
             verification=run.verification,
@@ -3810,10 +3802,7 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
-                reasoning_content=self._reasoning_content(
-                    run,
-                    include_final_attribution=False,
-                ),
+                reasoning_content=self._reasoning_content(run, final),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
                 verification=run.verification,
@@ -3854,6 +3843,14 @@ class Conductor:
 
         producer = asyncio.create_task(pump())
         try:
+            if self._expose_intermediate_outputs:
+                # The final unit is fixed before dispatch: its attribution
+                # leads the reasoning as in run() (EO-D4), without holding
+                # back the already running producer.
+                yield ConductorEvent(
+                    kind="reasoning",
+                    text=f"{self._attribution_summary(final)}\n\n---\n\n",
+                )
             while True:
                 item = await queue.get()
                 if item is None:
@@ -3996,10 +3993,7 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
-                reasoning_content=self._reasoning_content(
-                    run,
-                    include_final_attribution=False,
-                ),
+                reasoning_content=self._reasoning_content(run, final),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
                 verification=run.verification,

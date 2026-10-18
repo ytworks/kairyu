@@ -176,6 +176,27 @@ truthfully verify every sibling; an engine that declares `supports_n=False`
 does likewise. These are capability-specific 400s, replacing the former
 blanket AUTO rejection.
 
+**Streamed final-answer attribution (2026-10-18, owner decision on the PR #656
+GPU final test).** With `expose_intermediate_outputs`, `reasoning_content`
+opens with a "Final answer attribution" section (L2 role, L1 worker, engine,
+model of the answering unit; added 2026-08-13 with EO-D4). Only the unary
+result carried it, because the Chat UIs then used a non-streaming connection
+and a stream's result mirrored its streamed sections. Since PR #656 the UIs
+stream Responses, and the V4.1 ensemble's browser smoke found no attribution on
+its single-publisher `deepseek_think` route. The Conductor stream now sends the
+selected final unit's attribution as its first `reasoning` event, before any
+head or answer delta: the unit and its configured worker identity are fixed
+before dispatch. Its result's `reasoning_content` has the unary shape
+(attribution, stage sections, verification), so chat streams carry the
+attribution as the first `reasoning_content` delta and Responses streams as a
+reasoning item before the message. Limits: on a head-streamed DAG the stage
+sections still arrive while the message is open, so a Responses stream puts
+them in a second reasoning item after the message; on a budget-exhaustion
+stand-in without a head (EO-D7/O4) the stream has already named the selected
+final unit, while the unary result names the stand-in. Why: owner decision
+2026-10-18: a streamed response carries the same attribution as a
+non-streamed one, as the first reasoning section before the answer.
+
 ### D2 — Tiered auto models
 
 `create_app(orchestrators: dict[str, Orchestrator])` (back-compat shim for

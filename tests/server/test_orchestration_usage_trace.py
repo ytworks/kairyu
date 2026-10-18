@@ -147,9 +147,14 @@ def test_auto_usage_reconciles_every_success_route(
         assert usage["completion_tokens"] < usage["orchestration_output_tokens"]
 
 
-@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+@pytest.mark.parametrize(
+    ("api", "stream"),
+    [("chat", False), ("chat", True), ("responses", True)],
+    ids=["chat-unary", "chat-stream", "responses-stream"],
+)
 def test_visible_intermediates_use_reasoning_content_with_model_attribution(
     tmp_path,
+    api,
     stream,
 ):
     backend = AccountingBackend()
@@ -158,39 +163,57 @@ def test_visible_intermediates_use_reasoning_content_with_model_attribution(
     from fastapi.testclient import TestClient
 
     with TestClient(app) as client:
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "auto",
-                "messages": [{"role": "user", "content": COMPLEX}],
-                "stream": stream,
-            },
-        )
+        if api == "chat":
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": COMPLEX}],
+                    "stream": stream,
+                },
+            )
+        else:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "auto", "input": COMPLEX, "stream": True},
+            )
 
     assert response.status_code == 200
-    if stream:
-        payloads = _sse_payloads(response.text)
-        reasoning = "".join(
-            choice["delta"].get("reasoning_content") or ""
-            for payload in payloads
+    # (kind, text) in wire order, so the stream's order is checked too.
+    if api == "responses":
+        kinds = {
+            "response.reasoning_text.delta": "reasoning",
+            "response.output_text.delta": "answer",
+        }
+        pieces = [
+            (kinds[event["type"]], event["delta"])
+            for event in _sse_payloads(response.text)
+            if event["type"] in kinds
+        ]
+    elif stream:
+        pieces = [
+            (kind, choice["delta"].get(field) or "")
+            for payload in _sse_payloads(response.text)
             for choice in payload.get("choices", ())
-        )
-        content = "".join(
-            choice["delta"].get("content") or ""
-            for payload in payloads
-            for choice in payload.get("choices", ())
-        )
+            for kind, field in (("reasoning", "reasoning_content"), ("answer", "content"))
+        ]
     else:
         message = response.json()["choices"][0]["message"]
-        reasoning = message["reasoning_content"]
-        content = message["content"]
+        pieces = [("reasoning", message["reasoning_content"]), ("answer", message["content"])]
+    pieces = [(kind, text) for kind, text in pieces if text]
+    reasoning = "".join(text for kind, text in pieces if kind == "reasoning")
+    content = "".join(text for kind, text in pieces if kind == "answer")
 
     assert content == "final synthesized answer"
-    if not stream:
-        assert reasoning.startswith("### Final answer attribution")
-        assert "L2 role: `synthesizer`" in reasoning
-        assert "L1 worker: `tier2`" in reasoning
-        assert "Model: `DeepSeek-V4`" in reasoning
+    # The final answer's attribution is the first reasoning section, before
+    # any answer byte, streamed or not.
+    assert pieces[0][0] == "reasoning"
+    assert pieces[0][1].startswith("### Final answer attribution")
+    attribution = reasoning.split("\n\n---\n\n")[0]
+    assert "L2 role: `synthesizer`" in attribution
+    assert "L1 worker: `tier2`" in attribution
+    assert "Model: `DeepSeek-V4`" in attribution
+    assert reasoning.count("Final answer attribution") == 1
     assert "useful intermediate answer" in reasoning
     assert "PASS" in reasoning
     assert "L2 role: `planner`" in reasoning
