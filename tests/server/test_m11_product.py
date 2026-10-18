@@ -575,7 +575,7 @@ class TestOrchestratedResponses:
             final = response.json()
         assert final["status"] == "completed"
         assert isinstance(final["kairyu_trace"], list)
-        assert final["kairyu_trace_v2"]["request_id"]
+        assert final["kairyu_trace_v2"]["request_id"] == final["id"]
         if model == "kairyu-auto":
             assert final["kairyu_route"]["target"]
 

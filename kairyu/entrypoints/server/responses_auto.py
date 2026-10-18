@@ -101,6 +101,21 @@ def _delegated_failure(request: ResponsesRequest, emitter: ResponseEmitter, resp
     return _rerendered_chat_error(response)
 
 
+
+def _response_extensions(payload: dict, emitter: ResponseEmitter) -> dict:
+    """The delegated Chat result's ``kairyu_*`` fields, bound to this response.
+
+    The AUTO turn runs through the chat route, whose trace carries the chat
+    request id; on the Responses object it belongs to the Responses id, as a
+    direct-engine trace does.
+    """
+
+    extensions = kairyu_extensions(payload)
+    trace = extensions.get("kairyu_trace_v2")
+    if isinstance(trace, dict):
+        extensions["kairyu_trace_v2"] = {**trace, "request_id": emitter.response_id}
+    return extensions
+
 async def _relay(
     upstream,
     *,
@@ -140,7 +155,7 @@ async def _relay(
                         break
                     if isinstance(chunk.get("usage"), dict):
                         wire_usage = chunk["usage"]
-                    emitter.extensions.update(kairyu_extensions(chunk))
+                    emitter.extensions.update(_response_extensions(chunk, emitter))
                     for choice in chunk.get("choices") or ():
                         if choice.get("index", 0) != 0:
                             continue
@@ -276,7 +291,7 @@ async def auto_response(
     if delegated.status_code != 200:
         return _delegated_failure(request, emitter, delegated)
     payload = json.loads(bytes(delegated.body))
-    emitter.extensions.update(kairyu_extensions(payload))
+    emitter.extensions.update(_response_extensions(payload, emitter))
     choices = payload.get("choices") or []
     message = (choices[0].get("message") if choices else None) or {}
     assembler = OutputAssembler(emitter, namespaces=_namespace_names(request.tools))
