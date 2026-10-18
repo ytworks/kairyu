@@ -143,6 +143,16 @@ async function waitForChatSurface() {
 	await page.locator('#chat-input').waitFor({ state: 'visible', timeout: navigationTimeoutMs });
 }
 
+// Open WebUI shows its release notes once per version to each existing user,
+// over the whole page, so a volume that predates the v0.12.3 image opens with
+// it (GPU 2026-10-18: the dialog intercepted the model selector's click).
+async function dismissReleaseNotes() {
+	const accept = page.getByRole('button', { name: "Okay, Let's Go!", exact: true });
+	if (await becomesVisible(accept, 5_000)) {
+		await accept.click({ timeout: actionTimeoutMs });
+	}
+}
+
 async function selectModel(modelId) {
 	invariant(models.includes(modelId), `unsupported smoke model ${modelId}`);
 	const trigger = page.locator('#model-selector-model-button');
@@ -448,6 +458,7 @@ async function main() {
 	await step('open no-auth chat', async () => {
 		await goto('/');
 		await waitForChatSurface();
+		await dismissReleaseNotes();
 	});
 	await step('single product model inventory', assertTieredProductInventory);
 	await step('folded attributed reasoning and separate final answer', assertTieredReasoningUi);
