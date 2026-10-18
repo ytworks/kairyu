@@ -146,6 +146,8 @@ _STRAY_FINDINGS = [
         pytest.param(
             [[_THOUGHT, _CALL], [_ANSWER]], [[_CALL], [_THOUGHT, _ANSWER]], [], id="reasoning"
         ),
+        # So is how many parallel calls it makes.
+        pytest.param([[_CALL, _CALL], [_ANSWER]], [[_CALL], [_ANSWER]], [], id="parallel-calls"),
     ],
 )
 def test_the_tools_case_compares_both_turns(monkeypatch, l1_turns, l3_turns, findings):

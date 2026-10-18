@@ -536,9 +536,10 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   validates L3 against the openai-python types, records L1-only events as
   extensions, compares status, item types, collapsed events, usage keys and
   function names (status and usage keys only for an AUTO model; the tool
-  round trip compares both turns without their reasoning items, since whether
-  a model reasons around a tool call is sampled, and every function name must
-  be a declared tool), and sums every
+  round trip compares both turns without their reasoning items and with
+  repeated calls folded into the first, since whether a model reasons around a
+  tool call and how many parallel calls it makes are sampled, and every
+  function name must be a declared tool), and sums every
   L1 replica's `http_requests_total` to confirm L3 reached them on
   `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
 

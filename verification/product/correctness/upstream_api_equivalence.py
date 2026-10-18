@@ -19,8 +19,10 @@ Kairyu L3, then requires the same Responses structure from both:
   inside its reasoning is reasoning + an empty message on L3 and reasoning
   alone on vLLM);
 - the tools case compares both turns (the forced call and the answer to its
-  result) without their reasoning items, since whether a model reasons around
-  a tool call is sampled, and every function name must be a declared tool;
+  result) without their reasoning items and with repeated calls folded into
+  the first, since whether a model reasons around a tool call and how many
+  parallel calls it makes are sampled, and every function name must be a
+  declared tool;
 - with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
   replica publishes no host port), the replicas' own request counters show
   that L3 reached them on ``/v1/responses``;
@@ -290,6 +292,35 @@ def _without_reasoning(cap: Capture) -> Capture:
     return Capture(cap.status, events, {**cap.response, "output": output}, cap.raw)
 
 
+def _tool_turn_view(cap: Capture) -> Capture:
+    """A tool turn without reasoning and with only its first function call.
+
+    How many parallel calls a model makes for one request is sampled as well
+    (qwen3.8-27b-dp8-8gpu, 2026-10-18: two ``get_weather`` calls on L1, one
+    on L3); every call's name is still checked against the declared tools.
+    """
+
+    cap = _without_reasoning(cap)
+    if cap.response is None:
+        return cap
+    calls = [
+        event.get("output_index")
+        for event in cap.events
+        if event.get("type") == "response.output_item.added"
+        and (event.get("item") or {}).get("type") == "function_call"
+    ]
+    extra = set(calls[1:])
+    events = [event for event in cap.events if event.get("output_index") not in extra]
+    output, seen_call = [], False
+    for item in cap.response.get("output") or ():
+        if item.get("type") == "function_call":
+            if seen_call:
+                continue
+            seen_call = True
+        output.append(item)
+    return Capture(cap.status, events, {**cap.response, "output": output}, cap.raw)
+
+
 def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
     """Run one case on (L1, L3); returns its record with findings."""
 
@@ -359,7 +390,7 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
         }
         calls = {}
         for target, cap in zip(
-            targets, both(first_turn, check=declared, view=_without_reasoning), strict=True
+            targets, both(first_turn, check=declared, view=_tool_turn_view), strict=True
         ):
             call = next(
                 (
@@ -392,7 +423,7 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             }
 
         if len(calls) == len(targets):
-            both(second_turn, check=answered, view=_without_reasoning)
+            both(second_turn, check=answered, view=_tool_turn_view)
     elif case == "image":
         both(
             {
