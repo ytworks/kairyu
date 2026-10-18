@@ -346,7 +346,8 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             summary, own = summarize(cap, strict=strict)
             record["findings"] += [f"{target.name}: {f}" for f in own]
             checked = check is not None and (check_l3 or target.name != "l3")
-            if checked and summary.get("status") is not None:
+            # An HTTP failure is already a finding of its own (summarize()).
+            if checked and cap.status == 200 and summary.get("status") is not None:
                 problem = check(summary)
                 if problem:
                     record["findings"].append(f"{target.name}: {problem}")

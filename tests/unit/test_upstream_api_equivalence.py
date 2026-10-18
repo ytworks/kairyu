@@ -177,3 +177,19 @@ def test_an_auto_models_image_answer_is_not_judged(monkeypatch, orchestrated, fi
     args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=orchestrated)
 
     assert run_case("image", targets, args)["findings"] == findings
+
+
+def test_an_http_failure_is_a_finding_not_a_crash(monkeypatch):
+    # A Quyet AUTO model answered the cap case with HTTP 502 (GPU 2026-10-18);
+    # the case's own check then read fields a failed capture does not have.
+    failed = Capture(502, [], None, '{"error": {"code": "backend_error"}}')
+    monkeypatch.setattr(
+        upstream_api_equivalence,
+        "capture",
+        lambda target, body: _stream(("message", "1")) if target.name == "l1" else failed,
+    )
+    targets = (Target("l1", "", "m"), Target("l3", "", "m"))
+    args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=True)
+
+    findings = run_case("cap", targets, args)["findings"]
+    assert any(finding.startswith("l3: HTTP 502") for finding in findings)
