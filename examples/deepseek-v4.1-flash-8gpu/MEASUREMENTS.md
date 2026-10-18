@@ -4,8 +4,8 @@ The selected TP8/EP8 configuration passes the complete 320-request serving
 matrix, thinking/tool/vision/cancellation gates, normal restart, and four
 long-context retrieval smokes through 1,039,909 actual prompt tokens.
 Measurements below apply to the pinned runtime and this hardware.
-Since 2026-10-17 the served configuration uses the Responses API; GPU
-verification of that change is pending (last section).
+Since 2026-10-17 the served configuration uses the Responses API; every gate
+passes on it (2026-10-18, PR #656 final test; last section).
 
 Hardware target: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition,
 97,887 MiB per GPU, PCIe, one TP8 replica.
@@ -234,10 +234,21 @@ samples, placements, requests/responses or runtime identity as applicable.
 | `sm120-page32-parity.log` | `45493a4f8905749f435ce91f82faeefcbb4e154850c7a99584ff3bf222941931` |
 | `sm120-indexer-parity.log` | `1ffe04e48d4ce35bc8c248b92091cf098c8c46fcf2540525d73799d587a28db5` |
 
-## 2026-10-17 Responses connection — GPU verification pending
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
+
+GPU run 2026-10-18 05:14-05:27 JST (UTC 2026-10-17 20:14-20:27), working
+tree with `971e6dcf` (the V4.1 tokenizer reads Responses text parts):
+`serving` pass (354 s), `tool-calling` (12 s), `vision` (17 s), `reasoning`
+(15 s), `cancellation` (14 s), `long-context` (262 s), `api-equivalence`
+(20 s) all pass; Chat UI pass (Kairyu `/v1/responses` 12 -> 17, chat 0 -> 0).
+Cancellation probe: before the disconnect fixes (2026-10-18 11:48 JST)
+`/v1/responses` released only after 8.89 / 4.08 / 2.80 s; after `81bf2b22`
+and `5db4358f` (15:03 JST) 0.02 s three times, `/v1/chat/completions`
+0.09 / 0.02 / 0.08 s, every follow-up completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-8gpu/verification-results/20261017T201456Z/`.
 
 The served configuration changed after every result above (m9 D2, m11 D4/D7
-amendments of 2026-10-17); none of the gates below has run on it yet:
+amendments of 2026-10-17):
 
 - Open WebUI connects with `api_type: responses`; the effort filter also
   normalizes the body to strict Responses fields and `store: false`.

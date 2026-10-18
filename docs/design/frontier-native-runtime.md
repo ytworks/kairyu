@@ -451,8 +451,10 @@ effort and the template default applies. Only SHA-bound rows in the example's
 
 ### Responses connection amendment (2026-10-17, owner decision)
 
-Status: implemented and CPU-checked; GPU verification pending in every example
-below (plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`).
+Status: implemented; GPU-verified 2026-10-17/18 (PR #656 final test) in every
+remaining example below: all gates, `api-equivalence`, the Chat UI pass and
+the cancellation probe pass (each example's `MEASUREMENTS.md`; plan
+`docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`).
 
 Applies to the vLLM-backed examples of this record except the Jev ones
 (OpenJev, Quyet-1.0-Large; the Winnow examples are governed elsewhere):

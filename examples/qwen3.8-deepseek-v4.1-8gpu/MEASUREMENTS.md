@@ -1,8 +1,8 @@
 # qwen3.8-deepseek-v4.1-8gpu evidence
 
-Status: **GPU verification pending** for the 2026-10-17 Responses connection
-and the 2026-10-18 Qwen vLLM v0.31.0 image (below). The GPU gates passed on
-the chat configuration of 2026-10-01 (DTO-D17 with the loosened ENSEMBLE
+Status: **every gate passes** on the 2026-10-17 Responses connection with the
+2026-10-18 Qwen vLLM v0.31.0 image (PR #656 final test, 2026-10-18; below).
+The GPU gates passed earlier on the chat configuration of 2026-10-01 (DTO-D17 with the loosened ENSEMBLE
 criteria and judge fallback `deepseek_think`, Qwen on vLLM v0.23.0); those
 results describe that configuration, not the current one.
 
@@ -10,7 +10,7 @@ Hardware: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, PCIe). The
 DeepSeek-V4.1-Flash L1 runs on GPUs 0–5; the two Qwen3.8-27B replicas run on
 GPUs 6 and 7.
 
-## 2026-10-18 Qwen pools on vLLM v0.31.0 — GPU verification pending
+## 2026-10-18 Qwen pools on vLLM v0.31.0 — GPU-verified (PR #656 final test)
 
 What changed (DTO-D16 amendment of 2026-10-18): both Qwen replicas moved from
 the official `vllm/vllm-openai:v0.23.0` image
@@ -36,9 +36,28 @@ On v0.23.0 the slowdown pushed the 5 s route judge past its timeout on 13 of
 32 coding c32 requests and doubled the generic c32 judge p50 (1,982 →
 4,468 ms).
 
-Remaining on GPU: `run.sh up` and every gate below on the v0.31.0 Qwen pools.
+GPU run 2026-10-18 18:00-22:24 JST (UTC 09:00-13:25), working tree after
+`565c1da7` (the streamed attribution) and `00abc81d`: `serving-auto-max` pass
+(4,307 s), `serving-auto-max-coding` pass (11,304 s), `vision` (124 s),
+`tool-calling` (14 s), `api-equivalence` (39 s), `browser-smoke.sh` (20 s)
+all pass; Chat UI pass (Kairyu `/v1/responses` 12 -> 19, chat 0 -> 0).
+Artifacts: `/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4.1-8gpu/verification-results/20261018T090100Z/`
+and `20261018T101326Z/`.
 
-## 2026-10-17 Responses connection — GPU verification pending
+Route judge on v0.31.0 (owner accepted 2026-10-18): with identical judge
+request bodies Qwen returns ENSEMBLE for 17 of 32 coding prompts, against 9
+of 32 on v0.23.0; both deterministic and the same on chat and Responses. More
+coding requests take the ensemble route.
+
+Cancellation probe on the final build `1b995e4d` (2026-10-19 00:18 JST; each
+try starts on an idle stack): `/v1/responses` 0.10 / 0.11 / 0.10 s,
+`/v1/chat/completions` 0.11 / 0.10 / 0.10 s, every follow-up completed. On the
+`565c1da7` build (22:26 JST) chat released only after 9.0 / 5.7 / 4.8 s
+(role calls kept their upstream open; fixed by `03512314`) and Responses not
+within 30 s, measured while Open WebUI's background title/tag/follow-up
+requests from the preceding Chat UI pass were still running.
+
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test; above)
 
 What changed (m9 D2, m11 D4/D7, m1 D8 amendments of 2026-10-17):
 
@@ -55,7 +74,7 @@ What changed (m9 D2, m11 D4/D7, m1 D8 amendments of 2026-10-17):
   too), so they are not directly comparable with the chat rows below. New
   gate: `api-equivalence`.
 
-CPU evidence only:
+CPU evidence (2026-10-17, before the GPU run):
 
 - `patch_sm120.py` edit 8 applied to the pinned encoder source
   (`deepseek_v41_encoding.py` at `ac68c3087`): `xhigh` renders `Reasoning

@@ -1,6 +1,6 @@
 # Measured performance
 
-## 2026-10-18 vLLM v0.31.0 — GPU verification pending
+## 2026-10-18 vLLM v0.31.0 — GPU-verified (PR #656 final test)
 
 L1 moved from the official `vllm/vllm-openai:v0.23.0` image
 (`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`,
@@ -23,9 +23,15 @@ measured on GPU with the `qwen3.8-deepseek-v4.1-8gpu` route-judge
 
 The compose flags are unchanged. `run.sh up` and its probes passed on v0.31.0
 (GPU, 2026-10-18). Every Qwen3.8 result below was measured on v0.23.0;
-`verify.sh serving` and `verify.sh api-equivalence` must run on v0.31.0.
+On v0.31.0 (run 2026-10-18 17:34-17:39 JST, working tree after `00abc81d`):
+`serving` pass (225 s; v0.23.0 Responses run 2026-10-17: 209 s),
+`api-equivalence` pass (28 s; 26 s), Chat UI pass (Kairyu `/v1/responses`
+10 -> 18, chat 0 -> 0, as on v0.23.0). Cancellation probe: `/v1/responses`
+and `/v1/chat/completions` released in 15-17 ms each time, every follow-up
+completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/verification-results/20261018T083456Z/`.
 
-## 2026-10-17 Responses connection — GPU verification pending
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
 
 The 2026-10-17 configuration changes how the rows below were produced: the
 Chat UI and `verify.sh serving` use Kairyu's `/v1/responses`, and Kairyu
@@ -33,8 +39,8 @@ forwards each request to vLLM in its caller's API (a chat as the caller's own
 messages instead of one flattened user message). Serving rows now end naturally
 within 256 output tokens (the Responses API has no `ignore_eos`/`min_tokens`),
 so they are not comparable with the fixed-length chat rows below. The L1
-envelope is unchanged. No measurement of this configuration exists yet;
-`verify.sh serving` and `verify.sh api-equivalence` on the GPU host are pending.
+envelope is unchanged. GPU: `serving` and `api-equivalence` pass on v0.23.0
+(2026-10-17) and on v0.31.0 (2026-10-18, above).
 
 ## Qwen3.8 result (vLLM v0.23.0)
 

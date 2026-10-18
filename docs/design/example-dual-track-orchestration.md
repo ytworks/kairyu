@@ -758,9 +758,10 @@ five routes and four policies.
 
 ### DTO-D18 — Role calls in the caller's API; the V4 example on the official encoder (owner decision, 2026-10-17)
 
-Status: accepted; implemented and CPU-checked; GPU verification pending
-(plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`,
-decision 12).
+Status: accepted; implemented; GPU-verified 2026-10-18 for the V4.1 example
+(every gate, `api-equivalence`, browser smoke and the cancellation probe pass;
+its `MEASUREMENTS.md`); the V4 example was removed 2026-10-18 (plan
+`docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`, decision 12).
 
 - **Both examples.** Every pool is in `upstream_chat_models`,
   `upstream_responses_models` and `upstream_messages_models`, so each role

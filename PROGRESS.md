@@ -105,12 +105,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   authority, leader-fenced CRD publication, and production runtime assembly.
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
-- Caller-API forwarding / example UIs on Responses (2026-10-17): implemented and CPU-tested in one PR; remaining: review and fix rounds, then the GPU final test on this host (owner decision 2026-10-18: after the review) for the 8 remaining examples with an Open WebUI (overlay image IDs, route checks, all gates on `/v1/responses`, `api-equivalence`, browser gates, L1 `xhigh` renders); plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
+- Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-19 — [progress] PR #656 GPU final test complete
+- What: all 7 remaining Open WebUI examples pass every gate on `/v1/responses`, `api-equivalence`, the Chat UI pass (no chat requests) and the cancellation probe (release 0.02-0.23 s); Qwen on vLLM v0.31.0; the V4.1 ensemble judge routes 17/32 coding prompts to ENSEMBLE (9/32 on v0.23.0; owner accepted).
+- Refs: each example's `MEASUREMENTS.md`; FN Responses amendment, DTO-D18, VCO 2026-10-17 amendment Status lines
 
 ### 2026-10-19 — [design] `glm-5.3-flash-quyet-8gpu` deleted (VCO-D23 removal amendment)
 - What: the GLM-writer verified tool example is removed with its own tests. Its final-test serving gate failed on the recorded `dedup-case` limit (c4: GLM's think route answered a turn done without the call it still needed; c8/c16 made the call). The same turn on the live stack: done without a call 2/6 on `/v1/responses`, 1/6 on chat, so not caused by the caller-API forwarding.

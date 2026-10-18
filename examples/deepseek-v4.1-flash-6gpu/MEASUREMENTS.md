@@ -1,8 +1,8 @@
 # deepseek-v4.1-flash-6gpu evidence
 
 Status: **all final gates PASS on the committed configuration (2026-09-30).**
-Since 2026-10-17 the served configuration uses the Responses API; GPU
-verification of that change is pending (last section).
+Since 2026-10-17 the served configuration uses the Responses API; every gate
+passes on it (2026-10-17/18, PR #656 final test; last section).
 
 Hardware: 6 × NVIDIA RTX PRO 6000 Blackwell Server Edition (97,887 MiB,
 SM120, PCIe) out of an 8-GPU host; 1 TiB host memory, 4 NUMA nodes with
@@ -256,10 +256,21 @@ vLLM container) carry the 5 messages unchanged with `reasoning_effort: max`;
 vLLM `/tokenize` of that body renders `Reasoning Effort: 100` and counts
 3,645 tokens, equal to Kairyu's `usage.prompt_tokens`.
 
-## 2026-10-17 Responses connection — GPU verification pending
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
+
+GPU run 2026-10-18 02:05-03:08 JST (UTC 2026-10-17 17:05-18:08), working tree
+with `b4364e98` and `18ed6fa3`: `serving` pass (324 s), `completed` pass
+(1,765 s), `tool-calling` pass (13 s, after `b4364e98`), `vision` (15 s),
+`reasoning` (17 s), `cancellation` (21 s), `long-context` (167 s), `restart`
+(584 s), `api-equivalence` (24 s, after `18ed6fa3`) all pass; Chat UI pass
+(Kairyu `/v1/responses` 24 -> 29, chat 0 -> 0). Cancellation probe after the
+disconnect fixes (`81bf2b22`, `5db4358f`; 2026-10-18 14:45 JST):
+`/v1/responses` 0.21 / 0.08 / 0.23 s, `/v1/chat/completions` 0.11 / 0.09 /
+0.08 s, every follow-up completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-6gpu/verification-results/20261017T170611Z-serving/`.
 
 The served configuration changed after every result above (m9 D2, m11 D4/D7
-amendments of 2026-10-17); none of the gates below has run on it yet:
+amendments of 2026-10-17):
 
 - Open WebUI connects with `api_type: responses`; the effort filter also
   normalizes the body to strict Responses fields and `store: false`.

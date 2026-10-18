@@ -7,14 +7,72 @@ example's System One adapter): `quyet-route` on GPU 6 (route judge only),
 `quyet-judge` on GPU 7 (judgments and form check).
 Raw evidence: `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-quyet-8gpu/results/`.
 
-## 2026-10-17 Responses connection — GPU verification pending
+## 2026-10-17 Responses connection — PR #656 GPU final test (2026-10-18)
 
 The Chat UI and every public-model gate moved to `/v1/responses`, and the
 DeepSeek pool now receives each role call in the caller's API (m9 D2, m11 D4/D7
 amendments of 2026-10-17); a new `api-equivalence` gate compares DeepSeek's L1
-and the public model on the same Responses requests. No gate has been run on
-GPU since; the results below were measured over Chat Completions and remain
-the evidence for that configuration only.
+and the public model on the same Responses requests. The sections after this
+one were measured over Chat Completions (2026-10-11) and are the comparison.
+
+GPU run 2026-10-18 16:02-17:31 JST (UTC 07:02-08:31) on the working tree
+after `81f0a8ee` (Quyet gates judge a streamed reply on its deltas). **All ten
+gates and the Chat UI pass pass; `api-equivalence` passed on the final build
+`1b995e4d` (below), where the cancellation probe also passed.**
+
+| Gate | 2026-10-18 (Responses) | 2026-10-11 (chat) |
+|---|---|---|
+| l1 | pass (35 s) | pass (28 s) |
+| routing | pass: TOOL miss 0 % held-out / 5 % calibration; THINK precision 98.9 %, recall 94.8 % (tool-declared 68.8 %); judge wall 11.1 s for 136 | same rates; 11.2 s |
+| think-route | pass: 6/6 THINK, streamed; p50 1.06 s, TTFT p50 0.91 s | p50 1.07 s, TTFT 0.87 s |
+| effort | pass: THINK 0.8-0.9 s; TOOL 86-147 s, 15,271-26,237 output tokens, 178-185 tok/s, form passed each time | 70-147 s, 12,487-27,997 tokens, 172-191 tok/s |
+| verified-tool-route | pass: 12/12 TOOL with a structured call; 12-16 candidates; form passed 10 first time, 2 published at the fix limit; p50 80.1 s, p95 135.5 s; 173,555 output tokens | 12/12 first time; p50 64.3 s, p95 107.1 s; 149,578 tokens |
+| fallback | pass: `quyet-route` stopped: 2/2 THINK (`backend_error`, 0.9/1.3 s) with a call; `quyet-judge` stopped: TOOL, `judge_unavailable`, published unverified with a call (71.3 s); both back: judged and form-checked (96.7 s) | 0.8-1.3 s; 107.6 s; 111.0 s |
+| serving | pass: 72/72 answered, every reply a structured call (table below) | pass |
+| serving-routed | pass: 72/72 answered (table below) | pass |
+| browser | pass: Open WebUI answers on `/v1/responses` | pass |
+| Chat UI pass | pass: Kairyu `/v1/responses` 196 -> 203, chat 1 -> 1 | — |
+
+serving (agent turns), 2026-10-18 vs 2026-10-11:
+
+| Level | p50 s | p95 s | Wall s | Output tokens | Output tok/s | Form passed |
+|---|---:|---:|---:|---:|---:|---:|
+| c1 | 92.4 (74.8) | 111.6 (85.1) | 980 (594) | 164,726 (103,768) | 168 (175) | 6/8 |
+| c4 | 61.2 (65.4) | 125.8 (106.1) | 366 (390) | 165,696 (168,944) | 453 (433) | 15/15 |
+| c8 | 133.3 (108.7) | 247.7 (223.3) | 463 (269) | 229,287 (201,888) | 495 (751) | 13/15 |
+| c16 | 119.9 (134.2) | 207.0 (235.3) | 343 (417) | 366,574 (398,451) | 1,068 (955) | 29/31 |
+
+Six replies were published at the fix limit, each with its call. The one
+THINK turn per level answered in 2.5-3.4 s.
+
+serving-routed (routing set), 2026-10-18 vs 2026-10-11:
+
+| Level | p50 s | p95 s | Wall s | Output tok/s | TOOL n / p50 s | THINK n / p50 s |
+|---|---:|---:|---:|---:|---|---|
+| c1 | 30.7 (25.3) | 78.5 (41.9) | 308 (221) | 166 (157) | 2 / 76.8 | 6 / 13.3 |
+| c4 | 28.1 (17.2) | 65.9 (104.7) | 156 (187) | 430 (431) | 6 / 58.2 | 10 / 2.5 |
+| c8 | 52.7 (40.1) | 104.4 (122.6) | 140 (153) | 629 (608) | 6 / 69.8 | 10 / 25.1 |
+| c16 | 64.9 (47.8) | 182.7 (172.2) | 211 (233) | 923 (804) | 11 / 125.1 | 21 / 17.6 |
+
+Every TOOL reply of serving-routed passed the form check first time.
+
+`api-equivalence` on that build stopped on the output cap case: the public
+model answered HTTP 502 where L1 answered `incomplete` (an AUTO answer emptied
+by the caller's own `max_output_tokens`); the gate then crashed reading the
+failure. Fixed by `77a81ac8`/`8cbea242` (the AUTO answer is `incomplete`,
+m11 D1 amendment) and `617189f6`/`1c3d0f0e` (the gate reports an HTTP failure
+as a finding).
+
+Final build `1b995e4d` (2026-10-19 00:18-00:30 JST, UTC 2026-10-18
+15:18-15:30): `run.sh up`, then `api-equivalence` **pass** (32 s; the cap case
+answers `incomplete` on both L1 and the public model) and the Chat UI pass
+(Kairyu `/v1/responses` 10 -> 15, chat 0 -> 0). Cancellation probe (stream
+until the first delta while vLLM shows the request active, disconnect, then
+Kairyu's replica slots and every vLLM's running+waiting back to 0, a
+follow-up completes; each try starts on an idle stack): `/v1/responses`
+released in 0.09 / 0.09 / 0.11 s, `/v1/chat/completions` in 0.11 / 0.11 /
+0.12 s, every follow-up completed. No earlier probe of this example measured
+a release (the 2026-10-18 08:31Z attempt read a non-vLLM service's port).
 
 The DeepSeek overlay is rebuilt so that `xhigh` renders the max budget. The
 served vLLM image (`local/vllm-openai:deepseek-v41-quyet-responses`) is

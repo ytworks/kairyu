@@ -7,7 +7,7 @@ warm-up row and one full matrix before it), with row-unique prompt prefixes so
 neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix.
 
-## 2026-10-18 vLLM v0.31.0 — GPU verification pending
+## 2026-10-18 vLLM v0.31.0 — GPU-verified (PR #656 final test)
 
 The replicas moved from the official `vllm/vllm-openai:v0.23.0` image
 (`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`)
@@ -20,10 +20,16 @@ sets `extra_args={}`, so every Responses request Kairyu forwarded prefilled
 slowly; the measurement (1.43 s chat / 4.33 s Responses on v0.23.0, 1.26 s /
 1.27 s on v0.31.0, 16 concurrent route-judge requests on one replica) is in
 the single-GPU example's `MEASUREMENTS.md`. The compose flags are unchanged.
-Every result below was measured on v0.23.0; `run.sh up`, `serving`,
-`tool-calling`, `api-equivalence` and the Chat UI must run on v0.31.0.
+On v0.31.0 (run 2026-10-18 17:44-17:52 JST, working tree after `00abc81d`):
+`run.sh up`, `serving` pass (414 s; v0.23.0 Responses run 2026-10-17: 473 s),
+`tool-calling` pass (16 s; 15 s), `api-equivalence` pass (32 s; 31 s), Chat UI
+pass (Kairyu `/v1/responses` 11 -> 19, chat 0 -> 0, as on v0.23.0).
+Cancellation probe: `/v1/responses` and `/v1/chat/completions` released in
+92-97 ms each time, every follow-up completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-dp8-8gpu/verification-results/20261018T084418Z/`.
+The rows below were measured on v0.23.0.
 
-## 2026-10-17 Responses connection — GPU verification pending
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
 
 The served configuration changed after the locked run below: Kairyu forwards
 each request to vLLM in its caller's API (`upstream_chat_models`,

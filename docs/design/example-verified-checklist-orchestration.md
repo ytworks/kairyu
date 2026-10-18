@@ -985,7 +985,9 @@ object. `verify.sh api-equivalence` compares `kairyu-verified-tool` with the
 writer's L1 on status and usage keys. The DeepSeek overlay maps the
 encoder's `xhigh` to the max budget (Kairyu's Responses wire form of L3 max);
 GLM's template is checked on GPU. Quyet, System One and the questions,
-thresholds, fixes and budget are unchanged. GPU verification is pending.
+thresholds, fixes and budget are unchanged. GPU-verified 2026-10-18 for
+`deepseek-v4.1-quyet-8gpu`: all ten gates, the Chat UI pass and the
+cancellation probe pass (its `MEASUREMENTS.md`).
 
 Removal amendment 2026-10-19 (owner decision during the PR #656 GPU final
 test): `examples/glm-5.3-flash-quyet-8gpu` is deleted with its own tests.
