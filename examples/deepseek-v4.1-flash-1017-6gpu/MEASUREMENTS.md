@@ -1,7 +1,6 @@
 # deepseek-v4.1-flash-1017-6gpu evidence
 
-Status: **L1 selection in progress (2026-10-19).** Only the rows below with
-a run or log name are measured.
+Status: **L1 selected (2026-10-19); final gates in progress.**
 
 Hardware: 6 × NVIDIA RTX PRO 6000 Blackwell Server Edition (97,887 MiB,
 SM120, PCIe) out of an 8-GPU host; 1 TiB host memory, 4 NUMA nodes with
@@ -70,9 +69,71 @@ is unchanged.
 
 ## L1 selection
 
-Pending on GPU (plan S1–S3): `verify.sh l1`, then `tune.py baseline
-image-nightly` and the recipe levers one at a time.
+Rule (the six-GPU amendment's): one change at a time; adopted only with
+≥ 5 % output throughput at c1, c8 or c32 and no > 5 % loss elsewhere.
+Rows (`tune.py`): 32 requests of ≈ 8K unique input tokens through Kairyu's
+`/v1/responses`, capped at 256 output tokens, thinking high (almost every
+request reaches the cap inside its reasoning). Cells: output tok/s / model
+TTFT p50 ms. Single trials.
+
+### `l1` on the v0.32.0 image
+
+Run `20261018T181734Z-l1`: **PASS 17/17.** Rendered efforts default 75,
+low 50, high 75, max 100, `xhigh` 100, chat closes thinking; vLLM's prompt
+tokens equal the checkpoint encoder's for the 1017 tool-turn case (no tools
+declared: the current turn's `r2` reasoning is kept across its tool result)
+and the two golden chat fixtures; 12 concurrent `17 * 19` probes per
+variant (default/low/high/max/chat) all exact with finite log-probabilities,
+answered by all six DP engines; L1 default sampling `{'temperature': 1.0,
+'top_p': 1.0}`; tool call and image pass. Weights 59.02–59.07 GiB per GPU,
+14.88 GiB KV, 8,202,752–8,213,527 KV tokens per DP engine (7.8 × a
+1,048,576-token request). The first run (`20261018T181644Z-l1`) failed only
+`encoder_golden_1_tools`: the checkpoint fixture's tool calls carry no `id`,
+which vLLM's chat API requires; the gate now gives each call the id of the
+tool result that answers it, for vLLM and the reference encoder alike.
+
+### S1: runtime image
+
+Run `20261018T181801Z-tuning` (committed DP6 / EP6 command on both images).
+
+| Candidate | c1 | c8 | c32 | KV tokens per engine |
+|---|---|---|---|---|
+| v0.32.0 (running baseline) | 101.8 / 713 | 284.8 / 1,495 | 665.6 / 5,060 | 8,213,527 |
+| v0.32.0, restarted | 102.4 / 709 | 276.4 / 1,507 | 678.6 / 5,077 | 8,202,752 |
+| 2026-09-30 nightly | 100.7 / 685 | 289.4 / 1,336 | 624.4 / 5,240 | 8,283,516 |
+
+Against the mean of the two v0.32.0 rows (c1 102.1, c8 280.6, c32 672.1),
+the nightly is −1.4 % / +3.1 % / −7.1 %: no gain of 5 % anywhere, so
+**v0.32.0 is adopted**. The two v0.32.0 rows differ by 3.0 % at c8 and 1.9 %
+at c32, which sizes single-trial noise. The nightly candidate passed
+`tune.py`'s readiness probes (exact answers from every DP rank, tool call,
+image); its full `l1` was not run because it is not adopted.
 
 `use_thp` (recipe B200 TP2 arm) is not a candidate: v0.32.0's EngramConfig
 requires `dp_shared_memory=false` for it, i.e. one private pinned copy of
 the 183 GiB tables per DP rank (6 × 183 GiB exceeds the host's 1 TiB).
+
+### S2: recipe levers on v0.32.0
+
+Run `20261018T185202Z-tuning`, one change each against the committed
+command; percentages against the mean of the two v0.32.0 rows of S1.
+
+| Candidate | c1 | c8 | c32 | KV tokens per engine | Result |
+|---|---|---|---|---|---|
+| adaptive verification (NVIDIA DSpark default) | — | — | — | — | **FAIL** at startup: `Adaptive verification trims verification requests on device, which the DeepseekV41IndexerBackend attention backend does not support` (as on the nightly) |
+| `--prefill-schedule-interval 64` | 102.6 / 703 (+0.5 %) | 270.9 / 2,045 (−3.5 %) | 541.6 / 5,072 (−19.4 %) | 8,202,752 | rejected |
+| `--max-cudagraph-capture-size 1024` | 100.8 / 704 (−1.3 %) | 267.0 / 1,411 (−4.8 %) | 656.3 / 4,949 (−2.4 %) | 6,212,106 | rejected (and 24 % less KV) |
+| batch 8K | 104.7 / 639 (+2.5 %) | 292.8 / 1,488 (+4.3 %) | 668.8 / 5,676 (−0.5 %) | 4,926,403 | rejected (no ≥ 5 % gain; 40 % less KV) |
+
+No lever reaches the 5 % line, so nothing is combined (S3 not needed).
+
+## Selected L1
+
+vLLM v0.32.0 + this overlay (image `sha256:3dd34fc8…`, the one every row
+above and the final gates ran on), DP6 / EP6 (TP1), Engram tables in shared
+pinned host memory, `FLASHINFER_MLA_SPARSE_DSV41`, FP8 KV, MXFP4 indexer,
+64-token pages, Marlin MoE, DSpark 5 (full verification),
+`--max-num-batched-tokens 4096`, `--gpu-memory-utilization 0.92`,
+`--max-num-seqs 128`, prefix caching, temperature 1.0 / top_p 1.0,
+thinking high by default. The overlay keeps accepting the nightly so S1 can
+be repeated (`tune.py image-nightly`).

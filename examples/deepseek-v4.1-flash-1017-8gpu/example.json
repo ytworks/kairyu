@@ -53,7 +53,7 @@
   },
   "vllm": {
     "image": "local/vllm-openai:deepseek-v41-1017-8gpu",
-    "image_id": "sha256:995a89fcb6c9cf245b39143712bb3730837808e9bfb2b670d3f8abbfcbe65fbd",
+    "image_id": "sha256:7237421efe0a2eb901560ff550600c02e90310fda100caded27ff8475bf19b0c",
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",

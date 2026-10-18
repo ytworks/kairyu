@@ -39,7 +39,7 @@ pools:
         attention_data_parallel_size: 8
         dspark_enabled: true
         # Recorded after the build of this example's overlay (GPU selection pending).
-        container_image_digest: sha256:995a89fcb6c9cf245b39143712bb3730837808e9bfb2b670d3f8abbfcbe65fbd
+        container_image_digest: sha256:7237421efe0a2eb901560ff550600c02e90310fda100caded27ff8475bf19b0c
     unhealthy_after: 1
     queue_depth_threshold: 0
     prefix_index: true

@@ -57,10 +57,11 @@ reference encoder does.
 
 | Image | vLLM / FlashInfer / torch | Overlay build | Kernel gate (`check_sm120_kernels.py`) |
 |---|---|---|---|
-| `vllm/vllm-openai:v0.32.0@sha256:befccf0e…` + this example's overlay → `local/vllm-openai:deepseek-v41-1017-8gpu` `sha256:995a89fcb6c9cf245b39143712bb3730837808e9bfb2b670d3f8abbfcbe65fbd` | 0.32.0 / 0.7.0.post1 / 2.13.0+cu130 | all nine anchors patched; encoder checks pass (efforts 50/75/100, `xhigh` 100, default 75, 1017 tool-turn case) | PASS 28/28 (`kernel-checks/kernels-v032.log`) |
+| `vllm/vllm-openai:v0.32.0@sha256:befccf0e…` + this example's overlay → `local/vllm-openai:deepseek-v41-1017-8gpu` `sha256:7237421efe0a2eb901560ff550600c02e90310fda100caded27ff8475bf19b0c` | 0.32.0 / 0.7.0.post1 / 2.13.0+cu130 | all nine anchors patched; encoder checks pass (efforts 50/75/100, `xhigh` 100, default 75, 1017 tool-turn case) | PASS 28/28 (`kernel-checks/kernels-v032-r2.log`; the overlay accepts only v0.32.0, the six-GPU 1017 example's S1 selection) |
 
-The image follows the six-GPU 1017 example's S1 image selection (v0.32.0 or
-the 2026-09-30 nightly, both with the same overlay).
+The image follows the six-GPU 1017 example's S1 selection: v0.32.0 over the
+2026-09-30 nightly with the same overlay (c32 +7.6 %, c1/c8 within noise;
+`deepseek-v4.1-flash-1017-6gpu/MEASUREMENTS.md`).
 
 ## L1 selection
 

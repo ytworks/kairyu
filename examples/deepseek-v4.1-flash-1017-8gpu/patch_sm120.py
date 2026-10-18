@@ -2,9 +2,9 @@
 
 Every edit replaces exactly one known source anchor and fails the image build
 when the anchor is missing or repeated, so an upstream change can never be
-patched silently. The edits target exact vLLM versions (``VLLM_VERSIONS``:
-the v0.32.0 release and the 2026-09-30 nightly, whose anchors are identical);
-any other version fails the build.
+patched silently. The edits target one exact vLLM version (``VLLM_VERSIONS``:
+the v0.32.0 release the six-GPU 1017 example selected over the 2026-09-30
+nightly); any other version fails the build.
 
 0. 1017 encoder rule: the checkpoint's ``encoding/encoding.py`` (revision
    1bae0e10) no longer starts a turn at a user message that holds only tool
@@ -335,9 +335,8 @@ def top_p_guard(source: str) -> str:
 
 FLASHINFER_SM120 = "data/include/flashinfer/attention/sparse_mla_sm120"
 
-# vllm/vllm-openai:v0.32.0 and the 2026-09-30 nightly (both bundle FlashInfer
-# 0.7.0.post1; every anchor below is identical in the two).
-VLLM_VERSIONS = ("0.32.0", "0.30.1rc1.dev396+gac68c3087")
+# vllm/vllm-openai:v0.32.0 (FlashInfer 0.7.0.post1 bundled).
+VLLM_VERSIONS = ("0.32.0",)
 VLLM_EDITS = [
     ("vllm", "tokenizers/deepseek_v41_encoding.py", (tool_results_continue_turn, xhigh_is_max)),
     ("vllm", "models/deepseek_v41/attention.py", (configurable_swa_pages,)),
