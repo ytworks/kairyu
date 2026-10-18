@@ -1,6 +1,6 @@
 # deepseek-v4.1-flash-1017-6gpu evidence
 
-Status: **L1 selected (2026-10-19); final gates in progress.**
+Status: **all final gates PASS on the committed configuration (2026-10-19).**
 
 Hardware: 6 × NVIDIA RTX PRO 6000 Blackwell Server Edition (97,887 MiB,
 SM120, PCIe) out of an 8-GPU host; 1 TiB host memory, 4 NUMA nodes with
@@ -137,3 +137,37 @@ pinned host memory, `FLASHINFER_MLA_SPARSE_DSV41`, FP8 KV, MXFP4 indexer,
 `--max-num-seqs 128`, prefix caching, temperature 1.0 / top_p 1.0,
 thinking high by default. The overlay keeps accepting the nightly so S1 can
 be repeated (`tune.py image-nightly`).
+
+## Final gates on the committed configuration
+
+Run 2026-10-19 04:42–05:20 JST, image `sha256:3dd34fc8…`, served-config
+SHA-256 `2ff9f18a4f8ec231b403ed5eb6d273e8f8d026d686da350f6ea4324e0dd7c1c1`,
+every gate `--no-start` in order (`final-gates-20261019.log` in the NVMe
+example directory).
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `l1` | PASS 17/17 (10 s) | `20261018T194209Z-l1`; as in the selection run above |
+| `serving` | PASS (318 s) | c1/8/16/32/64: 101.8 / 278.0 / 364.2 / 579.0 / 803.7 tok/s; model TTFT p50 700 / 1,155 / 1,744 / 3,462 / 9,095 ms (p99 731 / 2,615 / 4,866 / 8,052 / 15,195); 64/64 per row (`20261018T194219Z-serving`) |
+| `completed` | PASS 192/192 (1,321 s) | generic c1 146.5 tok/s, completion p50 3.6 s (p99 16.0 s); c8 521.6, 5.7 s (44.0 s); c32 618.7, 8.7 s (50.5 s); coding c1 173.0, 10.8 s (79.9 s); c8 643.5, 16.6 s (108.2 s); c32 1,060.9, 23.7 s (123.9 s) (`20261018T194737Z-completed`) |
+| `tool-calling` | PASS 5/5 (3 s) | 12 concurrent calls, tool-result turn, streamed call, low and max effort |
+| `vision` | PASS 6/6 | completed red answers |
+| `reasoning` | PASS 4/4 | default/low/high/max all `323` with reasoning |
+| `cancellation` | PASS | L1 observed the request; released 0.55 s after the disconnect; follow-up completed |
+| `long-context` | PASS 4/4 (137 s) | 32,800 / 131,104 / 262,176 / 1,039,904 prompt tokens, 3.0 / 10.5 / 21.4 / 100.6 s, exact keys |
+| `restart` | PASS | healthy and answering 461 s after the L1 restart |
+| `api-equivalence` | PASS (13 s) | `20261018T201943Z-api-equivalence` |
+| Chat UI | PASS | the example's Open WebUI in Chromium (Playwright 1.60.0): two typed turns answered `323` and `324` (the second uses the first), an attached red PNG answered `Red`; Kairyu `/v1/responses` 1,254 → 1,261 (the three turns plus Open WebUI's own title/tag tasks), `/v1/chat/completions` 0 → 0 |
+
+Chat UI note: Kairyu streams these answers with a reasoning item
+(`response.reasoning_text.delta`, checked directly), but Open WebUI v0.12.3
+stored and showed only the message item for them. The L3/UI is the V4.1
+examples' and is unchanged here.
+
+For orientation (same host, 0909 weights on the 2026-09-30 nightly,
+`deepseek-v4.1-flash-6gpu` 2026-10-17 on the same Responses rows): `serving`
+101.4 / 303.0 / 412.8 / 593.7 / 782.3 tok/s; `completed` generated 166,125
+coding tokens at c1 (1017: 127,449, −23 %) and 43,254 generic (1017: 24,769,
+−43 %), with completion p50 20.0 s / 5.7 s at c1 (1017: 10.8 s / 3.6 s) —
+the shorter outputs the 1017 card reports. These rows check completion and
+latency, not answer quality.

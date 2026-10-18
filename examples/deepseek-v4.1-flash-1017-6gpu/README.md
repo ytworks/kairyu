@@ -13,8 +13,8 @@ Open WebUI (:3017) -> Kairyu (:8017) -> ReplicaPool -> vLLM (DP6 / EP6 + DSpark,
 the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 0909 checkpoint; the weights and `encoding/encoding.py` changed.
 
-> **L1 selected (2026-10-19); final gates in progress.** See
-> `MEASUREMENTS.md`.
+> **GPU-verified 2026-10-19.** Every gate, `api-equivalence` and the Chat UI
+> pass succeed on the committed configuration (`MEASUREMENTS.md`).
 
 ## Start
 
