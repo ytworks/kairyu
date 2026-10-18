@@ -106,11 +106,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
+- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` and `-8gpu` implemented (V4.1 L2/L3, own overlay with the 1017 encoder rule, top_p 1.0); L1 selection and gates pending on GPU, then DeepSWE (113 tasks, 8 workers, max) on the six-GPU one
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-19 — [design] DeepSeek-V4.1-Flash-1017 six- and eight-GPU examples (FN-D9 1017 amendment)
+- What: two new examples for the 1017 weight refresh with the V4.1 L2/L3 unchanged; their overlay ports the 1017 encoder rule (a tool-result-only user message does not start a turn) into vLLM's encoder copy, maps `xhigh` to 100, and follows the 1017 card's top_p 1.0; the L1 (v0.32.0 vs the pinned nightly, recipe levers, DP8 vs TP8 on eight GPUs) is selected by measurement.
+- Why: owner request 2026-10-19 (fastest L1 without lowering accuracy; DeepSWE on the six-GPU example).
+- Refs: `docs/design/frontier-native-runtime.md` FN-D9 1017 amendment; `docs/superpowers/plans/2026-10-19-deepseek-v41-flash-1017-examples.md`; PR #658
 
 ### 2026-10-19 — [progress] PR #656 GPU final test complete
 - What: all 7 remaining Open WebUI examples pass every gate on `/v1/responses`, `api-equivalence`, the Chat UI pass (no chat requests) and the cancellation probe (release 0.02-0.23 s); Qwen on vLLM v0.31.0; the V4.1 ensemble judge routes 17/32 coding prompts to ENSEMBLE (9/32 on v0.23.0; owner accepted).
