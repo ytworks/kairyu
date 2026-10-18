@@ -179,10 +179,18 @@ def test_an_auto_models_image_answer_is_not_judged(monkeypatch, orchestrated, fi
     assert run_case("image", targets, args)["findings"] == findings
 
 
-def test_an_http_failure_is_a_finding_not_a_crash(monkeypatch):
-    # A Quyet AUTO model answered the cap case with HTTP 502 (GPU 2026-10-18);
-    # the case's own check then read fields a failed capture does not have.
-    failed = Capture(502, [], None, '{"error": {"code": "backend_error"}}')
+@pytest.mark.parametrize(
+    ("failed", "finding"),
+    [
+        # A Quyet AUTO model answered the cap case with HTTP 502 (GPU 2026-10-18);
+        # the case's own check then read fields a failed capture does not have.
+        (Capture(502, [], None, '{"error": {"code": "backend_error"}}'), "l3: HTTP 502"),
+        # A 200 stream cut before its terminal event carries no response either.
+        (Capture(200, [], None, "data: {}"), "l3: HTTP 200"),
+    ],
+    ids=["http-502", "no-terminal-event"],
+)
+def test_a_capture_without_a_response_is_a_finding_not_a_crash(monkeypatch, failed, finding):
     monkeypatch.setattr(
         upstream_api_equivalence,
         "capture",
@@ -192,4 +200,4 @@ def test_an_http_failure_is_a_finding_not_a_crash(monkeypatch):
     args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=True)
 
     findings = run_case("cap", targets, args)["findings"]
-    assert any(finding.startswith("l3: HTTP 502") for finding in findings)
+    assert any(item.startswith(finding) for item in findings)
