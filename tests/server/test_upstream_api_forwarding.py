@@ -6,8 +6,9 @@ reaches an upstream declared in ``upstream_responses_models`` on
 ``/v1/responses`` with the conversation as it is, a Messages caller prefers
 ``/v1/messages`` then ``/v1/responses``, everything else stays on chat, and an
 AUTO model's role calls follow the caller's API. An assistant prefill skips
-Messages (vLLM opens a new turn there) and a single-call limit stays on vLLM's
-chat path, the only one that applies it.
+Messages (vLLM opens a new turn there), and a single-call limit and JSON mode
+stay on vLLM's chat path, the only one that applies them in every pinned
+version.
 """
 
 from __future__ import annotations
@@ -388,6 +389,25 @@ async def test_a_single_call_limit_stays_on_vllm_chat(upstream, endpoint, reques
     ((_host, path, body),) = upstream.calls
     assert path == "/v1/chat/completions"
     assert body["parallel_tool_calls"] is False
+
+
+async def test_json_mode_stays_on_vllm_chat(upstream):
+    # vLLM v0.23.0's Responses drops text.format json_object; its chat keeps it.
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=True)))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "remote",
+                "input": "Answer in JSON.",
+                "text": {"format": {"type": "json_object"}},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    assert path == "/v1/chat/completions"
+    assert body["response_format"] == {"type": "json_object"}
 
 
 async def test_auto_role_calls_follow_the_callers_api(upstream, tmp_path):

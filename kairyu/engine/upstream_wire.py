@@ -253,24 +253,37 @@ def responses_tool_choice(choice: object) -> object:
     raise WireError("tool_choice cannot be expressed on the Responses wire")
 
 
-def responses_text_format(response_format: object) -> dict[str, object] | None:
+# text.format types each upstream's Responses serving enforces. vLLM v0.23.0
+# turns only json_schema into structured outputs and silently drops
+# json_object (v0.31.0 enforces it); the backend does not know the vLLM
+# version, so JSON mode takes vLLM's chat path, which enforces it in every
+# pinned version. A Kairyu replica's Responses boundary enforces both.
+_RESPONSES_FORMATS = {
+    "vllm": frozenset({"text", "json_schema"}),
+    "kairyu": frozenset({"text", "json_object", "json_schema"}),
+}
+
+
+def responses_text_format(upstream: str, response_format: object) -> dict[str, object] | None:
     if response_format is None:
         return None
     if not isinstance(response_format, Mapping):
         raise WireError("response_format must be an object")
     kind = response_format.get("type")
-    if kind in {"text", "json_object"}:
+    if kind not in _RESPONSES_FORMATS[upstream]:
+        raise WireError(
+            f"response_format type {kind!r} cannot be sent on the {upstream} Responses wire"
+        )
+    if kind != "json_schema":
         return {"format": {"type": kind}}
-    if kind == "json_schema":
-        schema = response_format.get("json_schema")
-        if not isinstance(schema, Mapping):
-            raise WireError("response_format.json_schema must be an object")
-        converted = {"type": "json_schema", "name": schema.get("name") or "response"}
-        for key in ("schema", "strict", "description"):
-            if key in schema:
-                converted[key] = schema[key]
-        return {"format": converted}
-    raise WireError(f"response_format type {kind!r} cannot be sent on the Responses wire")
+    schema = response_format.get("json_schema")
+    if not isinstance(schema, Mapping):
+        raise WireError("response_format.json_schema must be an object")
+    converted = {"type": "json_schema", "name": schema.get("name") or "response"}
+    for key in ("schema", "strict", "description"):
+        if key in schema:
+            converted[key] = schema[key]
+    return {"format": converted}
 
 
 # Chat-wire sampling fields the Responses wire expresses, by upstream: vLLM's
@@ -348,7 +361,7 @@ def responses_expressible(upstream: str, validated: Mapping[str, object]) -> boo
     response_format = validated.get("response_format")
     if response_format is not None:
         try:
-            responses_text_format(response_format)
+            responses_text_format(upstream, response_format)
         except WireError:
             return False
     return True
@@ -401,7 +414,7 @@ def responses_body(
     effort = validated.get("reasoning_effort")
     if effort is not None:
         body["reasoning"] = {"effort": _RESPONSES_EFFORT[str(effort)]}
-    text = responses_text_format(validated.get("response_format"))
+    text = responses_text_format(upstream, validated.get("response_format"))
     if text is not None:
         body["text"] = text
     if tools:
