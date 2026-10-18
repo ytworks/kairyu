@@ -886,6 +886,80 @@ def test_profile_judge_quota_is_reserved_before_dispatch():
     assert not engine.prompts_seen
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/responses", {"model": "auto", "input": "Write a Rust CLI.", "stream": True}),
+        (
+            "/v1/messages",
+            {
+                "model": "auto",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Write a Rust CLI."}],
+                "stream": True,
+            },
+        ),
+    ],
+    ids=["responses", "messages"],
+)
+async def test_a_client_leaving_during_the_profile_judge_is_answered_499(path, body):
+    # The Responses and Messages adapters stream through the chat handler,
+    # which answers 499 when the client leaves while the judge runs; the
+    # adapters relay that instead of reading a stream that does not exist.
+    from kairyu.engine.mock import MockBackend
+    from kairyu.orchestration.conductor import RoleSpec
+
+    engine = MockBackend()
+    judge = MockBackend(latency_s=30)
+    final_role = RoleSpec(
+        name="final",
+        worker="tier1",
+        role_type="synthesizer",
+        prompt="[final] {query}",
+    )
+    app = create_legacy_app(
+        {"plain": engine},
+        orchestrators={
+            "auto": Orchestrator(
+                {"tier1": engine, "judge": judge},
+                roles=(final_role,),
+                profiles={"general": (final_role,)},
+                profile_judge=_judge_policy(),
+            )
+        },
+    )
+    incoming = [
+        {"type": "http.request", "body": json.dumps(body).encode(), "more_body": False},
+    ]
+    sent = []
+
+    async def receive():
+        return incoming.pop(0) if incoming else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-type", b"application/json"), (b"host", b"test")],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 499
+    assert not engine.prompts_seen
+
+
 def test_profile_judge_usage_settles_when_later_preflight_rejects(tmp_path):
     from fastapi.testclient import TestClient
 

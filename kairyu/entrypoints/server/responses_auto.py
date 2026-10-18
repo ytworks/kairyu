@@ -17,7 +17,7 @@ import logging
 from collections.abc import AsyncIterator
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from kairyu.entrypoints.chat_template import ToolCallProtocol
 from kairyu.entrypoints.server.chat_service import ChatRequestError, _normalize_tool_choice
@@ -258,6 +258,10 @@ async def auto_response(
         )
         if isinstance(delegated, JSONResponse):
             return _delegated_failure(request, emitter, delegated)
+        if not isinstance(delegated, StreamingResponse):
+            # The client left while the profile judge ran (the chat handler's
+            # 499); there is no stream to relay and nobody to answer.
+            return delegated
         assembler = OutputAssembler(
             emitter,
             scanner=(

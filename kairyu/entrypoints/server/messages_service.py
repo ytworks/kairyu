@@ -19,7 +19,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import replace
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from kairyu.engine.backend import (
@@ -1501,6 +1501,10 @@ async def _orchestrated_message(
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
             return _rerendered_chat_json_error(delegated, request_id)
+        if not isinstance(delegated, StreamingResponse):
+            # The client left while the profile judge ran (the chat handler's
+            # 499); there is no stream to read and nobody to answer.
+            return delegated
         if request.stream:
             return sse_response(
                 _relay_auto_tool_stream(
@@ -1550,6 +1554,8 @@ async def _orchestrated_message(
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
             return _rerendered_chat_json_error(delegated, request_id)
+        if not isinstance(delegated, StreamingResponse):
+            return delegated  # the client left during the judge (499), as above
         return sse_response(
             _relay_auto_stream(
                 request, delegated.body_iterator, message_id=message_id
