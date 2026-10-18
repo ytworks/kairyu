@@ -299,6 +299,18 @@ GPU verification of this section is pending.
   vLLM continues) have a Responses form; so does the route judge's request
   (its `min_p` is 0, the value vLLM's Responses request always samples with).
 
+## Qwen L1
+
+The two Qwen replicas run the official `vllm/vllm-openai:v0.31.0` image,
+pinned by registry digest (DTO-D16 amendment, 2026-10-18; v0.23.0 before),
+with unchanged flags. On v0.23.0 every request that carries `extra_args`
+prefills about 3x slower, and v0.23.0's Responses serving always sets
+`extra_args={}`. With every role call on `/v1/responses`, the route judge's
+prefill at 16 concurrent requests on one replica took 4.33 s instead of
+1.43 s on chat, and the 5 s judge timed out on 13 of 32 coding c32 requests.
+On v0.31.0 the same prefill takes 1.27 s (1.26 s on chat). GPU verification
+on v0.31.0 is pending ([`MEASUREMENTS.md`](MEASUREMENTS.md)).
+
 ## DeepSeek L1 and its overlay
 
 The DeepSeek service copies the committed six-GPU command and differs in two

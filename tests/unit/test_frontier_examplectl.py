@@ -44,7 +44,7 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
         "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e"
     )
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
-    assert spec["vllm"]["release"] == "v0.23.0"
+    assert spec["vllm"]["release"] == "v0.31.0"
     assert compose["services"]["vllm"]["image"] == (
         f"${{VLLM_IMAGE:-{spec['vllm']['image']}}}"
     )

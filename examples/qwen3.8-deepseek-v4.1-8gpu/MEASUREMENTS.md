@@ -1,13 +1,42 @@
 # qwen3.8-deepseek-v4.1-8gpu evidence
 
 Status: **GPU verification pending** for the 2026-10-17 Responses connection
-(below). The GPU gates passed on the chat configuration of 2026-10-01 (DTO-D17
-with the loosened ENSEMBLE criteria and judge fallback `deepseek_think`); those
+and the 2026-10-18 Qwen vLLM v0.31.0 image (below). The GPU gates passed on
+the chat configuration of 2026-10-01 (DTO-D17 with the loosened ENSEMBLE
+criteria and judge fallback `deepseek_think`, Qwen on vLLM v0.23.0); those
 results describe that configuration, not the current one.
 
 Hardware: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, PCIe). The
 DeepSeek-V4.1-Flash L1 runs on GPUs 0–5; the two Qwen3.8-27B replicas run on
 GPUs 6 and 7.
+
+## 2026-10-18 Qwen pools on vLLM v0.31.0 — GPU verification pending
+
+What changed (DTO-D16 amendment of 2026-10-18): both Qwen replicas moved from
+the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`)
+to the official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+as in `qwen3.8-27b-1gpu`. The Qwen compose flags and the DeepSeek overlay
+are unchanged.
+
+Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+slower, and v0.23.0's Responses serving always sets `extra_args={}`, so every
+Responses request Kairyu forwarded to Qwen prefilled slowly. Measured on GPU
+(PR #656 final test) with the route judge's `profile_judge` request, 16
+concurrent on one Qwen3.8 replica:
+
+| Qwen vLLM | chat | Responses | chat with an empty `vllm_xargs` |
+|---|---:|---:|---:|
+| v0.23.0 | 1.43 s | 4.33 s | 4.33 s |
+| v0.31.0 | 1.26 s | 1.27 s | 1.26 s |
+
+On v0.23.0 the slowdown pushed the 5 s route judge past its timeout on 13 of
+32 coding c32 requests and doubled the generic c32 judge p50 (1,982 →
+4,468 ms).
+
+Remaining on GPU: `run.sh up` and every gate below on the v0.31.0 Qwen pools.
 
 ## 2026-10-17 Responses connection — GPU verification pending
 
@@ -51,7 +80,8 @@ is rebuilt by this change; its 2026-10-18 build is pinned as
   `deepseek-v4.1-flash-6gpu`: DP6/EP6, Engram offload, 4K / 0.92, and DSpark
   5 with full verification. Its selection and rejected candidates are in that
   example's `MEASUREMENTS.md`.
-- The Qwen service is the V4 ensemble example's.
+- The Qwen service is the V4 ensemble example's, measured there on vLLM
+  v0.23.0; since 2026-10-18 it runs on v0.31.0 with the same flags (above).
 
 ## Overlay edit 7 (CPU rendering check, 2026-09-30)
 

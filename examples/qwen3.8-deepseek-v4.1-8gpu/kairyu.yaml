@@ -43,7 +43,7 @@ pools:
             family: qwen3.8-hybrid-mamba-paged-kv
           tensor_parallel_size: 1
           mtp_enabled: false
-          container_image_digest: sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
+          container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
       - backend: openai
         health_url: http://qwen-1:8000/health
         options: {<<: *qwen, base_url: http://qwen-1:8000/v1}

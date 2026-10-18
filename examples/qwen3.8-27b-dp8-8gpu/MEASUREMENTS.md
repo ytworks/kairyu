@@ -7,6 +7,22 @@ warm-up row and one full matrix before it), with row-unique prompt prefixes so
 neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix.
 
+## 2026-10-18 vLLM v0.31.0 — GPU verification pending
+
+The replicas moved from the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`)
+to the official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+as in `qwen3.8-27b-1gpu` (owner decision). Why: on v0.23.0 every request that
+carries `extra_args` prefills about 3x slower and its Responses serving always
+sets `extra_args={}`, so every Responses request Kairyu forwarded prefilled
+slowly; the measurement (1.43 s chat / 4.33 s Responses on v0.23.0, 1.26 s /
+1.27 s on v0.31.0, 16 concurrent route-judge requests on one replica) is in
+the single-GPU example's `MEASUREMENTS.md`. The compose flags are unchanged.
+Every result below was measured on v0.23.0; `run.sh up`, `serving`,
+`tool-calling`, `api-equivalence` and the Chat UI must run on v0.31.0.
+
 ## 2026-10-17 Responses connection — GPU verification pending
 
 The served configuration changed after the locked run below: Kairyu forwards

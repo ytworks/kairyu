@@ -515,3 +515,40 @@ are unchanged. No framework mechanism is removed: DeepSeek-V4 model support,
 System One and the llama.cpp upstream stay in `kairyu/`.
 Why: owner decision 2026-10-18; the removed examples' model storage (about
 723 GiB on the host's NVMe) was needed for the remaining examples.
+
+### Qwen3.8 vLLM v0.31.0 amendment (2026-10-18, owner decision)
+
+Status: implemented; `qwen3.8-27b-1gpu`'s `run.sh up` and its probes passed
+on v0.31.0 (GPU, 2026-10-18); every other GPU gate of the three examples
+below is pending on the new image.
+
+Applies to the examples that serve Qwen3.8-27B: `qwen3.8-27b-1gpu`, the
+FN-D9 replica example `qwen3.8-27b-dp8-8gpu`, and the Qwen pools of
+`qwen3.8-deepseek-v4.1-8gpu` (DTO-D16 amendment of the same date; its
+DeepSeek overlay is unchanged).
+
+- Qwen's L1 moves from the official `vllm/vllm-openai:v0.23.0` image
+  (`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`,
+  source `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`, FlashInfer 0.6.12) to
+  the official `v0.31.0` image the GLM-5.3-Flash amendment pins
+  (`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+  source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+  in each example's `compose.yaml` default, `example.json` and `kairyu.yaml`
+  `container_image_digest`. The L1 flags, the measured envelope
+  (`qwen3.8-27b-1gpu/MEASUREMENTS.md`) and the launchers are unchanged.
+- Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+  slower, and v0.23.0's Responses serving always sets `extra_args={}`, so
+  every Responses request Kairyu forwards to Qwen (Responses connection
+  amendment) prefilled slowly. Measured on GPU with the V4.1 ensemble's
+  `profile_judge` request, 16 concurrent on one Qwen3.8 replica: prefill
+  1.43 s on chat against 4.33 s on Responses and 4.33 s on chat with an empty
+  `vllm_xargs`; on v0.31.0 1.26 s / 1.27 s / 1.26 s. In the V4.1 ensemble the
+  slowdown pushed the 5 s route judge past its timeout on 13 of 32 coding c32
+  requests and doubled the generic c32 judge p50 (1,982 → 4,468 ms).
+- The v0.23.0 findings recorded above and in the examples stay as v0.23.0
+  evidence: the envelope's tuning rows (and its failed `FULL_AND_PIECEWISE`
+  candidate), and the `qwen3` parser behaviour behind the 2026-10-18
+  `--default-chat-template-kwargs` fix, which stays. The m9 D2 wire rules
+  that cite v0.23.0 are unchanged, because the backend does not know the
+  vLLM version.
+- GPU consequences: every gate of the three examples runs again on v0.31.0.

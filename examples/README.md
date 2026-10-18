@@ -30,8 +30,11 @@ change is pending in every one of these environments.
 over identical L1 replicas, and its `verify.sh` proves the per-replica split
 and the OpenAI tool-calling agent contract (`tool-calling`).
 Each `run.sh` command prints its API and Chat UI URLs when the stack is ready.
-Qwen3.8-27B uses the digest-pinned official vLLM v0.23.0 image;
-GLM-5.3-Flash uses the digest-pinned official vLLM v0.31.0 image, unpatched.
+Qwen3.8-27B and GLM-5.3-Flash use the digest-pinned official vLLM v0.31.0
+image, unpatched. Qwen moved there from v0.23.0 on 2026-10-18: v0.23.0
+prefills a request that carries `extra_args` about 3x slower, and its
+Responses serving always sets `extra_args={}`, so every Responses request
+Kairyu forwarded prefilled slowly (see `qwen3.8-27b-1gpu/MEASUREMENTS.md`).
 Every environment keeps persistent model, UI, and cache state on bind-backed
 storage below `/mnt/nvme` (`qwen3.8-27b-dp8-8gpu` reuses `qwen3.8-27b-1gpu`'s
 attested checkpoint).

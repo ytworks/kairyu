@@ -37,6 +37,17 @@ implemented; GPU verification is pending.** The locked results in
 [MEASUREMENTS.md](MEASUREMENTS.md) were measured on the earlier chat-only
 configuration.
 
+**vLLM v0.31.0 (owner decision, 2026-10-18).** The replicas run the official
+`vllm/vllm-openai:v0.31.0` image, pinned by registry digest, as the
+single-GPU example does (v0.23.0 before). On v0.23.0 every request that
+carries `extra_args` prefills about 3x slower, and v0.23.0's Responses serving
+always sets `extra_args={}`, so every Responses request Kairyu forwarded
+prefilled slowly (1.43 s on chat against 4.33 s on Responses for 16
+concurrent route-judge requests on one replica; 1.26 s / 1.27 s on v0.31.0;
+see the single-GPU example's `MEASUREMENTS.md`). The compose flags are
+unchanged. The locked results were measured on v0.23.0, and every gate runs
+again on v0.31.0.
+
 ## How requests are spread over the replicas
 
 The pool in [`kairyu.yaml`](kairyu.yaml) uses Kairyu's built-in placement
@@ -161,8 +172,12 @@ see the repository benchmark documentation for the retained evaluation suites.
 
 - Model revision: `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`
 - Model tree SHA-256: `9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e`
-- vLLM release/source: `v0.23.0` / `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`
-- vLLM image digest: `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
+- vLLM release/source: `v0.31.0` / `db9527a46873454610df6dbedf79a36d6bf1a7f6`
+  (FlashInfer `0.7.0.post1`)
+- vLLM image digest: `sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`
+- Until 2026-10-18: vLLM `v0.23.0` / `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`,
+  image `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
+  (FlashInfer `0.6.12`); the locked results in `MEASUREMENTS.md` ran on it
 - Open WebUI: `v0.12.3` plus the digest in `example.json`
 
 Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. Override prebuilt

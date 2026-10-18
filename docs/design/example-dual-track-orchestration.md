@@ -657,6 +657,27 @@ configuration (plan
   inherited ensemble method, and native image input in place of the
   Qwen-described proxy.
 
+**DTO-D16 amendment (owner, 2026-10-18): the Qwen pools on vLLM v0.31.0.**
+
+- **What:** both Qwen3.8 replicas leave the V4 example's official vLLM
+  v0.23.0 image for the official v0.31.0 image (registry digest
+  `sha256:c1c9f6fd…67c3`, the GLM examples' pin), with unchanged flags. The
+  DeepSeek overlay, the routes, the roles and the budgets are unchanged.
+- **Why:** on v0.23.0 every request that carries `extra_args` prefills about
+  3x slower, and v0.23.0's Responses serving always sets `extra_args={}`.
+  Since DTO-D18 every role call, the route judge included, reaches Qwen on
+  `/v1/responses`, so all of them prefilled slowly: the `profile_judge`
+  request, 16 concurrent on one replica, prefilled in 4.33 s against 1.43 s
+  on chat (1.27 s / 1.26 s on v0.31.0). The 5 s judge timed out on 13 of 32
+  coding c32 requests, and the generic c32 judge p50 doubled (1,982 →
+  4,468 ms).
+- **Status:** implemented; GPU verification on v0.31.0 pending (`run.sh up`,
+  both serving matrices, vision, tool-calling, `api-equivalence`, browser
+  smoke). The image identity and the other Qwen examples are recorded in
+  `frontier-native-runtime.md` (Qwen3.8 vLLM v0.31.0 amendment). The
+  DTO-D13/D15 findings measured on the v0.23 Qwen worker stay as history;
+  the mechanisms they introduced are unchanged.
+
 ### DTO-D17 — Two routes and two policies for the V4.1 example (owner decision, 2026-10-01)
 
 Status: accepted; implemented, with the two amendments below. On the

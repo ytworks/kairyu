@@ -1,5 +1,30 @@
 # Measured performance
 
+## 2026-10-18 vLLM v0.31.0 — GPU verification pending
+
+L1 moved from the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`,
+source `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`, FlashInfer 0.6.12) to the
+official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+which the GLM-5.3-Flash examples already pin (owner decision, 2026-10-18).
+
+Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+slower, and v0.23.0's Responses serving always sets `extra_args={}`, so every
+Responses request Kairyu forwarded to Qwen prefilled slowly. Prefill time,
+measured on GPU with the `qwen3.8-deepseek-v4.1-8gpu` route-judge
+(`profile_judge`) request, 16 concurrent on one Qwen3.8 replica:
+
+| vLLM | chat | Responses | chat with an empty `vllm_xargs` |
+|---|---:|---:|---:|
+| v0.23.0 | 1.43 s | 4.33 s | 4.33 s |
+| v0.31.0 | 1.26 s | 1.27 s | 1.26 s |
+
+The compose flags are unchanged. `run.sh up` and its probes passed on v0.31.0
+(GPU, 2026-10-18). Every Qwen3.8 result below was measured on v0.23.0;
+`verify.sh serving` and `verify.sh api-equivalence` must run on v0.31.0.
+
 ## 2026-10-17 Responses connection — GPU verification pending
 
 The 2026-10-17 configuration changes how the rows below were produced: the
