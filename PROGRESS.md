@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [amendment] PR #656 re-review fixes; native-stream cancellation (m9 D2, m11 D4)
+- What: JSON mode reaches vLLM as chat (v0.23.0's Responses drops `json_object`); a failed Kairyu-upstream Responses stream keeps its observed stages; a cancelled Responses/Messages stream closes its upstream at once (GPU cancellation gates had measured slot release 4.55 s and 3.74 s against 0.29 s and 0.23 s); the equivalence gate compares both tool turns and checks declared function names; the Quyet stream gates assemble the answer from deltas.
+- Why: owner re-review of PR #656 (five P2, reproduced on CPU; the Open WebUI saved-model-params finding awaits an owner decision) and the GPU final test's cancellation regression.
+- Refs: m9 D2 and m11 D4 amendments 2026-10-18; PR #656
+
 ### 2026-10-18 — [progress] Examples reduced to DeepSeek-V4.1, Qwen3.8-27B, GLM-5.3-Flash and Quyet (PR #656)
 - What: removed 8 examples with their own tests: `deepseek-v4-flash-0731-8gpu`, `-0731-dp2-8gpu`, `deepseek-v4-flash-vision-exp-dp2-8gpu`, `qwen3.8-flash-next-dp2-8gpu`, `qwen3.8-deepseek-v4-8gpu`, `openjev-diffusiongemma-26b-1gpu`, both `winnow-12b-q8`. 9 remain. No framework mechanism removed (DeepSeek-V4 support, System One, llama.cpp upstream stay); the host's unused model storage (~723 GiB) was deleted. PR #656's GPU final test now covers 8 examples on this host, after the review.
 - Why: owner decision 2026-10-18: only those four model families are used.

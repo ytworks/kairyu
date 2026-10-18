@@ -280,6 +280,14 @@ token-granularity TPOT, results files).
   the owner extended (2) to the Responses wire. Tests:
   `test_an_assistant_prefill_continues_on_responses_not_messages`,
   `test_a_single_call_limit_stays_on_vllm_chat`.
+- **Caller-API re-review amendment (2026-10-18, owner re-review of PR #656):**
+  (3) JSON mode (`json_object`) is not expressible on vLLM's Responses wire:
+  v0.23.0's Responses serving turns only `json_schema` into structured
+  outputs and drops `json_object` (v0.31.0 and the pinned nightlies enforce
+  it). The backend does not know the vLLM version, so JSON mode takes chat,
+  which enforces it in every pinned version; a Kairyu replica's Responses
+  boundary keeps it. Why: owner re-review finding (P2), reproduced with the
+  pinned v0.23.0 conversion. Test: `test_json_mode_stays_on_vllm_chat`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and
