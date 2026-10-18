@@ -161,3 +161,19 @@ def test_the_tools_case_compares_both_turns(monkeypatch, l1_turns, l3_turns, fin
     args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=False)
 
     assert run_case("tools", targets, args)["findings"] == findings
+
+
+@pytest.mark.parametrize(
+    ("orchestrated", "findings"), [(False, ["l3: answer 'White' is not red"]), (True, [])]
+)
+def test_an_auto_models_image_answer_is_not_judged(monkeypatch, orchestrated, findings):
+    answers = {"l1": "Red", "l3": "White"}
+    monkeypatch.setattr(
+        upstream_api_equivalence,
+        "capture",
+        lambda target, body: _stream(("message", answers[target.name])),
+    )
+    targets = (Target("l1", "", "m"), Target("l3", "", "m"))
+    args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=orchestrated)
+
+    assert run_case("image", targets, args)["findings"] == findings

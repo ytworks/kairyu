@@ -535,7 +535,8 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   `verification/product/correctness/fixtures/`) to an L1 directly and to L3,
   validates L3 against the openai-python types, records L1-only events as
   extensions, compares status, item types, collapsed events, usage keys and
-  function names (status and usage keys only for an AUTO model; the tool
+  function names (status and usage keys only for an AUTO model, whose image answer is not
+  judged: its roles answer inside their own prompts; the tool
   round trip compares both turns without their reasoning items and with
   repeated calls folded into the first, since whether a model reasons around a
   tool call and how many parallel calls it makes are sampled, and every

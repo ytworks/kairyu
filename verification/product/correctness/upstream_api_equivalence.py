@@ -28,7 +28,11 @@ Kairyu L3, then requires the same Responses structure from both:
   that L3 reached them on ``/v1/responses``;
 - with ``--l3-orchestrated`` the L3 model is an AUTO model whose output items
   come from its roles, so L1 and L3 are compared on status and usage keys
-  only; both sides are still validated in full.
+  only; both sides are still validated in full, but the image answer is
+  checked on L1 only: an AUTO role answers it inside its own prompt and named
+  a tiny solid image's colour wrongly on about 4 in 10 requests on the chat
+  wire too (V4.1 ensemble, GPU 2026-10-18), while that the image reaches
+  every role is the AUTO example's own vision gate;
 
 Requests are captured by a stdlib program that runs locally, or inside the L1
 container (``--l1-docker``) when L1 publishes no host port.
@@ -327,11 +331,12 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
     record: dict = {"case": case, "findings": []}
     base = {"max_output_tokens": args.max_output_tokens, "store": False}
 
-    def both(body, *, check=None, exact=False, view=None) -> list[Capture]:
+    def both(body, *, check=None, check_l3=True, exact=False, view=None) -> list[Capture]:
         """Send ``body`` (or ``body(target)``) to L1 and L3 and compare them.
 
         ``view`` narrows each capture before the comparison only; its own
-        findings and the check see the whole capture.
+        findings and the check see the whole capture. ``check_l3=False``
+        applies ``check`` to L1 only.
         """
 
         caps, summaries, compared = [], [], []
@@ -340,7 +345,8 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             cap = capture(target, body(target) if callable(body) else body)
             summary, own = summarize(cap, strict=strict)
             record["findings"] += [f"{target.name}: {f}" for f in own]
-            if check is not None and summary.get("status") is not None:
+            checked = check is not None and (check_l3 or target.name != "l3")
+            if checked and summary.get("status") is not None:
                 problem = check(summary)
                 if problem:
                     record["findings"].append(f"{target.name}: {problem}")
@@ -445,6 +451,7 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             check=lambda s: (
                 None if "red" in s["text"].lower() else f"answer {s['text'][:60]!r} is not red"
             ),
+            check_l3=not args.l3_orchestrated,
         )
     elif case == "cap":
         both(
