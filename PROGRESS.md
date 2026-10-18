@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [amendment] An AUTO answer emptied by the caller's own cap is incomplete, not 502 (m11 D1)
+- What: a final unit whose published attempt ran at exactly the caller's remaining `max_tokens` and stopped with `length` without public text now answers `finish_reason: "length"` (Responses `incomplete` / `max_output_tokens`) with empty content and real usage, unary and streamed. A failed unit, an empty `stop`, no caller cap, a refused retry, or a smaller role cap / floor reserve stays the #496 502 / SSE error.
+- Why: GPU final test: `kairyu-verified-tool` (Quyet) answered `max_output_tokens: 16` / `max_tokens: 16` with 502 because its thinking final unit spent the cap on reasoning; a direct engine and OpenAI answer incomplete; owner decision 2026-10-18.
+- Refs: m11 D1 amendment 2026-10-18 (issue #496); `kairyu/orchestration/conductor.py`; `test_auto_final_unit_out_of_the_callers_cap_answers_incomplete`; PR #656
+
 ### 2026-10-18 — [amendment] Qwen3.8 examples serve on vLLM v0.31.0 (FN, DTO-D16)
 - What: qwen3.8-27b-1gpu, qwen3.8-27b-dp8-8gpu and the V4.1 ensemble's Qwen pools move from the pinned vLLM v0.23.0 to the official v0.31.0 image (GLM's pin); flags and launchers unchanged; every gate of the three runs again.
 - Why: on v0.23.0 a request carrying `extra_args`, which its Responses serving always sets, prefilled about 3x slower (16 concurrent judge calls: chat 1.43 s, Responses 4.33 s; v0.31.0 1.26/1.27 s), pushing the ensemble's 5 s route judge past its timeout on 13 of 32 coding c32 requests; owner decision 2026-10-18.

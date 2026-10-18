@@ -20,7 +20,7 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
-from kairyu.orchestration.conductor import RoleSpec
+from kairyu.orchestration.conductor import RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
@@ -4635,6 +4635,128 @@ async def test_auto_empty_final_output_is_an_explicit_error(stream):
         payload = response.json()
         assert payload["error"]
         assert "usage" in payload
+
+
+class _ThinkingBackend:
+    """A thinking L1: it deliberates for 32 tokens before answering, so a
+    smaller cap ends in reasoning only with finish_reason "length"."""
+
+    think_tokens = 32
+
+    def __init__(self):
+        self.caps = []
+
+    async def generate(self, request):
+        cap = request.sampling_params.max_tokens
+        self.caps.append(cap)
+        thought_out = cap is not None and cap <= self.think_tokens
+        completion = CompletionOutput(
+            index=0,
+            text="" if thought_out else "Done.",
+            token_ids=(),
+            finish_reason="length" if thought_out else "stop",
+            reasoning_content="Weighing the steps",
+        )
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(completion,),
+            usage=GenerationUsage(
+                prompt_tokens=7,
+                completion_tokens=cap if thought_out else self.think_tokens + 2,
+            ),
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self):
+        return None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("capped_by", ["caller", "role"])
+async def test_auto_final_unit_out_of_the_callers_cap_answers_incomplete(
+    capped_by, api, stream
+):
+    """A final unit that thinks through the caller's own output cap answers
+    incomplete, as a direct engine does; a smaller cap of the final unit's
+    role is the deployment's and stays an explicit error (issue #496
+    amendment 2026-10-18)."""
+
+    backend = _ThinkingBackend()
+    roles = (
+        RoleSpec(
+            name="answer",
+            worker="tier1",
+            role_type="publisher",
+            prompt="[answer] {query}",
+            sampling=(
+                RoleSamplingOverrides(max_tokens=8) if capped_by == "role" else None
+            ),
+        ),
+    )
+    app = create_legacy_app(
+        engines={},
+        orchestrators={
+            "auto": Orchestrator({"tier1": backend, "tier2": backend}, roles=roles)
+        },
+    )
+    # Multi-step wording so the router selects the role DAG.
+    task = "First research. Then plan. After that implement. Finally verify."
+    if api == "chat":
+        path = "/v1/chat/completions"
+        body = {
+            "model": "auto",
+            "messages": [{"role": "user", "content": task}],
+            "max_tokens": 16,
+            "stream": stream,
+        }
+    else:
+        path = "/v1/responses"
+        body = {"model": "auto", "input": task, "max_output_tokens": 16, "stream": stream}
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post(path, json=body)
+
+    assert backend.caps == ([16, 16] if capped_by == "caller" else [8, 8])
+    payloads = _sse_json_payloads(response) if stream else [response.json()]
+    if capped_by == "role":
+        if stream:
+            assert response.status_code == 200  # SSE transport already open
+            assert '"error"' in response.text
+            assert not any(
+                choice.get("finish_reason")
+                for payload in payloads
+                for choice in payload.get("choices", ())
+            )
+            if api == "responses":
+                assert payloads[-1]["type"] == "response.failed"
+        else:
+            assert response.status_code == 502
+            assert payloads[0]["error"]
+        return
+    assert response.status_code == 200, response.text
+    assert not any(payload.get("error") for payload in payloads), response.text
+    if api == "chat":
+        choices = [choice for payload in payloads for choice in payload.get("choices", ())]
+        assert [c["finish_reason"] for c in choices if c.get("finish_reason")] == ["length"]
+        content = (
+            "".join(c["delta"].get("content") or "" for c in choices)
+            if stream
+            else choices[0]["message"]["content"] or ""
+        )
+        assert content == ""
+        if not stream:
+            assert payloads[0]["usage"]["completion_tokens"] == 16
+    else:
+        final = payloads[-1]["response"] if stream else payloads[0]
+        if stream:
+            assert payloads[-1]["type"] == "response.incomplete"
+        assert final["status"] == "incomplete"
+        assert final["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert final["usage"]["output_tokens"] == 16
 
 
 async def test_auto_stream_publishes_reclaimed_closed_reasoning_answer():

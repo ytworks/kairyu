@@ -176,6 +176,31 @@ truthfully verify every sibling; an engine that declares `supports_n=False`
 does likewise. These are capability-specific 400s, replacing the former
 blanket AUTO rejection.
 
+**Empty final answer at the caller's own limit (2026-10-18, owner decision on
+the PR #656 GPU final test; amends the #496 empty-final rule above).**
+`deepseek-v4.1-quyet-8gpu`'s `kairyu-verified-tool` answered a request with
+`max_output_tokens: 16` (Responses) or `max_tokens: 16` (chat) with HTTP 502
+`upstream backend error (RuntimeError)`: its final unit thinks before
+answering, spent the whole cap on reasoning in both attempts, and the rule
+above made the empty answer an error. A direct engine and OpenAI answer such
+a request as incomplete (`max_output_tokens`; chat `length`), and the V4.1
+ensemble already did because its floor answers with the reserve. Now an empty
+final answer is published, not an error, only when its published attempt was
+dispatched with exactly the caller's remaining limit (the caller's
+`max_tokens` minus the head's tokens) and every choice stopped with `length`:
+`finish_reason: "length"` (Responses `incomplete` / `max_output_tokens`),
+empty content, real usage (public usage is that attempt's; the orchestration
+totals include the retry and any refinements). Every other empty final unit
+stays the 502 / SSE error: a failed unit, an empty `stop`, no caller limit, a
+retry the run budget refused, and a `length` stop under a smaller cap of the
+final unit's role (`max_tokens`, `max_tokens_by_effort`) or under the floor's
+reserve; those caps are the deployment's, so `max_output_tokens` would name a
+limit the caller never reached. The answer is never `stop`. The bounded
+re-dispatch and a verifier's refinements still run first; the Conductor
+decides it for unary and for both stream paths, so chat and Responses agree.
+Why: an empty answer at the caller's own cap is a truncation the caller asked
+for, not a backend failure; owner decision 2026-10-18.
+
 **Streamed final-answer attribution (2026-10-18, owner decision on the PR #656
 GPU final test).** With `expose_intermediate_outputs`, `reasoning_content`
 opens with a "Final answer attribution" section (L2 role, L1 worker, engine,

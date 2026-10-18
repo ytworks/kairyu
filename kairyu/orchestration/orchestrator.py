@@ -2552,6 +2552,8 @@ class Orchestrator:
                 # The selected final unit failed or produced no public text
                 # after its retry; publishing an internal stage or an empty
                 # "stop" would be a silent lie to the caller (issue #496).
+                # An empty answer that ran out of the caller's own limit is
+                # not this case: it is returned with its "length" completions.
                 raise OrchestratorExecutionError(
                     RuntimeError("orchestration final unit produced no public output"),
                     result_with_trace(
