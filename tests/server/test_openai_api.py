@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.backend import GenerationResult, GenerationStageMetric, GenerationUsage
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
@@ -16,6 +16,7 @@ from kairyu.engine.prompt import TokensPrompt
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
@@ -266,89 +267,86 @@ async def test_native_chat_stage_trace_is_opt_in_and_terminal():
     await backend.shutdown()
 
 
-async def test_gateway_retains_replica_stage_trace_before_sanitized_error():
-    replica_trace = {
-        "trace_version": "2.0",
-        "request_id": "chatcmpl-replica",
-        "started_at": "2026-08-05T00:00:00.000Z",
-        "completed_at": "2026-08-05T00:00:00.100Z",
-        "events": [
-            {
-                "seq": 1,
-                "node": "decode_step",
-                "role": "engine",
-                "kind": "stage",
-                "status": "success",
-                "attempt": 0,
-                "timing": None,
-                "detail": {
-                    "stage": "decode_step",
-                    "duration_ns": 303,
-                    "occurrences": 2,
-                    "aggregation": "sum",
-                    "scope": "request-observed",
-                },
-            }
-        ],
-    }
-    metadata = json.dumps(
-        {
-            "id": "chatcmpl-replica",
-            "choices": [],
-            "kairyu_trace_v2": replica_trace,
-        }
-    )
-    replica_body = (
-        b'data: {"id":"chatcmpl-replica","choices":'
-        b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
-        + f"data: {metadata}\n\n".encode()
-        + b'data: {"error":{"message":"secret replica detail",'
-        b'"type":"upstream_error"}}\n\n'
-        + b"data: [DONE]\n\n"
-    )
+class _FailsAfterStageMetrics:
+    """A replica engine that reports one decode stage, then fails."""
+
+    async def generate(self, request):
+        raise AssertionError("streaming test reached generate")
+
+    async def stream(self, request):
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text="ok", token_ids=(1,), finish_reason=None),
+            ),
+            finished=False,
+            stage_metrics=(GenerationStageMetric("decode_step", 303, 2),),
+        )
+        raise RuntimeError("secret replica detail")
+
+    async def shutdown(self):
+        return None
+
+
+@pytest.mark.parametrize("caller_api", ["chat", "responses"])
+async def test_gateway_retains_replica_stage_trace_before_sanitized_error(caller_api):
+    """A Kairyu replica's known stages survive its failure on every wire the
+    gateway reaches it in: Chat's trace chunk and Responses' failed response."""
+
+    replica = create_legacy_app(engines={"m": _FailsAfterStageMetrics()})
     backend = OpenAICompatBackend(
         base_url="http://replica:8000/v1",
         model="m",
         api_key_env=None,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                content=replica_body,
-                headers={"content-type": "text/event-stream"},
-            )
-        ),
+        transport=httpx.ASGITransport(app=replica),
         upstream="kairyu",
+        upstream_apis=("responses",),
     )
-    app = create_legacy_app(engines={"gateway": backend})
+    app = create_app({"gateway": backend}, upstream_chat_models=frozenset({"gateway"}))
 
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            headers={"X-Kairyu-Trace": "1"},
-            json={
-                "model": "gateway",
-                "messages": [{"role": "user", "content": "trace failure"}],
-                "max_tokens": 2,
-                "stream": True,
-            },
-        )
+        if caller_api == "chat":
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"X-Kairyu-Trace": "1"},
+                json={
+                    "model": "gateway",
+                    "messages": [{"role": "user", "content": "trace failure"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+        else:
+            response = await client.post(
+                "/v1/responses",
+                headers={"X-Kairyu-Trace": "1"},
+                json={
+                    "model": "gateway",
+                    "input": "trace failure",
+                    "max_output_tokens": 2,
+                    "stream": True,
+                },
+            )
 
     payloads = _sse_json_payloads(response)
-    trace_payloads = [
-        payload for payload in payloads if "kairyu_trace_v2" in payload
-    ]
+    if caller_api == "chat":
+        traces = [
+            payload["kairyu_trace_v2"] for payload in payloads if "kairyu_trace_v2" in payload
+        ]
+        assert response.text.rstrip().endswith("data: [DONE]")
+    else:
+        assert payloads[-1]["type"] == "response.failed"
+        traces = [payloads[-1]["response"]["kairyu_trace_v2"]]
     assert response.status_code == 200
-    assert len(trace_payloads) == 1
-    stages = {
-        event["detail"]["stage"]: event
-        for event in trace_payloads[0]["kairyu_trace_v2"]["events"]
-    }
-    assert stages["decode_step"]["detail"]["duration_ns"] == 303
-    assert stages["decode_step"]["detail"]["occurrences"] == 2
-    assert "sse_write" in stages
+    assert len(traces) == 1
+    stages = {event["detail"]["stage"]: event["detail"] for event in traces[0]["events"]}
+    assert stages["decode_step"]["duration_ns"] == 303
+    assert stages["decode_step"]["occurrences"] == 2
+    if caller_api == "chat":
+        assert "sse_write" in stages
     assert "secret replica detail" not in response.text
     assert "upstream backend error (RuntimeError)" in response.text
-    assert response.text.rstrip().endswith("data: [DONE]")
     await backend.shutdown()
 
 

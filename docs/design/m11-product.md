@@ -524,7 +524,11 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   OpenAI clients ignore unknown keys. Engine paths pass `trace_requested` to
   the backend as Chat does. Why: the example gates move to `/v1/responses`
   and read `kairyu_verification` there (owner decision 2026-10-17). Test:
-  `test_trace_extensions_ride_the_response_object`.
+  `test_trace_extensions_ride_the_response_object`. A failed stream's
+  `response.failed` carries the stages observed before the failure, as Chat
+  sends its trace chunk before the sanitized error, and a gateway reading a
+  Kairyu upstream on Responses keeps them before it fails. Test: the
+  `responses` case of `test_gateway_retains_replica_stage_trace_before_sanitized_error`.
 - Equivalence gate: `verification/product/correctness/upstream_api_equivalence.py`
   sends the same Responses requests (text, stream, efforts, a tool round trip,
   an image, a length cap, and the Open WebUI v0.12.3 body in

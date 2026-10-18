@@ -197,6 +197,15 @@ async def engine_stream(
             return _usage_payload_from_wire(None)
         return usage()
 
+    def attach_trace() -> None:
+        # Failed turns too: like Chat's trace chunk before its sanitized
+        # error, the failed response reports the stages the engine observed.
+        _attach_trace(
+            emitter,
+            trace_started_at,
+            last.stage_metrics if last is not None else (),
+        )
+
     try:
         for frame in emitter.start():
             yield frame
@@ -233,6 +242,7 @@ async def engine_stream(
         except Exception as error:
             if not is_context_overflow(error):
                 logger.exception("Responses API upstream stream failed")
+            attach_trace()
             _envelope, frames = emitter.fail(_failure_payload(error), failed_usage())
             for frame in frames:
                 yield frame
@@ -250,6 +260,7 @@ async def engine_stream(
         status, details = _status(
             request, validated, completion.finish_reason if completion is not None else None
         )
+        attach_trace()
         if status == "context_exhausted":
             _envelope, frames = emitter.fail(
                 context_overflow_error(exhausted=True).payload(), failed_usage()
@@ -263,11 +274,6 @@ async def engine_stream(
             for frame in frames:
                 yield frame
             return
-        _attach_trace(
-            emitter,
-            trace_started_at,
-            last.stage_metrics if last is not None else (),
-        )
         envelope, terminal = emitter.complete(status, usage(), details)
         # Stored before the terminal frame: a client that disconnects on it
         # cancels this generator mid-send.

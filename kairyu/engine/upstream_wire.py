@@ -498,20 +498,30 @@ class ResponsesStreamReader:
     Returns ``(text_delta, reasoning_delta)`` per event. Function calls are
     emitted as one ``<tool_call>`` text delta when their item finishes, the
     same form the chat wire produces at its finish chunk.
+
+    ``failed_follows_error`` is the Kairyu upstream's failure contract: its
+    ``error`` event is always followed by ``response.failed``, whose response
+    object carries the stage trace the replica observed. The reader then
+    fails at ``response.failed``, with ``response`` set, so the caller can
+    keep those stages; any other event after ``error`` fails at once.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, failed_follows_error: bool = False) -> None:
         self.finish_reason: str | None = None
         self.usage: GenerationUsage | None = None
         self.finished = False
         # The terminal response object (carries Kairyu extensions when the
-        # upstream is a Kairyu replica).
+        # upstream is a Kairyu replica), completed or failed.
         self.response: Mapping[str, object] | None = None
         self._calls: dict[object, dict[str, object]] = {}
         self._call_count = 0
+        self._failed_follows_error = failed_follows_error
+        self._error: RuntimeError | None = None
 
     def feed(self, event: Mapping[str, object]) -> tuple[str, str]:
         kind = event.get("type")
+        if self._error is not None and kind != "response.failed":
+            raise self._error
         if kind == "response.output_text.delta":
             return str(event.get("delta") or ""), ""
         if kind in {"response.reasoning_text.delta", "response.reasoning_summary_text.delta"}:
@@ -549,6 +559,13 @@ class ResponsesStreamReader:
             self.finish_reason = _responses_finish(response, self._call_count)
             self.finished = True
             return "", ""
+        if kind == "error" and self._failed_follows_error:
+            self._error = _responses_error(event)
+            return "", ""
+        if kind == "response.failed":
+            response = event.get("response")
+            if isinstance(response, Mapping):
+                self.response = response
         if kind in {"response.failed", "error"}:
             raise _responses_error(event)
         return "", ""

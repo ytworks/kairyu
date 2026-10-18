@@ -2096,7 +2096,9 @@ class OpenAICompatBackend:
         """Relay a Responses or Messages event stream as delta-native partials."""
 
         reader: ResponsesStreamReader | MessagesStreamReader = (
-            ResponsesStreamReader()
+            ResponsesStreamReader(
+                failed_follows_error=self._capabilities.upstream == "kairyu"
+            )
             if wire == "responses"
             else MessagesStreamReader(
                 input_includes_cache=self._capabilities.upstream == "kairyu"
@@ -2124,7 +2126,30 @@ class OpenAICompatBackend:
                 event = json.loads(data_str)
                 if not isinstance(event, Mapping):
                     continue
-                text, reasoning = reader.feed(event)
+                try:
+                    text, reasoning = reader.feed(event)
+                except RuntimeError:
+                    # As on the chat wire: a Kairyu upstream's failed response
+                    # carries the stages it observed; surface them so a gateway
+                    # retains them, then fail when the consumer resumes.
+                    stage_metrics = self._native_stage_metrics(
+                        request, getattr(reader, "response", None)
+                    )
+                    if stage_metrics:
+                        yield self._partial(
+                            request,
+                            text_parts,
+                            text_lengths,
+                            {},
+                            {},
+                            deltas_seen,
+                            {},
+                            finished=False,
+                            stage_metrics=stage_metrics,
+                            reasoning_parts=reasoning_parts,
+                            reasoning_lengths=reasoning_lengths,
+                        )
+                    raise
                 text_deltas: dict[int, str] = {}
                 reasoning_deltas: dict[int, str] = {}
                 if reasoning:
