@@ -31,7 +31,7 @@
   "model": {
     "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
     "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
-    "tree_sha256": "PENDING-DOWNLOAD",
+    "tree_sha256": "e25bddd997c2e7b959f444bb70813e210b813b8c528bf25e7a0e25b1d89bb807",
     "slug": "deepseek-v4.1-flash-1017",
     "served_name": "deepseek-v4.1-flash-1017",
     "max_context_tokens": 1048576,

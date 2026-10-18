@@ -31,6 +31,19 @@ technical report PDF, `assets/` and `evaluation/` are no longer shipped.
   content may be a list, and images are collected after tool results are
   merged into prompt order.
 
+The checkpoint (the six-GPU 1017 example's download, hard-linked) hashes to tree SHA-256
+`e25bddd997c2e7b959f444bb70813e210b813b8c528bf25e7a0e25b1d89bb807` (83 files,
+`model-manifest.json`); every size and all 49 LFS SHA-256 values equal
+Hugging Face's. Identical to 0909: `config.json`, `tokenizer.json`,
+`tokenizer_config.json`, `model.safetensors.index.json`, the encoder test
+fixtures and most of `inference/`.
+
+The reference `inference/model.py` changed in two places: only an index-key
+owner layer (`kv_source_layers`) publishes the shared index keys, and the
+attention output `o` is FP8 quantized and dequantized before the `wo_a`
+einsum (the production FP8 `wo_a` GEMM's numerics); `tilelang` moves to
+0.1.12. vLLM keeps its own implementation of both; nothing is ported.
+
 vLLM's encoder copy (`vllm/tokenizers/deepseek_v41_encoding.py`) is the same
 file in the 2026-09-30 nightly (`ac68c3087`) and v0.32.0 and keeps the 0909
 rule. vLLM's tokenizer wrapper flattens list content to text with image
