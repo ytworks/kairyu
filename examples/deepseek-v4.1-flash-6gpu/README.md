@@ -55,6 +55,16 @@ lacks (`seed`, `top_k`, ...) are dropped, saved output items keep only their
 Responses fields, and `store` is false because the UI resends the whole
 conversation every turn.
 
+Saved model settings: Open WebUI applies a model's saved Advanced Params
+(Admin Panel or Workspace > Models) once more after the filter, just before it
+sends the request, so the filter cannot normalize them. Save only Responses
+fields there (temperature, top_p, max tokens; Open WebUI itself drops stop and
+the penalties). A default effort goes in as the Custom Parameter `reasoning`
+with the value `{"effort": "high"}`; it applies to requests that carry no
+effort of their own. A saved `seed`, `top_k`, `min_p` or `reasoning_effort`
+makes Kairyu answer 400 `Unknown parameter`, as OpenAI's Responses API does
+(m11 D7 amendment 2026-10-18).
+
 Kairyu sends each request to vLLM in its caller's API (`kairyu.yaml`
 declares the model in `upstream_chat_models`, `upstream_responses_models`
 and `upstream_messages_models`; Kairyu checks at startup that vLLM serves

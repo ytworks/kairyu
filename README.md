@@ -665,7 +665,12 @@ once: it installs
 global filter, which turns Chat Controls fields the Responses API lacks (seed,
 top_k, the effort field) into a Responses body. Without the credentials
 `webui-setup` only warns, and those Chat Controls fields are rejected until an
-admin installs the filter.
+admin installs the filter. The filter cannot reach a model's saved settings
+(Admin Panel > Models > Advanced Params), which Open WebUI applies again just
+before sending: save only Responses fields there, and a default effort as the
+Custom Parameter `reasoning` = `{"effort": "high"}`; a saved `seed`, `top_k` or
+`reasoning_effort` answers 400 `Unknown parameter`, as OpenAI's Responses API
+does.
 
 The advanced Reasoning Effort selector is wire-compatible: its medium default
 maps to Kairyu high (minimal/low→low, xhigh/max→max).

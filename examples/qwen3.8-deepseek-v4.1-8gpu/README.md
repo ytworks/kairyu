@@ -277,6 +277,15 @@ GPU verification of this section is pending.
   items, and sets `store: false` (the UI sends the whole conversation every
   turn). `up` checks through `/openai/config` that the connection really is
   `api_type: responses`.
+- **Saved model settings.** Open WebUI applies a model's saved
+  Advanced Params (Admin Panel or Workspace > Models) once more after the
+  filter, just before it sends the request, so the filter cannot normalize
+  them. Save only Responses fields there (temperature, top_p, max tokens; Open
+  WebUI itself drops stop and the penalties). A default effort goes in as the
+  Custom Parameter `reasoning` with the value `{"effort": "high"}`; it applies
+  to requests that carry no effort of their own. A saved `seed`, `top_k`,
+  `min_p` or `reasoning_effort` makes Kairyu answer 400 `Unknown parameter`,
+  as OpenAI's Responses API does (m11 D7 amendment 2026-10-18).
 - **L1 receives the caller's API** (m9 D2 amendment). Both pools are listed
   in `upstream_chat_models`, `upstream_responses_models`, and
   `upstream_messages_models`, so chat reaches vLLM as the caller's own

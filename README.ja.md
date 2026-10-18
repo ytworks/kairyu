@@ -681,7 +681,12 @@ Open WebUI は `/v1/responses` で Kairyu に接続します。`WEBUI_ADMIN_EMAI
 グローバルフィルターとして導入されます。これにより、Responses API にない
 Chat Controls の項目（seed、top_k、effort 欄）が Responses の形に直されます。
 未設定なら `webui-setup` は警告だけを出し、管理者がフィルターを導入するまで
-それらの項目は拒否されます。
+それらの項目は拒否されます。モデルごとの保存設定（Admin Panel > Models >
+Advanced Params）は Open WebUI が送信直前にもう一度当てるため、フィルターでは
+直せません。保存できるのは Responses の項目だけで、既定の effort は Custom
+Parameter `reasoning` = `{"effort": "high"}` として保存します。保存した `seed`、
+`top_k`、`reasoning_effort` は、OpenAI の Responses API と同じく 400
+`Unknown parameter` になります。
 `scripts/webui_smoke.sh` は完全なトポロジーを起動し、別途固定した Playwright
 イメージで、新規ユーザーセットアップ・モデル選択・ストリーミング・リロード後の
 永続性・可視的なゲートウェイ障害・Open WebUI を再起動しない復旧を証明します。

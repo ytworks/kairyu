@@ -820,6 +820,27 @@ reasoning items, the Advanced Params effort stays a free-text field and enum
 user valves still render as a select, and its converted fixture body equals
 v0.11.0's. Why: owner review finding (P2) and owner request.
 
+**Saved model params (2026-10-18, owner decision on the PR #656 re-review).**
+Open WebUI v0.12.3 applies a model's saved `params` (Advanced Params,
+Custom Parameters included) a second time after the filters, just before it
+converts and sends the body (`routers/openai.py` L1440–1456; the Responses
+conversion at L1557–1559 keeps unknown top-level keys). A filter neither sees
+those values (`__model__` carries only the public model-control params) nor
+has an extension point between that step and the send, and the title, tag and
+follow-up requests bypass filter functions altogether. A saved `seed`,
+`top_k`, `min_p` or `reasoning_effort` therefore reaches Kairyu's strict
+`/v1/responses` and answers 400 `Unknown parameter`, as OpenAI's Responses API
+does; Chat Controls values pass the filter and are normalized. The owner chose
+documentation over code: every example README with an Open WebUI and the demo's
+README say a model's saved settings must be Responses fields and a default
+effort is saved as the Custom Parameter `reasoning` = `{"effort": ...}`, which
+also reaches the requests that bypass filters. Rejected: reading Open WebUI's
+model table from the filter (not an extension point, task routes uncovered),
+rewriting saved settings at setup (silently drops user settings, misses later
+ones), the chat connection (reverses the 2026-10-17 decision), and accepting
+unknown keys in Kairyu (truthful API). Why: owner re-review finding (P2);
+owner decision 2026-10-18.
+
 `verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.

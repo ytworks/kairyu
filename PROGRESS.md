@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [amendment] Open WebUI saved model params stay Responses fields (m11 D7)
+- What: Open WebUI v0.12.3 re-applies a model's saved Advanced Params after the filters, so the filter cannot normalize them; the example and demo READMEs say to save only Responses fields, with a default effort as the Custom Parameter `reasoning`; a saved `seed`/`top_k`/`reasoning_effort` answers 400 as on OpenAI.
+- Why: owner re-review finding (P2); owner chose documentation over a code change (2026-10-18).
+- Refs: m11 D7 amendment 2026-10-18; PR #656
+
 ### 2026-10-18 — [amendment] PR #656 re-review fixes; native-stream cancellation (m9 D2, m11 D4)
 - What: JSON mode reaches vLLM as chat (v0.23.0's Responses drops `json_object`); a failed Kairyu-upstream Responses stream keeps its observed stages; a cancelled Responses/Messages stream closes its upstream at once (GPU cancellation gates had measured slot release 4.55 s and 3.74 s against 0.29 s and 0.23 s); the equivalence gate compares both tool turns and checks declared function names; the Quyet stream gates assemble the answer from deltas.
 - Why: owner re-review of PR #656 (five P2, reproduced on CPU; the Open WebUI saved-model-params finding awaits an owner decision) and the GPU final test's cancellation regression.
