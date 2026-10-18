@@ -3444,6 +3444,11 @@ class Conductor:
             )
             return
         if run.budget.is_exhausted:
+            if attempt:
+                # The run refused its own retry: the first attempt's empty
+                # "length" answer is no longer the caller's truncation, as in
+                # the unary path (issue #496 amendment 2026-10-18).
+                run.final_completions_max_tokens = None
             run.trace.append(
                 self._trace_event(
                     spec,

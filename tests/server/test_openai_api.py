@@ -20,6 +20,7 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
@@ -4676,14 +4677,15 @@ class _ThinkingBackend:
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("api", ["chat", "responses"])
-@pytest.mark.parametrize("capped_by", ["caller", "role"])
+@pytest.mark.parametrize("capped_by", ["caller", "role", "refused-retry"])
 async def test_auto_final_unit_out_of_the_callers_cap_answers_incomplete(
     capped_by, api, stream
 ):
     """A final unit that thinks through the caller's own output cap answers
     incomplete, as a direct engine does; a smaller cap of the final unit's
     role is the deployment's and stays an explicit error (issue #496
-    amendment 2026-10-18)."""
+    amendment 2026-10-18). So is the caller's cap when the run's step budget
+    refuses the bounded retry: the run did not finish its own retry."""
 
     backend = _ThinkingBackend()
     roles = (
@@ -4700,7 +4702,11 @@ async def test_auto_final_unit_out_of_the_callers_cap_answers_incomplete(
     app = create_legacy_app(
         engines={},
         orchestrators={
-            "auto": Orchestrator({"tier1": backend, "tier2": backend}, roles=roles)
+            "auto": Orchestrator(
+                {"tier1": backend, "tier2": backend},
+                roles=roles,
+                budget=Budget(max_steps=1) if capped_by == "refused-retry" else None,
+            )
         },
     )
     # Multi-step wording so the router selects the role DAG.
@@ -4720,9 +4726,9 @@ async def test_auto_final_unit_out_of_the_callers_cap_answers_incomplete(
     async with _client(app, raise_app_exceptions=False) as client:
         response = await client.post(path, json=body)
 
-    assert backend.caps == ([16, 16] if capped_by == "caller" else [8, 8])
+    assert backend.caps == {"caller": [16, 16], "role": [8, 8], "refused-retry": [16]}[capped_by]
     payloads = _sse_json_payloads(response) if stream else [response.json()]
-    if capped_by == "role":
+    if capped_by != "caller":
         if stream:
             assert response.status_code == 200  # SSE transport already open
             assert '"error"' in response.text
