@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 
-from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
+from kairyu.async_thread import cancel_and_wait, run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     UNLIMITED_OUTPUT_ADMISSION_TOKENS,
     AdmissionUpperBound,
@@ -2686,8 +2686,7 @@ class Orchestrator:
                 yield event
         finally:
             if not first.done():
-                first.cancel()
-                await asyncio.gather(first, return_exceptions=True)
+                await cancel_and_wait(first)
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 await close()
@@ -2720,8 +2719,10 @@ class Orchestrator:
                         return
                 finally:
                     if not upcoming.done():
-                        upcoming.cancel()
-                        await asyncio.gather(upcoming, return_exceptions=True)
+                        # A disconnect re-cancels the response task on every
+                        # loop iteration; a gather would forward each re-cancel
+                        # into the role calls and abort their upstream close.
+                        await cancel_and_wait(upcoming)
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:

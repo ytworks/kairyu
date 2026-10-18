@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from kairyu.async_thread import run_prompt_work
+from kairyu.async_thread import cancel_and_wait, run_prompt_work
 from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
@@ -3898,9 +3898,9 @@ class Conductor:
                 yield item
             await producer
         except BaseException as error:
-            if not producer.done():
-                producer.cancel()
-            await asyncio.gather(producer, return_exceptions=True)
+            # The consumer stopped (an error, a cancel, or a close): no role
+            # call outlives it, even if its own task is re-cancelled meanwhile.
+            await cancel_and_wait(producer)
             if isinstance(error, Exception):
                 raise ConductorStreamError(
                     error,

@@ -4,12 +4,14 @@ Prompt rendering and tokenizer preflight are CPU work that must not serialize
 the serving event loop.  They also must not fill asyncio's shared default
 executor: the native engine uses that executor for progress and shutdown work.
 This module keeps small, per-event-loop admission lanes in front of dedicated
-process-owned executors and propagates ContextVars explicitly.
+process-owned executors and propagates ContextVars explicitly. It also owns
+``cancel_and_wait``, the cancellation-safe way to stop a helper task.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import threading
@@ -62,6 +64,27 @@ def _limiter_for_running_loop(
             # loops do not form a global loop -> semaphore -> loop leak.
             limiters[loop] = weakref.ref(limiter)
     return limiter
+
+
+async def cancel_and_wait(task: asyncio.Future) -> None:
+    """Cancel ``task`` once and wait until it has unwound; drop its outcome.
+
+    A client disconnect cancels the streaming response's anyio scope, which
+    re-cancels the response task on every event-loop iteration. Awaiting
+    ``task`` directly (or through ``asyncio.gather``) forwards each re-cancel
+    into it and cuts its cleanup short: httpcore's connection close (shielded
+    against anyio scopes, not against ``Task.cancel``) was abandoned, so the
+    upstream request kept running. The shield stops the forwarding, so the
+    single cancel unwinds ``task`` as a stream consumed in the response task
+    itself unwinds.
+    """
+
+    task.cancel()
+    while True:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(task)
+        if task.done():
+            return
 
 
 def _release_abandoned_work(

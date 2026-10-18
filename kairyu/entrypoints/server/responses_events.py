@@ -24,6 +24,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
+from kairyu.async_thread import cancel_and_wait
 from kairyu.engine.prompt import prompt_text
 from kairyu.entrypoints.server.chat_service import NormalizedToolChoice, ReasoningDeltaParser
 from kairyu.entrypoints.server.responses_protocol import (
@@ -33,7 +34,6 @@ from kairyu.entrypoints.server.responses_protocol import (
     _usage_payload_from_wire,
 )
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
-from kairyu.entrypoints.server.sse_keepalive import cancel_and_wait
 from kairyu.entrypoints.server.tool_stream import (
     StreamInvalid,
     TextDelta,

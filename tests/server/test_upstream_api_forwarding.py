@@ -9,7 +9,7 @@ AUTO model's role calls follow the caller's API. An assistant prefill skips
 Messages (vLLM opens a new turn there), and a single-call limit and JSON mode
 stay on vLLM's chat path, the only one that applies them in every pinned
 version. A client that leaves a stream mid-generation releases the upstream
-request at once on every public API.
+request at once on every public API, and an AUTO stream's role calls with it.
 """
 
 from __future__ import annotations
@@ -548,7 +548,9 @@ def _one_delta_then_silence(closed: threading.Event) -> Starlette:
     )
 
 
-def _read_first_delta_then_disconnect(url: str, path: str, body: dict, marker: bytes) -> None:
+def _read_first_delta_then_disconnect(
+    url: str, path: str, body: dict, marker: bytes, *, before_close=None
+) -> None:
     host, port = url.removeprefix("http://").split(":")
     payload = json.dumps(body).encode()
     head = (
@@ -562,6 +564,8 @@ def _read_first_delta_then_disconnect(url: str, path: str, body: dict, marker: b
             chunk = client.recv(65536)
             assert chunk, received
             received += chunk
+        if before_close is not None:
+            before_close()
 
 
 @pytest.mark.parametrize(
@@ -613,6 +617,113 @@ def test_a_client_disconnect_ends_the_upstream_request_at_once(path, body, marke
     try:
         _read_first_delta_then_disconnect(kairyu_url, path, body, marker)
         assert closed.wait(timeout=5), "the upstream request outlived its client"
+    finally:
+        if collecting:
+            gc.enable()
+        kairyu_server.should_exit = True
+        upstream_server.should_exit = True
+
+
+class _RolesAnsweringOnlyAClosedClient:
+    """An upstream whose every role call stays pending until its client leaves."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.roles: list[str] = []
+        self.open = 0
+        self.both_pending = threading.Event()
+        self.all_closed = threading.Event()
+
+    def app(self) -> Starlette:
+        async def role(request):
+            body = await request.json()
+            if not body:  # the startup probe posts {}
+                return JSONResponse({"error": {"message": "role calls only"}}, status_code=400)
+            text = json.dumps(body)
+            name = next(name for name in ("alpha", "beta", "final") if f"Role {name}" in text)
+            with self.lock:
+                self.roles.append(name)
+                self.open += 1
+                if {"alpha", "beta"} <= set(self.roles):
+                    self.both_pending.set()
+            try:
+                while not await request.is_disconnected():
+                    await asyncio.sleep(0.02)
+            finally:
+                with self.lock:
+                    self.open -= 1
+                    if self.open == 0:
+                        self.all_closed.set()
+            return JSONResponse({"error": {"message": "client left"}}, status_code=499)
+
+        return Starlette(
+            routes=[
+                Route("/v1/responses", role, methods=["POST"]),
+                Route("/v1/chat/completions", role, methods=["POST"]),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "marker"),
+    [
+        pytest.param(
+            "/v1/chat/completions",
+            {"model": "auto", "messages": [{"role": "user", "content": "Count."}], "stream": True},
+            b"reasoning_content",
+            id="chat",
+        ),
+        pytest.param(
+            "/v1/responses",
+            {"model": "auto", "input": "Count.", "stream": True},
+            b"response.reasoning_text.delta",
+            id="responses",
+        ),
+    ],
+)
+def test_a_client_leaving_an_auto_stream_ends_every_role_call_at_once(
+    tmp_path, path, body, marker
+):
+    # The first delta is the final answer's attribution, streamed while both
+    # parallel roles are still running; the client leaves right then.
+    (tmp_path / "auto.yaml").write_text(
+        """
+workers:
+  - name: writer
+    engine_ref: remote
+router:
+  kind: rules
+  thresholds: {multi_step_markers: 0}
+roles:
+  - {name: alpha, worker: writer, role_type: proposal, prompt: "Role alpha: {query}"}
+  - {name: beta, worker: writer, role_type: proposal, prompt: "Role beta: {query}"}
+  - name: final
+    worker: writer
+    role_type: synthesizer
+    depends_on: [alpha, beta]
+    prompt: "Role final: {query} {alpha} {beta}"
+expose_intermediate_outputs: true
+"""
+    )
+    upstream = _RolesAnsweringOnlyAClosedClient()
+    upstream_url, upstream_server = serve(upstream.app())
+    spec = _spec(responses=True, extra="orchestrators:\n  auto:\n    spec: auto.yaml\n")
+    app = build_app_from_spec(
+        load_deployment_spec(spec.replace("http://vllm.test", upstream_url)), base_dir=tmp_path
+    )
+    kairyu_url, kairyu_server = serve(app)
+
+    def roles_pending() -> None:
+        assert upstream.both_pending.wait(timeout=5), upstream.roles
+
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        _read_first_delta_then_disconnect(
+            kairyu_url, path, body, marker, before_close=roles_pending
+        )
+        assert upstream.all_closed.wait(timeout=5), "a role call outlived its client"
+        assert sorted(upstream.roles) == ["alpha", "beta"]
     finally:
         if collecting:
             gc.enable()

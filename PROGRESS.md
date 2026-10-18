@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [progress] A client leaving an AUTO stream ends every role call at once
+- What: the Orchestrator's keep-alive wrappers awaited their cancelled per-event task through `asyncio.gather`, which forwarded the disconnect's per-iteration re-cancels into the Conductor stream and its producer and cut httpcore's connection close short: on public chat every in-flight role call (parallel DAG roles, a publisher route) kept its upstream connection open and vLLM generated on. Pre-existing (also before `565c1da7`, which only made a disconnect right after the first delta meet pending roles); Responses AUTO released at once on CPU. Both wrappers and the Conductor producer now use `cancel_and_wait` (moved to `kairyu/async_thread.py`).
+- Why: GPU final test (V4.1 ensemble disconnect probe); reproduced on CPU with real sockets, gc on and off.
+- Refs: `kairyu/orchestration/orchestrator.py`, `kairyu/orchestration/conductor.py`; `test_a_client_leaving_an_auto_stream_ends_every_role_call_at_once`; PR #656
+
 ### 2026-10-18 — [amendment] An AUTO answer emptied by the caller's own cap is incomplete, not 502 (m11 D1)
 - What: a final unit whose published attempt ran at exactly the caller's remaining `max_tokens` and stopped with `length` without public text now answers `finish_reason: "length"` (Responses `incomplete` / `max_output_tokens`) with empty content and real usage, unary and streamed. A failed unit, an empty `stop`, no caller cap, a refused retry, or a smaller role cap / floor reserve stays the #496 502 / SSE error.
 - Why: GPU final test: `kairyu-verified-tool` (Quyet) answered `max_output_tokens: 16` / `max_tokens: 16` with 502 because its thinking final unit spent the cap on reasoning; a direct engine and OpenAI answer incomplete; owner decision 2026-10-18.
