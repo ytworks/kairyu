@@ -2,13 +2,9 @@
 
 import asyncio
 import json
-import socket
-import threading
-import time
 
 import httpx
 import pytest
-import uvicorn
 import yaml
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -22,6 +18,7 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.systemone_service import SystemOneModel
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+from tests.server._live_server import serve
 
 QUESTIONS = {"urgent": {"type": "noul", "instructions": "Does the customer need a reply?"}}
 ANSWER = {
@@ -35,19 +32,6 @@ def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://kairyu")
 
 
-def _serve(app) -> tuple[str, uvicorn.Server]:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
-    threading.Thread(target=server.run, daemon=True).start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert time.monotonic() < deadline, "fake upstream did not start"
-        time.sleep(0.02)
-    return f"http://127.0.0.1:{port}", server
-
-
 async def test_spec_served_systemone_forwards_aliases_and_meters_usage(tmp_path):
     received: list[dict] = []
 
@@ -55,7 +39,7 @@ async def test_spec_served_systemone_forwards_aliases_and_meters_usage(tmp_path)
         received.append(await request.json())
         return JSONResponse(ANSWER, headers={"server-timing": "model;dur=12.0, total;dur=13.0"})
 
-    url, upstream = _serve(Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"])]))
+    url, upstream = serve(Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"])]))
     spec = DeploymentSpec.model_validate(
         yaml.safe_load(
             f"""

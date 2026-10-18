@@ -1,11 +1,97 @@
 # qwen3.8-deepseek-v4.1-8gpu evidence
 
-Status: **GPU gates pass on the current configuration** (DTO-D17 with the
-loosened ENSEMBLE criteria and judge fallback `deepseek_think`, 2026-10-01).
+Status: **every gate passes** on the 2026-10-17 Responses connection with the
+2026-10-18 Qwen vLLM v0.31.0 image (PR #656 final test, 2026-10-18; below).
+The GPU gates passed earlier on the chat configuration of 2026-10-01 (DTO-D17 with the loosened ENSEMBLE
+criteria and judge fallback `deepseek_think`, Qwen on vLLM v0.23.0); those
+results describe that configuration, not the current one.
 
 Hardware: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, PCIe). The
 DeepSeek-V4.1-Flash L1 runs on GPUs 0–5; the two Qwen3.8-27B replicas run on
 GPUs 6 and 7.
+
+## 2026-10-18 Qwen pools on vLLM v0.31.0 — GPU-verified (PR #656 final test)
+
+What changed (DTO-D16 amendment of 2026-10-18): both Qwen replicas moved from
+the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`)
+to the official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+as in `qwen3.8-27b-1gpu`. The Qwen compose flags and the DeepSeek overlay
+are unchanged.
+
+Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+slower, and v0.23.0's Responses serving always sets `extra_args={}`, so every
+Responses request Kairyu forwarded to Qwen prefilled slowly. Measured on GPU
+(PR #656 final test) with the route judge's `profile_judge` request, 16
+concurrent on one Qwen3.8 replica:
+
+| Qwen vLLM | chat | Responses | chat with an empty `vllm_xargs` |
+|---|---:|---:|---:|
+| v0.23.0 | 1.43 s | 4.33 s | 4.33 s |
+| v0.31.0 | 1.26 s | 1.27 s | 1.26 s |
+
+On v0.23.0 the slowdown pushed the 5 s route judge past its timeout on 13 of
+32 coding c32 requests and doubled the generic c32 judge p50 (1,982 →
+4,468 ms).
+
+GPU run 2026-10-18 18:00-22:24 JST (UTC 09:00-13:25), working tree after
+`565c1da7` (the streamed attribution) and `00abc81d`: `serving-auto-max` pass
+(4,307 s), `serving-auto-max-coding` pass (11,304 s), `vision` (124 s),
+`tool-calling` (14 s), `api-equivalence` (39 s), `browser-smoke.sh` (20 s)
+all pass; Chat UI pass (Kairyu `/v1/responses` 12 -> 19, chat 0 -> 0).
+Artifacts: `/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4.1-8gpu/verification-results/20261018T090100Z/`
+and `20261018T101326Z/`.
+
+Route judge on v0.31.0 (owner accepted 2026-10-18): with identical judge
+request bodies Qwen returns ENSEMBLE for 17 of 32 coding prompts, against 9
+of 32 on v0.23.0; both deterministic and the same on chat and Responses. More
+coding requests take the ensemble route.
+
+Cancellation probe on the final build `1b995e4d` (2026-10-19 00:18 JST; each
+try starts on an idle stack): `/v1/responses` 0.10 / 0.11 / 0.10 s,
+`/v1/chat/completions` 0.11 / 0.10 / 0.10 s, every follow-up completed. On the
+`565c1da7` build (22:26 JST) chat released only after 9.0 / 5.7 / 4.8 s
+(role calls kept their upstream open; fixed by `03512314`) and Responses not
+within 30 s, measured while Open WebUI's background title/tag/follow-up
+requests from the preceding Chat UI pass were still running.
+
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test; above)
+
+What changed (m9 D2, m11 D4/D7, m1 D8 amendments of 2026-10-17):
+
+- The Chat UI connects with `api_type: responses` and streams
+  (`stream_response: false` removed); the effort filter normalizes each body
+  to the Responses API.
+- Both pools moved from `legacy_chat_models` to the three upstream lists, so
+  the AUTO roles reach L1 in the caller's API (a Chat UI turn on
+  `/v1/responses`).
+- Overlay edit 8 maps the encoder's `xhigh` to 100 (Kairyu sends L3 `max` as
+  Responses `xhigh`).
+- Every gate calls L3 on `/v1/responses`; the serving and coding rows run
+  `serving_bench.py --api responses` without a seed (the paired direct row
+  too), so they are not directly comparable with the chat rows below. New
+  gate: `api-equivalence`.
+
+CPU evidence (2026-10-17, before the GPU run):
+
+- `patch_sm120.py` edit 8 applied to the pinned encoder source
+  (`deepseek_v41_encoding.py` at `ac68c3087`): `xhigh` renders `Reasoning
+  Effort: 100`, the unpatched file fails the post-patch check.
+- `tests/unit/test_qwen38_deepseek_v41_example.py`: an image request arriving
+  as a Responses caller sends the image and `reasoning.effort` to every
+  DeepSeek role, and the route judge and every DAG role reach their L1 on
+  `/v1/responses`.
+
+Remaining on GPU: build and pin the overlay, `run.sh up` (including the
+`xhigh` rendering probe and the `/openai/config` check), every
+`verify.sh` gate including `api-equivalence`, and `browser-smoke.sh`.
+
+The served vLLM image (`local/vllm-openai:qwen38-deepseek-v41-ensemble-xhigh`)
+is rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:9dea0b4ad70701217ac73c2b0ee27e04b2ca8b3d527631b8c4e7437faa484edc`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 ## Carried-over L1 evidence
 
@@ -13,7 +99,8 @@ GPUs 6 and 7.
   `deepseek-v4.1-flash-6gpu`: DP6/EP6, Engram offload, 4K / 0.92, and DSpark
   5 with full verification. Its selection and rejected candidates are in that
   example's `MEASUREMENTS.md`.
-- The Qwen service is the V4 ensemble example's.
+- The Qwen service is the V4 ensemble example's, measured there on vLLM
+  v0.23.0; since 2026-10-18 it runs on v0.31.0 with the same flags (above).
 
 ## Overlay edit 7 (CPU rendering check, 2026-09-30)
 

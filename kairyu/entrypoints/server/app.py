@@ -74,6 +74,11 @@ from kairyu.entrypoints.server.chat_service import (
 from kairyu.entrypoints.server.chat_service import (
     render_prompt as render_prompt,
 )
+from kairyu.entrypoints.server.direct_trace import (
+    _direct_stage_trace,
+    _direct_trace_lines,
+    _merge_stage_metrics,
+)
 from kairyu.entrypoints.server.errors import (
     invalid_request,
     model_not_found,
@@ -92,6 +97,7 @@ from kairyu.entrypoints.server.metering import (
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
     _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
+    _CALLER_API_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
     AccessLogMiddleware,
     AuthMiddleware,
@@ -146,7 +152,7 @@ from kairyu.orchestration.orchestrator import (
 )
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
-from kairyu.orchestration.trace import StructuredTrace, TraceEvent, utc_now_iso
+from kairyu.orchestration.trace import utc_now_iso
 from kairyu.outputs import CompletionOutput, _lazy_text
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import (
@@ -811,77 +817,6 @@ def _orchestrator_metadata_chunk(
         exclude = _with_usage_exclude(exclude, usage)
     serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
     return f"data: {serialized}\n\n"
-
-
-def _direct_stage_trace(
-    response_id: str,
-    *,
-    started_at: str,
-    stage_metrics: Sequence[GenerationStageMetric],
-) -> StructuredTrace:
-    """Build the privacy-safe v2 envelope for one direct engine request."""
-
-    stage_metrics = _merge_stage_metrics(stage_metrics)
-    events = tuple(
-        TraceEvent(
-            node=metric.stage,
-            kind="stage",
-            operation="stage",
-            status="success",
-            role="engine",
-            metadata={
-                "stage": metric.stage,
-                "duration_ns": metric.duration_ns,
-                "occurrences": metric.occurrences,
-                "aggregation": "sum",
-                "scope": "request-observed",
-            },
-        )
-        for metric in stage_metrics
-    )
-    return StructuredTrace(
-        request_id=response_id,
-        started_at=started_at,
-        completed_at=utc_now_iso(),
-        events=events,
-    )
-
-
-def _merge_stage_metrics(
-    *groups: Sequence[GenerationStageMetric],
-) -> tuple[GenerationStageMetric, ...]:
-    """Combine same-stage observations across nested Kairyu transport hops."""
-
-    order: list[str] = []
-    totals: dict[str, tuple[int, int]] = {}
-    for group in groups:
-        for metric in group:
-            if metric.stage not in totals:
-                order.append(metric.stage)
-                totals[metric.stage] = (0, 0)
-            duration_ns, occurrences = totals[metric.stage]
-            totals[metric.stage] = (
-                duration_ns + metric.duration_ns,
-                occurrences + metric.occurrences,
-            )
-    return tuple(
-        GenerationStageMetric(
-            stage=stage,
-            duration_ns=totals[stage][0],
-            occurrences=totals[stage][1],
-        )
-        for stage in order
-    )
-
-
-def _direct_trace_lines(
-    stage_metrics: Sequence[GenerationStageMetric],
-) -> list[str]:
-    stage_metrics = _merge_stage_metrics(stage_metrics)
-    return [
-        f"stage:{metric.stage} duration_ns={metric.duration_ns} occurrences={metric.occurrences}"
-        for metric in stage_metrics
-    ]
 
 
 def _direct_metadata_chunk(
@@ -2439,6 +2374,7 @@ def create_app(
                         else None
                     ),
                     conversation=validated_input.conversation_messages,
+                    caller_api=getattr(http_request.state, _CALLER_API_STATE_KEY, "chat"),
                 )
                 selected = auto_models[request.model]
                 judge_will_run = selected.will_judge_role_profile(orchestration_request)

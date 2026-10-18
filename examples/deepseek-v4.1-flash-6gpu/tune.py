@@ -3,10 +3,10 @@
 Run after ``run.sh up``. Each candidate restarts only this example's vLLM
 service with a Compose override, must pass the L1 correctness probes (exact
 finite answers from every DP rank, a tool call, an image), and is then
-measured with fixed 8K-in / 256-out rows. Raw evidence, the exact command,
-and failures are kept; the committed configuration is restored in
-``finally``. Final numbers come from ``verify.sh`` on the committed
-configuration, not from these exploratory rows.
+measured with 8K-in / up-to-256-out Responses rows (natural completion).
+Raw evidence, the exact command, and failures are kept; the committed
+configuration is restored in ``finally``. Final numbers come from
+``verify.sh`` on the committed configuration, not from these exploratory rows.
 """
 
 from __future__ import annotations
@@ -206,7 +206,7 @@ def main() -> None:
                     with peak:
                         code = verification.bench(
                             dataset,
-                            mode="fixed",
+                            mode="capped",
                             requests=args.requests,
                             concurrency=level,
                             max_tokens=256,

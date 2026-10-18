@@ -306,7 +306,7 @@ environment).
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
 uv run --frozen python -m verification list                  # inspect the verification registry
-./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
+./examples/deepseek-v4.1-flash-8gpu/run.sh           # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
 Then pick your path: [single model](#5-single-model-setup--usage) or
@@ -650,10 +650,27 @@ The Open WebUI demo mounts [`deploy/compose/config.yaml`](deploy/compose/config.
 at `/etc/kairyu/config.yaml` and serves the keyless CPU-safe direct model
 `default` plus the legacy orchestrated model `kairyu-auto`. Open
 `http://localhost:3000`, create the first account, and select either model. The
-topology pins Open WebUI v0.11.0 by immutable linux/amd64 digest; its named data
+topology pins Open WebUI v0.12.3 by immutable linux/amd64 digest; its named data
 volume stores an automatically generated secret, while its mock backends are for
 this local demo only. Replace the deployment and orchestrator specs and
 authentication policy for production.
+
+Open WebUI reaches Kairyu over `/v1/responses`. Start the demo with
+`WEBUI_ADMIN_EMAIL` and `WEBUI_ADMIN_PASSWORD` exported, so that Open WebUI
+creates that admin and closes sign-up (sign in as that admin instead of
+creating the first account), then run
+`docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
+once: it installs
+[`webui-responses-filter.py`](deploy/compose/webui-responses-filter.py) as a
+global filter, which turns Chat Controls fields the Responses API lacks (seed,
+top_k, the effort field) into a Responses body. Without the credentials
+`webui-setup` only warns, and those Chat Controls fields are rejected until an
+admin installs the filter. The filter cannot reach a model's saved settings
+(Admin Panel > Models > Advanced Params), which Open WebUI applies again just
+before sending: save only Responses fields there, and a default effort as the
+Custom Parameter `reasoning` = `{"effort": "high"}`; a saved `seed`, `top_k` or
+`reasoning_effort` answers 400 `Unknown parameter`, as OpenAI's Responses API
+does.
 
 The advanced Reasoning Effort selector is wire-compatible: its medium default
 maps to Kairyu high (minimal/low→low, xhigh/max→max).

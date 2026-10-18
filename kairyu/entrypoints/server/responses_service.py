@@ -84,6 +84,7 @@ from kairyu.entrypoints.server.responses_store import (
     list_page,
 )
 from kairyu.entrypoints.server.sse_response import sse_response
+from kairyu.orchestration.trace import utc_now_iso
 
 logger = logging.getLogger(__name__)
 _FALLBACK_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
@@ -242,6 +243,11 @@ def add_responses_route(
                 max(0, time.perf_counter_ns() - ingress_ns),
             )
         owner = _owner(http_request)
+        # The same opt-in as Chat Completions: structured stage traces ride
+        # the response object as Kairyu extension fields.
+        trace_started_at = (
+            utc_now_iso() if http_request.headers.get("x-kairyu-trace") == "1" else None
+        )
         try:
             _validate_request_surface(request)
             engine = engines.get(request.model)
@@ -338,8 +344,10 @@ def add_responses_route(
                     placement_started_ns=getattr(
                         http_request.state, "placement_started_ns", None
                     ),
+                    trace_requested=trace_started_at is not None,
                     legacy_chat_models=legacy_chat_models,
                     upstream_chat_models=upstream_chat_models,
+                    caller_api="responses",
                 )
         except ChatRequestError as error:
             image = first_image_path(request.input)
@@ -487,11 +495,16 @@ def add_responses_route(
                     saver=saver,
                     owner=owner,
                     http_request=http_request,
+                    trace_started_at=trace_started_at,
                 )
             )
         try:
             response = await engine_unary(
-                request, validated, emitter=emitter, http_request=http_request
+                request,
+                validated,
+                emitter=emitter,
+                http_request=http_request,
+                trace_started_at=trace_started_at,
             )
         except _BufferedFailure as failure:
             return failure.json_response()

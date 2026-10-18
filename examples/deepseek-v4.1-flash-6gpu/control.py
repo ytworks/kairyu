@@ -301,6 +301,13 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
     if os.environ.get("DEEPSEEK_ALLOW_UNPINNED_IMAGE") == "1":
         print(f"WARNING: serving unpinned image {image} ({actual}); not evidence", flush=True)
         return
+    if source["image_id"] is None:
+        raise SystemExit(
+            f"vLLM image {image} ({actual}) has no recorded image ID: it was rebuilt for "
+            "the Responses xhigh->max effort edit and awaits GPU verification; record this "
+            "ID as example.json image_id and kairyu.yaml container_image_digest, or serve it "
+            "anyway (not evidence) with DEEPSEEK_ALLOW_UNPINNED_IMAGE=1"
+        )
     if actual != source["image_id"]:
         raise SystemExit(
             f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
@@ -430,6 +437,258 @@ def post_json(url: str, payload: dict, *, timeout_s: float) -> dict:
         return json.loads(response.read())
 
 
+# --- Responses gate adapter (m11 D7 amendment 2026-10-17) ---------------------
+# The example gates are written against chat-shaped payloads and replies. These
+# helpers send each payload to Kairyu's public /v1/responses instead (the API
+# the Chat UI uses) and read the Responses reply back into the chat shape the
+# gate checks, so a gate's assertions stay as they were.
+
+# Responses fields a payload may already carry (the Chat UI filter's output
+# has reasoning and store) pass through as they are.
+_RESPONSES_PASSTHROUGH = frozenset(
+    {
+        "model",
+        "stream",
+        "temperature",
+        "top_p",
+        "parallel_tool_calls",
+        "metadata",
+        "user",
+        "reasoning",
+        "store",
+    }
+)
+
+
+def _responses_content(content: object, *, assistant: bool) -> object:
+    if isinstance(content, str) or content is None:
+        return content or ""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            kind = "output_text" if assistant else "input_text"
+            parts.append({"type": kind, "text": part["text"]})
+        elif part.get("type") == "image_url" and not assistant:
+            image = part["image_url"]
+            url = image["url"] if isinstance(image, dict) else image
+            parts.append({"type": "input_image", "image_url": url, "detail": "auto"})
+        else:
+            raise ValueError(f"chat content part {part.get('type')!r} has no Responses form")
+    return parts
+
+
+def _responses_tool(tool: dict) -> dict:
+    function = tool["function"]
+    flat = {"type": "function", "name": function["name"]}
+    for key in ("description", "parameters", "strict"):
+        if key in function:
+            flat[key] = function[key]
+    return flat
+
+
+def responses_request(payload: dict) -> dict:
+    """The /v1/responses body for one chat-shaped gate payload (stateless)."""
+
+    body: dict = {"store": False}
+    for key, value in payload.items():
+        if key == "messages":
+            continue
+        if key in _RESPONSES_PASSTHROUGH:
+            body[key] = value
+        elif key in ("max_tokens", "max_completion_tokens"):
+            body["max_output_tokens"] = value
+        elif key == "reasoning_effort":
+            body["reasoning"] = {"effort": value}
+        elif key == "tools":
+            body["tools"] = [_responses_tool(tool) for tool in value]
+        elif key == "tool_choice":
+            body["tool_choice"] = (
+                {"type": "function", "name": value["function"]["name"]}
+                if isinstance(value, dict)
+                else value
+            )
+        elif key == "response_format":
+            if value.get("type") == "json_schema":
+                schema = value["json_schema"]
+                body["text"] = {"format": {"type": "json_schema", **schema}}
+            else:
+                body["text"] = {"format": {"type": value["type"]}}
+        elif key == "stream_options":
+            continue  # a Responses stream always ends with usage
+        else:
+            raise ValueError(f"chat field {key!r} has no Responses form")
+    items: list[dict] = []
+    for message in payload["messages"]:
+        role = message["role"]
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": message["content"],
+                }
+            )
+            continue
+        if message.get("reasoning_content"):
+            items.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": message["reasoning_content"]}],
+                }
+            )
+        content = message.get("content")
+        if content:
+            items.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": _responses_content(content, assistant=role == "assistant"),
+                }
+            )
+        for call in message.get("tool_calls") or ():
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["function"]["name"],
+                    "arguments": call["function"]["arguments"],
+                }
+            )
+    body["input"] = items
+    return body
+
+
+def _finish_reason(response: dict, calls: list) -> str:
+    if response.get("status") == "completed":
+        return "tool_calls" if calls else "stop"
+    if response.get("status") == "incomplete":
+        reason = (response.get("incomplete_details") or {}).get("reason")
+        return "content_filter" if reason == "content_filter" else "length"
+    return str(response.get("status"))
+
+
+def chat_view(response: dict) -> dict:
+    """One Responses object read back as a chat completion (kairyu_* kept)."""
+
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: list[dict] = []
+    has_message = False
+    for item in response.get("output") or ():
+        kind = item.get("type")
+        if kind == "message":
+            has_message = True
+            text += [
+                part.get("text", "")
+                for part in item.get("content") or ()
+                if part.get("type") == "output_text"
+            ]
+        elif kind == "reasoning":
+            parts = item.get("content") or item.get("summary") or ()
+            reasoning += [p.get("text", "") for p in parts]
+        elif kind == "function_call":
+            calls.append(
+                {
+                    "id": item.get("call_id"),
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item.get("arguments")},
+                }
+            )
+    usage = response.get("usage") or {}
+    chat_usage = {
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens_details": {
+            "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens")
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
+        },
+        **{key: value for key, value in usage.items() if key.startswith("orchestration_")},
+    }
+    return {
+        "id": response.get("id"),
+        "object": "chat.completion",
+        "created": response.get("created_at"),
+        "model": response.get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(text) if has_message else None,
+                    "reasoning_content": "".join(reasoning) or None,
+                    "tool_calls": calls or None,
+                },
+                "finish_reason": _finish_reason(response, calls),
+            }
+        ],
+        "usage": chat_usage,
+        **{key: value for key, value in response.items() if key.startswith("kairyu_")},
+    }
+
+
+def chat_stream_view(sse_text: str) -> str:
+    """A Responses SSE body read back as chat SSE chunks ending in [DONE]."""
+
+    chunks: list[dict] = []
+    indexes: dict[int, int] = {}
+    streamed_arguments: set[int] = set()
+
+    def delta(**fields) -> None:
+        chunks.append({"choices": [{"index": 0, "delta": fields, "finish_reason": None}]})
+
+    for line in sse_text.splitlines():
+        if not line.startswith("data:") or not line[len("data:") :].strip():
+            continue
+        event = json.loads(line[len("data:") :])
+        kind = event.get("type")
+        if kind == "response.output_text.delta":
+            delta(content=event["delta"])
+        elif kind in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+            delta(reasoning_content=event["delta"])
+        elif kind == "response.output_item.added" and event["item"].get("type") == "function_call":
+            index = indexes.setdefault(event["output_index"], len(indexes))
+            item = event["item"]
+            delta(
+                tool_calls=[
+                    {
+                        "index": index,
+                        "id": item.get("call_id"),
+                        "type": "function",
+                        "function": {"name": item.get("name"), "arguments": ""},
+                    }
+                ]
+            )
+        elif kind == "response.function_call_arguments.delta":
+            index = indexes[event["output_index"]]
+            streamed_arguments.add(index)
+            delta(tool_calls=[{"index": index, "function": {"arguments": event["delta"]}}])
+        elif kind == "response.output_item.done" and event["item"].get("type") == "function_call":
+            index = indexes[event["output_index"]]
+            if index not in streamed_arguments:
+                arguments = event["item"].get("arguments") or ""
+                delta(tool_calls=[{"index": index, "function": {"arguments": arguments}}])
+        elif kind in ("response.completed", "response.incomplete"):
+            view = chat_view(event["response"])
+            extensions = {k: v for k, v in view.items() if k.startswith("kairyu_")}
+            finish = view["choices"][0]["finish_reason"]
+            chunks.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+            chunks.append({"choices": [], "usage": view["usage"], **extensions})
+        elif kind in ("error", "response.failed"):
+            error = event if kind == "error" else (event.get("response") or {}).get("error")
+            chunks.append({"error": error})
+    return "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+
+
+def post_responses(api_url: str, payload: dict, *, timeout_s: float) -> dict:
+    """POST one chat-shaped payload to /v1/responses; return the reply as chat."""
+    reply = post_json(f"{api_url}/v1/responses", responses_request(payload), timeout_s=timeout_s)
+    return chat_view(reply)
+
+
 def _healthy_replicas(metrics: str, pool: str) -> int | None:
     pattern = re.compile(
         r'^kairyu_pool_replicas\{pool="' + re.escape(pool) + r'",state="healthy"\} (\S+)$',
@@ -455,7 +714,7 @@ def validate_ready(api_url: str) -> None:
         raise SystemExit(f"Kairyu pool {served!r} must report 1 healthy replica, got {healthy!r}")
 
 
-def arithmetic_answer_error(body: dict) -> str | None:
+def arithmetic_answer_error(body: dict, *, logprobs: bool = True) -> str | None:
     """Reject a probe that is not exactly ``323`` with finite log-probabilities.
 
     EP6 on an unfixed SM120 image answered its first request correctly and then
@@ -472,6 +731,8 @@ def arithmetic_answer_error(body: dict) -> str | None:
         return f"finish_reason is {choice.get('finish_reason')!r}"
     if not isinstance(content, str) or content.strip() != "323":
         return f"answer is {content!r}, expected '323'"
+    if not logprobs:
+        return None
     tokens = ((choice.get("logprobs") or {}).get("content")) or []
     if not tokens:
         return "no log-probabilities were returned"
@@ -490,14 +751,14 @@ def arithmetic_answer_error(body: dict) -> str | None:
     return None
 
 
-def arithmetic_probe(**overrides) -> dict:
+def arithmetic_probe(*, logprobs: bool = True, **overrides) -> dict:
     payload = {
         "model": SPEC["model"]["served_name"],
         "messages": [{"role": "user", "content": "What is 17 * 19? Reply with only the integer."}],
         "max_tokens": 8192,
-        "logprobs": True,
-        "top_logprobs": 3,
     }
+    if logprobs:
+        payload.update(logprobs=True, top_logprobs=3)
     payload.update(overrides)
     return payload
 
@@ -506,22 +767,25 @@ def _validate_arithmetic(api_url: str) -> None:
     import concurrent.futures
 
     # One request per DP rank and mode at once, so vLLM's DP balancer hands a
-    # probe to every rank; the finiteness check catches a rank that corrupts.
+    # probe to every rank. It uses /v1/responses, the Chat UI's API, which has
+    # no token log-probabilities (owner decision 2026-10-17): this probe checks
+    # the exact answer and finish, and `verify.sh l1` reads the finite
+    # log-probabilities that catch a corrupting rank from vLLM directly.
     variants = [{}, {"reasoning_effort": "low"}]
     requests = [variant for variant in variants for _ in ALLOCATION["dp_rank_gpu_ids"]]
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(requests)) as pool:
         bodies = list(
             pool.map(
-                lambda overrides: post_json(
-                    f"{api_url}/v1/chat/completions",
-                    arithmetic_probe(**overrides),
+                lambda overrides: post_responses(
+                    api_url,
+                    arithmetic_probe(logprobs=False, **overrides),
                     timeout_s=900,
                 ),
                 requests,
             )
         )
     for overrides, body in zip(requests, bodies, strict=True):
-        error = arithmetic_answer_error(body)
+        error = arithmetic_answer_error(body, logprobs=False)
         if error is not None:
             raise SystemExit(f"arithmetic probe {overrides or 'default'} failed: {error}")
 
@@ -558,7 +822,7 @@ def validate_tool_calling(api_url: str) -> None:
         "max_tokens": 8192,
     }
     try:
-        body = post_json(f"{api_url}/v1/chat/completions", payload, timeout_s=600)
+        body = post_responses(api_url, payload, timeout_s=600)
         choice = body["choices"][0]
         calls = choice["message"].get("tool_calls") or []
         arguments = json.loads(calls[0]["function"]["arguments"]) if calls else {}
@@ -612,7 +876,7 @@ def validate_vision(api_url: str) -> None:
         "What single color fills this image? Answer with one word.", max_tokens=8192
     )
     try:
-        body = post_json(f"{api_url}/v1/chat/completions", payload, timeout_s=900)
+        body = post_responses(api_url, payload, timeout_s=900)
         message = body["choices"][0]["message"]
         content = message.get("content")
     except (KeyError, IndexError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
@@ -661,6 +925,19 @@ def _webui_api(
         return json.loads(response.read())
 
 
+def _check_chat_ui_connection(ui_url: str, token: str) -> None:
+    """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
+
+    config = _webui_api(ui_url, "/openai/config", token=token)
+    api_type = ((config.get("OPENAI_API_CONFIGS") or {}).get("0") or {}).get("api_type")
+    if api_type != "responses":
+        raise SystemExit(
+            "Chat UI connection 0 must use api_type=responses, got "
+            f"{api_type!r}; an existing Open WebUI volume keeps its saved connection, so set "
+            "Admin Panel > Settings > Connections > Kairyu > API Type to Responses"
+        )
+
+
 def _provision_chat_ui_effort_selector(ui_url: str) -> None:
     """Install the Reasoning Effort dropdown filter into the pinned Open WebUI."""
 
@@ -693,6 +970,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
             state = _webui_api(ui_url, f"{base}/toggle/global", token=token, payload={})
         if not (state.get("is_active") and state.get("is_global")):
             raise SystemExit("Chat UI effort selector could not be activated globally")
+        _check_chat_ui_connection(ui_url, token)
         spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
     except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:

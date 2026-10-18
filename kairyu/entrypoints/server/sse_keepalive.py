@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterable, AsyncIterator
+
+from kairyu.async_thread import cancel_and_wait
 
 
 async def iter_with_idle_markers(
@@ -30,9 +31,7 @@ async def iter_with_idle_markers(
                         break
                     yield None
             except BaseException:
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
+                await cancel_and_wait(task)
                 raise
             try:
                 item = task.result()

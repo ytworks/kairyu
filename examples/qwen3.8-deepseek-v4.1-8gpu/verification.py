@@ -41,6 +41,8 @@ _JUDGE_NODE = "profile_judge"
 # byte and is reported, not gated (DTO-D17 keeps only these two routes).
 _TTFT_GATED_PROFILES = tuple(SPEC["orchestration"]["ttft_gated_profiles"])
 DEEPSEEK_MODEL = SPEC["models"]["tier2"]["served_name"]
+# Compose container names (control.py sets COMPOSE_PROJECT_NAME to this).
+PROJECT = SPEC["environment"].replace(".", "-")
 # Serving-benchmark metadata: the DeepSeek L1 is one DP6 replica of TP1 ranks.
 _DEEPSEEK_TP = int(SPEC["allocation"]["tier2"]["tensor_parallel_size"])
 _DEEPSEEK_REPLICAS = int(SPEC["allocation"]["tier2"]["replicas"])
@@ -336,7 +338,7 @@ def _validate_serving_row(
             )
             print(f"{row_dir.name}: routes {json.dumps(report['routes'], sort_keys=True)}")
     if not complete:
-        print("serving row did not produce complete fixed-token evidence", file=sys.stderr)
+        print("serving row did not produce complete evidence", file=sys.stderr)
         return 1
     return 0
 
@@ -351,7 +353,6 @@ def _serving(
     expected_role: str = "direct",
     expected_kind: str = "generation",
     warmup_requests: int | None = None,
-    natural_completion: bool = False,
     require_head: bool = False,
     expected_generation_nodes: tuple[str, ...] = (),
     expected_verification_nodes: tuple[str, ...] = (),
@@ -364,11 +365,12 @@ def _serving(
     prompt_tokens = int(config["prompt_tokens_approx"])
     warmup_requests = warmup_requests or max(1, replicas)
     warmup_dataset = run_dir / "warmup-8k.json"
+    # Rows run over the public Responses API (m11 D7 amendment 2026-10-17),
+    # which has no ignore_eos/min_tokens/seed: every row ends naturally within
+    # the combined cap and is counted in public tokens.
     response_instruction = (
         "Synthesize a useful final answer of approximately 256 output tokens. "
         "Return only that answer; do not expose candidates or private reasoning."
-        if natural_completion
-        else ""
     )
     _serving_dataset(
         warmup_dataset,
@@ -377,26 +379,13 @@ def _serving(
         namespace=f"{run_dir.parent.name}-{run_dir.name}-warmup",
         response_instruction=response_instruction,
     )
-    request_max_tokens = (
-        int(config["auto_max_combined_max_tokens"])
-        if natural_completion
-        else output_tokens
-    )
-    fixed_output_args = (
-        []
-        if natural_completion
-        else ["--min-tokens", "32", "--ignore-eos"]
-    )
-    public_tokenizer_args = (
-        [
-            "--public-tokenizer-url",
-            f"{_deepseek_l1_root()}/tokenize",
-            "--public-tokenizer-model",
-            DEEPSEEK_MODEL,
-        ]
-        if natural_completion
-        else []
-    )
+    request_max_tokens = int(config["auto_max_combined_max_tokens"])
+    public_tokenizer_args = [
+        "--public-tokenizer-url",
+        f"{_deepseek_l1_root()}/tokenize",
+        "--public-tokenizer-model",
+        DEEPSEEK_MODEL,
+    ]
     warmup_code = _run(
         [
             str(ROOT / ".venv/bin/python"),
@@ -405,6 +394,8 @@ def _serving(
             f"{_api_root()}/v1",
             "--model",
             model,
+            "--api",
+            "responses",
             "--dataset",
             str(warmup_dataset),
             "--num-requests",
@@ -412,12 +403,9 @@ def _serving(
             "--concurrency",
             str(warmup_requests),
             "--max-tokens",
-            str(request_max_tokens if natural_completion else 32),
-            *fixed_output_args,
+            str(request_max_tokens),
             "--temperature",
-            "0.0" if natural_completion else "1.0",
-            "--seed",
-            "0",
+            "0.0",
             "--timeout",
             "86400",
             "--results-dir",
@@ -452,6 +440,8 @@ def _serving(
                 f"{_api_root()}/v1",
                 "--model",
                 model,
+                "--api",
+                "responses",
                 "--dataset",
                 str(dataset),
                 "--num-requests",
@@ -460,15 +450,8 @@ def _serving(
                 str(concurrency),
                 "--max-tokens",
                 str(request_max_tokens),
-                *(
-                    []
-                    if natural_completion
-                    else ["--min-tokens", str(output_tokens), "--ignore-eos"]
-                ),
                 "--temperature",
-                "0.0" if natural_completion else "1.0",
-                "--seed",
-                "0",
+                "0.0",
                 "--timeout",
                 "86400",
                 "--results-dir",
@@ -491,7 +474,7 @@ def _serving(
                 expected_route=expected_route,
                 expected_role=expected_role,
                 expected_kind=expected_kind,
-                public_tokens=natural_completion,
+                public_tokens=True,
                 require_head=require_head,
                 expected_generation_nodes=expected_generation_nodes,
                 expected_verification_nodes=expected_verification_nodes,
@@ -517,7 +500,6 @@ def serving_auto_max(run_dir: Path) -> int:
         expected_role="publisher",
         expected_kind="generation",
         warmup_requests=4,
-        natural_completion=True,
         require_head=True,
         expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
         expected_verification_nodes=_DUAL_TRACK_VERIFICATION_NODES,
@@ -618,6 +600,9 @@ def _bench_row(
     stage_trace: bool,
     public_tokenizer: bool,
 ) -> int:
+    # Product rows and the paired direct DeepSeek rows both use the Responses
+    # API, so the TTFT pair compares the same public API (first output-text
+    # delta on each side).
     public_tokenizer_args = (
         [
             "--public-tokenizer-url",
@@ -636,6 +621,8 @@ def _bench_row(
             base_url,
             "--model",
             model,
+            "--api",
+            "responses",
             "--dataset",
             str(dataset),
             "--num-requests",
@@ -646,8 +633,6 @@ def _bench_row(
             str(max_tokens),
             "--temperature",
             "0.0",
-            "--seed",
-            "0",
             "--timeout",
             "86400",
             "--results-dir",
@@ -885,15 +870,210 @@ _VISION_PROMPT = (
 )
 
 
+# --- Responses gate adapter (m11 D7 amendment 2026-10-17) ---------------------
+# The example gates are written against chat-shaped payloads and replies. These
+# helpers send each payload to Kairyu's public /v1/responses instead (the API
+# the Chat UI uses) and read the Responses reply back into the chat shape the
+# gate checks, so a gate's assertions stay as they were.
+
+# Responses fields a payload may already carry (the Chat UI filter's output
+# has reasoning and store) pass through as they are.
+_RESPONSES_PASSTHROUGH = frozenset(
+    {
+        "model",
+        "stream",
+        "temperature",
+        "top_p",
+        "parallel_tool_calls",
+        "metadata",
+        "user",
+        "reasoning",
+        "store",
+    }
+)
+
+
+def _responses_content(content: object, *, assistant: bool) -> object:
+    if isinstance(content, str) or content is None:
+        return content or ""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            kind = "output_text" if assistant else "input_text"
+            parts.append({"type": kind, "text": part["text"]})
+        elif part.get("type") == "image_url" and not assistant:
+            image = part["image_url"]
+            url = image["url"] if isinstance(image, dict) else image
+            parts.append({"type": "input_image", "image_url": url, "detail": "auto"})
+        else:
+            raise ValueError(f"chat content part {part.get('type')!r} has no Responses form")
+    return parts
+
+
+def _responses_tool(tool: dict) -> dict:
+    function = tool["function"]
+    flat = {"type": "function", "name": function["name"]}
+    for key in ("description", "parameters", "strict"):
+        if key in function:
+            flat[key] = function[key]
+    return flat
+
+
+def responses_request(payload: dict) -> dict:
+    """The /v1/responses body for one chat-shaped gate payload (stateless)."""
+
+    body: dict = {"store": False}
+    for key, value in payload.items():
+        if key == "messages":
+            continue
+        if key in _RESPONSES_PASSTHROUGH:
+            body[key] = value
+        elif key in ("max_tokens", "max_completion_tokens"):
+            body["max_output_tokens"] = value
+        elif key == "reasoning_effort":
+            body["reasoning"] = {"effort": value}
+        elif key == "tools":
+            body["tools"] = [_responses_tool(tool) for tool in value]
+        elif key == "tool_choice":
+            body["tool_choice"] = (
+                {"type": "function", "name": value["function"]["name"]}
+                if isinstance(value, dict)
+                else value
+            )
+        elif key == "response_format":
+            if value.get("type") == "json_schema":
+                schema = value["json_schema"]
+                body["text"] = {"format": {"type": "json_schema", **schema}}
+            else:
+                body["text"] = {"format": {"type": value["type"]}}
+        elif key == "stream_options":
+            continue  # a Responses stream always ends with usage
+        else:
+            raise ValueError(f"chat field {key!r} has no Responses form")
+    items: list[dict] = []
+    for message in payload["messages"]:
+        role = message["role"]
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": message["content"],
+                }
+            )
+            continue
+        if message.get("reasoning_content"):
+            items.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": message["reasoning_content"]}],
+                }
+            )
+        content = message.get("content")
+        if content:
+            items.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": _responses_content(content, assistant=role == "assistant"),
+                }
+            )
+        for call in message.get("tool_calls") or ():
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["function"]["name"],
+                    "arguments": call["function"]["arguments"],
+                }
+            )
+    body["input"] = items
+    return body
+
+
+def _finish_reason(response: dict, calls: list) -> str:
+    if response.get("status") == "completed":
+        return "tool_calls" if calls else "stop"
+    if response.get("status") == "incomplete":
+        reason = (response.get("incomplete_details") or {}).get("reason")
+        return "content_filter" if reason == "content_filter" else "length"
+    return str(response.get("status"))
+
+
+def chat_view(response: dict) -> dict:
+    """One Responses object read back as a chat completion (kairyu_* kept)."""
+
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: list[dict] = []
+    has_message = False
+    for item in response.get("output") or ():
+        kind = item.get("type")
+        if kind == "message":
+            has_message = True
+            text += [
+                p.get("text", "")
+                for p in item.get("content") or ()
+                if p.get("type") == "output_text"
+            ]
+        elif kind == "reasoning":
+            parts = item.get("content") or item.get("summary") or ()
+            reasoning += [p.get("text", "") for p in parts]
+        elif kind == "function_call":
+            calls.append(
+                {
+                    "id": item.get("call_id"),
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item.get("arguments")},
+                }
+            )
+    usage = response.get("usage") or {}
+    chat_usage = {
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens_details": {
+            "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens")
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
+        },
+        **{key: value for key, value in usage.items() if key.startswith("orchestration_")},
+    }
+    return {
+        "id": response.get("id"),
+        "object": "chat.completion",
+        "created": response.get("created_at"),
+        "model": response.get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(text) if has_message else None,
+                    "reasoning_content": "".join(reasoning) or None,
+                    "tool_calls": calls or None,
+                },
+                "finish_reason": _finish_reason(response, calls),
+            }
+        ],
+        "usage": chat_usage,
+        **{key: value for key, value in response.items() if key.startswith("kairyu_")},
+    }
+
+
 def _post_chat(payload: dict, *, timeout_s: float) -> tuple[int, dict]:
+    """One chat-shaped gate request through L3's public /v1/responses."""
+
     request = urllib.request.Request(
-        f"{_api_root()}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
+        f"{_api_root()}/v1/responses",
+        data=json.dumps(responses_request(payload)).encode(),
         headers={"Content-Type": "application/json", "X-Kairyu-Trace": "1"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            return response.status, json.loads(response.read())
+            return response.status, chat_view(json.loads(response.read()))
     except urllib.error.HTTPError as error:
         return error.code, {"error": error.read().decode("utf-8", "replace")[:500]}
 
@@ -1085,6 +1265,60 @@ def tool_calling(run_dir: Path) -> int:
     return 0
 
 
+def api_equivalence(run_dir: Path) -> int:
+    """L1 and L3 answer the same Responses requests in the same format.
+
+    The DeepSeek L1 (loopback port) and the AUTO product model receive the
+    same requests (verification/product/correctness/upstream_api_equivalence.py);
+    the AUTO model's output items come from its roles, so the two sides are
+    compared on status and usage keys while each is validated in full. The
+    request counters of all three L1 services the roles reach must show every
+    L3 call on /v1/responses and none on /v1/chat/completions.
+    """
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    qwen_replicas = int(SPEC["allocation"]["tier1"]["replicas"])
+    metrics = [
+        f"{_deepseek_l1_root()}/metrics",
+        *(
+            f"{PROJECT}-qwen-{replica}-1=http://127.0.0.1:8000/metrics"
+            for replica in range(qwen_replicas)
+        ),
+    ]
+    return _run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
+            "--l1",
+            f"{_deepseek_l1_root()}/v1",
+            "--l1-model",
+            DEEPSEEK_MODEL,
+            *(argument for endpoint in metrics for argument in ("--l1-metrics", endpoint)),
+            "--l3",
+            f"{_api_root()}/v1",
+            "--l3-model",
+            SPEC["orchestration"]["auto_max_model"],
+            "--l3-orchestrated",
+            "--cases",
+            "text,stream,effort,tools,image,cap,openwebui",
+            # xhigh is L3 max on the Responses wire (patch_sm120.py edit 8).
+            # No --expect-reasoning: the AUTO stream's leading reasoning item is
+            # the final-answer attribution, not the publisher's thinking, and on
+            # this short arithmetic the deepseek_think publisher answered without
+            # thinking at every effort, on the chat wire too (GPU 2026-10-18), so
+            # a reasoning item says nothing about the effort. Quyet does the same.
+            "--efforts",
+            "low,high,xhigh",
+            "--max-output-tokens",
+            "16384",
+            "--out",
+            str(run_dir / "api-equivalence.json"),
+        ],
+        log=run_dir / "api-equivalence.log",
+        check=False,
+    )
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
     for name in (
@@ -1121,6 +1355,10 @@ _VERIFICATIONS = {
     "tool-calling": (
         tool_calling,
         "an agent turn returns an executable OpenAI tool call through L3",
+    ),
+    "api-equivalence": (
+        api_equivalence,
+        "the DeepSeek L1 and L3 answer the same Responses requests in the same format",
     ),
 }
 

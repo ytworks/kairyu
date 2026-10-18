@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 
-from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
+from kairyu.async_thread import cancel_and_wait, run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     UNLIMITED_OUTPUT_ADMISSION_TOKENS,
     AdmissionUpperBound,
@@ -904,6 +904,7 @@ class Orchestrator:
                 temperature=0.0,
             ),
             chat_template_kwargs=chat_template_kwargs,
+            caller_api=call.caller_api,
         )
 
     @staticmethod
@@ -1338,6 +1339,7 @@ class Orchestrator:
                             if conductor is not None
                             else ()
                         ),
+                        caller_api=call.caller_api,
                     ),
                 )
             )
@@ -1383,6 +1385,7 @@ class Orchestrator:
             chat_template_kwargs=(
                 call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
             ),
+            caller_api=call.caller_api,
         )
 
     def _engine_prompt(
@@ -1413,6 +1416,7 @@ class Orchestrator:
                 self._shared_prefix,
                 session="validation-moa",
                 reasoning_effort=self._effective_reasoning_effort(call),
+                caller_api=call.caller_api,
             )
             key = self._internal_engine_keys(call, decision)[0]
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
@@ -1436,6 +1440,7 @@ class Orchestrator:
                             if isinstance(prompt, MultimodalPrompt)
                             else None
                         ),
+                        caller_api=call.caller_api,
                     ),
                 )
             )
@@ -1597,6 +1602,7 @@ class Orchestrator:
                 self._shared_prefix,
                 session=f"preflight-moa-{suffix}",
                 reasoning_effort=self._effective_reasoning_effort(call),
+                caller_api=call.caller_api,
             )
             proposal_key = self._internal_engine_keys(call, decision)[0]
             internal_requests = tuple(
@@ -2065,6 +2071,7 @@ class Orchestrator:
             public_output_floor=self._profile_output_floor(roles),
             decision_workers=self._decision_workers,
             conversation=self._native_conversation(call, roles),
+            caller_api=call.caller_api,
         )
 
     @staticmethod
@@ -2348,6 +2355,7 @@ class Orchestrator:
                             final_tool_call_protocol=call.tool_call_protocol,
                             shared_prefix=self._shared_prefix,
                             reasoning_effort=self._effective_reasoning_effort(call),
+                            caller_api=call.caller_api,
                         )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
                     # Reconcile proposals + synthesis with the actual result cost;
@@ -2544,6 +2552,8 @@ class Orchestrator:
                 # The selected final unit failed or produced no public text
                 # after its retry; publishing an internal stage or an empty
                 # "stop" would be a silent lie to the caller (issue #496).
+                # An empty answer that ran out of the caller's own limit is
+                # not this case: it is returned with its "length" completions.
                 raise OrchestratorExecutionError(
                     RuntimeError("orchestration final unit produced no public output"),
                     result_with_trace(
@@ -2676,8 +2686,7 @@ class Orchestrator:
                 yield event
         finally:
             if not first.done():
-                first.cancel()
-                await asyncio.gather(first, return_exceptions=True)
+                await cancel_and_wait(first)
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 await close()
@@ -2710,8 +2719,10 @@ class Orchestrator:
                         return
                 finally:
                     if not upcoming.done():
-                        upcoming.cancel()
-                        await asyncio.gather(upcoming, return_exceptions=True)
+                        # A disconnect re-cancels the response task on every
+                        # loop iteration; a gather would forward each re-cancel
+                        # into the role calls and abort their upstream close.
+                        await cancel_and_wait(upcoming)
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
@@ -3154,6 +3165,7 @@ class Orchestrator:
                         shared_prefix=self._shared_prefix,
                         usage_observer=observe_moa_usage,
                         reasoning_effort=self._effective_reasoning_effort(call),
+                        caller_api=call.caller_api,
                     )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:

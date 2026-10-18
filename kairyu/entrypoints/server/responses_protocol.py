@@ -514,17 +514,38 @@ def _response_envelope(
     }
 
 
+_ORCHESTRATION_USAGE_FIELDS = ("orchestration_input_tokens", "orchestration_output_tokens")
+
+
 def _usage_payload_from_wire(usage: dict | None) -> dict:
-    """Map public Chat Completions usage onto the Responses usage shape."""
+    """Map public Chat Completions usage onto the Responses usage shape.
+
+    Kairyu's orchestration usage extension (the internal-call totals an AUTO
+    model reports beside the public usage) is carried over unchanged.
+    """
     usage = usage or {}
     details = usage.get("prompt_tokens_details") or {}
     completion_details = usage.get("completion_tokens_details") or {}
-    return _usage_shape(
+    shaped = _usage_shape(
         int(usage.get("prompt_tokens") or 0),
         int(details.get("cached_tokens") or 0),
         int(usage.get("completion_tokens") or 0),
         int(completion_details.get("reasoning_tokens") or 0),
     )
+    for field in _ORCHESTRATION_USAGE_FIELDS:
+        if usage.get(field) is not None:
+            shaped[field] = usage[field]
+    return shaped
+
+
+def kairyu_extensions(payload: dict) -> dict:
+    """The Kairyu extension fields of a Chat Completions body or chunk."""
+
+    return {
+        key: value
+        for key, value in payload.items()
+        if key.startswith("kairyu_") and value is not None
+    }
 
 
 # Context-window overflow as L3 can see it: L1 raises no typed overflow error,

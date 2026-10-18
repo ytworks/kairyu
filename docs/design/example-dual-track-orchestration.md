@@ -14,6 +14,9 @@ Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes; DTO-D16 applies the
 same policy to `examples/qwen3.8-deepseek-v4.1-8gpu/`, reduced there to two
 routes and two policies by DTO-D17.
+Removed (2026-10-18, owner decision, PR #656): `examples/qwen3.8-deepseek-v4-8gpu/`
+was deleted with every DeepSeek-V4 example; DTO-D16..D18 continue in
+`examples/qwen3.8-deepseek-v4.1-8gpu/`, and the V4 decisions stay as history.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
 `example-coding-orchestration.md` (owner decision, 2026-08-18: the coding DAG,
 the general ensemble profile, the LLM profile judge, and the sandbox execution
@@ -654,6 +657,27 @@ configuration (plan
   inherited ensemble method, and native image input in place of the
   Qwen-described proxy.
 
+**DTO-D16 amendment (owner, 2026-10-18): the Qwen pools on vLLM v0.31.0.**
+
+- **What:** both Qwen3.8 replicas leave the V4 example's official vLLM
+  v0.23.0 image for the official v0.31.0 image (registry digest
+  `sha256:c1c9f6fd…67c3`, the GLM examples' pin), with unchanged flags. The
+  DeepSeek overlay, the routes, the roles and the budgets are unchanged.
+- **Why:** on v0.23.0 every request that carries `extra_args` prefills about
+  3x slower, and v0.23.0's Responses serving always sets `extra_args={}`.
+  Since DTO-D18 every role call, the route judge included, reaches Qwen on
+  `/v1/responses`, so all of them prefilled slowly: the `profile_judge`
+  request, 16 concurrent on one replica, prefilled in 4.33 s against 1.43 s
+  on chat (1.27 s / 1.26 s on v0.31.0). The 5 s judge timed out on 13 of 32
+  coding c32 requests, and the generic c32 judge p50 doubled (1,982 →
+  4,468 ms).
+- **Status:** implemented; GPU verification on v0.31.0 pending (`run.sh up`,
+  both serving matrices, vision, tool-calling, `api-equivalence`, browser
+  smoke). The image identity and the other Qwen examples are recorded in
+  `frontier-native-runtime.md` (Qwen3.8 vLLM v0.31.0 amendment). The
+  DTO-D13/D15 findings measured on the v0.23 Qwen worker stay as history;
+  the mechanisms they introduced are unchanged.
+
 ### DTO-D17 — Two routes and two policies for the V4.1 example (owner decision, 2026-10-01)
 
 Status: accepted; implemented, with the two amendments below. On the
@@ -731,6 +755,56 @@ five routes and four policies.
 - **Status:** every GPU gate passes on this configuration (2026-10-01). Judge
   timeouts: 3 of 269 judged requests, all served by `deepseek_think`. The
   earlier amendment's runs are kept in MEASUREMENTS.md as superseded.
+
+### DTO-D18 — Role calls in the caller's API; the V4 example on the official encoder (owner decision, 2026-10-17)
+
+Status: accepted; implemented; GPU-verified 2026-10-18 for the V4.1 example
+(every gate, `api-equivalence`, browser smoke and the cancellation probe pass;
+its `MEASUREMENTS.md`); the V4 example was removed 2026-10-18 (plan
+`docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`, decision 12).
+
+- **Both examples.** Every pool is in `upstream_chat_models`,
+  `upstream_responses_models` and `upstream_messages_models`, so each role
+  call (the route judge included) reaches its L1 in the public request's API
+  (m1 D8 / m9 D2 amendments): a Chat UI turn, which now arrives on
+  `/v1/responses` (m11 D7 amendment; `stream_response: false` dropped because
+  a non-streaming Responses result loses the internal-work item), reaches
+  both pools on `/v1/responses`. Messages callers fall to Responses for roles
+  whose sampling (`top_k`, `seed`) the Messages wire cannot carry. The gates
+  call `/v1/responses`; serving rows end naturally within their caps, so they
+  are not comparable with earlier rows; `verify.sh api-equivalence` compares
+  the AUTO model with L1 on status and usage keys and sums every L1's request
+  counters.
+- **V4 example (`qwen3.8-deepseek-v4-8gpu`).** DeepSeek roles leave the
+  inline completion scaffolds of D6/D7 for the checkpoint's own encoder on
+  the chat path, as DTO-D16 did for V4.1: prompts carry no
+  `<｜begin▁of▁sentence｜><｜User｜>` / `<｜Assistant｜><think>`, and no role
+  needs `/v1/completions`. One DeepSeek pool serves every DeepSeek role;
+  `tier2-direct`, the `-thinking` pool, `completion_reasoning_end_tag`, the
+  Kairyu `chat_templates`, `deepseek-thinking.jinja` and
+  `deepseek-role-effort.jinja` are removed. `inherit` roles send the L3
+  effort, which turns thinking on and renders the encoder's official
+  preamble; the effort-less `deepseek_answer` keeps `reasoning_closed` and
+  sends `enable_thinking: false`. The L1 runs `--tokenizer-mode deepseek_v4`
+  with thinking off by default (the dp2 example's setting), so the coding
+  gate's DeepSeek-direct TTFT denominator stays a non-thinking call. The D9
+  floor on `synthesis` and `deepseek_think_answer` uses D15's `chat`
+  continuation. An example-owned overlay (`vllm-overlay.Dockerfile`,
+  `patch_tokenizer.py`) on the pinned `aa0d513027` build renders the
+  Responses `xhigh` (Kairyu's wire form of L3 max) as `max` and continues a
+  final `<think>` assistant prefill as an open turn; readiness checks both
+  through L1 `/tokenize`. Unchanged: five routes and four policies (DTO-D17
+  is V4.1 only), D11's Qwen `image_description` (0731 is text-only), prompt
+  bodies, sampling, budget `{19, 2}`, floor 256.
+- **V4.1 example (`qwen3.8-deepseek-v4.1-8gpu`).** The overlay's new edit 8
+  maps the encoder's `xhigh` (75) to the max budget (100); readiness checks
+  the rendering. Routes, policies and roles are unchanged.
+- **Why.** Owner request 2026-10-17: L1 receives the same API as L3, and the
+  V4 example's L2 is rebuilt like DTO-D16 so it no longer depends on
+  Kairyu-rendered DeepSeek prompts.
+- **GPU consequences.** The served-config digests change; the rebuilt
+  overlays have no recorded image ID until the GPU build; both serving gates,
+  `api-equivalence` and the browser smoke must be re-measured.
 
 ## Acceptance
 

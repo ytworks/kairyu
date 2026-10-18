@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import uuid
@@ -82,6 +83,27 @@ _DECLARED_METADATA_FIELDS = (
     "container_image_digest",
 )
 logger = logging.getLogger(__name__)
+
+
+def placement_text(request: GenerationRequest) -> str | None:
+    """The text a request's prefix placement hashes.
+
+    A natively forwarded conversation travels beside the prompt (the prompt is
+    empty, or only a role's final turn). Its canonical serialization leads, so
+    consecutive turns of one conversation share a growing prefix whichever
+    public API carried them (m9 D2 amendment 2026-10-17); a plain prompt hashes
+    exactly as before.
+    """
+
+    text = prompt_text(request.prompt)
+    if text is None or not request.conversation_prefix:
+        return text
+    turns = "".join(
+        json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+        for message in request.conversation_prefix
+    )
+    return turns + text
 
 
 def _supports_native_prepared_prefix(index: object) -> bool:
@@ -1179,7 +1201,7 @@ class ReplicaPool:
         if track_prefix is None:
             track_prefix = self._should_track_prefix(request)
         if track_prefix:
-            prefix_prompt = prompt_text(request.prompt)
+            prefix_prompt = placement_text(request)
             if prefix_prompt is None:  # Defensive: _should_track_prefix owns this invariant.
                 raise RuntimeError("prefix tracking requires a text prompt")
             prefix_reason = "prefix_match"
@@ -1412,7 +1434,7 @@ class ReplicaPool:
         )
         prepare = self._prefix_prepare
         track_prefix = self._should_track_prefix(request)
-        prefix_prompt = prompt_text(request.prompt) if track_prefix else None
+        prefix_prompt = placement_text(request) if track_prefix else None
         if track_prefix and prefix_prompt is None:  # Defensive invariant.
             raise RuntimeError("prefix tracking requires a text prompt")
         prefix_fingerprint = ""
@@ -1494,7 +1516,7 @@ class ReplicaPool:
         elif prefix_keys is not None and self._prefix_observe_prepared is not None:
             self._prefix_observe_prepared(replica_id, prefix_keys, promote)
         else:
-            prefix_prompt = prompt_text(request.prompt)
+            prefix_prompt = placement_text(request)
             if prefix_prompt is None:  # Defensive: prefix tracking is text-only.
                 raise RuntimeError("prefix tracking requires a text prompt")
             self._prefix_index.observe(replica_id, prefix_prompt)

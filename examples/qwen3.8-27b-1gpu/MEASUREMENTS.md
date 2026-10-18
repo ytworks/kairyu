@@ -1,5 +1,47 @@
 # Measured performance
 
+## 2026-10-18 vLLM v0.31.0 — GPU-verified (PR #656 final test)
+
+L1 moved from the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`,
+source `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`, FlashInfer 0.6.12) to the
+official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+which the GLM-5.3-Flash examples already pin (owner decision, 2026-10-18).
+
+Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+slower, and v0.23.0's Responses serving always sets `extra_args={}`, so every
+Responses request Kairyu forwarded to Qwen prefilled slowly. Prefill time,
+measured on GPU with the `qwen3.8-deepseek-v4.1-8gpu` route-judge
+(`profile_judge`) request, 16 concurrent on one Qwen3.8 replica:
+
+| vLLM | chat | Responses | chat with an empty `vllm_xargs` |
+|---|---:|---:|---:|
+| v0.23.0 | 1.43 s | 4.33 s | 4.33 s |
+| v0.31.0 | 1.26 s | 1.27 s | 1.26 s |
+
+The compose flags are unchanged. `run.sh up` and its probes passed on v0.31.0
+(GPU, 2026-10-18). Every Qwen3.8 result below was measured on v0.23.0;
+On v0.31.0 (run 2026-10-18 17:34-17:39 JST, working tree after `00abc81d`):
+`serving` pass (225 s; v0.23.0 Responses run 2026-10-17: 209 s),
+`api-equivalence` pass (28 s; 26 s), Chat UI pass (Kairyu `/v1/responses`
+10 -> 18, chat 0 -> 0, as on v0.23.0). Cancellation probe: `/v1/responses`
+and `/v1/chat/completions` released in 15-17 ms each time, every follow-up
+completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/verification-results/20261018T083456Z/`.
+
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
+
+The 2026-10-17 configuration changes how the rows below were produced: the
+Chat UI and `verify.sh serving` use Kairyu's `/v1/responses`, and Kairyu
+forwards each request to vLLM in its caller's API (a chat as the caller's own
+messages instead of one flattened user message). Serving rows now end naturally
+within 256 output tokens (the Responses API has no `ignore_eos`/`min_tokens`),
+so they are not comparable with the fixed-length chat rows below. The L1
+envelope is unchanged. GPU: `serving` and `api-equivalence` pass on v0.23.0
+(2026-10-17) and on v0.31.0 (2026-10-18, above).
+
 ## Qwen3.8 result (vLLM v0.23.0)
 
 The selected single-GPU configuration uses the attested

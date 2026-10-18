@@ -19,7 +19,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import replace
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from kairyu.engine.backend import (
@@ -65,6 +65,7 @@ from kairyu.entrypoints.server.metering import (
 )
 from kairyu.entrypoints.server.middleware import (
     _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
+    _CALLER_API_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
 )
 from kairyu.entrypoints.server.protocol import (
@@ -1473,6 +1474,7 @@ async def _orchestrated_message(
     itself.
     """
 
+    setattr(http_request.state, _CALLER_API_STATE_KEY, "messages")
     if _tools_active(chat_request):
         # #573: tool-bearing AUTO requests consume the in-process raw stream
         # (the state sentinel is unreachable from the wire) for BOTH stream
@@ -1499,6 +1501,10 @@ async def _orchestrated_message(
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
             return _rerendered_chat_json_error(delegated, request_id)
+        if not isinstance(delegated, StreamingResponse):
+            # The client left while the profile judge ran (the chat handler's
+            # 499); there is no stream to read and nobody to answer.
+            return delegated
         if request.stream:
             return sse_response(
                 _relay_auto_tool_stream(
@@ -1548,6 +1554,8 @@ async def _orchestrated_message(
         delegated = await chat_dispatch(live_request, http_request)
         if isinstance(delegated, JSONResponse):
             return _rerendered_chat_json_error(delegated, request_id)
+        if not isinstance(delegated, StreamingResponse):
+            return delegated  # the client left during the judge (499), as above
         return sse_response(
             _relay_auto_stream(
                 request, delegated.body_iterator, message_id=message_id
@@ -1777,6 +1785,7 @@ def add_messages_route(
                     ),
                     legacy_chat_models=legacy_chat_models,
                     upstream_chat_models=upstream_chat_models,
+                    caller_api="messages",
                 )
         except ChatRequestError as error:
             return chat_error(error)

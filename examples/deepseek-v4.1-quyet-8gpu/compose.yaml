@@ -382,6 +382,9 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses (connection 0 is OPENAI_API_BASE_URL).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: kairyu-verified-tool
       DEFAULT_MODEL_PARAMS: '{"max_tokens":262144,"stream_response":true}'
       ENABLE_PERSISTENT_CONFIG: 'false'

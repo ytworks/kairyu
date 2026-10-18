@@ -92,10 +92,15 @@ def _webui_smoke_env(
         fake_bin / "docker",
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'printf "[%s|%s]\\n" "$WEBUI_ADMIN_EMAIL" "$WEBUI_ADMIN_PASSWORD" >> "$DOCKER_LOG.admin"\n'
         'case "$*" in\n'
         '  *" config --format json")\n'
         "    printf "
-        "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\"}}}}' "
+        "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\","
+        "\"OPENAI_API_CONFIGS\":"
+        "\"{\\\\\"0\\\\\":{\\\\\"api_type\\\\\":\\\\\"responses\\\\\"}}\"}},"
+        "\"browser\":{\"environment\":{\"WEBUI_SMOKE_EMAIL\":\"smoke@example.invalid\","
+        "\"WEBUI_SMOKE_PASSWORD\":\"smoke-password\"}}}}' "
         '"$WEBUI_RENDERED_BASE_URL"\n'
         "    ;;\n"
         f"{fail_case}"
@@ -149,6 +154,7 @@ elif url.endswith("/metrics"):
     sys.stdout.write(
         'kairyu_requests_total{code="200",method="POST",'
         'model="embed-small",path="/v1/embeddings",tenant="default"} 10.0\\n'
+        'kairyu_request_duration_seconds_count{path="/v1/responses"} 6.0\\n'
     )
 else:
     print(f"unexpected fake curl URL: {url!r}", file=sys.stderr)
@@ -251,6 +257,7 @@ def test_webui_compose_pins_full_authenticated_browser_topology():
     environment = webui["environment"]
     assert environment["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert environment["OPENAI_API_KEY"] == "sk-local"
+    assert json.loads(environment["OPENAI_API_CONFIGS"]) == {"0": {"api_type": "responses"}}
     assert {
         key: environment[key]
         for key in (
@@ -301,7 +308,7 @@ def test_webui_compose_pins_full_authenticated_browser_topology():
     assert "healthcheck" in webui
 
     _assert_immutable_image(
-        webui["image"], "ghcr.io/open-webui/open-webui:v0.11.0-slim"
+        webui["image"], "ghcr.io/open-webui/open-webui:v0.12.3"
     )
     assert browser["image"] == "kairyu-webui-browser:playwright-1.60.0"
     assert browser["build"] == {
@@ -805,13 +812,16 @@ def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path
     assert docker_log.read_text(encoding="utf-8").splitlines() == [
         (
             f"compose --project-name {WEBUI_SMOKE_PROJECT} "
-            f"-f {WEBUI_COMPOSE.resolve()} config --format json"
+            f"-f {WEBUI_COMPOSE.resolve()} --profile browser-smoke config --format json"
         )
     ]
 
 
 def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
     env, docker_log, curl_log = _webui_smoke_env(tmp_path)
+    # The README's demo admin credentials must not reach the smoke's stack:
+    # Open WebUI would create that admin and close the fresh signup.
+    env.update(WEBUI_ADMIN_EMAIL="demo-admin@example.invalid", WEBUI_ADMIN_PASSWORD="demo")
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -823,18 +833,28 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    admin_env = Path(f"{docker_log}.admin").read_text(encoding="utf-8").splitlines()
+    assert set(admin_env) == {"[|]"}
     commands = docker_log.read_text(encoding="utf-8").splitlines()
     compose = (
         f"compose --project-name {WEBUI_SMOKE_PROJECT} "
         f"-f {WEBUI_COMPOSE.resolve()}"
     )
     assert commands == [
-        f"{compose} config --format json",
+        f"{compose} --profile browser-smoke config --format json",
         (
             f"{compose} up -d --build --wait "
             "--wait-timeout 240 kairyu webui"
         ),
         f"{compose} --profile browser-smoke build browser",
+        (
+            f"{compose} --profile browser-smoke run --rm --no-deps "
+            "-e WEBUI_SMOKE_PHASE=signup browser"
+        ),
+        (
+            f"{compose} run --rm --no-deps -e WEBUI_ADMIN_EMAIL=smoke@example.invalid "
+            "-e WEBUI_ADMIN_PASSWORD=smoke-password webui-setup"
+        ),
         (
             f"{compose} --profile browser-smoke run --rm --no-deps "
             "-e WEBUI_SMOKE_PHASE=initial browser"
@@ -852,13 +872,13 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
         f"{compose} --profile browser-smoke down --volumes --remove-orphans",
     ]
     curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
-    assert len(curl_commands) == 4
+    assert len(curl_commands) == 6
     assert all("--connect-timeout 2 --max-time 10" in line for line in curl_commands)
     assert "/v1/embeddings" in curl_commands[0]
     assert '"model":"embed-small"' in curl_commands[0]
-    assert curl_commands[1].endswith("http://localhost:8000/metrics")
-    assert curl_commands[2].endswith("http://localhost:8000/readyz")
-    assert curl_commands[3].endswith("http://localhost:8000/metrics")
+    assert all(line.endswith("http://localhost:8000/metrics") for line in curl_commands[1:3])
+    assert curl_commands[3].endswith("http://localhost:8000/readyz")
+    assert all(line.endswith("http://localhost:8000/metrics") for line in curl_commands[4:])
 
 
 def test_webui_smoke_tears_down_if_browser_phase_fails(tmp_path):
@@ -918,7 +938,7 @@ def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
         command for command in curl_commands if command.endswith("/readyz")
     ]
     assert 1 <= len(readiness_commands) <= 90
-    assert len(readiness_commands) == len(curl_commands) - 2
+    assert len(readiness_commands) == len(curl_commands) - 3
 
 
 def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
@@ -944,6 +964,8 @@ def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
     assert "assert_embedding_contract" in smoke
     assert "assert_embedding_metrics 4" in smoke
     assert "assert_embedding_metrics 2" in smoke
+    assert "assert_responses_wire 5" in smoke
+    assert "assert_responses_wire 3" in smoke
     assert '"$BASE_URL/v1/embeddings"' in smoke
     assert '"$BASE_URL/metrics"' in smoke
 

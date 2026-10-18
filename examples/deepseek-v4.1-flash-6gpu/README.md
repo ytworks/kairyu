@@ -23,6 +23,7 @@ Open WebUI (:3008) -> Kairyu (:8008) -> ReplicaPool -> vLLM (DP6 / EP6 + DSpark,
 ./verify.sh cancellation --no-start
 ./verify.sh long-context --no-start
 ./verify.sh restart --no-start
+./verify.sh api-equivalence --no-start
 ./run.sh down
 ```
 
@@ -37,6 +38,41 @@ hard-linked (no extra space) and then re-hashed; nothing is trusted from it.
 API: `http://127.0.0.1:8008/v1`, model `deepseek-v4.1-flash`.
 Chat UI: `http://127.0.0.1:3008` (local, no authentication).
 
+> **GPU verification pending (2026-10-17).** The Chat UI, the gates and the
+> Kairyu→vLLM hop moved to the OpenAI Responses API (below); none of these
+> gates has run on GPU since. `MEASUREMENTS.md` holds the earlier chat
+> evidence.
+
+## Chat UI and API
+
+Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
+`api_type: responses`; m11 D7 amendment 2026-10-17). `run.sh up` installs
+the Reasoning Effort filter (`webui-reasoning-effort-filter.py`) as a
+global filter and checks the connection type. Besides the effort dropdown,
+the filter turns Open WebUI's chat body into a strict Responses body: the
+effort becomes `reasoning.effort`, Chat Controls fields the Responses API
+lacks (`seed`, `top_k`, ...) are dropped, saved output items keep only their
+Responses fields, and `store` is false because the UI resends the whole
+conversation every turn.
+
+Saved model settings: Open WebUI applies a model's saved Advanced Params
+(Admin Panel or Workspace > Models) once more after the filter, just before it
+sends the request, so the filter cannot normalize them. Save only Responses
+fields there (temperature, top_p, max tokens; Open WebUI itself drops stop and
+the penalties). A default effort goes in as the Custom Parameter `reasoning`
+with the value `{"effort": "high"}`; it applies to requests that carry no
+effort of their own. A saved `seed`, `top_k`, `min_p` or `reasoning_effort`
+makes Kairyu answer 400 `Unknown parameter`, as OpenAI's Responses API does
+(m11 D7 amendment 2026-10-18).
+
+Kairyu sends each request to vLLM in its caller's API (`kairyu.yaml`
+declares the model in `upstream_chat_models`, `upstream_responses_models`
+and `upstream_messages_models`; Kairyu checks at startup that vLLM serves
+`/v1/responses` and `/v1/messages`): chat as the caller's own messages,
+Responses as Responses, Anthropic Messages as Messages. On the Responses
+wire Kairyu spells L3 `max` as OpenAI `xhigh`, which `patch_sm120.py` maps to
+the max budget (100).
+
 ## Why this configuration
 
 The settings start from the official sources (model card, encoder
@@ -47,7 +83,7 @@ time; a change is adopted only for ≥ 5 % on c1 or c32 throughput without a
 
 | Setting | Value | Source / reason |
 |---|---|---|
-| Runtime | `vllm/vllm-openai:nightly` pinned by digest + `patch_sm120.py` | The recipe's image. It already renders the model author's efforts; the SM120 edits below are still missing upstream. |
+| Runtime | `vllm/vllm-openai:nightly` pinned by digest + `patch_sm120.py` | The recipe's image. It already renders the model author's efforts (`xhigh` is mapped to max, below); the SM120 edits below are still missing upstream. |
 | Replica shape | DP6 / EP6 (TP1 per rank) | Official Blackwell "DEP" shape. 384 routed experts / 6 = 64 per rank. Measured against the official TP2 degree (TP2 × DP3 on NUMA-local pairs): c32 +44–47 %, c1 TTFT −37 %. TP6 cannot divide 64 heads / 8 output groups. The official DEP kernels (FlashMLA mega attention, DeepGEMM mega MoE) are SM100-only, so DEP runs on the TP path's SM120 kernels. |
 | Engram | `cpu_offload: true` | 6 × 96 GB is below the checkpoint's official 614 GB minimum; the recipe's memory-bound 8 × H100 arm moves the 183 GiB tables to pinned host memory ("output is unchanged"). |
 | Batched tokens / memory | 4096 / 0.92 | The same memory-bound arm's values. Needed to fit DSpark on DP6 (at 16K / 0.90 its KV pool is negative). |
@@ -57,14 +93,19 @@ time; a change is adopted only for ≥ 5 % on c1 or c32 throughput without a
 | MoE | Marlin | SM120 MXFP4 MoE path. |
 | Sequences | 128 per DP engine | Official Blackwell value; 64 measured no different. |
 | Vision encoder | default (not `--mm-encoder-tp-mode data`) | Official option measured no different on TP1 ranks. |
-| Effort | default thinking high (75); low 50, max 100 | The model author's encoder (`encoding/README.md`), which the runtime renders; the recipe's 25/50/75/100 table is the older vLLM encoder's. |
-| Chat | `upstream_chat_models` | vLLM renders the encoder from the caller's own messages (earlier turns, tool calls, tool results); Kairyu sends them as they are instead of one flattened user message. |
+| Effort | default thinking high (75); low 50, max 100 (and `xhigh` 100) | The model author's encoder (`encoding/README.md`), which the runtime renders; the recipe's 25/50/75/100 table is the older vLLM encoder's. `xhigh` is Kairyu's Responses spelling of max. |
+| Chat / Responses / Messages | `upstream_chat_models`, `upstream_responses_models`, `upstream_messages_models` | vLLM renders the encoder from the caller's own messages (earlier turns, tool calls, tool results) in the API the caller used; Kairyu sends them as they are instead of one flattened user message. |
 | Sampling | temperature 1.0, top_p 0.95 | Model card; the setting DeepSeek's published results use. Applied at L1 with `--override-generation-config`; callers can still send their own. |
 
 Each of the six DP engines holds about 8.3M KV tokens, so a full
 1,048,576-token request fits on any engine.
 
 ## SM120 runtime overlay
+
+The served vLLM image (`local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh`) is
+rebuilt by this change; its 2026-10-18 build is pinned as
+`sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c`
+(`example.json` `image_id`, `kairyu.yaml` `container_image_digest`).
 
 `vllm-sm120.Dockerfile` builds on the pinned vLLM image and runs
 `patch_sm120.py`, which edits exactly one known source anchor per change and
@@ -76,7 +117,10 @@ fails the build if any anchor is missing or repeated:
   it every EP6 shape returned NaN log-probabilities or unrelated text);
 - the split top-p cutoff keeps a candidate when a forced logit rounds the
   cutoff to the maximum;
-- a build-time check that the encoder renders the model author's efforts.
+- `xhigh` (Kairyu's Responses spelling of L3 max) renders the max budget
+  (100) instead of the pinned encoder's 75;
+- a build-time check that the encoder renders the model author's efforts
+  and `xhigh` as max.
 
 Prebuilt FlashInfer JIT caches are removed so the patched sources are the
 ones compiled. `check_sm120_kernels.py` is the numerical gate for these
@@ -84,21 +128,36 @@ kernels (including a NaN-poisoned masked slot):
 
 ```sh
 docker run --rm --gpus device=0 -v "$PWD:/checks:ro" --entrypoint python3 \
-  local/vllm-openai:deepseek-v41-6gpu-nightly /checks/check_sm120_kernels.py
+  local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh /checks/check_sm120_kernels.py
 ```
 
 ## Verification gates
 
-- `l1`: rendered efforts (default/low/high/max/chat), rounds of 12
-  concurrent `17 * 19` probes per variant with exact answers and finite
-  log-probabilities until all six DP engines have answered, the L1 default
-  sampling, tool call, image, and memory.
-- `serving`: fixed 8K-in / 256-out rows at c1/8/16/32/64 (64 requests each),
-  every request placed on the replica, GPU peaks.
+Every gate that goes through Kairyu uses `/v1/responses`, the Chat UI's API,
+including the readiness `17 * 19` probes (exact answer and finish; the
+Responses API has no token log-probabilities). Checks that talk to vLLM
+directly (`/tokenize` renders, L1 probes with finite log-probabilities) stay
+on vLLM's chat API.
+
+- `l1`: rendered efforts (default/low/high/max/chat, plus `xhigh` rendering
+  the max budget), rounds of 12 concurrent `17 * 19` probes per variant with
+  exact answers and finite log-probabilities until all six DP engines have
+  answered, the L1 default sampling, tool call, image, and memory.
+- `serving`: 8K-in rows capped at 256 output tokens at c1/8/16/32/64 (64
+  requests each), every request placed on the replica, GPU peaks. The
+  Responses API has no `ignore_eos`/`min_tokens`, so each request ends
+  naturally within the cap; these rows are not comparable with the earlier
+  fixed-length chat rows.
 - `completed`: natural-completion generic and coding rows at c1/8/32 with
-  the default effort; every request must stop with visible content.
-- `tool-calling`, `vision`, `reasoning`, `cancellation`, `long-context`
+  the default effort; every request must complete with visible content.
+- `tool-calling`, `vision`, `reasoning`, `cancellation` (natural completion
+  within `max_output_tokens`, disconnected mid-stream), `long-context`
   (32K/128K/256K/≈1M retrieval), `restart`.
+- `api-equivalence`: the same Responses requests (text, stream, efforts
+  low/high/xhigh, a tool round trip, an image, a length cap, the Open WebUI
+  body) sent to vLLM directly and to Kairyu agree, and vLLM's own request
+  counters show Kairyu reached it on `/v1/responses`
+  (`verification/product/correctness/upstream_api_equivalence.py`).
 
 L1 candidates are compared with `tune.py` (one parameter at a time, the
 committed configuration restored afterwards). Results and every official

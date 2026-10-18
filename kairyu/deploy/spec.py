@@ -66,6 +66,11 @@ class BackendSpec(BaseModel):
                 self.options.get("upstream", "generic"),
                 self.options.get("capabilities"),
             )
+        if "upstream_apis" in self.options:
+            raise ValueError(
+                "declare native upstream APIs per model with upstream_responses_models "
+                "or upstream_messages_models, not backend options.upstream_apis"
+            )
         return self
 
     def resolved_health_url(self) -> str | None:
@@ -484,6 +489,12 @@ class DeploymentSpec(BaseModel):
     # native messages (m9 D2 amendment 2026-10-12): Kairyu sends a text chat's
     # validated messages as they are instead of a rendered prompt.
     upstream_chat_models: frozenset[str] = frozenset()
+    # Models whose upstream also serves the OpenAI Responses / Anthropic
+    # Messages APIs (m9 D2 amendment 2026-10-17): a request the caller sent in
+    # one of them reaches the upstream in that API, with the conversation as
+    # it is. Each name must also be an upstream_chat_models model.
+    upstream_responses_models: frozenset[str] = frozenset()
+    upstream_messages_models: frozenset[str] = frozenset()
     orchestrator: OrchestratorSection | None = None
     # served auto-model name -> orchestrator spec; serves ANY number of named
     # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
@@ -560,6 +571,16 @@ class DeploymentSpec(BaseModel):
                 "upstream_chat_models cannot also declare a chat template or the "
                 f"legacy chat fallback: {sorted(conflicting_upstream)}"
             )
+        for field, names in (
+            ("upstream_responses_models", self.upstream_responses_models),
+            ("upstream_messages_models", self.upstream_messages_models),
+        ):
+            outside = names - self.upstream_chat_models
+            if outside:
+                raise ValueError(
+                    f"{field} must also be upstream_chat_models models (the upstream "
+                    f"receives the conversation natively): {sorted(outside)}"
+                )
         if any(not name for name in self.orchestrators):
             raise ValueError("orchestrators: names must be non-empty strings")
         auto_overlap = self.orchestrators.keys() & (self.engines.keys() | self.pools.keys())

@@ -38,7 +38,8 @@ pools:
         expert_parallel_size: 6
         attention_data_parallel_size: 6
         dspark_enabled: true
-        container_image_digest: sha256:119afb09d8b71203707c50e8f9da1300c9992aea6c7aaa959cdb18df7e2483c5
+        # Recorded after the GPU build of the rebuilt image (GPU verification pending).
+        container_image_digest: sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c
     unhealthy_after: 1
     queue_depth_threshold: 0
     prefix_index: true
@@ -47,5 +48,12 @@ pools:
 # vLLM renders the model author's encoder from the caller's own messages
 # (earlier turns, tool calls and tool results) and parses tool calls, so
 # Kairyu sends each chat's messages as they are (m9 D2 amendment 2026-10-12).
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one.
 upstream_chat_models:
+- deepseek-v4.1-flash
+upstream_responses_models:
+- deepseek-v4.1-flash
+upstream_messages_models:
 - deepseek-v4.1-flash

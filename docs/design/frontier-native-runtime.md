@@ -129,6 +129,28 @@ structural pass does not satisfy the native production gate: the default may
 be called native Kairyu L1 only after the full-checkpoint gates in FN-D7 pass.
 The binding example contract is `example-layered-orchestration.md`.
 
+**Native L1 rendering amendment (2026-10-17, owner decision).** The
+checkpoint's prompt encoder no longer lives in Kairyu.
+`deepseek-v4-flash-0731-8gpu` takes the L1 settings of FN-D9's tool-calling
+amendment from the dp2 example: vLLM renders every request with the
+checkpoint's own `deepseek_v4` encoder, separates reasoning, and parses DSML
+tool calls (`--enable-auto-tool-choice --tool-call-parser deepseek_v4`), with
+thinking off by default (`--default-chat-template-kwargs`). The identity
+template, the Kairyu `chat_templates` entry and the templated passthrough are
+removed, and the model is listed in `upstream_chat_models`,
+`upstream_responses_models` and `upstream_messages_models` (m9 D2 amendment),
+so each request reaches vLLM in its caller's API. Kairyu sends L3 `max` on the
+Responses wire as `xhigh` (m11 D4 amendment) and the pinned tokenizer folds
+`xhigh` to high, so an example-owned overlay (`vllm-effort.Dockerfile`,
+`patch_effort.py`; the build fails on a missing or repeated anchor) maps
+`xhigh` to max; its image ID is recorded after the GPU build. Why: the
+conversation reaches L1 as it is, in the caller's API, and the example serves
+OpenAI tool calls. The 2026-08-11 measurements belong to the previous
+configuration; serving rows now run on `/v1/responses` and end naturally
+within 256 tokens, so they are not comparable with the fixed-length rows. GPU
+verification (`verify.sh serving`, `verify.sh api-equivalence`) is pending;
+the FN-D7 gates are not weakened.
+
 ## FN-D9 — Replica-pool scale-out examples (amendment, 2026-09-01)
 
 Status: accepted; implemented; GPU-verified 2026-09-01/02 (placement gates
@@ -426,3 +448,109 @@ model author asks chat clients to pass `clear_thinking=true`; Kairyu's legacy ch
 path rejects `chat_template_kwargs` on text requests, so the Chat UI sends only the
 effort and the template default applies. Only SHA-bound rows in the example's
 `MEASUREMENTS.md` establish runtime and performance claims.
+
+### Responses connection amendment (2026-10-17, owner decision)
+
+Status: implemented; GPU-verified 2026-10-17/18 (PR #656 final test) in every
+remaining example below: all gates, `api-equivalence`, the Chat UI pass and
+the cancellation probe pass (each example's `MEASUREMENTS.md`; plan
+`docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`).
+
+Applies to the vLLM-backed examples of this record except the Jev ones
+(OpenJev, Quyet-1.0-Large; the Winnow examples are governed elsewhere):
+`qwen3.8-27b-1gpu`, `deepseek-v4-flash-0731-8gpu` (also FN-D8's native L1
+rendering amendment), the four FN-D9 replica examples, and the two V4.1 Flash
+and the GLM-5.3-Flash single-replica examples.
+
+- Each served model leaves `legacy_chat_models` for `upstream_chat_models`,
+  `upstream_responses_models` and `upstream_messages_models` (m9 D2
+  amendment): chat reaches vLLM as the caller's own turns instead of one
+  flattened user message, and Responses/Messages callers reach vLLM's own
+  `/v1/responses`/`/v1/messages`. vLLM keeps rendering and parsing.
+- Open WebUI uses `api_type: responses` with an example-owned filter that
+  leaves only Responses fields (m11 D7 amendment); the four sign-in examples
+  install it, and switch a saved chat connection to Responses, with
+  `WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD`, and warn without them.
+  Qwen3.8-Flash-Next's UI loses `presence_penalty` 1.5 (no Responses field).
+- L3 `max` travels as the Responses `xhigh`: the DeepSeek V4 examples add an
+  overlay mapping it to max, the V4.1 overlays map the encoder's
+  `xhigh` (75) to 100, GLM's template and Qwen's templates need no change
+  (GPU checks). Rebuilt images have no recorded image ID until the GPU build;
+  `run.sh up` stops unless the example's allow-unpinned variable is set.
+- Every gate through Kairyu uses `/v1/responses` (including the readiness
+  `17 * 19` probes, which lose their log-probability check there; the L1
+  gates keep it); L1-direct checks stay on vLLM's chat API. Serving and
+  cancellation rows end naturally within `max_output_tokens`, so they are not
+  comparable with the earlier fixed-length rows. `tool_result_turn` uses PR
+  #647's wording. `verify.sh api-equivalence` runs
+  `verification/product/correctness/upstream_api_equivalence.py`.
+- GPU final test fix (2026-10-18): `qwen3.8-27b-1gpu` adds
+  `--default-chat-template-kwargs '{"enable_thinking": false}'`, as
+  `qwen3.8-27b-dp8-8gpu` already did. With vLLM rendering the native
+  messages, vLLM v0.23.0's `qwen3` parser treated a request without
+  `enable_thinking: false` as thinking and filed the direct answer or tool
+  call as reasoning (`api-equivalence`: the L1 returned only a reasoning item;
+  through L3 a unary answer was empty). The template already rendered those
+  requests non-thinking, so prompts are unchanged; an explicit effort still
+  sets `enable_thinking` per request ahead of the default.
+- GPU final test fix (2026-10-18): `deepseek-v4.1-flash-8gpu`'s overlay (the
+  older `deepseekv41-flash-0909` base) lets the V4.1 tokenizer read the
+  Responses `input_text`/`output_text` parts as text, as the nightly used by
+  the other V4.1 examples already does; its image probe through Kairyu
+  answered HTTP 400 ("supports text and image content only; got
+  'input_text'"). The rebuilt overlay is pinned again.
+
+### Example removal amendment (2026-10-18, owner decision)
+
+Status: implemented in PR #656.
+
+The owner keeps only the examples that serve DeepSeek-V4.1, Qwen3.8-27B,
+GLM-5.3-Flash or Quyet. Removed from `examples/` with their own tests:
+`deepseek-v4-flash-0731-8gpu` (FN-D8), the FN-D9 replica examples
+`deepseek-v4-flash-0731-dp2-8gpu`, `deepseek-v4-flash-vision-exp-dp2-8gpu`
+and `qwen3.8-flash-next-dp2-8gpu`, and `openjev-diffusiongemma-26b-1gpu`
+(also the Winnow examples of `llamacpp-upstream.md` and the DeepSeek-V4
+tiered example of `example-dual-track-orchestration.md`). Their decisions and
+evidence above stay as history. FN-D9's replica pattern continues in
+`qwen3.8-27b-dp8-8gpu`; the V4.1 Flash, GLM-5.3-Flash and Quyet amendments
+are unchanged. No framework mechanism is removed: DeepSeek-V4 model support,
+System One and the llama.cpp upstream stay in `kairyu/`.
+Why: owner decision 2026-10-18; the removed examples' model storage (about
+723 GiB on the host's NVMe) was needed for the remaining examples.
+
+### Qwen3.8 vLLM v0.31.0 amendment (2026-10-18, owner decision)
+
+Status: implemented; `qwen3.8-27b-1gpu`'s `run.sh up` and its probes passed
+on v0.31.0 (GPU, 2026-10-18); every other GPU gate of the three examples
+below is pending on the new image.
+
+Applies to the examples that serve Qwen3.8-27B: `qwen3.8-27b-1gpu`, the
+FN-D9 replica example `qwen3.8-27b-dp8-8gpu`, and the Qwen pools of
+`qwen3.8-deepseek-v4.1-8gpu` (DTO-D16 amendment of the same date; its
+DeepSeek overlay is unchanged).
+
+- Qwen's L1 moves from the official `vllm/vllm-openai:v0.23.0` image
+  (`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`,
+  source `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`, FlashInfer 0.6.12) to
+  the official `v0.31.0` image the GLM-5.3-Flash amendment pins
+  (`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+  source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+  in each example's `compose.yaml` default, `example.json` and `kairyu.yaml`
+  `container_image_digest`. The L1 flags, the measured envelope
+  (`qwen3.8-27b-1gpu/MEASUREMENTS.md`) and the launchers are unchanged.
+- Why: on v0.23.0 every request that carries `extra_args` prefills about 3x
+  slower, and v0.23.0's Responses serving always sets `extra_args={}`, so
+  every Responses request Kairyu forwards to Qwen (Responses connection
+  amendment) prefilled slowly. Measured on GPU with the V4.1 ensemble's
+  `profile_judge` request, 16 concurrent on one Qwen3.8 replica: prefill
+  1.43 s on chat against 4.33 s on Responses and 4.33 s on chat with an empty
+  `vllm_xargs`; on v0.31.0 1.26 s / 1.27 s / 1.26 s. In the V4.1 ensemble the
+  slowdown pushed the 5 s route judge past its timeout on 13 of 32 coding c32
+  requests and doubled the generic c32 judge p50 (1,982 → 4,468 ms).
+- The v0.23.0 findings recorded above and in the examples stay as v0.23.0
+  evidence: the envelope's tuning rows (and its failed `FULL_AND_PIECEWISE`
+  candidate), and the `qwen3` parser behaviour behind the 2026-10-18
+  `--default-chat-template-kwargs` fix, which stays. The m9 D2 wire rules
+  that cite v0.23.0 are unchanged, because the backend does not know the
+  vLLM version.
+- GPU consequences: every gate of the three examples runs again on v0.31.0.

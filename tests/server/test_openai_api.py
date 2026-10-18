@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.backend import GenerationResult, GenerationStageMetric, GenerationUsage
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
@@ -16,10 +16,12 @@ from kairyu.engine.prompt import TokensPrompt
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
-from kairyu.orchestration.conductor import RoleSpec
+from kairyu.orchestration.budget import Budget
+from kairyu.orchestration.conductor import RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
@@ -266,89 +268,86 @@ async def test_native_chat_stage_trace_is_opt_in_and_terminal():
     await backend.shutdown()
 
 
-async def test_gateway_retains_replica_stage_trace_before_sanitized_error():
-    replica_trace = {
-        "trace_version": "2.0",
-        "request_id": "chatcmpl-replica",
-        "started_at": "2026-08-05T00:00:00.000Z",
-        "completed_at": "2026-08-05T00:00:00.100Z",
-        "events": [
-            {
-                "seq": 1,
-                "node": "decode_step",
-                "role": "engine",
-                "kind": "stage",
-                "status": "success",
-                "attempt": 0,
-                "timing": None,
-                "detail": {
-                    "stage": "decode_step",
-                    "duration_ns": 303,
-                    "occurrences": 2,
-                    "aggregation": "sum",
-                    "scope": "request-observed",
-                },
-            }
-        ],
-    }
-    metadata = json.dumps(
-        {
-            "id": "chatcmpl-replica",
-            "choices": [],
-            "kairyu_trace_v2": replica_trace,
-        }
-    )
-    replica_body = (
-        b'data: {"id":"chatcmpl-replica","choices":'
-        b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
-        + f"data: {metadata}\n\n".encode()
-        + b'data: {"error":{"message":"secret replica detail",'
-        b'"type":"upstream_error"}}\n\n'
-        + b"data: [DONE]\n\n"
-    )
+class _FailsAfterStageMetrics:
+    """A replica engine that reports one decode stage, then fails."""
+
+    async def generate(self, request):
+        raise AssertionError("streaming test reached generate")
+
+    async def stream(self, request):
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text="ok", token_ids=(1,), finish_reason=None),
+            ),
+            finished=False,
+            stage_metrics=(GenerationStageMetric("decode_step", 303, 2),),
+        )
+        raise RuntimeError("secret replica detail")
+
+    async def shutdown(self):
+        return None
+
+
+@pytest.mark.parametrize("caller_api", ["chat", "responses"])
+async def test_gateway_retains_replica_stage_trace_before_sanitized_error(caller_api):
+    """A Kairyu replica's known stages survive its failure on every wire the
+    gateway reaches it in: Chat's trace chunk and Responses' failed response."""
+
+    replica = create_legacy_app(engines={"m": _FailsAfterStageMetrics()})
     backend = OpenAICompatBackend(
         base_url="http://replica:8000/v1",
         model="m",
         api_key_env=None,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                content=replica_body,
-                headers={"content-type": "text/event-stream"},
-            )
-        ),
+        transport=httpx.ASGITransport(app=replica),
         upstream="kairyu",
+        upstream_apis=("responses",),
     )
-    app = create_legacy_app(engines={"gateway": backend})
+    app = create_app({"gateway": backend}, upstream_chat_models=frozenset({"gateway"}))
 
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            headers={"X-Kairyu-Trace": "1"},
-            json={
-                "model": "gateway",
-                "messages": [{"role": "user", "content": "trace failure"}],
-                "max_tokens": 2,
-                "stream": True,
-            },
-        )
+        if caller_api == "chat":
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"X-Kairyu-Trace": "1"},
+                json={
+                    "model": "gateway",
+                    "messages": [{"role": "user", "content": "trace failure"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+        else:
+            response = await client.post(
+                "/v1/responses",
+                headers={"X-Kairyu-Trace": "1"},
+                json={
+                    "model": "gateway",
+                    "input": "trace failure",
+                    "max_output_tokens": 2,
+                    "stream": True,
+                },
+            )
 
     payloads = _sse_json_payloads(response)
-    trace_payloads = [
-        payload for payload in payloads if "kairyu_trace_v2" in payload
-    ]
+    if caller_api == "chat":
+        traces = [
+            payload["kairyu_trace_v2"] for payload in payloads if "kairyu_trace_v2" in payload
+        ]
+        assert response.text.rstrip().endswith("data: [DONE]")
+    else:
+        assert payloads[-1]["type"] == "response.failed"
+        traces = [payloads[-1]["response"]["kairyu_trace_v2"]]
     assert response.status_code == 200
-    assert len(trace_payloads) == 1
-    stages = {
-        event["detail"]["stage"]: event
-        for event in trace_payloads[0]["kairyu_trace_v2"]["events"]
-    }
-    assert stages["decode_step"]["detail"]["duration_ns"] == 303
-    assert stages["decode_step"]["detail"]["occurrences"] == 2
-    assert "sse_write" in stages
+    assert len(traces) == 1
+    stages = {event["detail"]["stage"]: event["detail"] for event in traces[0]["events"]}
+    assert stages["decode_step"]["duration_ns"] == 303
+    assert stages["decode_step"]["occurrences"] == 2
+    if caller_api == "chat":
+        assert "sse_write" in stages
     assert "secret replica detail" not in response.text
     assert "upstream backend error (RuntimeError)" in response.text
-    assert response.text.rstrip().endswith("data: [DONE]")
     await backend.shutdown()
 
 
@@ -677,20 +676,25 @@ async def test_invalid_body_returns_422(app):
 
 
 @pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "x" * 256}]}),
+        # The Responses front door carries the same conversations (m11 D4).
+        ("/v1/responses", {"input": "x" * 256}),
+    ],
+)
 async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
     chunked,
+    path,
+    body,
 ):
     backend = MockBackend()
     app = create_legacy_app(
         engines={"m": backend},
         settings=ServerSettings(max_chat_body_bytes=128),
     )
-    encoded = json.dumps(
-        {
-            "model": "m",
-            "messages": [{"role": "user", "content": "x" * 256}],
-        }
-    ).encode()
+    encoded = json.dumps({"model": "m", **body}).encode()
 
     async def body_chunks():
         yield encoded[:96]
@@ -699,7 +703,7 @@ async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
     content = body_chunks() if chunked else encoded
     async with _client(app) as client:
         response = await client.post(
-            "/v1/chat/completions",
+            path,
             content=content,
             headers={"content-type": "application/json"},
         )
@@ -4632,6 +4636,133 @@ async def test_auto_empty_final_output_is_an_explicit_error(stream):
         payload = response.json()
         assert payload["error"]
         assert "usage" in payload
+
+
+class _ThinkingBackend:
+    """A thinking L1: it deliberates for 32 tokens before answering, so a
+    smaller cap ends in reasoning only with finish_reason "length"."""
+
+    think_tokens = 32
+
+    def __init__(self):
+        self.caps = []
+
+    async def generate(self, request):
+        cap = request.sampling_params.max_tokens
+        self.caps.append(cap)
+        thought_out = cap is not None and cap <= self.think_tokens
+        completion = CompletionOutput(
+            index=0,
+            text="" if thought_out else "Done.",
+            token_ids=(),
+            finish_reason="length" if thought_out else "stop",
+            reasoning_content="Weighing the steps",
+        )
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(completion,),
+            usage=GenerationUsage(
+                prompt_tokens=7,
+                completion_tokens=cap if thought_out else self.think_tokens + 2,
+            ),
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self):
+        return None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("capped_by", ["caller", "role", "refused-retry"])
+async def test_auto_final_unit_out_of_the_callers_cap_answers_incomplete(
+    capped_by, api, stream
+):
+    """A final unit that thinks through the caller's own output cap answers
+    incomplete, as a direct engine does; a smaller cap of the final unit's
+    role is the deployment's and stays an explicit error (issue #496
+    amendment 2026-10-18). So is the caller's cap when the run's step budget
+    refuses the bounded retry: the run did not finish its own retry."""
+
+    backend = _ThinkingBackend()
+    roles = (
+        RoleSpec(
+            name="answer",
+            worker="tier1",
+            role_type="publisher",
+            prompt="[answer] {query}",
+            sampling=(
+                RoleSamplingOverrides(max_tokens=8) if capped_by == "role" else None
+            ),
+        ),
+    )
+    app = create_legacy_app(
+        engines={},
+        orchestrators={
+            "auto": Orchestrator(
+                {"tier1": backend, "tier2": backend},
+                roles=roles,
+                budget=Budget(max_steps=1) if capped_by == "refused-retry" else None,
+            )
+        },
+    )
+    # Multi-step wording so the router selects the role DAG.
+    task = "First research. Then plan. After that implement. Finally verify."
+    if api == "chat":
+        path = "/v1/chat/completions"
+        body = {
+            "model": "auto",
+            "messages": [{"role": "user", "content": task}],
+            "max_tokens": 16,
+            "stream": stream,
+        }
+    else:
+        path = "/v1/responses"
+        body = {"model": "auto", "input": task, "max_output_tokens": 16, "stream": stream}
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post(path, json=body)
+
+    assert backend.caps == {"caller": [16, 16], "role": [8, 8], "refused-retry": [16]}[capped_by]
+    payloads = _sse_json_payloads(response) if stream else [response.json()]
+    if capped_by != "caller":
+        if stream:
+            assert response.status_code == 200  # SSE transport already open
+            assert '"error"' in response.text
+            assert not any(
+                choice.get("finish_reason")
+                for payload in payloads
+                for choice in payload.get("choices", ())
+            )
+            if api == "responses":
+                assert payloads[-1]["type"] == "response.failed"
+        else:
+            assert response.status_code == 502
+            assert payloads[0]["error"]
+        return
+    assert response.status_code == 200, response.text
+    assert not any(payload.get("error") for payload in payloads), response.text
+    if api == "chat":
+        choices = [choice for payload in payloads for choice in payload.get("choices", ())]
+        assert [c["finish_reason"] for c in choices if c.get("finish_reason")] == ["length"]
+        content = (
+            "".join(c["delta"].get("content") or "" for c in choices)
+            if stream
+            else choices[0]["message"]["content"] or ""
+        )
+        assert content == ""
+        if not stream:
+            assert payloads[0]["usage"]["completion_tokens"] == 16
+    else:
+        final = payloads[-1]["response"] if stream else payloads[0]
+        if stream:
+            assert payloads[-1]["type"] == "response.incomplete"
+        assert final["status"] == "incomplete"
+        assert final["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert final["usage"]["output_tokens"] == 16
 
 
 async def test_auto_stream_publishes_reclaimed_closed_reasoning_answer():

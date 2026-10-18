@@ -181,3 +181,33 @@ Effort: Max` and counts 3,333 tokens, equal to Kairyu's `usage.prompt_tokens`.
 
 Not caused by Kairyu: GLM on vLLM v0.31.0 sometimes returns an em dash as
 mojibake (`â\x80\x94`), 3 of 10 answers sent directly.
+
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
+
+Owner decision 2026-10-17 (m9 D2, m11 D4/D7 amendments): the Chat UI talks to
+Kairyu over `/v1/responses`, and Kairyu sends each request to vLLM in its
+caller's API (`upstream_responses_models` and `upstream_messages_models`
+beside `upstream_chat_models`). The public gates now run through Kairyu's
+`/v1/responses`; `serving` rows end naturally within 256 output tokens and
+`cancellation` within its 8,192-token cap (the Responses API has no
+`ignore_eos`/`min_tokens`/`seed`), so their numbers are not comparable with
+the fixed-length chat rows above. The L1 render, `/tokenize` and the
+log-probability readiness probe stay on chat. New checks:
+
+- `l1` `render_xhigh`: the template must render `xhigh` (L3 max on the
+  Responses wire) as `Reasoning Effort: Max`.
+- `api-equivalence`: the same Responses requests to vLLM directly and through
+  Kairyu agree on status, output item types, events, usage keys and function
+  names, and vLLM's `http_requests_total` shows Kairyu reached it on
+  `/v1/responses` (no `/v1/chat/completions`).
+
+GPU run 2026-10-18 03:19-04:43 JST (UTC 2026-10-17 18:19-19:43): `serving`
+pass (466 s), `completed` (2,690 s), `tool-calling` (17 s), `vision` (13 s),
+`reasoning` (14 s), `cancellation` (16 s), `long-context` (202 s), `restart`
+(252 s), `api-equivalence` (26 s) all pass; Chat UI pass (Kairyu
+`/v1/responses` 18 -> 25, chat 0 -> 0). Cancellation probe after the
+disconnect fixes (`81bf2b22`, `5db4358f`; 2026-10-18 14:59 JST):
+`/v1/responses` 0.11 / 0.13 / 0.12 s, `/v1/chat/completions` 0.04 / 0.13 /
+0.13 s, every follow-up completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/glm-5.3-flash-6gpu/verification-results/20261017T181954Z-serving/`.
+Every row above was measured on the chat configuration.

@@ -245,7 +245,7 @@ fake and mirrored in `tests/gpu/`). The real runner is `PagedModelRunner`
 - First measurements (same script already smoke-tested vs mock):
 
 ```bash
-./examples/deepseek-v4-flash-0731-8gpu/run.sh      # pinned 8-GPU Kairyu L3 + vLLM L1 stack
+./examples/deepseek-v4.1-flash-8gpu/run.sh        # pinned 8-GPU Kairyu L3 + vLLM L1 stack
 uv run python verification/l1/performance/serving_bench.py --model kairyu --num-requests 256 --concurrency 128
 uv run python verification/fleet/performance/multiturn_prefix.py           # CPU workload/KV-manager diagnostic
 # Real-engine TP4/8 direct+gateway A7 procedure: §6.

@@ -7,6 +7,42 @@ warm-up row and one full matrix before it), with row-unique prompt prefixes so
 neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix.
 
+## 2026-10-18 vLLM v0.31.0 — GPU-verified (PR #656 final test)
+
+The replicas moved from the official `vllm/vllm-openai:v0.23.0` image
+(`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`)
+to the official `v0.31.0` image
+(`sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3`,
+source `db9527a46873454610df6dbedf79a36d6bf1a7f6`, FlashInfer 0.7.0.post1),
+as in `qwen3.8-27b-1gpu` (owner decision). Why: on v0.23.0 every request that
+carries `extra_args` prefills about 3x slower and its Responses serving always
+sets `extra_args={}`, so every Responses request Kairyu forwarded prefilled
+slowly; the measurement (1.43 s chat / 4.33 s Responses on v0.23.0, 1.26 s /
+1.27 s on v0.31.0, 16 concurrent route-judge requests on one replica) is in
+the single-GPU example's `MEASUREMENTS.md`. The compose flags are unchanged.
+On v0.31.0 (run 2026-10-18 17:44-17:52 JST, working tree after `00abc81d`):
+`run.sh up`, `serving` pass (414 s; v0.23.0 Responses run 2026-10-17: 473 s),
+`tool-calling` pass (16 s; 15 s), `api-equivalence` pass (32 s; 31 s), Chat UI
+pass (Kairyu `/v1/responses` 11 -> 19, chat 0 -> 0, as on v0.23.0).
+Cancellation probe: `/v1/responses` and `/v1/chat/completions` released in
+92-97 ms each time, every follow-up completed. Serving artifacts:
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-dp8-8gpu/verification-results/20261018T084418Z/`.
+The rows below were measured on v0.23.0.
+
+## 2026-10-17 Responses connection — GPU-verified (PR #656 final test)
+
+The served configuration changed after the locked run below: Kairyu forwards
+each request to vLLM in its caller's API (`upstream_chat_models`,
+`upstream_responses_models`, `upstream_messages_models` instead of
+`legacy_chat_models`; m9 D2 amendment), the Chat UI and every gate use
+`/v1/responses` (m11 D7 amendment), and the serving rows end naturally within
+256 output tokens because the Responses API has no `ignore_eos`/`min_tokens`.
+No GPU run of this configuration exists yet. The results below describe the
+previous chat-only configuration (served-config `140bc1c7…`) and are not
+comparable with the new natural-completion rows; `serving`, `tool-calling`,
+the new `api-equivalence` gate and the Chat UI will be recorded here after the
+GPU run.
+
 ## Locked system
 
 - Hardware: 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB per

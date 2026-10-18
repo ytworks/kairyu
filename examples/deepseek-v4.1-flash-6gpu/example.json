@@ -42,8 +42,8 @@
     "sampling": {"temperature": 1.0, "top_p": 0.95}
   },
   "vllm": {
-    "image": "local/vllm-openai:deepseek-v41-6gpu-nightly",
-    "image_id": "sha256:119afb09d8b71203707c50e8f9da1300c9992aea6c7aaa959cdb18df7e2483c5",
+    "image": "local/vllm-openai:deepseek-v41-6gpu-nightly-xhigh",
+    "image_id": "sha256:ae41dee620a10fcae0b18d4fd01a02c8da04dba42a35bf76c254361b4c8fbc7c",
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:nightly@sha256:b5406fca282e149af867fa137683434018eddfe61df1b0c435dcb5e12d9f7c12",
@@ -69,7 +69,7 @@
     "indexer_sparse_logits": false
   },
   "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
     "port": 3008,
     "reasoning_effort_levels": ["default", "low", "high", "max"]
   },

@@ -52,6 +52,10 @@ _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
 # raw stream); it is unreachable from the wire, so the public
 # /v1/chat/completions contract (including its pre-SSE tool gates) is unchanged.
 _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY = "kairyu_internal_anthropic_tool_stream"
+# The public API (responses/messages) of a request an adapter delegates to the
+# Chat Completions handler; the AUTO role calls carry it to their workers.
+# Request state is unreachable from the wire, so a chat caller cannot set it.
+_CALLER_API_STATE_KEY = "kairyu_internal_caller_api"
 
 # collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)
 # to {id} so a Prometheus path label cannot explode in cardinality (M1)
@@ -343,14 +347,19 @@ class ConcurrencyLimitMiddleware:
 class ChatBodyLimitMiddleware:
     """Bound chat-shaped JSON before Starlette materializes the body.
 
-    Covers both dialect front doors intentionally (issue #508): the OpenAI
-    ``/v1/chat/completions`` route and the Anthropic ``/v1/messages`` route.
+    Covers every conversation front door intentionally: the OpenAI
+    ``/v1/chat/completions`` route, the Anthropic ``/v1/messages`` route
+    (issue #508) and the OpenAI Responses routes (m11 D4 amendment
+    2026-10-17), which carry the same conversations and images.
     """
 
     _PATHS = (
         "/v1/chat/completions",
         "/v1/messages",
         "/v1/messages/count_tokens",
+        "/v1/responses",
+        "/v1/responses/compact",
+        "/v1/responses/input_tokens",
     )
 
     def __init__(

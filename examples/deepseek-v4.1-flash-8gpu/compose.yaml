@@ -1,7 +1,7 @@
 name: kairyu-deepseek-v4.1-flash-8gpu
 services:
   deepseek-0:
-    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120}
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120-xhigh}
     ipc: host
     environment:
       HF_HOME: /models/.cache
@@ -128,10 +128,13 @@ services:
       retries: 120
     restart: unless-stopped
   chat-ui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses (connection 0 is OPENAI_API_BASE_URL).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
       DEFAULT_MODELS: deepseek-v4.1-flash
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"reasoning_effort":"high","temperature":1.0,"top_p":1.0}'
       ENABLE_PERSISTENT_CONFIG: 'false'

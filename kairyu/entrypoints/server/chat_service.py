@@ -1078,6 +1078,7 @@ def _finish_chat_request_validation(
     placement_started_ns: int | None = None,
     trace_requested: bool = False,
     before_prepare: bool = False,
+    caller_api: str = "chat",
 ) -> ValidatedChatRequest:
     if request.n > 1 and getattr(engine, "supports_n", True) is False:
         raise ChatRequestError(f"model {request.model!r} does not support n > 1")
@@ -1106,6 +1107,7 @@ def _finish_chat_request_validation(
             else None
         ),
         conversation_prefix=validated_input.upstream_conversation,
+        caller_api=caller_api,
     )
     try:
         if before_prepare:
@@ -1137,6 +1139,7 @@ def validate_chat_request(
     trace_requested: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
     upstream_chat_models: AbstractSet[str] | None = None,
+    caller_api: str = "chat",
 ) -> ValidatedChatRequest:
     """Synchronous compatibility entry point for non-async callers."""
 
@@ -1158,6 +1161,7 @@ def validate_chat_request(
         scheduling_class=scheduling_class,
         placement_started_ns=placement_started_ns,
         trace_requested=trace_requested,
+        caller_api=caller_api,
     )
 
 
@@ -1174,8 +1178,13 @@ async def validate_chat_request_async(
     trace_requested: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
     upstream_chat_models: AbstractSet[str] | None = None,
+    caller_api: str = "chat",
 ) -> ValidatedChatRequest:
-    """Render off-loop, then validate mutable backend state on the loop."""
+    """Render off-loop, then validate mutable backend state on the loop.
+
+    ``caller_api`` records the public API the request arrived on, so an
+    upstream declared to serve it receives the request in that API.
+    """
 
     engine = _chat_engine(request, engines)
     validated_input = await validate_chat_input_async(
@@ -1196,6 +1205,7 @@ async def validate_chat_request_async(
         placement_started_ns=placement_started_ns,
         trace_requested=trace_requested,
         before_prepare=True,
+        caller_api=caller_api,
     )
 
 

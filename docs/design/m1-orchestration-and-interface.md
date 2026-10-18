@@ -332,6 +332,35 @@ prompt stay in the example. Code: `RoleSpec.native_conversation`,
 `test_generate_sends_the_callers_conversation_as_native_messages`,
 `test_conversation_prefix_fails_closed_without_upstream_support`.
 
+Amendment (2026-10-17, owner authorization): every L1 role call carries the
+public API of the request it serves. `OrchestrationRequest.caller_api`
+(`chat`, `responses`, `messages`) is set by the chat route from request state
+that only the Responses and Messages adapters write when they delegate an AUTO
+request; the orchestrator passes it to the Conductor, MoA, the LLM profile
+judge, direct routes and every preflight intent, and each `GenerationRequest`
+records it. A worker whose deployment model is declared in
+`upstream_responses_models` / `upstream_messages_models` then receives the call
+in that API (m9 D2 caller-API amendment 2026-10-17): a role prompt is one user
+input item, a `native_conversation` publisher's conversation stays turn for
+turn, `response_format` becomes `text.format`, an assistant prefill is a
+continued final turn, and the reply returns in the same text/reasoning form,
+so verdicts, grammars and the `<tool_call>` form of candidates are unchanged.
+Jev-family workers (System One judges, checklist questions) keep their own
+wire, and a pre-rendered judge scaffold keeps `/completions`.
+Why (framework boundary): (1) an AUTO request's role calls reached every
+worker as chat even when the caller used Responses and the worker's upstream
+serves it; (2) no extension point sets a role call's wire; (3) observable on
+any AUTO model over a declared worker (the worker's access log shows chat for
+a Responses caller); (4) one immutable field threaded to the existing request
+builders; which worker declares which API stays in the deployment. Test:
+`test_auto_role_calls_follow_the_callers_api`.
+
+Review amendment (2026-10-18, owner review of PR #656): MoA built its setup
+with the caller's API only when `prepare_request()` ran first; `run_moa` and
+`stream_moa` now take `caller_api` and the orchestrator passes the request's,
+so proposals and synthesis keep the caller's API with or without a prepared
+handle. Test: `test_unprepared_moa_keeps_the_callers_api`.
+
 ### D9. System One profile judge (2026-10-01)
 
 Status: accepted by the owner (2026-10-01); CPU tests in

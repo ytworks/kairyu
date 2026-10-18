@@ -122,6 +122,16 @@ def test_probe_gate_requires_every_dp_engine(example):
             "<｜System｜>Reasoning Effort: 25 (range 1-100)<｜User｜>q<｜Assistant｜><think>",
             False,
         ),
+        (
+            "xhigh",
+            "<｜System｜>Reasoning Effort: 100 (range 1-100)<｜User｜>q<｜Assistant｜><think>",
+            True,
+        ),
+        (
+            "xhigh",
+            "<｜System｜>Reasoning Effort: 75 (range 1-100)<｜User｜>q<｜Assistant｜><think>",
+            False,
+        ),
         ("chat", "<｜User｜>q<｜Assistant｜></think>", True),
         (
             "chat",
@@ -143,6 +153,11 @@ def test_runtime_patches_fail_closed(example):
     assert "if not (pivot_logit < M):" in guarded
     with pytest.raises(ValueError):
         patch.top_p_guard(guarded)
+    # xhigh is L3 max on the Responses wire (m11 D4 amendment 2026-10-17).
+    mapped = patch.xhigh_is_max(patch.EFFORT_MAPPINGS_ANCHOR)
+    assert '"xhigh": 100,' in mapped
+    with pytest.raises(ValueError):
+        patch.xhigh_is_max(mapped)
 
 
 def test_tuning_candidates_edit_only_their_flags(example):

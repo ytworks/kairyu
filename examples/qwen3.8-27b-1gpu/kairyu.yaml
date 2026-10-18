@@ -35,6 +35,12 @@ engines:
         family: qwen3.8-hybrid-mamba-paged-kv
       tensor_parallel_size: 1
       mtp_enabled: false
-      container_image_digest: sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
+      container_image_digest: sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
 
-legacy_chat_models: [qwen3.8-27b]
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders and parses each one with the example's
+# chat template (mounted into vLLM).
+upstream_chat_models: [qwen3.8-27b]
+upstream_responses_models: [qwen3.8-27b]
+upstream_messages_models: [qwen3.8-27b]

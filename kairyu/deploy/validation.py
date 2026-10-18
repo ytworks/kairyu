@@ -1137,6 +1137,18 @@ def _validate_chat_policy(
                 "non-template-preserving served models require an explicit "
                 "model-scoped legacy chat policy"
             )
+        elif "upstream_responses_models" in message or "upstream_messages_models" in message:
+            code = "schema.invalid_upstream_api_policy"
+            field = (
+                "upstream_responses_models"
+                if "upstream_responses_models" in message
+                else "upstream_messages_models"
+            )
+            safe_message = (
+                "upstream_responses_models and upstream_messages_models need every "
+                "replica to serve that API upstream (an openai backend with "
+                "upstream: vllm or kairyu)"
+            )
         elif "upstream_chat_models" in message:
             code = "schema.invalid_upstream_chat_policy"
             field = "upstream_chat_models"

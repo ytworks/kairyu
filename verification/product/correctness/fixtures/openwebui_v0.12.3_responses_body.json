@@ -1,0 +1,24 @@
+{
+  "source": "open-webui v0.12.3 convert_to_responses_payload (backend/open_webui/routers/openai.py) applied to a streamed Chat UI turn with the example filter's store:false",
+  "body": {
+    "model": "MODEL",
+    "stream": true,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "store": false,
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "What is 17 * 19? Reply with the number only."
+          }
+        ]
+      }
+    ],
+    "instructions": "You are a helpful assistant.",
+    "max_output_tokens": 4096
+  }
+}

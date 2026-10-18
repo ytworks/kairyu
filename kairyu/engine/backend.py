@@ -40,6 +40,11 @@ _MAX_STAGE_OCCURRENCES = (1 << 31) - 1
 # admission merely needs a finite reservation, which exact usage settles.
 UNLIMITED_OUTPUT_ADMISSION_TOKENS = 8192
 
+# The public APIs a caller can use at L3. A request records its caller's API so
+# an OpenAI-compatible upstream can receive it in the same API when the
+# deployment declares that the upstream serves it (m9 D2 amendment 2026-10-17).
+CALLER_APIS = frozenset({"chat", "responses", "messages"})
+
 
 class Shutdownable(Protocol):
     async def shutdown(self) -> None: ...
@@ -211,6 +216,10 @@ class GenerationRequest:
     # a JSON transcript inside one message (m1 D8 amendment 2026-10-09). The
     # prompt text follows as one final user message, omitted when empty.
     conversation_prefix: tuple[Mapping[str, object], ...] = ()
+    # The API the caller used at L3 (``CALLER_APIS``). Only an OpenAI-compatible
+    # backend with a declared native upstream API reads it; every other
+    # backend serves the request exactly as before.
+    caller_api: str = "chat"
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
@@ -228,6 +237,8 @@ class GenerationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.caller_api not in CALLER_APIS:
+            raise ValueError("caller_api must be chat, responses or messages")
         if self.chat_template_kwargs is not None:
             if not isinstance(self.chat_template_kwargs, Mapping) or any(
                 not isinstance(key, str) or not key

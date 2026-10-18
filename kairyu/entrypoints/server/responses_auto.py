@@ -17,12 +17,15 @@ import logging
 from collections.abc import AsyncIterator
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from kairyu.entrypoints.chat_template import ToolCallProtocol
 from kairyu.entrypoints.server.chat_service import ChatRequestError, _normalize_tool_choice
 from kairyu.entrypoints.server.errors import openai_error_payload
-from kairyu.entrypoints.server.middleware import _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY
+from kairyu.entrypoints.server.middleware import (
+    _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
+    _CALLER_API_STATE_KEY,
+)
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
 from kairyu.entrypoints.server.responses_codec import (
     _compaction_output_from_message,
@@ -42,6 +45,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     _BufferedFailure,
     _usage_payload_from_wire,
     context_overflow_error,
+    kairyu_extensions,
     overflow_text,
     responses_error_response,
 )
@@ -97,6 +101,21 @@ def _delegated_failure(request: ResponsesRequest, emitter: ResponseEmitter, resp
     return _rerendered_chat_error(response)
 
 
+
+def _response_extensions(payload: dict, emitter: ResponseEmitter) -> dict:
+    """The delegated Chat result's ``kairyu_*`` fields, bound to this response.
+
+    The AUTO turn runs through the chat route, whose trace carries the chat
+    request id; on the Responses object it belongs to the Responses id, as a
+    direct-engine trace does.
+    """
+
+    extensions = kairyu_extensions(payload)
+    trace = extensions.get("kairyu_trace_v2")
+    if isinstance(trace, dict):
+        extensions["kairyu_trace_v2"] = {**trace, "request_id": emitter.response_id}
+    return extensions
+
 async def _relay(
     upstream,
     *,
@@ -136,6 +155,7 @@ async def _relay(
                         break
                     if isinstance(chunk.get("usage"), dict):
                         wire_usage = chunk["usage"]
+                    emitter.extensions.update(_response_extensions(chunk, emitter))
                     for choice in chunk.get("choices") or ():
                         if choice.get("index", 0) != 0:
                             continue
@@ -207,6 +227,7 @@ async def auto_response(
 ):
     """Serve an AUTO model by delegating to the Chat Completions handler."""
 
+    setattr(http_request.state, _CALLER_API_STATE_KEY, "responses")
     if compaction_request:
         return await _auto_compaction(
             request,
@@ -237,6 +258,10 @@ async def auto_response(
         )
         if isinstance(delegated, JSONResponse):
             return _delegated_failure(request, emitter, delegated)
+        if not isinstance(delegated, StreamingResponse):
+            # The client left while the profile judge ran (the chat handler's
+            # 499); there is no stream to relay and nobody to answer.
+            return delegated
         assembler = OutputAssembler(
             emitter,
             scanner=(
@@ -270,6 +295,7 @@ async def auto_response(
     if delegated.status_code != 200:
         return _delegated_failure(request, emitter, delegated)
     payload = json.loads(bytes(delegated.body))
+    emitter.extensions.update(_response_extensions(payload, emitter))
     choices = payload.get("choices") or []
     message = (choices[0].get("message") if choices else None) or {}
     assembler = OutputAssembler(emitter, namespaces=_namespace_names(request.tools))

@@ -5,7 +5,9 @@
 measured: the pinned image and checkpoint, rendered efforts, exact finite
 answers from every DP rank, the official sampling defaults, the KV pool,
 prefix-cache consistency, tools and images. The public gates run through
-Kairyu (L2 ReplicaPool, L3 API).
+Kairyu (L2 ReplicaPool, L3 API) on ``/v1/responses``, the API the Chat UI uses
+(m11 D7 amendment 2026-10-17); ``api-equivalence`` sends the same Responses
+requests to L1 directly and through Kairyu.
 """
 
 from __future__ import annotations
@@ -56,25 +58,40 @@ def _run_id() -> str:
 # --- HTTP helpers ------------------------------------------------------------------
 
 
-def post_chat(payload: dict, *, timeout_s: float = 900.0) -> tuple[int, object, str | None]:
+def post_responses(
+    payload: dict, *, timeout_s: float = 900.0
+) -> tuple[int, object, str | None]:
+    """Send a chat-shaped gate payload to Kairyu's /v1/responses.
+
+    The reply comes back in chat shape (``control.chat_view`` for a unary reply,
+    ``control.chat_stream_view`` for a stream) so each gate keeps its checks;
+    an error body stays text. The request log keeps the Responses exchange.
+    """
+    body = control.responses_request(payload)
     request = urllib.request.Request(
-        f"{_api_url()}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
+        f"{_api_url()}/v1/responses",
+        data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             raw = response.read().decode("utf-8")
             status, request_id = response.status, response.headers.get("x-request-id")
-            body: object = raw if payload.get("stream") else json.loads(raw)
+        if payload.get("stream"):
+            reply: object = raw
+            view: object = control.chat_stream_view(raw)
+        else:
+            reply = json.loads(raw)
+            view = control.chat_view(reply)
     except urllib.error.HTTPError as error:
-        status, body = error.code, error.read().decode("utf-8", "replace")
+        status = error.code
+        reply = view = error.read().decode("utf-8", "replace")
         request_id = error.headers.get("x-request-id") if error.headers else None
     if REQUEST_LOG is not None:
         with REQUEST_LOG.open("a", encoding="utf-8") as output:
-            row = {"request": payload, "status": status, "response": body, "request_id": request_id}
+            row = {"request": body, "status": status, "response": reply, "request_id": request_id}
             output.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return status, body, request_id
+    return status, view, request_id
 
 
 _L1_PROGRAM = r"""
@@ -114,8 +131,11 @@ def l1_json(path: str, payload: dict) -> dict:
 
 # --- L1 correctness gate -------------------------------------------------------------
 
-# The official template renders every effort other than low/high as Max.
-RENDERED_EFFORT = {"default": "Max", "low": "Low", "high": "High", "max": "Max"}
+# The official template renders every effort other than low/high as Max,
+# including xhigh: Kairyu sends L3 max to L1's /v1/responses as xhigh
+# (m11 D4 amendment 2026-10-17), and vLLM passes it to the template as
+# reasoning_effort.
+RENDERED_EFFORT = {"default": "Max", "low": "Low", "high": "High", "max": "Max", "xhigh": "Max"}
 
 
 def rendered_prompt(variant: str) -> str:
@@ -210,7 +230,7 @@ def prefix_cache_consistency(requests: int = 16, rounds: int = 2) -> tuple[str |
 
     def ask(pair: tuple[int, int]) -> str | None:
         left, right = pair
-        status, body, _ = post_chat(
+        status, body, _ = post_responses(
             {
                 "model": SERVED_MODEL,
                 "messages": [
@@ -297,7 +317,7 @@ def l1(run_dir: Path) -> int:
         and f"'top_p': {sampling['top_p']}" in defaults
         else defaults or "no sampling defaults in the startup log",
     )
-    for variant in SPEC["verification"]["l1"]["variants"]:
+    for variant in [*SPEC["verification"]["l1"]["variants"], "xhigh"]:
         try:
             prompt = rendered_prompt(variant)
             record(f"render_{variant}", rendering_error(variant, prompt), prompt[-160:])
@@ -485,7 +505,7 @@ class GpuPeak:
 def serving(
     run_dir: Path, concurrency: list[int] | None = None, requests: int | None = None
 ) -> int:
-    """Fixed ~8K-in / 256-out rows through Kairyu: every request placed and exact."""
+    """~8K-in rows, up to 256 output tokens (natural completion), all placed, via Responses."""
     config = SPEC["verification"]["serving"]
     requests = requests or int(config["requests_per_concurrency"])
     output_tokens = int(config["output_tokens"])
@@ -494,7 +514,7 @@ def serving(
     fixed_dataset(warmup, DP_RANKS, prompt_tokens, namespace=f"{run_dir.name}-warmup")
     if bench(
         warmup,
-        mode="fixed",
+        mode="capped",
         requests=DP_RANKS,
         concurrency=DP_RANKS,
         max_tokens=32,
@@ -503,25 +523,25 @@ def serving(
         print("warm-up row failed", file=sys.stderr)
         return 1
     for level in concurrency or config["concurrency"]:
-        dataset = run_dir / f"fixed-c{level}.json"
+        dataset = run_dir / f"capped-c{level}.json"
         fixed_dataset(dataset, requests, prompt_tokens, namespace=f"{run_dir.name}-c{level}")
         offset = PLACEMENT_LOG.stat().st_size if PLACEMENT_LOG.exists() else 0
         peak = GpuPeak()
         with peak:
             code = bench(
                 dataset,
-                mode="fixed",
+                mode="capped",
                 requests=requests,
                 concurrency=level,
                 max_tokens=output_tokens,
-                out=run_dir / f"fixed-c{level}",
+                out=run_dir / f"capped-c{level}",
             )
         placed = _placement_counts(offset, requests)
-        (run_dir / f"fixed-c{level}" / "resources.json").write_text(
+        (run_dir / f"capped-c{level}" / "resources.json").write_text(
             json.dumps({"gpu_peak_mib": peak.peak, "placements": placed}, indent=2) + "\n"
         )
         if code or placed != requests:
-            print(f"fixed c{level}: exit {code}, placements {placed}/{requests}", file=sys.stderr)
+            print(f"capped c{level}: exit {code}, placements {placed}/{requests}", file=sys.stderr)
             return 1
     return 0
 
@@ -632,7 +652,7 @@ def streamed_tool_call_error(sse: str) -> str | None:
 
 
 def _chat_case(payload: dict, *, timeout_s: float = 1800) -> tuple[dict | None, str | None]:
-    status, body, _ = post_chat(payload, timeout_s=timeout_s)
+    status, body, _ = post_responses(payload, timeout_s=timeout_s)
     if status != 200 or not isinstance(body, dict):
         return None, f"HTTP {status}: {str(body)[:200]}"
     return body["choices"][0], None
@@ -699,7 +719,7 @@ def tool_calling(run_dir: Path) -> int:
         cases["tool_result_turn_with_reasoning"] = failure or tool_call_error(
             choice["message"], choice["finish_reason"]
         )
-    status, body, _ = post_chat(_tool_request(stream=True), timeout_s=1800)
+    status, body, _ = post_responses(_tool_request(stream=True), timeout_s=1800)
     cases["streamed_tool_call"] = (
         streamed_tool_call_error(body) if status == 200 else f"HTTP {status}"
     )
@@ -714,7 +734,7 @@ def tool_calling(run_dir: Path) -> int:
         cases[f"tool_call_effort_{effort}"] = tool_call_error(
             choice["message"], choice["finish_reason"]
         )
-    # The body the Chat UI's effort filter produces is one the gateway accepts.
+    # The body the Chat UI's effort filter produces is one /v1/responses accepts.
     choice, failure = _chat_case(chat_ui_body(_tool_request(), "low"))
     cases["chat_ui_filter_body"] = failure or tool_call_error(
         choice["message"], choice["finish_reason"]
@@ -732,7 +752,7 @@ def vision(run_dir: Path) -> int:
     max_tokens = int(config["max_tokens"])
 
     def ask(case: int):
-        return post_chat(
+        return post_responses(
             control.image_request(
                 f"Vision case {case}: what single color fills this image? Answer with one word.",
                 max_tokens=max_tokens,
@@ -743,7 +763,7 @@ def vision(run_dir: Path) -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=fan) as pool:
         results = list(pool.map(ask, range(fan)))
     results.append(
-        post_chat(
+        post_responses(
             control.image_request(
                 "What single color fills all of these images? Answer with one word.",
                 max_tokens=max_tokens,
@@ -804,24 +824,25 @@ def image_ttft(run_dir: Path, *, images: int = 8, trials: int = 5) -> dict:
         content.append({"type": "text", "text": f"Trial {trial}: how many images are there?"})
         start = time.monotonic()
         request = urllib.request.Request(
-            f"{_api_url()}/v1/chat/completions",
+            f"{_api_url()}/v1/responses",
             data=json.dumps(
-                {
-                    "model": SERVED_MODEL,
-                    "stream": True,
-                    "max_tokens": 16,
-                    "messages": [{"role": "user", "content": content}],
-                }
+                control.responses_request(
+                    {
+                        "model": SERVED_MODEL,
+                        "stream": True,
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": content}],
+                    }
+                )
             ).encode(),
             headers={"Content-Type": "application/json"},
         )
         first = None
         with urllib.request.urlopen(request, timeout=1800) as response:
             for line in response:
-                if line.startswith(b"data: ") and line[6:].strip() != b"[DONE]":
-                    delta = (json.loads(line[6:]).get("choices") or [{}])[0].get("delta", {})
-                    if first is None and (delta.get("content") or delta.get("reasoning_content")):
-                        first = time.monotonic() - start
+                event = _sse_event(line)
+                if first is None and event.get("type") in _MODEL_DELTAS and event.get("delta"):
+                    first = time.monotonic() - start
         rows.append({"trial": trial, "ttft_s": first})
     values = sorted(row["ttft_s"] for row in rows if row["ttft_s"] is not None)
     report = {
@@ -833,10 +854,26 @@ def image_ttft(run_dir: Path, *, images: int = 8, trials: int = 5) -> dict:
     return report
 
 
+_REASONING_DELTAS = ("response.reasoning_text.delta", "response.reasoning_summary_text.delta")
+_MODEL_DELTAS = ("response.output_text.delta", *_REASONING_DELTAS)
+_TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
+
+
+def _sse_event(line: bytes) -> dict:
+    """One Responses SSE ``data:`` line as its event; other lines are ``{}``."""
+    data = line[len(b"data:") :].strip() if line.startswith(b"data:") else b""
+    return json.loads(data) if data else {}
+
+
 def _stream(payload: dict, *, timeout_s: float = 1800) -> dict:
+    """Stream one chat-shaped payload over /v1/responses, timing the first answer text.
+
+    ``done`` means exactly one terminal event and nothing after it; an
+    ``error`` or ``response.failed`` event is the stream's error.
+    """
     request = urllib.request.Request(
-        f"{_api_url()}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
+        f"{_api_url()}/v1/responses",
+        data=json.dumps(control.responses_request(payload)).encode(),
         headers={"Content-Type": "application/json"},
     )
     start = time.monotonic()
@@ -846,28 +883,29 @@ def _stream(payload: dict, *, timeout_s: float = 1800) -> dict:
     done = 0
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for line in response:
-            if not line.startswith(b"data: "):
-                continue
-            data = line[6:].strip()
-            if data == b"[DONE]":
-                done += 1
+            event = _sse_event(line)
+            if not event:
                 continue
             if done:
-                error = error or "JSON after the terminal SSE marker"
+                error = error or "event after the terminal event"
                 continue
-            chunk = json.loads(data)
-            if "error" in chunk:
-                error = chunk["error"]
-                continue
-            usage = chunk.get("usage") or usage
-            for choice in chunk.get("choices", []):
-                delta = choice.get("delta", {})
-                text = delta.get("content") or ""
-                if text and first_content is None:
+            kind = event.get("type")
+            if kind == "error":
+                error = event.get("message") or event
+            elif kind == "response.output_text.delta":
+                if event.get("delta") and first_content is None:
                     first_content = time.monotonic() - start
-                content += text
-                trace += delta.get("reasoning_content") or ""
-                finish = choice.get("finish_reason") or finish
+                content += event.get("delta") or ""
+            elif kind in _REASONING_DELTAS:
+                trace += event.get("delta") or ""
+            elif kind in _TERMINAL_EVENTS:
+                done += 1
+                final = event.get("response") or {}
+                if kind == "response.failed":
+                    error = final.get("error") or kind
+                view = control.chat_view(final)
+                finish = view["choices"][0]["finish_reason"]
+                usage = view["usage"]
     return {
         "done": done == 1,
         "error": error,
@@ -933,29 +971,27 @@ def _l1_active_requests() -> float:
 
 def cancellation(run_dir: Path) -> int:
     """A client disconnect releases Kairyu's slot and L1's running/waiting requests."""
+    # The Responses API has no ignore_eos, so the request ends naturally within
+    # max_output_tokens (owner decision 2026-10-17); counting at the default
+    # (max) effort keeps it generating well past the first delta.
     payload = {
         "model": SERVED_MODEL,
         "stream": True,
         "max_tokens": 8192,
-        "ignore_eos": True,
         "messages": [{"role": "user", "content": "Count upwards from one, one number per line."}],
     }
     request = urllib.request.Request(
-        f"{_api_url()}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
+        f"{_api_url()}/v1/responses",
+        data=json.dumps(control.responses_request(payload)).encode(),
         headers={"Content-Type": "application/json"},
     )
     saw_delta = observed = False
     with urllib.request.urlopen(request, timeout=1800) as response:
         for line in response:
-            if line.startswith(b"data: ") and line[6:].strip() != b"[DONE]":
-                choices = json.loads(line[6:]).get("choices", [])
-                if any(
-                    c.get("delta", {}).get("content") or c.get("delta", {}).get("reasoning_content")
-                    for c in choices
-                ):
-                    saw_delta = True
-                    break
+            event = _sse_event(line)
+            if event.get("type") in _MODEL_DELTAS and event.get("delta"):
+                saw_delta = True
+                break
         deadline = time.monotonic() + 15
         while saw_delta and time.monotonic() < deadline:
             if _l1_active_requests() > 0:
@@ -972,7 +1008,7 @@ def cancellation(run_dir: Path) -> int:
             released_at = time.monotonic() - start
             break
         time.sleep(0.25)
-    status, body, _ = post_chat(
+    status, body, _ = post_responses(
         {
             "model": SERVED_MODEL,
             "max_tokens": 4096,
@@ -1046,7 +1082,7 @@ def long_context(run_dir: Path) -> int:
         )
         start = time.monotonic()
         # The claim is the context, not the effort: the lightest effort bounds the answer.
-        status, body, _ = post_chat(
+        status, body, _ = post_responses(
             {
                 "model": SERVED_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
@@ -1078,6 +1114,39 @@ def long_context(run_dir: Path) -> int:
         if not passed:
             return 1
     return 0
+
+
+def api_equivalence(run_dir: Path) -> int:
+    """The same Responses requests to L1 directly and through Kairyu agree; L1 sees Responses."""
+    metrics = f"{control.L1_CONTAINER}=http://127.0.0.1:8000/metrics"
+    command = [
+        sys.executable,
+        str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
+        "--l1",
+        "http://127.0.0.1:8000/v1",
+        "--l1-docker",
+        control.L1_CONTAINER,
+        "--l1-model",
+        SERVED_MODEL,
+        "--l1-metrics",
+        metrics,
+        "--l3",
+        f"{_api_url()}/v1",
+        "--l3-model",
+        SERVED_MODEL,
+        "--cases",
+        "text,stream,effort,tools,image,cap,openwebui",
+        # low/high reach the template as they are; xhigh is L3 max on the wire.
+        "--efforts",
+        "low,high,xhigh",
+        "--exact-input-tokens",
+        "--out",
+        str(run_dir / "api-equivalence.json"),
+    ]
+    with (run_dir / "api-equivalence.log").open("w") as log:
+        code = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT).returncode
+    print(f"api-equivalence: {'PASS' if code == 0 else 'FAIL'} (exit {code})")
+    return int(code != 0)
 
 
 def restart(run_dir: Path) -> int:
@@ -1164,6 +1233,7 @@ GATES = {
     "cancellation": cancellation,
     "long-context": long_context,
     "restart": restart,
+    "api-equivalence": api_equivalence,
 }
 
 
@@ -1176,7 +1246,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.gate == "list":
         for name, function in GATES.items():
-            print(f"{name:13} {(function.__doc__ or '-').strip().splitlines()[0]}")
+            print(f"{name:16} {(function.__doc__ or '-').strip().splitlines()[0]}")
         return
     if not args.no_start:
         control.up()

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import re
@@ -55,6 +56,20 @@ from kairyu.engine.prompt import (
     prompt_text,
 )
 from kairyu.engine.registry import register_backend
+from kairyu.engine.upstream_wire import (
+    MessagesStreamReader,
+    ResponsesStreamReader,
+    WireError,
+    messages_body,
+    messages_expressible,
+    parse_messages_result,
+    parse_responses_result,
+    responses_body,
+    responses_expressible,
+    validate_upstream_apis,
+    wire_endpoint,
+    wire_preference,
+)
 from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
 from kairyu.outputs import CompletionOutput, TokenLogprob, _lazy_text
 from kairyu.sampling_params import (
@@ -718,6 +733,7 @@ class OpenAICompatBackend:
         container_image_digest: str | None = None,
         client: httpx.AsyncClient | None = None,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        upstream_apis: tuple[str, ...] | list[str] | frozenset[str] = (),
     ) -> None:
         if client is not None and client_factory is not None:
             raise ValueError("client and client_factory are mutually exclusive")
@@ -760,6 +776,19 @@ class OpenAICompatBackend:
             raise ValueError("request_stream_usage must be a boolean")
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
+        # Native upstream APIs the deployment declares for this model
+        # (``upstream_responses_models`` / ``upstream_messages_models``).
+        self._upstream_apis = validate_upstream_apis(upstream_apis)
+        if "responses" in self._upstream_apis and not self._capabilities.responses_api:
+            raise ValueError(
+                f"upstream {self._capabilities.upstream!r} does not serve the "
+                "Responses API (upstream_responses_models)"
+            )
+        if "messages" in self._upstream_apis and not self._capabilities.messages_api:
+            raise ValueError(
+                f"upstream {self._capabilities.upstream!r} does not serve the "
+                "Anthropic Messages API (upstream_messages_models)"
+            )
         if completion_reasoning_end_tag is not None and (
             self._capabilities.upstream != "vllm"
             or not allow_templated_chat_passthrough
@@ -848,6 +877,12 @@ class OpenAICompatBackend:
 
         return self._capabilities
 
+    @property
+    def upstream_apis(self) -> frozenset[str]:
+        """Native APIs (besides chat) the deployment declares for this upstream."""
+
+        return self._upstream_apis
+
     def supports_prompt_kind(self, kind: str) -> bool:
         """Publish the resolved prompt contract to composite backends."""
 
@@ -863,6 +898,7 @@ class OpenAICompatBackend:
         OpenAIRequestCapabilities,
         ImageInputPolicy | None,
         bool,
+        frozenset[str],
     ] | None:
         """Identity for replicas with exactly equivalent request validation.
 
@@ -880,6 +916,7 @@ class OpenAICompatBackend:
             self._capabilities,
             self._image_input_policy,
             self._allow_templated_chat_passthrough,
+            self._upstream_apis,
         )
 
     @property
@@ -1249,6 +1286,7 @@ class OpenAICompatBackend:
             self._model,
             self._request_stream_usage,
             self.max_model_len,
+            self._upstream_apis,
         )
 
     def _peek_shared_prepared_payload(
@@ -1417,7 +1455,8 @@ class OpenAICompatBackend:
         return await run_prompt_work(
             self._stream_wire_payload,
             payload,
-            self._request_stream_usage,
+            # Responses and Messages always report usage in their final event.
+            self._request_stream_usage and self._select_wire(request) is None,
         )
 
     async def _validated_image_urls(
@@ -1566,6 +1605,107 @@ class OpenAICompatBackend:
             raise RuntimeError("prepared image input was lost before dispatch")
         return image_urls
 
+    @staticmethod
+    def _message_shape(request: GenerationRequest) -> list[dict[str, object]]:
+        """The chat messages of a request without its image data."""
+
+        prompt = request.prompt
+        if isinstance(prompt, MultimodalPrompt):
+            messages: list[dict[str, object]] = [
+                {
+                    "role": message.role,
+                    "content": [
+                        {"type": "text", "text": part.text}
+                        if part.type == "text"
+                        else {"type": "image_url", "image_url": {"url": ""}}
+                        for part in message.content
+                    ],
+                }
+                for message in prompt.messages
+            ]
+        else:
+            text = prompt_text(prompt) or ""
+            messages = [dict(message) for message in request.conversation_prefix]
+            if text or not messages:
+                messages.append({"role": "user", "content": text})
+        if request.assistant_prefill is not None:
+            messages.append({"role": "assistant", "content": request.assistant_prefill})
+        return messages
+
+    def _select_wire(self, request: GenerationRequest) -> str | None:
+        """The native wire for this request, or None for the chat wire.
+
+        The caller's own API wins when the deployment declares that this
+        upstream serves it and the request can be expressed there; otherwise
+        the next API in the caller's preference order, finally chat.
+        Pre-rendered and token prompts keep their completions/chat path. An
+        assistant prefill never takes Messages: vLLM converts a Messages
+        request into a fresh assistant turn, not a continuation of the last.
+        """
+
+        if (
+            request.caller_api == "chat"
+            or not self._upstream_apis
+            or isinstance(request.prompt, TemplatedPrompt)
+            or prompt_kind(request.prompt) not in {"text", "multimodal"}
+        ):
+            return None
+        validated: dict[str, object] | None = None
+        for wire in wire_preference(request.caller_api):
+            if wire not in self._upstream_apis:
+                continue
+            if validated is None:
+                validated = self._request_payload(request, validate_json=False)
+            upstream = self._capabilities.upstream
+            if wire == "responses" and responses_expressible(upstream, validated):
+                return wire
+            if (
+                wire == "messages"
+                and request.assistant_prefill is None
+                and messages_expressible(
+                    upstream,
+                    validated,
+                    self._message_shape(request),
+                    max_model_len=self.max_model_len,
+                )
+            ):
+                return wire
+        return None
+
+    async def startup(self) -> None:
+        """Fail startup when a declared native upstream API is not served.
+
+        An empty POST is a validation error on a route that exists and a 404
+        or 405 on one that does not; no generation runs. Connection failures
+        are retried while the upstream is still starting.
+        """
+
+        for wire in sorted(self._upstream_apis):
+            url = f"{self._base_url}/{wire_endpoint(wire)}"
+            deadline = asyncio.get_running_loop().time() + self._timeout_s
+            while True:
+                try:
+                    response = await self._get_client().post(
+                        url,
+                        content=b"{}",
+                        headers=self._json_headers(None),
+                        timeout=min(self._timeout_s, 10.0),
+                    )
+                    break
+                except httpx.TransportError:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise RuntimeError(
+                            f"upstream {self._base_url} is unreachable; cannot verify "
+                            f"its declared {wire} API"
+                        ) from None
+                    await asyncio.sleep(1.0)
+            if response.status_code in {404, 405}:
+                raise RuntimeError(
+                    f"upstream {self._base_url} does not serve /{wire_endpoint(wire)} "
+                    f"(HTTP {response.status_code}) but the deployment declares it in "
+                    f"upstream_{wire}_models"
+                )
+
     async def prepare_request(self, request: GenerationRequest) -> None:
         """Validate payload/media once before quota debit or streaming headers."""
 
@@ -1632,6 +1772,9 @@ class OpenAICompatBackend:
             # The upstream template renders this final assistant turn and
             # vLLM continues it instead of opening a new generation prompt.
             messages.append({"role": "assistant", "content": request.assistant_prefill})
+        wire = self._select_wire(request)
+        if wire is not None:
+            return self._native_payload(request, wire, messages, validated)
         payload: dict = {
             "model": self._model,
             "messages": messages,
@@ -1661,6 +1804,39 @@ class OpenAICompatBackend:
             if tool_choice is not None:
                 payload["tool_choice"] = tool_choice
         return payload
+
+    def _native_payload(
+        self,
+        request: GenerationRequest,
+        wire: str,
+        messages: list[dict[str, object]],
+        validated: dict[str, object],
+    ) -> dict[str, object]:
+        """The same generation on the caller's native API (Responses/Messages)."""
+
+        tools = list(request.tools) if request.tools else None
+        try:
+            if wire == "responses":
+                return responses_body(
+                    model=self._model,
+                    upstream=self._capabilities.upstream,
+                    messages=messages,
+                    validated=validated,
+                    tools=tools,
+                    tool_choice=request.tool_choice,
+                    continue_final=request.assistant_prefill is not None,
+                )
+            return messages_body(
+                model=self._model,
+                upstream=self._capabilities.upstream,
+                messages=messages,
+                validated=validated,
+                tools=tools,
+                tool_choice=request.tool_choice,
+                max_model_len=self.max_model_len,
+            )
+        except WireError as error:
+            raise _client_error(self._capabilities.upstream, str(error)) from error
 
     def _token_logprobs(
         self,
@@ -1705,6 +1881,12 @@ class OpenAICompatBackend:
                 separators=(",", ":"),
                 allow_nan=False,
             ).encode()
+        except OpenAIRequestValidationError as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                public_message=str(error),
+            ) from error
         except (TypeError, ValueError) as serialization_error:
             error = _client_error(
                 self._capabilities.upstream,
@@ -1743,7 +1925,7 @@ class OpenAICompatBackend:
             suffix += b',"stream_options":{"include_usage":true}'
         return payload[:-1] + suffix + b"}"
 
-    def _json_headers(self, request: GenerationRequest) -> dict[str, str]:
+    def _json_headers(self, request: GenerationRequest | None) -> dict[str, str]:
         return {
             **self._headers(request),
             "Content-Type": "application/json",
@@ -1767,6 +1949,9 @@ class OpenAICompatBackend:
             request,
             stream=False,
         )
+        wire = self._select_wire(request)
+        if wire is not None:
+            return await self._generate_native(request, payload, wire)
         use_completions = self._uses_vllm_completions(request)
         endpoint = "completions" if use_completions else "chat/completions"
         response = await self._get_client().post(
@@ -1840,6 +2025,183 @@ class OpenAICompatBackend:
             stage_metrics=stage_metrics,
         )
 
+    def _native_stage_metrics(
+        self,
+        request: GenerationRequest,
+        response: Mapping[str, object] | None,
+    ) -> tuple[GenerationStageMetric, ...]:
+        if not request.trace_requested or not isinstance(response, Mapping):
+            return ()
+        trace = response.get("kairyu_trace_v2")
+        if trace is None:
+            return ()
+        response_id = response.get("id")
+        return _stage_metrics_from_trace(
+            trace,
+            response_id=response_id if isinstance(response_id, str) else None,
+        )
+
+    async def _generate_native(
+        self,
+        request: GenerationRequest,
+        payload: bytes,
+        wire: str,
+    ) -> GenerationResult:
+        response = await self._get_client().post(
+            f"{self._base_url}/{wire_endpoint(wire)}",
+            content=payload,
+            headers=self._json_headers(request),
+            timeout=self._timeout_s,
+        )
+        if response.status_code != 200:
+            _raise_for_status(self._base_url, response.status_code, response.text)
+        data = response.json()
+        if not isinstance(data, Mapping):
+            raise RuntimeError(f"backend {self._base_url} returned a non-object {wire} body")
+        if wire == "responses":
+            text, reasoning, finish_reason, usage = parse_responses_result(data)
+        else:
+            text, reasoning, finish_reason, usage = parse_messages_result(
+                data,
+                input_includes_cache=self._capabilities.upstream == "kairyu",
+            )
+        self._require_exact_multimodal_usage(request, usage)
+        completion_tokens = usage.completion_tokens if usage is not None else None
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=text,
+                    reasoning_content=reasoning,
+                    token_ids=(
+                        tuple(range(completion_tokens))
+                        if completion_tokens is not None
+                        else ()
+                    ),
+                    finish_reason=finish_reason,
+                ),
+            ),
+            usage=usage,
+            stage_metrics=self._native_stage_metrics(request, data),
+        )
+
+    async def _stream_native(
+        self,
+        request: GenerationRequest,
+        payload: bytes,
+        wire: str,
+    ) -> AsyncIterator[GenerationResult]:
+        """Relay a Responses or Messages event stream as delta-native partials."""
+
+        reader: ResponsesStreamReader | MessagesStreamReader = (
+            ResponsesStreamReader(
+                failed_follows_error=self._capabilities.upstream == "kairyu"
+            )
+            if wire == "responses"
+            else MessagesStreamReader(
+                input_includes_cache=self._capabilities.upstream == "kairyu"
+            )
+        )
+        text_parts: dict[int, list[str]] = {0: []}
+        text_lengths: dict[int, int] = {0: 0}
+        reasoning_parts: dict[int, list[str]] = {}
+        reasoning_lengths: dict[int, int] = {}
+        deltas_seen: dict[int, int] = {}
+        async with self._get_client().stream(
+            "POST",
+            f"{self._base_url}/{wire_endpoint(wire)}",
+            content=payload,
+            headers=self._json_headers(request),
+            timeout=self._timeout_s,
+        ) as response:
+            if response.status_code != 200:
+                body = (await response.aread()).decode(errors="replace")
+                _raise_for_status(self._base_url, response.status_code, body)
+            async for data_str in iter_sse_data(response):
+                data_str = data_str.strip()
+                if not data_str or data_str == _SSE_DONE:
+                    continue
+                event = json.loads(data_str)
+                if not isinstance(event, Mapping):
+                    continue
+                try:
+                    text, reasoning = reader.feed(event)
+                except RuntimeError:
+                    # As on the chat wire: a Kairyu upstream's failed response
+                    # carries the stages it observed; surface them so a gateway
+                    # retains them, then fail when the consumer resumes.
+                    stage_metrics = self._native_stage_metrics(
+                        request, getattr(reader, "response", None)
+                    )
+                    if stage_metrics:
+                        yield self._partial(
+                            request,
+                            text_parts,
+                            text_lengths,
+                            {},
+                            {},
+                            deltas_seen,
+                            {},
+                            finished=False,
+                            stage_metrics=stage_metrics,
+                            reasoning_parts=reasoning_parts,
+                            reasoning_lengths=reasoning_lengths,
+                        )
+                    raise
+                text_deltas: dict[int, str] = {}
+                reasoning_deltas: dict[int, str] = {}
+                if reasoning:
+                    reasoning_parts.setdefault(0, []).append(reasoning)
+                    reasoning_lengths[0] = reasoning_lengths.get(0, 0) + len(reasoning)
+                    reasoning_deltas[0] = reasoning
+                    deltas_seen[0] = deltas_seen.get(0, 0) + 1
+                if text:
+                    text_parts[0].append(text)
+                    text_lengths[0] += len(text)
+                    text_deltas[0] = text
+                    deltas_seen[0] = deltas_seen.get(0, 0) + 1
+                if text or reasoning:
+                    yield self._partial(
+                        request,
+                        text_parts,
+                        text_lengths,
+                        text_deltas,
+                        {},
+                        deltas_seen,
+                        {},
+                        finished=False,
+                        reasoning_parts=reasoning_parts,
+                        reasoning_lengths=reasoning_lengths,
+                        reasoning_deltas=reasoning_deltas,
+                    )
+                if reader.finished:
+                    break
+        if not reader.finished:
+            raise RuntimeError(
+                f"backend {self._base_url} ended its {wire} stream before the final event"
+            )
+        self._require_exact_multimodal_usage(request, reader.usage)
+        assert reader.finish_reason is not None
+        yield self._partial(
+            request,
+            text_parts,
+            text_lengths,
+            {},
+            {0: reader.finish_reason},
+            deltas_seen,
+            {},
+            finished=True,
+            usage=reader.usage,
+            stage_metrics=self._native_stage_metrics(
+                request,
+                getattr(reader, "response", None),
+            ),
+            reasoning_parts=reasoning_parts,
+            reasoning_lengths=reasoning_lengths,
+        )
+
     def _partial(
         self,
         request: GenerationRequest,
@@ -1903,6 +2265,18 @@ class OpenAICompatBackend:
             request,
             stream=True,
         )
+        wire = self._select_wire(request)
+        if wire is not None:
+            # Close the native stream (and its upstream connection) as soon as
+            # the consumer stops, as the chat path's own ``async with`` does;
+            # an unclosed inner generator kept the upstream request running
+            # until garbage collection.
+            async with contextlib.aclosing(
+                self._stream_native(request, payload, wire)
+            ) as partials:
+                async for partial in partials:
+                    yield partial
+            return
         use_completions = self._uses_vllm_completions(request)
         endpoint = "completions" if use_completions else "chat/completions"
         async with self._get_client().stream(
