@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for DeepSeek-V4.1-Flash-1017 as one DP8 / EP8 replica on eight GPUs."""
+"""One-command lifecycle for DeepSeek-V4.1-Flash-1017 as one TP8 / EP8 replica on eight GPUs."""
 
 from __future__ import annotations
 
@@ -166,24 +166,15 @@ def numa_node(pci_bus_id: str, sysfs: Path = Path("/sys")) -> int:
     return node
 
 
-def dp_rank_numa_layout(nodes: dict[int, int], dp_rank_gpu_ids: list[list[int]]) -> list[int]:
-    """NUMA node per DP rank; each TP pair must sit on one node.
+def dp_rank_numa_layout(nodes: dict[int, int], dp_rank_gpu_ids: list[list[int]]) -> list[list[int]]:
+    """NUMA nodes per DP rank, in GPU order.
 
-    A TP pair split across sockets pays the SYS (inter-socket) PCIe path on
-    every all-reduce; the example refuses that layout instead of silently
-    running slower.
+    The TP8 replica spans every socket (GPU pairs share a node), so its L1
+    gets the union of its GPUs' NUMA-local CPU sets, as in
+    `deepseek-v4.1-flash-8gpu`.
     """
 
-    layout = []
-    for rank, group in enumerate(dp_rank_gpu_ids):
-        rank_nodes = {nodes[index] for index in group}
-        if len(rank_nodes) != 1:
-            raise SystemExit(
-                f"DP rank {rank} GPUs {group} span NUMA nodes {sorted(rank_nodes)}; "
-                "each TP pair must share one NUMA node"
-            )
-        layout.append(rank_nodes.pop())
-    return layout
+    return [list(dict.fromkeys(nodes[index] for index in group)) for group in dp_rank_gpu_ids]
 
 
 def _node_cpulist(node: int) -> str:
@@ -249,14 +240,14 @@ def _preflight(env: dict[str, str]) -> None:
         available = _host_memory_available_gib()
         required = int(expected["minimum_host_available_gib"])
         if available < required:
-            raise SystemExit(
-                f"host has {available} GiB available; the pinned Engram tables need {required} GiB"
-            )
+            raise SystemExit(f"host has {available} GiB available; the L1 needs {required} GiB")
     nodes = {index: numa_node(str(rows[index]["pci_bus_id"])) for index in GPU_IDS}
     layout = dp_rank_numa_layout(nodes, DP_RANK_GPU_IDS)
-    env["DEEPSEEK_CPUSET"] = ",".join(_node_cpulist(node) for node in dict.fromkeys(layout))
+    env["DEEPSEEK_CPUSET"] = ",".join(
+        _node_cpulist(node) for node in dict.fromkeys(node for rank in layout for node in rank)
+    )
     ranks = "; ".join(
-        f"DP{rank}=GPU {','.join(map(str, group))} (NUMA {layout[rank]})"
+        f"DP{rank}=GPU {','.join(map(str, group))} (NUMA {','.join(map(str, layout[rank]))})"
         for rank, group in enumerate(DP_RANK_GPU_IDS)
     )
     print(f"hardware: {len(GPU_IDS)} x {expected['product']}; {ranks}", flush=True)
@@ -1024,7 +1015,7 @@ def up() -> None:
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
     print(
         f"Chat model: {SPEC['model']['served_name']} "
-        "(one DP8 / EP8 replica on GPUs 0-7; text + image input; thinking high)"
+        "(one TP8 / EP8 replica on GPUs 0-7; text + image input; thinking high)"
     )
     print(
         "Reasoning effort: Chat Controls -> Valves -> Reasoning Effort "

@@ -22,39 +22,23 @@ import yaml
 
 import verification
 
-_DSPARK = (
-    '{"method":"dspark","num_speculative_tokens":5,'
-    '"draft_sample_method":"probabilistic","rejection_sample_method":"block",'
-    '"enable_adaptive_verification":%s}'
-)
-
 # Flag -> value (None removes the flag, True adds a bare flag).
 CANDIDATES: dict[str, dict[str, object]] = {
     "baseline": {},
     # The committed command after a fresh restart: run-to-run variation of a
     # single trial, measured the same way as every other candidate.
     "baseline-repeat": {},
-    # S1 shapes. Engram tables sharded over the eight DP ranks in HBM (one
-    # table copy, per-step DP exchange of the looked-up rows) instead of one
-    # shared pinned host copy.
-    "embedding-across-dp": {"--engram-config": '{"cpu_offload":false,"embedding_across_dp":true}'},
-    # The deepseek-v4.1-flash-8gpu shape: TP8 / EP8 with TP-sharded,
-    # GPU-resident Engram tables. NCCL all-reduce: the custom all-reduce
-    # failed DSpark CUDA-graph capture at TP2 on six GPUs.
-    "tp8": {
-        "--tensor-parallel-size": "8",
-        "--data-parallel-size": "1",
-        "--data-parallel-backend": None,
-        "--engram-config": '{"cpu_offload":false}',
-        "--disable-custom-all-reduce": True,
+    # S1's other shape: DP8 / EP8 (TP1 per rank) with the Engram tables in
+    # pinned host memory shared by the DP ranks (the six-GPU 1017 shape).
+    "dp8": {
+        "--tensor-parallel-size": "1",
+        "--data-parallel-size": "8",
+        "--data-parallel-backend": "mp",
+        "--engram-config": '{"cpu_offload":true}',
+        "--disable-custom-all-reduce": None,
     },
-    # S2, official recipe levers one at a time.
-    # NVIDIA default DSpark verification (the V4.1 SM120 indexer backend
-    # rejected it on the nightly; recorded when it still does).
-    "adaptive-verification": {"--speculative-config": _DSPARK % "true"},
-    # B200 DEP2 c32 arm: admit new prefills every 64 steps, aligned across DP ranks.
-    "prefill-interval-64": {"--prefill-schedule-interval": "64"},
-    # Recipe sizing: max-num-seqs x (1 + 5 draft tokens) = 768, rounded to 1024.
+    # S2 on TP8, one at a time (the DP-only prefill interval and adaptive
+    # verification, which the V4.1 indexer backend rejects, do not apply).
     "cudagraph-1024": {"--max-cudagraph-capture-size": "1024"},
     "batch-8k": {"--max-num-batched-tokens": "8192"},
     "batch-16k": {"--max-num-batched-tokens": "16384"},

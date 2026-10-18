@@ -1,11 +1,10 @@
 name: kairyu-deepseek-v4.1-flash-1017-8gpu
 services:
-  # One DeepSeek-V4.1-Flash-1017 replica on GPUs 0-7: attention data parallel
-  # DP8 (TP1 per rank) with EP8 over the 384 routed experts (48 per rank), the
-  # official Blackwell "DEP" shape with this example's SM120 kernels. Engram
-  # tables (183 GiB) live in pinned host memory shared by the DP ranks, and
-  # batched tokens / memory use start from the six-GPU 1017 example's
-  # measured values. MEASUREMENTS.md records every candidate.
+  # One DeepSeek-V4.1-Flash-1017 replica on GPUs 0-7: TP8 with EP8 over the
+  # 384 routed experts (48 per rank) and TP-sharded, GPU-resident Engram
+  # tables (the deepseek-v4.1-flash-8gpu shape) on this example's SM120
+  # kernels; NCCL all-reduce. Measured against DP8 / EP8: c1 +52 %, c8 +30 %,
+  # c32 -28 %; selected by c8 (MEASUREMENTS.md records every candidate).
   deepseek:
     image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-1017-8gpu}
     ipc: host
@@ -33,16 +32,14 @@ services:
     - --tokenizer-mode
     - deepseek_v41
     - --tensor-parallel-size
-    - '1'
-    - --data-parallel-size
     - '8'
-    - --data-parallel-backend
-    - mp
+    - --data-parallel-size
+    - '1'
     - --enable-expert-parallel
     - --moe-backend
     - marlin
     - --engram-config
-    - '{"cpu_offload":true}'
+    - '{"cpu_offload":false}'
     - --attention-config
     - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4"}'
     - --kv-cache-dtype
@@ -70,6 +67,7 @@ services:
     - --limit-mm-per-prompt
     - '{"image":8}'
     - --disable-uvicorn-access-log
+    - --disable-custom-all-reduce
     healthcheck:
       test:
       - CMD

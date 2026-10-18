@@ -65,10 +65,44 @@ The image follows the six-GPU 1017 example's S1 selection: v0.32.0 over the
 
 ## L1 selection
 
-Pending on GPU (plan S1–S2): `verify.sh l1`, then `tune.py baseline
-embedding-across-dp tp8` and the recipe levers one at a time on the selected
-shape. Selection by c8 output throughput (the DeepSWE run's concurrency),
-then c32.
+Rule (the six-GPU amendment's): one change at a time; adopted only with
+≥ 5 % output throughput at c1, c8 or c32 and no > 5 % loss elsewhere; the
+replica shape is chosen by c8 throughput (the DeepSWE run's concurrency),
+then c32. Rows (`tune.py`): 32 requests of ≈ 8K unique input tokens through
+Kairyu's `/v1/responses`, capped at 256 output tokens, thinking high.
+Cells: output tok/s / model TTFT p50 ms. Single trials.
+
+### `l1` on DP8 / EP8
+
+Run `20261018T204321Z-l1`: **PASS 17/17.** Rendered efforts default 75,
+low 50, high 75, max 100, `xhigh` 100, chat closes thinking; vLLM's prompt
+tokens equal the checkpoint encoder's for the 1017 tool-turn case and the two
+golden chat fixtures; 12 concurrent `17 * 19` probes per variant all exact
+with finite log-probabilities, answered by all eight DP engines; L1 default
+sampling `{'temperature': 1.0, 'top_p': 1.0}`; tool call and image pass.
+Weights 47.55 GiB per GPU (48 of 384 experts per rank), 25.03 GiB KV,
+13,799,928 KV tokens per DP engine; idle GPUs at 87,633 MiB.
+
+### S1: replica shape
+
+Run `20261018T204356Z-tuning` on v0.32.0, starting from DP8 / EP8 (the
+committed command at the time, with the six-GPU 1017 levers).
+
+| Candidate | c1 | c8 | c32 | KV per GPU / tokens per engine | Result |
+|---|---|---|---|---|---|
+| DP8 / EP8, Engram in shared host memory (running) | 101.0 / 726 | 291.7 / 1,216 | 620.2 / 4,319 | 25.03 GiB / 13,799,928 | PASS |
+| DP8 / EP8, restarted | 98.7 / 719 | 288.9 / 1,378 | 655.8 / 4,331 | 25.03 GiB / 13,799,928 | PASS |
+| DP8 / EP8 + `embedding_across_dp` (Engram sharded in HBM) | — | — | — | — | **FAIL** at start: 1.51–1.84 GiB KV per GPU, below the 1.9 GiB one 1,048,576-token request needs |
+| **TP8 / EP8**, Engram TP-sharded in HBM, NCCL (`--disable-custom-all-reduce`) | **152.2 / 470** | **376.2 / 1,515** | **458.2 / 7,017** | 15.70 GiB / 8,613,322 | PASS |
+
+Against the mean of the two DP8 rows (c1 99.9, c8 290.3, c32 638.0), TP8
+is +52 % at c1, +30 % at c8 and −28 % at c32. By the plan's rule (c8, the
+concurrency of the DeepSWE runs, decides; c32 second) **TP8 / EP8 is
+adopted**; DP8 keeps the higher aggregate rate at c32. Weights are 61.16 GiB
+per GPU on TP8 (47.55 GiB on DP8 with the tables in host memory). For
+comparison, `deepseek-v4.1-flash-8gpu` (0909 weights, TP8 on its 0909 image,
+chat rows of exactly 256 tokens) measured 126.8 / 275.4 / 326.8 tok/s at
+c1/c8/c32.
 
 `use_thp` (recipe B200 TP2 arm) is not a candidate: v0.32.0's EngramConfig
 requires `dp_shared_memory=false` for it, i.e. one private pinned copy of

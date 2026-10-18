@@ -34,9 +34,9 @@ pools:
         cache_descriptor:
           family: deepseek-v41-swa-csa-engram
           block_size: 64
-        tensor_parallel_size: 1
+        tensor_parallel_size: 8
         expert_parallel_size: 8
-        attention_data_parallel_size: 8
+        attention_data_parallel_size: 1
         dspark_enabled: true
         # Recorded after the build of this example's overlay (GPU selection pending).
         container_image_digest: sha256:7237421efe0a2eb901560ff550600c02e90310fda100caded27ff8475bf19b0c

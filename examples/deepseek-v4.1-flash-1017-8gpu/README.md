@@ -6,18 +6,16 @@ the V4.1 examples: one Kairyu `ReplicaPool` replica, the OpenAI-compatible
 API, and Open WebUI.
 
 ```text
-Open WebUI (:3018) -> Kairyu (:8018) -> ReplicaPool -> vLLM (DP8 / EP8 + DSpark, GPUs 0-7)
+Open WebUI (:3018) -> Kairyu (:8018) -> ReplicaPool -> vLLM (TP8 / EP8 + DSpark, GPUs 0-7)
 ```
 
 1017 (2026-10-17) is DeepSeek's weight refresh of V4.1-Flash: `config.json`,
 the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 0909 checkpoint; the weights and `encoding/encoding.py` changed.
 
-> **L1 selection in progress (2026-10-19).** The replica shape (DP8 / EP8
-> with host or HBM-sharded Engram tables, or TP8 / EP8) and the recipe
-> levers are being measured on the image the six-GPU 1017 example selects
-> (`MEASUREMENTS.md`); until then the image pins are empty and `run.sh up`
-> serves only with `DEEPSEEK_ALLOW_UNPINNED_IMAGE=1`.
+> **L1 selection in progress (2026-10-19).** The replica shape is TP8 / EP8
+> (measured against DP8 / EP8); the recipe levers on TP8 and the final gates
+> follow (`MEASUREMENTS.md`).
 
 ## Start
 
@@ -38,8 +36,8 @@ the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 ```
 
 `run.sh up` refuses to start when GPUs 0–7 are busy or when the host has
-less than 256 GiB of available memory (the Engram tables are pinned in host
-memory). The checkpoint (≈476 GiB) is downloaded to
+less than 64 GiB of available memory (the Engram tables are GPU-resident on
+this shape). The checkpoint (≈476 GiB) is downloaded to
 `/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-1017-8gpu/models` and
 hashed against the pinned tree. To reuse a copy that is already on the same
 NVMe filesystem, set `DEEPSEEK_MODEL_SEED=<path to deepseek-v4.1-flash-1017>`:
@@ -91,9 +89,9 @@ a > 5 % loss elsewhere).
 | Setting | Value | Source / reason |
 |---|---|---|
 | Runtime | `vllm/vllm-openai:v0.32.0` pinned by digest + `patch_sm120.py` (selected over the 2026-09-30 nightly on six GPUs: c32 +7.6 %, c1/c8 within noise) | v0.32.0 adds V4.1 work after the nightly (faster CPU-offloaded Engram lookups, FP8 Engram exchange across DP, SWA replay trimming, SM120 split-K attention, DSpark fixes) but none of the SM120 edits below. |
-| Replica shape | DP8 / EP8 (TP1 per rank), 48 experts per rank (selection in progress against TP8 / EP8) | Official Blackwell "DEP" shape on the TP path's SM120 kernels (the DEP kernels are SM100-only). On six GPUs DP6 was 44–47 % faster at c32 than TP2 × DP3, and the DP6 example outran `deepseek-v4.1-flash-8gpu`'s TP8 from c8 up (586.7 vs 326.8 tok/s at c32). Selected by c8 throughput (DeepSWE's concurrency), then c32. |
-| Engram | pinned host memory, one copy shared by the DP ranks (selection in progress against `embedding_across_dp` in HBM) | 8 × 96 GB clears the official 614 GB minimum only narrowly; the recipe's memory-bound arm keeps the 183 GiB tables in host memory ("output is unchanged"). `embedding_across_dp` shards one table copy over the eight ranks (≈23 GiB each) at the cost of a per-step DP exchange. `use_thp` is not a candidate: it needs one private host copy per DP rank (8 × 183 GiB exceeds the host's 1 TiB). |
-| Batched tokens / memory | 4096 / 0.92 | The six-GPU selection; 8K/16K and 0.90 are re-measured with the larger per-rank memory. |
+| Replica shape | TP8 / EP8, 48 experts per rank, NCCL all-reduce | Measured against DP8 / EP8 (the six-GPU 1017 shape on eight ranks) on v0.32.0: c1 +52 % (152.2 vs 99.9 tok/s), c8 +30 % (376.2 vs 290.3), c32 −28 % (458.2 vs 638.0). Selected by c8, the concurrency of the owner's DeepSWE runs; DP8 serves more aggregate tokens at c32. |
+| Engram | GPU-resident, TP-sharded (≈23 GiB per GPU) | As in `deepseek-v4.1-flash-8gpu`'s TP8. On DP8, `embedding_across_dp` in HBM left 1.5–1.8 GiB of KV per GPU, below one 1,048,576-token request (start refused); `use_thp` needs one private host copy per DP rank (8 × 183 GiB exceeds the host's 1 TiB). |
+| Batched tokens / memory | 4096 / 0.92 | The six-GPU selection; 8K/16K and 0.90 are re-measured on TP8 (in progress). |
 | DSpark | 5-token block, probabilistic drafts, block rejection, full verification | Official method and block (lossless rejection sampling). Adaptive verification is re-measured on the selected image. |
 | Attention | `FLASHINFER_MLA_SPARSE_DSV41`, FP8 KV, MXFP4 indexer | Official Blackwell settings. |
 | Pages | 64-token blocks | SM120 requirement (FlashInfer SWA pages, DeepGEMM C1/C2 indexer pages). |
@@ -144,8 +142,7 @@ on vLLM's chat API.
   the max budget); vLLM's prompt tokens equal to the checkpoint encoder's
   for the 1017 tool-turn case (no tools declared) and the checkpoint's two
   golden chat fixtures; rounds of 12 concurrent `17 * 19` probes per variant
-  with exact answers and finite log-probabilities until all eight DP engines
-  have answered; the L1 default sampling, tool call, image, and memory.
+  with exact answers and finite log-probabilities from the TP8 engine; the L1 default sampling, tool call, image, and memory.
 - `serving`: 8K-in rows capped at 256 output tokens at c1/8/16/32/64 (64
   requests each), every request placed on the replica, GPU peaks. The
   Responses API has no `ignore_eos`/`min_tokens`, so each request ends
@@ -160,8 +157,8 @@ on vLLM's chat API.
   `/v1/responses` (`verification/product/correctness/upstream_api_equivalence.py`).
 
 L1 candidates are compared with `tune.py` (one parameter at a time, the
-committed configuration restored afterwards; `embedding-across-dp` and `tp8`
-are the shape candidates). Results and every official deviation are
+committed configuration restored afterwards; `dp8` is the other measured
+shape). Results and every official deviation are
 in `MEASUREMENTS.md`.
 
 ## Primary references
