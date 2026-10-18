@@ -67,7 +67,7 @@
     "dspark_speculative_tokens": 5,
     "adaptive_verification": false,
     "engram_cpu_offload": false,
-    "max_num_batched_tokens": 4096,
+    "max_num_batched_tokens": 8192,
     "max_num_seqs": 128,
     "gpu_memory_utilization": 0.92,
     "kv_cache_dtype": "fp8",

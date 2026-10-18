@@ -12,8 +12,8 @@
 | [`qwen3.8-27b-dp8-8gpu`](qwen3.8-27b-dp8-8gpu/README.md) | Qwen TP1 x 8 replicas, one per card | one public model with OpenAI tool calling; Kairyu L2 is the replica pool only (even, prefix-aware placement) |
 | [`deepseek-v4.1-flash-8gpu`](deepseek-v4.1-flash-8gpu/README.md) | DeepSeek-V4.1-Flash, one TP8 replica (GPU 0-7) | text + image, OpenAI tools, default thinking high; V4 ReplicaPool/API/UI structure |
 | [`deepseek-v4.1-flash-6gpu`](deepseek-v4.1-flash-6gpu/README.md) | DeepSeek-V4.1-Flash, one DP6/EP6 replica (GPU 0-5) | the `deepseek-v4.1-flash-8gpu` L2/L3 structure on six GPUs; GPUs 6-7 unused |
-| [`deepseek-v4.1-flash-1017-6gpu`](deepseek-v4.1-flash-1017-6gpu/README.md) | DeepSeek-V4.1-Flash-1017, one DP6/EP6 replica (GPU 0-5) | the V4.1 L2/L3 structure; vLLM v0.32.0 + SM120 overlay with the 1017 encoder rule; L1 selection in progress |
-| [`deepseek-v4.1-flash-1017-8gpu`](deepseek-v4.1-flash-1017-8gpu/README.md) | DeepSeek-V4.1-Flash-1017, one DP8/EP8 replica (GPU 0-7) | the V4.1 L2/L3 structure; replica shape (DP8/EP8 or TP8/EP8) selection in progress |
+| [`deepseek-v4.1-flash-1017-6gpu`](deepseek-v4.1-flash-1017-6gpu/README.md) | DeepSeek-V4.1-Flash-1017, one DP6/EP6 replica (GPU 0-5) | the V4.1 L2/L3 structure; vLLM v0.32.0 + SM120 overlay with the 1017 encoder rule; text + image, OpenAI tools, default thinking high |
+| [`deepseek-v4.1-flash-1017-8gpu`](deepseek-v4.1-flash-1017-8gpu/README.md) | DeepSeek-V4.1-Flash-1017, one TP8/EP8 replica (GPU 0-7) | the V4.1 L2/L3 structure; vLLM v0.32.0 + SM120 overlay with the 1017 encoder rule; TP8 measured faster than DP8 at c1/c8 |
 
 All of them use Kairyu as L3, vLLM as L1 and Open WebUI as the public chat
 surface, except `quyet-1.0-large-1gpu`, a System One decision model with no

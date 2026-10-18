@@ -13,9 +13,8 @@ Open WebUI (:3018) -> Kairyu (:8018) -> ReplicaPool -> vLLM (TP8 / EP8 + DSpark,
 the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 0909 checkpoint; the weights and `encoding/encoding.py` changed.
 
-> **L1 selection in progress (2026-10-19).** The replica shape is TP8 / EP8
-> (measured against DP8 / EP8); the recipe levers on TP8 and the final gates
-> follow (`MEASUREMENTS.md`).
+> **GPU-verified 2026-10-19.** TP8 / EP8 with 8,192 batched tokens; every
+> gate, `api-equivalence` and the Chat UI pass succeed (`MEASUREMENTS.md`).
 
 ## Start
 
@@ -91,12 +90,12 @@ a > 5 % loss elsewhere).
 | Runtime | `vllm/vllm-openai:v0.32.0` pinned by digest + `patch_sm120.py` (selected over the 2026-09-30 nightly on six GPUs: c32 +7.6 %, c1/c8 within noise) | v0.32.0 adds V4.1 work after the nightly (faster CPU-offloaded Engram lookups, FP8 Engram exchange across DP, SWA replay trimming, SM120 split-K attention, DSpark fixes) but none of the SM120 edits below. |
 | Replica shape | TP8 / EP8, 48 experts per rank, NCCL all-reduce | Measured against DP8 / EP8 (the six-GPU 1017 shape on eight ranks) on v0.32.0: c1 +52 % (152.2 vs 99.9 tok/s), c8 +30 % (376.2 vs 290.3), c32 −28 % (458.2 vs 638.0). Selected by c8, the concurrency of the owner's DeepSWE runs; DP8 serves more aggregate tokens at c32. |
 | Engram | GPU-resident, TP-sharded (≈23 GiB per GPU) | As in `deepseek-v4.1-flash-8gpu`'s TP8. On DP8, `embedding_across_dp` in HBM left 1.5–1.8 GiB of KV per GPU, below one 1,048,576-token request (start refused); `use_thp` needs one private host copy per DP rank (8 × 183 GiB exceeds the host's 1 TiB). |
-| Batched tokens / memory | 4096 / 0.92 | The six-GPU selection; 8K/16K and 0.90 are re-measured on TP8 (in progress). |
-| DSpark | 5-token block, probabilistic drafts, block rejection, full verification | Official method and block (lossless rejection sampling). Adaptive verification is re-measured on the selected image. |
+| Batched tokens / memory | 8192 / 0.92 | Measured on TP8 against 4096: c32 +5.5 % (16K: +4.1 % with half the KV; memory 0.90 no gain). |
+| DSpark | 5-token block, probabilistic drafts, block rejection, full verification | Official method and block (lossless rejection sampling). Adaptive verification (the NVIDIA default) fails at start: the V4.1 indexer backend rejects it. |
 | Attention | `FLASHINFER_MLA_SPARSE_DSV41`, FP8 KV, MXFP4 indexer | Official Blackwell settings. |
 | Pages | 64-token blocks | SM120 requirement (FlashInfer SWA pages, DeepGEMM C1/C2 indexer pages). |
 | MoE | Marlin | SM120 MXFP4 MoE path. |
-| Sequences | 128 per DP engine | Official Blackwell value. |
+| Sequences / graphs | 128; default CUDA graph sizes | Official Blackwell value. `--max-cudagraph-capture-size 1024` measured no gain on TP8. |
 | Effort | default thinking high (75); low 50, max 100 (and `xhigh` 100) | The 1017 encoder (`encoding/encoding.py`). `xhigh` is Kairyu's Responses spelling of max. |
 | Encoder | vLLM's `deepseek_v41` encoder + the 1017 tool-turn rule | 1017 no longer starts a turn at a user message holding only tool results, so without a tools declaration the current turn's reasoning survives its tool calls. vLLM's copy still has the 0909 rule; the overlay ports the 1017 one. |
 | Sampling | temperature 1.0, top_p 1.0 | The 1017 model card. Applied at L1 with `--override-generation-config`; callers can still send their own. |

@@ -1,7 +1,6 @@
 # deepseek-v4.1-flash-1017-8gpu evidence
 
-Status: **L1 selection in progress (2026-10-19).** Only the rows below with
-a run or log name are measured.
+Status: **all final gates PASS on the committed configuration (2026-10-19).**
 
 Hardware: 8 × NVIDIA RTX PRO 6000 Blackwell Server Edition (97,887 MiB,
 SM120, PCIe); 1 TiB host memory, 4 NUMA nodes with GPU pairs
@@ -104,6 +103,68 @@ comparison, `deepseek-v4.1-flash-8gpu` (0909 weights, TP8 on its 0909 image,
 chat rows of exactly 256 tokens) measured 126.8 / 275.4 / 326.8 tok/s at
 c1/c8/c32.
 
+### S2: levers on TP8
+
+Run `20261018T212205Z-tuning` after `l1` passed on TP8 (`20261018T212139Z-l1`:
+17/17, weights 61.16 GiB per GPU, 15.70 GiB KV, 8,613,322 KV tokens, every
+probe exact from the single TP8 engine). Percentages against the mean of the
+two TP8 rows (S1 and the running baseline here: c1 151.5, c8 378.3, c32
+463.4).
+
+| Candidate | c1 | c8 | c32 | KV tokens | Result |
+|---|---|---|---|---|---|
+| TP8 baseline (running) | 150.8 / 471 | 380.3 / 1,280 | 468.6 / 7,005 | 8,613,322 | PASS |
+| `--max-cudagraph-capture-size 1024` | 151.8 / 469 (+0.2 %) | 365.0 / 1,104 (−3.5 %) | 466.6 / 7,004 (+0.7 %) | 6,748,667 | rejected |
+| **batch 8K** | 152.5 / 461 (+0.7 %) | 379.7 / 866 (+0.4 %) | **488.7 / 6,789 (+5.5 %)** | 6,803,944 | **adopted** |
+| batch 16K | 152.8 / 440 (+0.9 %) | 386.0 / 822 (+2.0 %) | 482.3 / 6,505 (+4.1 %) | 3,731,439 | rejected (below 5 %) |
+| memory 0.90 | 149.7 / 471 (−1.2 %) | 371.5 / 912 (−1.8 %) | 465.1 / 7,002 (+0.4 %) | 7,566,052 | rejected |
+
+Batch 8K is the only lever over the line (c32 +5.5 %; the two TP8 baseline
+rows differ by 2.3 % at c32); it also lowers c8 TTFT p50 by about a third.
+It keeps 6.5 × a 1,048,576-token request of KV. Not measured on TP8: the
+DP-only `--prefill-schedule-interval` and adaptive verification (the V4.1
+indexer backend rejects it on every shape, six-GPU S2).
+
+## Selected L1
+
+vLLM v0.32.0 + this overlay, TP8 / EP8 (48 experts per rank), NCCL
+all-reduce, TP-sharded GPU-resident Engram tables,
+`FLASHINFER_MLA_SPARSE_DSV41`, FP8 KV, MXFP4 indexer, 64-token pages, Marlin
+MoE, DSpark 5 (full verification), `--max-num-batched-tokens 8192`,
+`--gpu-memory-utilization 0.92`, `--max-num-seqs 128`, prefix caching,
+temperature 1.0 / top_p 1.0, thinking high by default.
+
 `use_thp` (recipe B200 TP2 arm) is not a candidate: v0.32.0's EngramConfig
 requires `dp_shared_memory=false` for it, i.e. one private pinned copy of
 the 183 GiB tables per DP rank (8 × 183 GiB exceeds the host's 1 TiB).
+
+## Final gates on the committed configuration
+
+Run 2026-10-19 06:53–07:17 JST, image `sha256:7237421e…`, TP8 / EP8 with
+8,192 batched tokens, served-config SHA-256
+`e8226cff9ee8a22df88cfa504a188c2aeb166a759201420d4632826aecf57fb1`, every
+gate `--no-start` in order (`final-gates-20261019.log` in the NVMe example
+directory).
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `l1` | PASS 17/17 (9 s) | efforts 75/50/75/100, `xhigh` 100; encoder parity (1017 tool-turn case, two golden fixtures); probes exact from the TP8 engine |
+| `serving` | PASS (255 s) | c1/8/16/32/64: 151.2 / 378.8 / 434.5 / 484.7 / 511.1 tok/s; model TTFT p50 461 / 845 / 937 / 2,116 / 13,171 ms (p99 478 / 3,262 / 6,470 / 12,971 / 26,652); 64/64 per row (`20261018T215333Z-serving`) |
+| `completed` | PASS 192/192 (875 s) | generic c1 218.4 tok/s, completion p50 2.4 s (p99 17.4 s); c8 680.7, 4.4 s (21.1 s); c32 895.1, 7.9 s (33.6 s); coding c1 266.7, 6.6 s (46.8 s); c8 975.6, 14.7 s (63.6 s); c32 1,323.4, 31.5 s (111.2 s) (`20261018T215748Z-completed`) |
+| `tool-calling` | PASS 5/5 | concurrent calls, tool-result turn, streamed call, low and max effort |
+| `vision` | PASS 6/6 | completed red answers |
+| `reasoning` | PASS 4/4 | default/low/high/max all `323` with reasoning |
+| `cancellation` | PASS | released 0.23 s after the disconnect; follow-up completed |
+| `long-context` | PASS 4/4 (86 s) | 32,800 / 131,104 / 262,176 / 1,039,904 prompt tokens, 2.2 / 6.4 / 11.4 / 65.9 s, exact keys |
+| `restart` | PASS | healthy and answering 194 s after the L1 restart |
+| `api-equivalence` | PASS (9 s) | |
+| Chat UI | PASS | Chromium (Playwright 1.60.0) on the example's Open WebUI: `323`, then `324` from the same chat, and `Red` for an attached red PNG; Kairyu `/v1/responses` 555 → 561, `/v1/chat/completions` 0 → 0 |
+
+Open WebUI v0.12.3 stored and showed only the message items of these answers
+although Kairyu streams their reasoning items (as in the six-GPU 1017
+example; the L3/UI is the V4.1 examples', unchanged).
+
+For orientation (same host): `deepseek-v4.1-flash-8gpu` (0909 weights, TP8
+on its 0909 image, fixed 256-token chat rows) measured 126.8 / 275.4 /
+305.4 / 326.8 / 314.3 tok/s at c1/8/16/32/64; the six-GPU 1017 example
+measured 101.8 / 278.0 / 364.2 / 579.0 / 803.7 on these Responses rows.

@@ -559,7 +559,12 @@ DeepSeek overlay is unchanged).
 
 Status: accepted by the owner (plan
 `docs/superpowers/plans/2026-10-19-deepseek-v41-flash-1017-examples.md`);
-L1 selection and gates pending on GPU (each example's `MEASUREMENTS.md`).
+GPU-verified 2026-10-19: both examples pass every gate, `api-equivalence`
+and the Chat UI pass (each example's `MEASUREMENTS.md`). Selected: vLLM
+v0.32.0 on both (over the nightly: c32 +7.6 %); six GPUs keep the 0909
+six-GPU levers (no recipe lever reached 5 %); eight GPUs serve TP8 / EP8
+(c1 +52 %, c8 +30 %, c32 −28 % against DP8 / EP8) with 8,192 batched tokens
+(c32 +5.5 %).
 
 `examples/deepseek-v4.1-flash-1017-6gpu` (GPUs 0–5) and
 `examples/deepseek-v4.1-flash-1017-8gpu` (GPUs 0–7) serve

@@ -106,7 +106,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
-- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` and `-8gpu` implemented (V4.1 L2/L3, own overlay with the 1017 encoder rule, top_p 1.0); L1 selection and gates pending on GPU, then DeepSWE (113 tasks, 8 workers, max) on the six-GPU one
+- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); remaining: DeepSWE (113 tasks, 8 workers, max) on the six-GPU one and the kairyu-bench wiki
 
 ## Change Log
 

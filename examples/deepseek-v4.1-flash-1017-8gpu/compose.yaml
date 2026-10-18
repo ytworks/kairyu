@@ -4,7 +4,8 @@ services:
   # 384 routed experts (48 per rank) and TP-sharded, GPU-resident Engram
   # tables (the deepseek-v4.1-flash-8gpu shape) on this example's SM120
   # kernels; NCCL all-reduce. Measured against DP8 / EP8: c1 +52 %, c8 +30 %,
-  # c32 -28 %; selected by c8 (MEASUREMENTS.md records every candidate).
+  # c32 -28 %; selected by c8. 8,192 batched tokens: c32 +5.5 % over 4,096
+  # (MEASUREMENTS.md records every candidate).
   deepseek:
     image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-1017-8gpu}
     ipc: host
@@ -52,7 +53,7 @@ services:
     - --max-num-seqs
     - '128'
     - --max-num-batched-tokens
-    - '4096'
+    - '8192'
     - --speculative-config
     - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
     - --reasoning-parser
