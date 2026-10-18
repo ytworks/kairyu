@@ -8,16 +8,23 @@ reaches an upstream declared in ``upstream_responses_models`` on
 AUTO model's role calls follow the caller's API. An assistant prefill skips
 Messages (vLLM opens a new turn there), and a single-call limit and JSON mode
 stay on vLLM's chat path, the only one that applies them in every pinned
-version.
+version. A client that leaves a stream mid-generation releases the upstream
+request at once on every public API.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import socket
+import threading
 
 import httpx
 import pytest
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse, StreamingResponse
+from starlette.routing import Route
 
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_spec
@@ -26,6 +33,7 @@ from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.registry import create_backend
 from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS, SamplingParams
+from tests.server._live_server import serve
 
 
 def _sse(events: list[dict], *, named: bool = True) -> bytes:
@@ -504,3 +512,109 @@ async def test_a_cancelled_native_stream_closes_its_upstream_at_once():
 
     assert closed.is_set()
     await backend.shutdown()
+
+
+def _one_delta_then_silence(closed: threading.Event) -> Starlette:
+    """An upstream that decodes one token, then waits until its client leaves."""
+
+    async def stream(request):
+        body = await request.json()
+        if not body.get("stream"):  # the startup probe posts {}
+            return JSONResponse({"error": {"message": "stream only"}}, status_code=400)
+        if request.url.path.endswith("/chat/completions"):
+            delta = {"choices": [{"index": 0, "delta": {"content": "ok"}}]}
+        else:
+            delta = {
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "ok",
+            }
+
+        async def events():
+            try:
+                yield f"data: {json.dumps(delta)}\n\n"
+                await asyncio.sleep(3600)
+            finally:
+                closed.set()
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    return Starlette(
+        routes=[
+            Route("/v1/responses", stream, methods=["POST"]),
+            Route("/v1/chat/completions", stream, methods=["POST"]),
+        ]
+    )
+
+
+def _read_first_delta_then_disconnect(url: str, path: str, body: dict, marker: bytes) -> None:
+    host, port = url.removeprefix("http://").split(":")
+    payload = json.dumps(body).encode()
+    head = (
+        f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n\r\n"
+    )
+    with socket.create_connection((host, int(port)), timeout=10) as client:
+        client.sendall(head.encode() + payload)
+        received = b""
+        while marker not in received:
+            chunk = client.recv(65536)
+            assert chunk, received
+            received += chunk
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "marker"),
+    [
+        pytest.param(
+            "/v1/responses",
+            {"model": "remote", "input": "Hi", "stream": True},
+            b"response.output_text.delta",
+            id="responses",
+        ),
+        pytest.param(
+            "/v1/messages",
+            {
+                "model": "remote",
+                "max_tokens": 16,
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "description": "Look a value up.",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": True,
+            },
+            b"text_delta",
+            id="messages-with-tools",
+        ),
+        pytest.param(
+            "/v1/chat/completions",
+            {"model": "remote", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+            b'"content":"ok"',
+            id="chat",
+        ),
+    ],
+)
+def test_a_client_disconnect_ends_the_upstream_request_at_once(path, body, marker):
+    # Real sockets: the disconnect must travel Uvicorn, Starlette's cancel
+    # scope and httpcore's connection close, none of which an in-process
+    # transport exercises. Garbage collection stays off: the release must not
+    # wait for a collector to finalize an abandoned stream.
+    closed = threading.Event()
+    upstream_url, upstream_server = serve(_one_delta_then_silence(closed))
+    spec = _spec(responses=True).replace("http://vllm.test", upstream_url)
+    kairyu_url, kairyu_server = serve(build_app_from_spec(load_deployment_spec(spec)))
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        _read_first_delta_then_disconnect(kairyu_url, path, body, marker)
+        assert closed.wait(timeout=5), "the upstream request outlived its client"
+    finally:
+        if collecting:
+            gc.enable()
+        kairyu_server.should_exit = True
+        upstream_server.should_exit = True

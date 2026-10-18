@@ -18,7 +18,6 @@ Messages adapter's gates (``parallel_tool_calls=false``, required/named
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import time
 import uuid
@@ -34,6 +33,7 @@ from kairyu.entrypoints.server.responses_protocol import (
     _usage_payload_from_wire,
 )
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
+from kairyu.entrypoints.server.sse_keepalive import cancel_and_wait
 from kairyu.entrypoints.server.tool_stream import (
     StreamInvalid,
     TextDelta,
@@ -611,9 +611,7 @@ async def buffered_stream(emitter: ResponseEmitter, produce, saver) -> AsyncIter
             if emitter.heartbeat_due():
                 yield emitter.heartbeat()
     except BaseException:
-        task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
+        await cancel_and_wait(task)
         raise
     try:
         output, usage, status, incomplete_details = task.result()
