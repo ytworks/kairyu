@@ -7,14 +7,15 @@ DeepSeek max requirements and two Winnow replicas 2026-10-07 (VCO-D19 amendment)
 next-step replies with structured tool calls 2026-10-07 (VCO-D19 amendment), all nine GPU gates pass 2026-10-07;
 one routed verified tool route with prompts tuned on DeepSWE 2026-10-09 (VCO-D20, amended the same day), all nine GPU gates pass 2026-10-09;
 Quyet replaces Winnow and the verified tool route is rebuilt around judged candidates and a form check 2026-10-11 (VCO-D21, VCO-D22), TOOL floor and strict form check 2026-10-11 (amendment), all nine GPU gates pass 2026-10-11;
-the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13**
+the same route with GLM-5.3-Flash as the writer 2026-10-12 (VCO-D23), GLM pool kept after one failure, F5 asks for one call first and the form check reports without fixes 2026-10-13 (amendments), all nine GPU gates pass 2026-10-13; the GLM example removed 2026-10-19 (VCO-D23 removal amendment)**
 (evidence: `examples/deepseek-v4.1-quyet-8gpu/MEASUREMENTS.md`; VCO-D1..D17 evidence:
 `examples/deepseek-v4.1-openjev-verified-8gpu/MEASUREMENTS.md` at `df109a6b`).
 Applies to: `examples/deepseek-v4.1-quyet-8gpu/` (renamed from
 `examples/deepseek-v4.1-openjev-verified-8gpu/` by VCO-D18, from
 `examples/deepseek-v4.1-qwen3.8-winnow-8gpu/` by the VCO-D19 amendment of
 2026-10-07 and from `examples/deepseek-v4.1-winnow-8gpu/` by VCO-D21) and, with
-GLM-5.3-Flash as the writer, `examples/glm-5.3-flash-quyet-8gpu/` (VCO-D23). Framework
+GLM-5.3-Flash as the writer, `examples/glm-5.3-flash-quyet-8gpu/` (VCO-D23, removed
+2026-10-19). Framework
 mechanisms: m1 D8 (checklist verifiers), m1 D9 and the
 m11 D8 replica amendment.
 
@@ -985,6 +986,20 @@ writer's L1 on status and usage keys. The DeepSeek overlay maps the
 encoder's `xhigh` to the max budget (Kairyu's Responses wire form of L3 max);
 GLM's template is checked on GPU. Quyet, System One and the questions,
 thresholds, fixes and budget are unchanged. GPU verification is pending.
+
+Removal amendment 2026-10-19 (owner decision during the PR #656 GPU final
+test): `examples/glm-5.3-flash-quyet-8gpu` is deleted with its own tests.
+Its serving gate failed again on the recorded `dedup-case` limit: at c4 GLM's
+think route (P(TOOL) 0.035) answered the agent turn done without the call it
+still needed (the turn's last script compared emails case-sensitively,
+against the request); the call was made at c8 and c16. On the live stack the same turn
+answered done without a call 2 of 6 times on `/v1/responses` and 1 of 6 on
+`/v1/chat/completions`, so the caller-API forwarding did not cause it. The
+decisions and evidence above stay as history. `deepseek-v4.1-quyet-8gpu`,
+`glm-5.3-flash-6gpu` and `kairyu/` are unchanged; this example's own F5
+wording and form-check settings go with it.
+Why: the owner judged the example unusable once its recorded limit recurred
+in the final test.
 
 ## Limitations
 

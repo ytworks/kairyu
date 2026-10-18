@@ -98,6 +98,9 @@ Review round 1 (owner review of `6c011416`, decisions 2026-10-18):
     storage is deleted.
 32. The GPU final test runs on this host (the live deployments are stopped)
     once the review is complete.
+33. `glm-5.3-flash-quyet-8gpu` is deleted in this PR with its own tests
+    (owner decision 2026-10-19, after its serving gate failed on the
+    recorded `dedup-case` think-route limit in the final test).
 
 ## Phase 0 findings (CPU, 2026-10-17)
 
@@ -167,7 +170,7 @@ session, so the browser gates themselves run with the GPU tasks.
 
 1. Review: receive review of the PR, fix, and repeat until approved.
 2. Final test on this host after the review (decision 32), per remaining
-   example with an Open WebUI (8):
+   example with an Open WebUI (7 after decision 33):
    - build the rebuilt L1 overlays and record their image IDs
      (`example.json` `image_id`, `kairyu.yaml` `container_image_digest`);
    - `run.sh up` (Kairyu's startup check of `/v1/responses` and
