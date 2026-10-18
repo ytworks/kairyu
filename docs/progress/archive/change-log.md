@@ -11,6 +11,30 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-17 — [amendment] Per-example decisions for the Responses move (FN-D8, DTO-D18, VCO, m9 D2)
+- What: 0731-8gpu L1 on the dp2 settings (no identity template); qwen3.8-deepseek-v4 L2 rebuilt on the official encoder (DTO-D18); DeepSeek overlays render `xhigh` as max, rebuilt images unpinned until the GPU build; readiness probes on Responses without logprobs; sign-in UIs switch a saved chat connection; native wires take a lacking field only at its upstream default (`min_p` 0, priority 0).
+- Why: owner answers 2026-10-17 (plan decisions 12, 15-22); order is implement → CPU checks → review/fix rounds → separate GPU final test.
+- Refs: FN-D8/FN Responses amendments, DTO-D18, VCO 2026-10-17 amendment, m9 D2; plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
+
+### 2026-10-17 — [design] L1 receives the caller's API; example UIs on Responses (m9 D2, m11 D4/D7, m1 D8)
+- What: `upstream_responses_models`/`upstream_messages_models` declare L1s that serve Responses/Messages; such a model gets the request in the caller's API (Messages → Responses → chat; AUTO role calls too; Jev roles unchanged), `max` sent as `xhigh`, startup fails on a missing route. Native prefix placement, `kairyu_*` on Responses, body limit on Responses paths. 13 non-Jev examples: Open WebUI `api_type: responses` + normalization filter, native chat, gates on `/v1/responses` plus `api-equivalence`. GPU verification pending.
+- Why: owner request 2026-10-17: UI and L1 on the same OpenAI-compliant Responses API as L3; Jev examples untouched.
+- Refs: m9 D2, m11 D4/D7, m1 D8 amendments 2026-10-17; plan `docs/superpowers/plans/2026-10-17-upstream-api-forwarding.md`
+
+### 2026-10-13 — [progress] GLM + Quyet example: all nine GPU gates pass (VCO-D23, PR #648)
+- What: at `90ab8016` (after the three 2026-10-13 amendments) every gate passes in one run: verified-tool-route 12/12, serving 72/72 structured calls (p50 c1/c16 151.5/185.6 s, 95/506 tok/s; DeepSeek version at high effort 74.8/134.2 s), serving-routed 72/72; 0 GLM grammar errors, 0 Kairyu errors, no fix ran; 3 of 69 serving TOOL replies published with a form failure reported (F1 x2, F7). A targeted run of `reschedule` and `announced-no-call` (10 each) first: 20/20 with a call.
+- Refs: VCO-D23; example `MEASUREMENTS.md`
+
+### 2026-10-13 — [amendment] GLM + Quyet: the form check reports without fixes (VCO-D23, PR #648)
+- What: third run stopped at `verified-tool-route` (`reschedule`: Quyet read the one-call reply's F1 low, the second fix published GLM's reasoning about the check without a call). `format_check` now has no fixes (`max_refinements` 0, `refine_prompt` removed): the reply is published as written, the seven results in `kairyu_verification`. Runs so far: 14/209 TOOL replies failed the first check, fixes passed 4, left 8 unchanged, dropped the call in 2.
+- Why: owner decision 2026-10-13: GLM's fixes of misread one-call replies made them worse; an F1 rewording did not move the misread on replay. Gate runs now stop at the first failure (owner).
+- Refs: VCO-D23 amendment 2026-10-13 (third); example `verified-tool.yaml`, `README.md`
+
+### 2026-10-13 — [amendment] GLM + Quyet: the form check's F5 asks for one call first (VCO-D23, PR #648)
+- What: re-run with `unhealthy_after: 3`: l1 and serving-routed pass; serving c16 32/32 answered (no 502) but `announced-no-call` published a reply without a call: Quyet read F5 below 0.5 (0.16-0.23) for its one-call replies, two fixes ran, the last dropped the call. F5 now asks "exactly one call?" first; several calls must be independent and allowed. Replay of 127 recorded replies: those read 0.63-0.88, the two-call reply under the one-call protocol still fails, none else crosses 0.5.
+- Why: owner decision 2026-10-13; only this example's F5 changes, DeepSeek's passes its gates.
+- Refs: VCO-D23 amendment 2026-10-13 (second); example `verified-tool.yaml`
+
 ### 2026-10-13 — [amendment] GLM + Quyet: the GLM pool keeps its replica after one failed request (VCO-D23, PR #648)
 - What: `glm-5.3-flash-quyet-8gpu` GLM pool `unhealthy_after` 1 -> 3. First GPU run: 8 of 9 gates pass; serving c16 21/32: vLLM ended one grammar-constrained MTP candidates call ("grammar rejected tokens", 1 of ~100), the only replica left placement and 10 waiting requests got 502; one THINK-routed agent turn (`dedup-case`, P(TOOL) 0.025) answered done without a call. Both recorded as README limits.
 - Why: owner decision 2026-10-13: one failed request must not fail every request waiting for the only replica; MTP and the candidates grammar stay.
