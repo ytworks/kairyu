@@ -113,6 +113,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-10-18 — [amendment] Qwen3.8 examples serve on vLLM v0.31.0 (FN, DTO-D16)
+- What: qwen3.8-27b-1gpu, qwen3.8-27b-dp8-8gpu and the V4.1 ensemble's Qwen pools move from the pinned vLLM v0.23.0 to the official v0.31.0 image (GLM's pin); flags and launchers unchanged; every gate of the three runs again.
+- Why: on v0.23.0 a request carrying `extra_args`, which its Responses serving always sets, prefilled about 3x slower (16 concurrent judge calls: chat 1.43 s, Responses 4.33 s; v0.31.0 1.26/1.27 s), pushing the ensemble's 5 s route judge past its timeout on 13 of 32 coding c32 requests; owner decision 2026-10-18.
+- Refs: FN Qwen3.8 v0.31.0 amendment, DTO-D16 amendment 2026-10-18; PR #656
+
 ### 2026-10-18 — [amendment] A streamed AUTO response names the final answer's L1 model first (m11 D1)
 - What: with `expose_intermediate_outputs`, the Conductor stream sends the selected final unit's "Final answer attribution" (L2 role, L1 worker, engine, model) as its first reasoning event, before any head or answer delta, and its result's `reasoning_content` has the unary shape; chat streams carry it as the first `reasoning_content` delta, Responses streams as a reasoning item before the message. Only unary results carried it before (`75efaae0`, when the Chat UIs were non-streaming). Limits: a head-streamed DAG's stage sections form a second Responses reasoning item after the message; a budget stand-in without a head is named only by its own section.
 - Why: after PR #656 moved the Chat UIs to streaming, the V4.1 ensemble's browser smoke found no attribution on `deepseek_think`; owner decision 2026-10-18 (PR #656 GPU final test).
