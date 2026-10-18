@@ -189,6 +189,22 @@ def rendering_error(variant: str, prompt: str) -> str | None:
 CHECKPOINT = ENVIRONMENT_STORAGE / "models" / SPEC["model"]["slug"]
 
 
+def with_call_ids(messages: list[dict]) -> list[dict]:
+    """Give fixture tool calls the ``id`` vLLM's chat API requires.
+
+    Each call takes the ``tool_call_id`` of the tool result that answers it
+    (the following tool messages, in order); the encoder renders neither.
+    """
+    messages = copy.deepcopy(messages)
+    for index, message in enumerate(messages):
+        results = iter(
+            m.get("tool_call_id") for m in messages[index + 1 :] if m.get("role") == "tool"
+        )
+        for number, call in enumerate(message.get("tool_calls") or []):
+            call.setdefault("id", next(results, None) or f"call_{index}_{number}")
+    return messages
+
+
 def encoder_cases() -> dict[str, dict]:
     """Chat requests whose prompt the checkpoint's own encoder defines.
 
@@ -203,7 +219,7 @@ def encoder_cases() -> dict[str, dict]:
     golden = json.loads((fixtures / "test_input_1.json").read_text())
     return {
         "tool_turn_without_tools": {"messages": patch_sm120.TOOL_TURN_MESSAGES},
-        "golden_1_tools": {"messages": golden["messages"], "tools": golden["tools"]},
+        "golden_1_tools": {"messages": with_call_ids(golden["messages"]), "tools": golden["tools"]},
         "golden_2_multi_turn": {
             "messages": json.loads((fixtures / "test_input_2.json").read_text())
         },
