@@ -1,16 +1,21 @@
 """The L1/L3 Responses equivalence gate can pass and can fail (m11 D4 amendment)."""
 
+import argparse
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.responses_events import ResponseEmitter
 from kairyu.entrypoints.server.responses_protocol import ResponsesRequest
+from verification.product.correctness import upstream_api_equivalence
 from verification.product.correctness.upstream_api_equivalence import (
     Capture,
+    Target,
     compare,
+    run_case,
     summarize,
 )
 
@@ -30,15 +35,26 @@ def _kairyu_capture() -> Capture:
     return Capture(response.status_code, events, events[-1]["response"], response.text)
 
 
-def _reasoning_capture(*, vllm_part_events: bool) -> Capture:
-    """Kairyu's own reasoning + text stream; vLLM names the reasoning part events."""
+def _stream(*items: tuple[str, str], vllm_part_events: bool = False) -> Capture:
+    """Kairyu's own stream of (reasoning | message | function_call, text or name) items.
+
+    With ``vllm_part_events`` the reasoning part events carry vLLM's names.
+    """
 
     request = ResponsesRequest.model_validate(
         {"model": "m", "input": "hello", "stream": True, "store": False}
     )
     emitter = ResponseEmitter(request, response_id="resp_1", created_at=0)
-    frames = emitter.start() + emitter.begin_reasoning() + emitter.reasoning_delta("think")
-    frames += emitter.close() + emitter.begin_message() + emitter.text_delta("ok")
+    frames = emitter.start()
+    for kind, value in items:
+        if kind == "reasoning":
+            frames += emitter.begin_reasoning() + emitter.reasoning_delta(value)
+        elif kind == "message":
+            frames += emitter.begin_message() + emitter.text_delta(value)
+        else:
+            frames += emitter.begin_call("call_1", value, None)
+            frames += emitter.arguments_delta('{"city": "Paris"}')
+        frames += emitter.close()
     usage = {
         "input_tokens": 1,
         "input_tokens_details": {"cached_tokens": 0},
@@ -59,8 +75,9 @@ def _reasoning_capture(*, vllm_part_events: bool) -> Capture:
 
 
 def test_a_vllm_reasoning_stream_matches_kairyus():
-    l1, l1_findings = summarize(_reasoning_capture(vllm_part_events=True), strict=False)
-    l3, l3_findings = summarize(_reasoning_capture(vllm_part_events=False), strict=True)
+    items = (("reasoning", "think"), ("message", "ok"))
+    l1, l1_findings = summarize(_stream(*items, vllm_part_events=True), strict=False)
+    l3, l3_findings = summarize(_stream(*items), strict=True)
 
     assert l1_findings == [] and l3_findings == []
     assert l1["items"] == ["reasoning", "message"]
@@ -104,3 +121,41 @@ def test_an_empty_message_item_carries_no_answer():
     assert l1["items"] == l3["items"] == ["reasoning"]
     assert compare(l1, l3) == []
 
+
+_CALL = ("function_call", "get_weather")
+_STRAY = ("function_call", "unregistered_weather")
+_ANSWER = ("message", "18C and sunny.")
+_THOUGHT = ("reasoning", "think")
+_STRAY_FINDINGS = [
+    "l3: function_call ['unregistered_weather'] is not a declared tool",
+    "functions: L1 ['get_weather'] != L3 ['unregistered_weather']",
+]
+
+
+@pytest.mark.parametrize(
+    ("l1_turns", "l3_turns", "findings"),
+    [
+        pytest.param([[_CALL], [_ANSWER]], [[_STRAY], [_ANSWER]], _STRAY_FINDINGS, id="call-turn"),
+        pytest.param(
+            [[_CALL], [_ANSWER, _CALL]],
+            [[_CALL], [_ANSWER, _STRAY]],
+            _STRAY_FINDINGS,
+            id="answer-turn",
+        ),
+        # Whether the model reasons before a call or an answer is sampled per request.
+        pytest.param(
+            [[_THOUGHT, _CALL], [_ANSWER]], [[_CALL], [_THOUGHT, _ANSWER]], [], id="reasoning"
+        ),
+    ],
+)
+def test_the_tools_case_compares_both_turns(monkeypatch, l1_turns, l3_turns, findings):
+    turns = {"l1": l1_turns, "l3": l3_turns}
+    monkeypatch.setattr(
+        upstream_api_equivalence,
+        "capture",
+        lambda target, body: _stream(*turns[target.name][isinstance(body["input"], list)]),
+    )
+    targets = (Target("l1", "", "m"), Target("l3", "", "m"))
+    args = argparse.Namespace(max_output_tokens=64, l3_orchestrated=False)
+
+    assert run_case("tools", targets, args)["findings"] == findings

@@ -18,6 +18,9 @@ Kairyu L3, then requires the same Responses structure from both:
   types (Kairyu closes every response with a message item, so a reply cut
   inside its reasoning is reasoning + an empty message on L3 and reasoning
   alone on vLLM);
+- the tools case compares both turns (the forced call and the answer to its
+  result) without their reasoning items, since whether a model reasons around
+  a tool call is sampled, and every function name must be a declared tool;
 - with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
   replica publishes no host port), the replicas' own request counters show
   that L3 reached them on ``/v1/responses``;
@@ -266,27 +269,58 @@ def _answer_check(text: str) -> str | None:
     return None if re.search(r"\b323\b", text) else f"answer {text[:80]!r} is not 323"
 
 
+def _without_reasoning(cap: Capture) -> Capture:
+    """The capture without its reasoning items and their events.
+
+    Whether a model reasons before a tool call or a tool-result answer is
+    sampled per request (a thinking model skips it on about 1 in 5 one-step
+    calls, on vLLM directly too), so tool turns compare the rest.
+    """
+
+    if cap.response is None:
+        return cap
+    reasoning = {
+        event.get("output_index")
+        for event in cap.events
+        if event.get("type") == "response.output_item.added"
+        and (event.get("item") or {}).get("type") == "reasoning"
+    }
+    events = [event for event in cap.events if event.get("output_index") not in reasoning]
+    output = [item for item in cap.response.get("output") or () if item.get("type") != "reasoning"]
+    return Capture(cap.status, events, {**cap.response, "output": output}, cap.raw)
+
+
 def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
     """Run one case on (L1, L3); returns its record with findings."""
 
     record: dict = {"case": case, "findings": []}
     base = {"max_output_tokens": args.max_output_tokens, "store": False}
 
-    def both(body: dict, *, check=None, exact=False) -> tuple[dict, dict]:
-        summaries = []
+    def both(body, *, check=None, exact=False, view=None) -> list[Capture]:
+        """Send ``body`` (or ``body(target)``) to L1 and L3 and compare them.
+
+        ``view`` narrows each capture before the comparison only; its own
+        findings and the check see the whole capture.
+        """
+
+        caps, summaries, compared = [], [], []
         for target in targets:
-            summary, own = summarize(capture(target, body), strict=target.name == "l3")
+            strict = target.name == "l3"
+            cap = capture(target, body(target) if callable(body) else body)
+            summary, own = summarize(cap, strict=strict)
             record["findings"] += [f"{target.name}: {f}" for f in own]
             if check is not None and summary.get("status") is not None:
                 problem = check(summary)
                 if problem:
                     record["findings"].append(f"{target.name}: {problem}")
+            caps.append(cap)
             summaries.append(summary)
+            compared.append(summary if view is None else summarize(view(cap), strict=strict)[0])
         record["findings"] += compare(
-            *summaries, exact_input_tokens=exact, orchestrated=args.l3_orchestrated
+            *compared, exact_input_tokens=exact, orchestrated=args.l3_orchestrated
         )
         record.setdefault("summaries", []).append(summaries)
-        return summaries[0], summaries[1]
+        return caps
 
     if case in {"text", "stream"}:
         both(
@@ -305,6 +339,17 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
                 ),
             )
     elif case == "tools":
+
+        def declared(summary: dict) -> str | None:
+            stray = [name for name in summary.get("functions", []) if name != _TOOL["name"]]
+            return f"function_call {stray} is not a declared tool" if stray else None
+
+        def answered(summary: dict) -> str | None:
+            if summary.get("status") == "completed" and "message" in summary.get("items", []):
+                return declared(summary)
+            problems = ("the tool result turn did not answer", declared(summary))
+            return "; ".join(filter(None, problems))
+
         first_turn = {
             **base,
             "input": "Use the tool to get the weather in Paris.",
@@ -312,10 +357,10 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             "tool_choice": "required",
             "stream": True,
         }
-        for target in targets:
-            cap = capture(target, first_turn)
-            summary, own = summarize(cap, strict=target.name == "l3")
-            record["findings"] += [f"{target.name}: {f}" for f in own]
+        calls = {}
+        for target, cap in zip(
+            targets, both(first_turn, check=declared, view=_without_reasoning), strict=True
+        ):
             call = next(
                 (
                     i
@@ -326,8 +371,12 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             )
             if call is None:
                 record["findings"].append(f"{target.name}: no function_call")
-                continue
-            second = {
+            else:
+                calls[target.name] = call
+
+        def second_turn(target: Target) -> dict:
+            call = calls[target.name]
+            return {
                 **base,
                 "input": [
                     {"role": "user", "content": first_turn["input"]},
@@ -341,13 +390,9 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
                 "tools": [_TOOL],
                 "stream": True,
             }
-            second_summary, own = summarize(capture(target, second), strict=target.name == "l3")
-            record["findings"] += [f"{target.name}: {f}" for f in own]
-            if second_summary.get("status") != "completed" or "message" not in second_summary.get(
-                "items", []
-            ):
-                record["findings"].append(f"{target.name}: the tool result turn did not answer")
-            record.setdefault("summaries", []).append([target.name, summary, second_summary])
+
+        if len(calls) == len(targets):
+            both(second_turn, check=answered, view=_without_reasoning)
     elif case == "image":
         both(
             {
