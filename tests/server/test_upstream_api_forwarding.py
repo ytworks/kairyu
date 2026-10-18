@@ -12,6 +12,7 @@ chat path, the only one that applies it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -436,4 +437,50 @@ async def test_a_declared_api_the_upstream_lacks_fails_startup():
     )
     with pytest.raises(RuntimeError, match="does not serve /responses"):
         await backend.startup()
+    await backend.shutdown()
+
+
+async def test_a_cancelled_native_stream_closes_its_upstream_at_once():
+    closed = asyncio.Event()
+
+    class EndlessEvents(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            delta = {
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "a",
+            }
+            yield f"data: {json.dumps(delta)}\n\n".encode()
+            await asyncio.sleep(3600)
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm.test/v1",
+        model="m",
+        api_key_env=None,
+        upstream="vllm",
+        upstream_apis=("responses",),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=EndlessEvents()
+            )
+        ),
+    )
+    partials = backend.stream(
+        GenerationRequest(
+            request_id="cancel",
+            prompt="Hi",
+            sampling_params=SamplingParams(max_tokens=16).with_generation_config_omitted(
+                GENERATION_CONFIG_SAMPLING_FIELDS
+            ),
+            caller_api="responses",
+        )
+    )
+    assert (await partials.__anext__()).completions[0].text_delta == "a"
+    await partials.aclose()
+
+    assert closed.is_set()
     await backend.shutdown()

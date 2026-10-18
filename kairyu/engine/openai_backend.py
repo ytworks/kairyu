@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import re
@@ -2241,8 +2242,15 @@ class OpenAICompatBackend:
         )
         wire = self._select_wire(request)
         if wire is not None:
-            async for partial in self._stream_native(request, payload, wire):
-                yield partial
+            # Close the native stream (and its upstream connection) as soon as
+            # the consumer stops, as the chat path's own ``async with`` does;
+            # an unclosed inner generator kept the upstream request running
+            # until garbage collection.
+            async with contextlib.aclosing(
+                self._stream_native(request, payload, wire)
+            ) as partials:
+                async for partial in partials:
+                    yield partial
             return
         use_completions = self._uses_vllm_completions(request)
         endpoint = "completions" if use_completions else "chat/completions"
