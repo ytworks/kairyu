@@ -1302,11 +1302,11 @@ def api_equivalence(run_dir: Path) -> int:
             "--cases",
             "text,stream,effort,tools,image,cap,openwebui",
             # xhigh is L3 max on the Responses wire (patch_sm120.py edit 8).
-            # No --expect-reasoning: the AUTO model's stream carries a
-            # reasoning item only when its publisher thinks, and on this short
-            # arithmetic the deepseek_think publisher answered without thinking
-            # at every effort, on the chat wire too (GPU 2026-10-18); the
-            # Conductor's stream omits the attribution summary. Quyet does the same.
+            # No --expect-reasoning: the AUTO stream's leading reasoning item is
+            # the final-answer attribution, not the publisher's thinking, and on
+            # this short arithmetic the deepseek_think publisher answered without
+            # thinking at every effort, on the chat wire too (GPU 2026-10-18), so
+            # a reasoning item says nothing about the effort. Quyet does the same.
             "--efforts",
             "low,high,xhigh",
             "--max-output-tokens",
