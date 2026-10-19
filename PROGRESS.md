@@ -106,13 +106,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
-- Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness 76/113 recorded in the kairyu-bench wiki; remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
+- Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); kairyu-bench wiki DeepSWE-Comparison updated
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-20 — [progress] DeepSWE with DeepSeek Harness: 83/113 on the 1017 eight-GPU example
+- What: the same dsh run as the six-GPU one (dsh 0.2.1rc2, kairyu-bench PR #31, effort max, 8 workers, Kairyu code of PR #660 `0513750a`) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 83/113 (six-GPU dsh 76/113, mini-swe-agent 79/113), 4 h 33 min (0.72x), 10,753 API calls all 200 (1.00x), 10,424 with thinking, input 1.106 B, output 9.33 M; all 113 tasks scored, no re-run needed. No new Kairyu-side problem.
+- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660
 
 ### 2026-10-19 — [progress] DeepSWE with DeepSeek Harness via Messages: 76/113 on the 1017 six-GPU example
 - What: PR #660 (`0513750a`, Kairyu only replaced) passed the GPU smokes: dsh effort max (91 calls 200, 88 replies with thinking, 3,857 replayed blocks accepted, reward 1) and effort off (thinking off, first input 1,171 tokens, reward 1). DeepSWE v1.1 with DeepSeek Harness (dsh 0.2.1rc2, kairyu-bench PR #31) on `deepseek-v4.1-flash-1017-6gpu`, effort max, 8 workers: 76/113 (mini-swe-agent on the same L1: 79/113), 6 h 20 min, 10,768 API calls all 200, 10,393 with thinking. New finding: `count_tokens` is 404 on tool-call history (vLLM v0.32.0 `/tokenize` fails on `content: null`; #659 item 5, recorded only).
