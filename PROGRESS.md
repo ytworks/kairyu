@@ -106,12 +106,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
-- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); remaining: DeepSWE (113 tasks, 8 workers, max) on the six-GPU one and the kairyu-bench wiki
+- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); kairyu-bench wiki DeepSWE-Comparison updated
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-19 — [progress] DeepSeek-V4.1-Flash-1017 examples GPU-verified; DeepSWE 79/113 on six GPUs
+- What: both 1017 examples pass every gate (six GPUs keep DP6/EP6 on vLLM v0.32.0; eight GPUs serve TP8/EP8 with 8K batched tokens: c1/c8 +52/+30 % over DP8). DeepSWE v1.1 on the six-GPU example, effort max (rendered `Reasoning Effort: 100`), 8 workers: 79/113 (two verifier timeouts count as not correct), 6 h 04 min, 10,062 API calls (0909 six-GPU max: 85/113, 15 h 22 min, 21,985 calls).
+- Refs: each example's `MEASUREMENTS.md`; run `deepswe-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #658
 
 ### 2026-10-19 — [design] DeepSeek-V4.1-Flash-1017 six- and eight-GPU examples (FN-D9 1017 amendment)
 - What: two new examples for the 1017 weight refresh with the V4.1 L2/L3 unchanged; their overlay ports the 1017 encoder rule (a tool-result-only user message does not start a turn) into vLLM's encoder copy, maps `xhigh` to 100, and follows the 1017 card's top_p 1.0; the L1 (v0.32.0 vs the pinned nightly, recipe levers, DP8 vs TP8 on eight GPUs) is selected by measurement.

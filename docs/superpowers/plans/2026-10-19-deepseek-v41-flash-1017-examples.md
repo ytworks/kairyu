@@ -1,6 +1,6 @@
 # DeepSeek V4.1 Flash 1017 examples on six and eight GPUs, and one DeepSWE pass
 
-Status: **Approved 2026-10-19 (owner); implementation in progress.**
+Status: **Approved 2026-10-19 (owner); implemented and GPU-verified 2026-10-19; DeepSWE 79/113 recorded in the kairyu-bench wiki.**
 
 Accepted scope (owner, 2026-10-19):
 
