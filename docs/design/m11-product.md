@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D4 amended 2026-10-05; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D4 amended 2026-10-19; D4 amended 2026-10-05; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -589,6 +589,33 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   function name must be a declared tool), and sums every
   L1 replica's `http_requests_total` to confirm L3 reached them on
   `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
+
+**Messages thinking amendment (2026-10-19, owner decision).** `/v1/messages`
+round-trips a direct engine's reasoning as Anthropic thinking blocks, as
+`/v1/responses` does with reasoning items (Reasoning, above):
+- `thinking: {"type": "enabled"}` without `budget_tokens` means thinking on
+  at `output_config.effort`, as `adaptive`; with `budget_tokens` it stays 400.
+- An assistant `thinking` block (`thinking`, optional `signature`,
+  `cache_control`) is accepted. For an engine or pool model it becomes the
+  turn's `reasoning_content` (a Messages upstream receives it as a thinking
+  block again); an AUTO model drops it. Signatures are not verified: Kairyu
+  does not sign.
+- An engine or pool model's reply carries its reasoning as one thinking block
+  before its text and tool blocks, with an empty signature: first in the unary
+  content; streamed as `content_block_start` (thinking), `thinking_delta`,
+  `signature_delta` (empty), `content_block_stop`. A reply still carries a text
+  block, empty when nothing was said. AUTO replies are unchanged: stage
+  reasoning stays private.
+Why: DeepSeek Harness (kairyu-bench PR #31) sends `enabled` with an effort and
+replays its earlier thinking; Kairyu answered both with 400 and never returned
+thinking, so a client that replays reasoning lost it at every tool call (issue
+#659). Framework boundary: the missing shared contract is the Messages thinking
+round trip for a direct engine (the Responses rule, applied to Messages); it
+lives in L3's request normalization, which no example extension point reaches;
+any Messages client that replays thinking needs it. Tests:
+`test_a_pool_model_round_trips_messages_thinking`,
+`test_an_auto_messages_reply_keeps_role_reasoning_private`, and the `enabled`
+case of `test_compatible_thinking_modes_are_accepted_as_noops`.
 
 ### D5 — Vision wire format
 

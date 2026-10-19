@@ -45,10 +45,14 @@ def _sse(events: list[dict], *, named: bool = True) -> bytes:
 
 
 class FakeUpstream:
-    """Records every request; answers chat, Responses and Messages with 'ok'."""
+    """Records every request; answers chat, Responses and Messages with 'ok'.
+
+    A Messages answer opens with a thinking block when ``thinking`` is set.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict]] = []
+        self.thinking: str | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -133,24 +137,30 @@ class FakeUpstream:
             return httpx.Response(200, json=response)
         assert path.endswith("/messages"), path
         usage = {"input_tokens": 7, "output_tokens": 1}
+        thought = [] if self.thinking is None else [("thinking", self.thinking)]
         if stream:
+            blocks = []
+            for index, (kind, text) in enumerate([*thought, ("text", "ok")]):
+                blocks += [
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": kind, kind: ""},
+                    },
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": f"{kind}_delta", kind: text},
+                    },
+                    {"type": "content_block_stop", "index": index},
+                ]
             return httpx.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
                 content=_sse(
                     [
                         {"type": "message_start", "message": {"usage": {"input_tokens": 7}}},
-                        {
-                            "type": "content_block_start",
-                            "index": 0,
-                            "content_block": {"type": "text", "text": ""},
-                        },
-                        {
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": "ok"},
-                        },
-                        {"type": "content_block_stop", "index": 0},
+                        *blocks,
                         {
                             "type": "message_delta",
                             "delta": {"stop_reason": "end_turn"},
@@ -160,11 +170,12 @@ class FakeUpstream:
                     ]
                 ),
             )
+        content = [{"type": kind, kind: text} for kind, text in thought]
         return httpx.Response(
             200,
             json={
                 "type": "message",
-                "content": [{"type": "text", "text": "ok"}],
+                "content": [*content, {"type": "text", "text": "ok"}],
                 "stop_reason": "end_turn",
                 "usage": usage,
             },
@@ -307,9 +318,7 @@ async def test_responses_caller_stays_on_chat_without_a_declared_upstream(upstre
 async def test_messages_caller_prefers_messages_then_responses_then_chat(
     upstream, responses, messages, expected
 ):
-    app = build_app_from_spec(
-        load_deployment_spec(_spec(responses=responses, messages=messages))
-    )
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=responses, messages=messages)))
     async with _client(app) as client:
         response = await client.post(
             "/v1/messages",
@@ -331,6 +340,85 @@ async def test_messages_caller_prefers_messages_then_responses_then_chat(
         assert body["messages"] == [{"role": "user", "content": "Hi"}]
         assert body["max_tokens"] == 64
         assert body["output_config"] == {"effort": "max"}
+
+
+def _data_events(text: str) -> list[dict]:
+    return [
+        json.loads(line[len("data:") :]) for line in text.splitlines() if line.startswith("data:")
+    ]
+
+
+def _thinking_turn(model: str, stream: bool) -> dict:
+    """A DeepSeek Harness turn: thinking on, effort max, its reasoning replayed."""
+
+    return {
+        "model": model,
+        "max_tokens": 64,
+        "stream": stream,
+        "thinking": {"type": "enabled"},
+        "output_config": {"effort": "max"},
+        "tools": [
+            {
+                "name": "lookup",
+                "description": "Look a value up.",
+                "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}},
+            }
+        ],
+        "messages": [
+            {"role": "user", "content": "What is k?"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Look k up.", "signature": ""},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"key": "k"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "42"}],
+            },
+        ],
+    }
+
+
+def _reply_blocks(response: httpx.Response, stream: bool) -> list[dict]:
+    """The reply's content blocks, folded from the SSE events when streamed."""
+
+    if not stream:
+        return response.json()["content"]
+    blocks: dict[int, dict] = {}
+    for event in _data_events(response.text):
+        if event["type"] == "content_block_start":
+            blocks[event["index"]] = dict(event["content_block"])
+        elif event["type"] == "content_block_delta":
+            delta = event["delta"]
+            block = blocks[event["index"]]
+            for key in ("text", "thinking", "signature"):
+                if key in delta:
+                    block[key] += delta[key]
+    return [blocks[index] for index in sorted(blocks)]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_pool_model_round_trips_messages_thinking(upstream, stream):
+    upstream.thinking = "k is 42."
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=True, messages=True)))
+    async with _client(app) as client:
+        response = await client.post("/v1/messages", json=_thinking_turn("remote", stream))
+
+    assert response.status_code == 200, response.text
+    assert _reply_blocks(response, stream) == [
+        {"type": "thinking", "thinking": "k is 42.", "signature": ""},
+        {"type": "text", "text": "ok"},
+    ]
+    ((_host, path, body),) = upstream.calls
+    assert path == "/v1/messages"
+    assert body["output_config"] == {"effort": "max"}
+    assert body["messages"][1]["content"][0] == {
+        "type": "thinking",
+        "thinking": "Look k up.",
+        "signature": "",
+    }
 
 
 async def test_an_assistant_prefill_continues_on_responses_not_messages(upstream):
@@ -452,6 +540,37 @@ budget:
     assert via_chat.status_code == 200, via_chat.text
     assert responses_paths and set(responses_paths) == {"/v1/responses"}
     assert upstream.paths() and set(upstream.paths()) == {"/v1/chat/completions"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_an_auto_messages_reply_keeps_role_reasoning_private(upstream, tmp_path, stream):
+    (tmp_path / "auto.yaml").write_text(
+        """
+workers:
+  - name: writer
+    engine_ref: remote
+roles:
+  - name: answer
+    worker: writer
+    role_type: synthesizer
+    prompt: "Answer the task.\\nTask: {query}"
+budget:
+  max_steps: 4
+"""
+    )
+    upstream.thinking = "private role reasoning"
+    spec = load_deployment_spec(
+        _spec(messages=True, extra="orchestrators:\n  auto:\n    spec: auto.yaml\n")
+    )
+    app = build_app_from_spec(spec, base_dir=tmp_path)
+    async with _client(app) as client:
+        response = await client.post("/v1/messages", json=_thinking_turn("auto", stream))
+
+    assert response.status_code == 200, response.text
+    assert upstream.paths() and set(upstream.paths()) == {"/v1/messages"}
+    assert [block["type"] for block in _reply_blocks(response, stream)] == ["text"]
+    assert "private role reasoning" not in response.text
+    assert all("Look k up." not in json.dumps(body) for _host, _path, body in upstream.calls)
 
 
 async def test_a_declared_api_the_upstream_lacks_fails_startup():
@@ -681,9 +800,7 @@ class _RolesAnsweringOnlyAClosedClient:
         ),
     ],
 )
-def test_a_client_leaving_an_auto_stream_ends_every_role_call_at_once(
-    tmp_path, path, body, marker
-):
+def test_a_client_leaving_an_auto_stream_ends_every_role_call_at_once(tmp_path, path, body, marker):
     # The first delta is the final answer's attribution, streamed while both
     # parallel roles are still running; the client leaves right then.
     (tmp_path / "auto.yaml").write_text(
