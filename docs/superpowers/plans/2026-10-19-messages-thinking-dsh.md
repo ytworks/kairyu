@@ -1,6 +1,6 @@
 # Anthropic Messages thinking round trip for single-model pools (DeepSeek Harness)
 
-Status: **Approved 2026-10-19 (owner); smoke at effort max passed on `423494b0`; review fixes approved 2026-10-19, implemented.**
+Status: **Approved 2026-10-19 (owner); implemented; owner review passed; GPU smokes passed on `0513750a`; DeepSWE with DeepSeek Harness 76/113 recorded in the kairyu-bench wiki (2026-10-19).**
 
 Owner decision 2026-10-19: fix Kairyu, then run DeepSWE with DeepSeek Harness
 (`dsh` 0.2.1rc2, `sdk-minimal`, `deepseek-official` provider; kairyu-bench PR
@@ -95,3 +95,19 @@ Kairyu replaced):
   thinking), a verifier reward.
 - Stop and report at the first failure. DeepSWE with dsh starts on the owner's
   order.
+
+## Results (2026-10-19)
+
+- GPU smokes on `0513750a` (only Kairyu replaced): A, effort max — 91 calls
+  200, 88 replies with thinking, 3,857 replayed thinking blocks accepted,
+  `tool_use` 90 / `end_turn` 1, reward 1; B, effort off — 120 calls 200, no
+  thinking block, first input 1,171 tokens (rendered without thinking),
+  reward 1.
+- DeepSWE `deepswe-dsh-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`:
+  76/113 (67.26 %), all 113 scored, 6 h 20 min 32 s, 10,768 API calls all
+  200 (10,393 with thinking), input 1,092,145,731, output 8,978,878 (thinking
+  67.0 %); input sample 300/300 equal to vLLM `/tokenize`. mini-swe-agent on
+  the same L1: 79/113. Wiki: "DeepSeek-1017 6GPU max (DeepSeek Harness)".
+- New Kairyu-side finding (recorded only): #659 item 5, `count_tokens` is
+  404 on a tool-call history (vLLM v0.32.0 `/tokenize` fails on
+  `content: null`).
