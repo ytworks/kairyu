@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "environment": "deepseek-v4.1-flash-1017-6gpu",
+  "hardware": {
+    "gpu_count": 6,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000,
+    "maximum_idle_used_mib": 1024,
+    "minimum_host_available_gib": 256
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 600
+  },
+  "allocation": {
+    "model": "deepseek-v4.1-flash-1017",
+    "gpu_ids": [0, 1, 2, 3, 4, 5],
+    "replicas": 1,
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 6,
+    "expert_parallel_size": 6,
+    "dp_rank_gpu_ids": [[0], [1], [2], [3], [4], [5]]
+  },
+  "pool": {
+    "queue_depth_threshold": 0,
+    "prefix_index": true,
+    "unhealthy_after": 1,
+    "placement_log": "/var/lib/kairyu/placement/deepseek-v4.1-flash-1017.jsonl"
+  },
+  "model": {
+    "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "tree_sha256": "e25bddd997c2e7b959f444bb70813e210b813b8c528bf25e7a0e25b1d89bb807",
+    "slug": "deepseek-v4.1-flash-1017",
+    "served_name": "deepseek-v4.1-flash-1017",
+    "max_context_tokens": 1048576,
+    "quantization": "mixed-fp4-fp8",
+    "modalities": ["text", "image"],
+    "default_reasoning_effort": "high",
+    "reasoning_effort_budgets": {"low": 50, "high": 75, "max": 100},
+    "sampling": {"temperature": 1.0, "top_p": 1.0}
+  },
+  "vllm": {
+    "image": "local/vllm-openai:deepseek-v41-1017-6gpu",
+    "image_id": "sha256:3dd34fc8c9ff103a3d9f0104176da77bbb2345a0643becb441fc6363f9986687",
+    "distribution": "overlay",
+    "dockerfile": "vllm-sm120.Dockerfile",
+    "base_image": "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
+    "source_repository": "https://github.com/vllm-project/vllm",
+    "source_revision": "v0.32.0",
+    "source_version": "0.32.0",
+    "flashinfer_version": "0.7.0.post1",
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 6,
+    "expert_parallel_size": 6,
+    "attention_backend": "FLASHINFER_MLA_SPARSE_DSV41",
+    "moe_backend": "marlin",
+    "dspark_enabled": true,
+    "dspark_speculative_tokens": 5,
+    "adaptive_verification": false,
+    "engram_cpu_offload": true,
+    "max_num_batched_tokens": 4096,
+    "max_num_seqs": 128,
+    "gpu_memory_utilization": 0.92,
+    "kv_cache_dtype": "fp8",
+    "block_size": 64,
+    "indexer_kv_dtype": "mxfp4",
+    "indexer_sparse_logits": false
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
+    "port": 3017,
+    "reasoning_effort_levels": ["default", "low", "high", "max"]
+  },
+  "api_port": 8017,
+  "verification": {
+    "serving": {
+      "prompt_tokens_approx": 8192,
+      "output_tokens": 256,
+      "concurrency": [1, 8, 16, 32, 64],
+      "requests_per_concurrency": 64
+    },
+    "l1": {
+      "probes_per_variant": 12,
+      "variants": ["default", "low", "high", "max", "chat"]
+    },
+    "vision": {
+      "requests": 6,
+      "max_tokens": 8192
+    }
+  }
+}

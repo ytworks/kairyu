@@ -554,3 +554,41 @@ DeepSeek overlay is unchanged).
   that cite v0.23.0 are unchanged, because the backend does not know the
   vLLM version.
 - GPU consequences: every gate of the three examples runs again on v0.31.0.
+
+### V4.1 Flash 1017 amendment (2026-10-19)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-10-19-deepseek-v41-flash-1017-examples.md`);
+GPU-verified 2026-10-19: both examples pass every gate, `api-equivalence`
+and the Chat UI pass (each example's `MEASUREMENTS.md`). Selected: vLLM
+v0.32.0 on both (over the nightly: c32 +7.6 %); six GPUs keep the 0909
+six-GPU levers (no recipe lever reached 5 %); eight GPUs serve TP8 / EP8
+(c1 +52 %, c8 +30 %, c32 −28 % against DP8 / EP8) with 8,192 batched tokens
+(c32 +5.5 %).
+
+`examples/deepseek-v4.1-flash-1017-6gpu` (GPUs 0–5) and
+`examples/deepseek-v4.1-flash-1017-8gpu` (GPUs 0–7) serve
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` (revision `1bae0e10`) with the V4.1
+examples' L2/L3 unchanged (one ReplicaPool replica, the Kairyu API, Open
+WebUI over `/v1/responses`). Every script, overlay file and test is the
+example's own; `kairyu/` and the 0909 examples are not changed.
+
+1017 is a weight refresh: `config.json`, the tokenizer, the 96,085 tensor
+names and the 510.3 GB total equal 0909's. Its encoder no longer starts a
+turn at a user message holding only tool results, so without a tools
+declaration the current turn's reasoning survives its tool calls; vLLM's
+encoder copy (nightly 2026-09-30, v0.31.0, v0.32.0) keeps the 0909 rule, so
+the overlay ports the 1017 one and the `l1` gate compares vLLM's prompt
+tokens with the checkpoint's own encoder. Sampling follows the 1017 card
+(temperature 1.0, top_p 1.0; 0909 allowed 0.95). Efforts stay the model
+author's (low 50, high 75, max 100, default high) with `xhigh` mapped to 100.
+
+The L1 is selected by the six-GPU amendment's rule (one change at a time,
+≥ 5 % at c1, c8 or c32 without a > 5 % loss elsewhere, correctness first):
+the vLLM v0.32.0 release (V4.1 Engram, SWA replay and SM120 attention work
+after the nightly, none of the SM120 edits) against the 2026-09-30 nightly,
+both with the same overlay; then the recipe's levers. On eight GPUs the
+replica shape is measured too: DP8 / EP8 with host or HBM-sharded
+(`embedding_across_dp`) Engram tables, or the 0909 eight-GPU example's
+TP8 / EP8, selected by c8 throughput (the concurrency of the DeepSWE run on
+the six-GPU example), then c32.
