@@ -617,6 +617,36 @@ any Messages client that replays thinking needs it. Tests:
 `test_an_auto_messages_reply_keeps_role_reasoning_private`, and the `enabled`
 case of `test_compatible_thinking_modes_are_accepted_as_noops`.
 
+*Review amendment (2026-10-19, owner review of PR #660 and issue #659 item 4;
+owner decision).*
+- `thinking: {"type": "disabled"}` turns an engine or pool model's thinking
+  off; it was a no-op, so L1 thought at its default and the reasoning was
+  dropped from the reply. Kairyu carries it as the internal effort `none`,
+  set only by this boundary: the public Chat and Responses parsers still
+  reject `none`. Each wire sends its own "off": Messages
+  `thinking: {"type": "disabled"}`, Responses `reasoning.effort: "none"`, chat
+  `reasoning_effort: "none"`; a Kairyu-rendered template gets
+  `thinking_mode: "chat"` and `enable_thinking: false`. How a model turns
+  thinking off stays with L1 (as `xhigh`): vLLM v0.32.0 renders and generates
+  DeepSeek-V4.1-Flash-1017 without thinking on all three wires. A Kairyu
+  upstream accepts it only on Messages (its Chat and Responses answer 400). An
+  AUTO model keeps its stage policy: `disabled` stays a no-op there.
+- `thinking.display: "omitted"` returns the thinking block with empty text
+  (unary) or without `thinking_delta` (SSE), as Anthropic does; `display`
+  must be `summarized` or `omitted`. An empty replayed thinking block adds no
+  reasoning.
+- A Kairyu upstream receives replayed thinking blocks too; its Messages
+  boundary accepts them since this amendment, so the old exclusion is gone. A
+  gateway and its Kairyu replicas run the same release.
+- The first streamed thinking delta (or block, when omitted) is the TTFT
+  observation for SLO admission, as on Chat; a unary reply with a thinking
+  block counts too.
+Tests: the `kairyu` and `omitted` cases of
+`test_a_pool_model_round_trips_messages_thinking`,
+`test_messages_thinking_disabled_turns_a_pool_models_thinking_off`, and
+`test_messages_thinking_is_the_first_stream_token`; `disabled` left
+`test_compatible_thinking_modes_are_accepted_as_noops`.
+
 ### D5 — Vision wire format
 
 `protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat

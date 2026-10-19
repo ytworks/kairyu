@@ -106,13 +106,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
-- Messages thinking round trip (m11 D4 amendment 2026-10-19, PR #660): CPU tests pass; remaining: GPU smoke with DeepSeek Harness on the six-GPU 1017 example, then DeepSWE (113 tasks, 8 workers, max) with that harness
+- Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): CPU tests pass; the dsh smoke (effort max) passed on `423494b0`; remaining: GPU smoke A (effort max) and B (effort off) on the review head, then DeepSWE with dsh on the owner's order
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); kairyu-bench wiki DeepSWE-Comparison updated
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-19 — [amendment] Messages `thinking: disabled` turns thinking off; review fixes (m11 D4)
+- What: an engine or pool model now receives `thinking: disabled` as thinking off (internal effort `none`, per wire: Messages `thinking.disabled`, Responses/chat `none`; AUTO unchanged); `display: omitted` returns empty thinking; a Kairyu upstream gets replayed thinking; the first thinking delta is the SLO first token. GPU: the dsh smoke (effort max, 1 task) on `423494b0` passed (66 calls 200, 65 with thinking, reward 1).
+- Why: issue #659 item 4 (disabled was a no-op, so L1 thought at its default unseen) and three owner review findings on PR #660; owner decision 2026-10-19.
+- Refs: m11 D4 Messages thinking review amendment; `kairyu/entrypoints/server/messages_service.py`, `kairyu/engine/upstream_wire.py`; PR #660; issue #659
 
 ### 2026-10-19 — [amendment] Messages thinking round trip for direct engines (m11 D4)
 - What: `/v1/messages` accepts `thinking: {"type": "enabled"}` without a budget (thinking on at `output_config.effort`) and assistant `thinking` blocks (an engine or pool model replays them as `reasoning_content`, AUTO drops them), and an engine or pool model's reply returns its reasoning as a thinking block with an empty signature (unary and SSE); AUTO replies are unchanged.

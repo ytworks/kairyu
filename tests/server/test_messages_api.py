@@ -212,7 +212,7 @@ def test_output_config_effort_reaches_backend(tmp_path, effort, expected):
     assert backend.requests[-1].reasoning_effort == expected
 
 
-@pytest.mark.parametrize("thinking_type", ["adaptive", "disabled", "enabled"])
+@pytest.mark.parametrize("thinking_type", ["adaptive", "enabled"])
 def test_compatible_thinking_modes_are_accepted_as_noops(tmp_path, thinking_type):
     backend = ReasoningRecordingBackend()
     response = TestClient(_app(tmp_path, backend)).post(

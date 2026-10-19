@@ -235,8 +235,8 @@ class GenerationRequest:
             raise ValueError(
                 "tool_call_protocol must be generic, llama, qwen or deepseek_v4"
             )
-        if self.reasoning_effort not in {None, "low", "high", "max"}:
-            raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.reasoning_effort not in {None, "none", "low", "high", "max"}:
+            raise ValueError("reasoning_effort must be none, low, high, max, or null")
         if self.caller_api not in CALLER_APIS:
             raise ValueError("caller_api must be chat, responses or messages")
         if self.chat_template_kwargs is not None:

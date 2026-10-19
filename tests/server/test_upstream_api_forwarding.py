@@ -348,14 +348,15 @@ def _data_events(text: str) -> list[dict]:
     ]
 
 
-def _thinking_turn(model: str, stream: bool) -> dict:
+def _thinking_turn(model: str, stream: bool, display: str | None = None) -> dict:
     """A DeepSeek Harness turn: thinking on, effort max, its reasoning replayed."""
 
+    thinking = {"type": "enabled"} if display is None else {"type": "enabled", "display": display}
     return {
         "model": model,
         "max_tokens": 64,
         "stream": stream,
-        "thinking": {"type": "enabled"},
+        "thinking": thinking,
         "output_config": {"effort": "max"},
         "tools": [
             {
@@ -400,17 +401,28 @@ def _reply_blocks(response: httpx.Response, stream: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize("stream", [False, True])
-async def test_a_pool_model_round_trips_messages_thinking(upstream, stream):
+@pytest.mark.parametrize(
+    ("upstream_kind", "display"), [("vllm", None), ("kairyu", None), ("vllm", "omitted")]
+)
+async def test_a_pool_model_round_trips_messages_thinking(upstream, stream, upstream_kind, display):
     upstream.thinking = "k is 42."
-    app = build_app_from_spec(load_deployment_spec(_spec(responses=True, messages=True)))
+    spec = _spec(responses=True, messages=True).replace(
+        "upstream: vllm", f"upstream: {upstream_kind}"
+    )
+    app = build_app_from_spec(load_deployment_spec(spec))
     async with _client(app) as client:
-        response = await client.post("/v1/messages", json=_thinking_turn("remote", stream))
+        response = await client.post(
+            "/v1/messages", json=_thinking_turn("remote", stream, display)
+        )
 
     assert response.status_code == 200, response.text
+    # An omitted display returns the block without its text (Anthropic).
+    shown = "" if display == "omitted" else "k is 42."
     assert _reply_blocks(response, stream) == [
-        {"type": "thinking", "thinking": "k is 42.", "signature": ""},
+        {"type": "thinking", "thinking": shown, "signature": ""},
         {"type": "text", "text": "ok"},
     ]
+    assert display != "omitted" or "k is 42." not in response.text
     ((_host, path, body),) = upstream.calls
     assert path == "/v1/messages"
     assert body["output_config"] == {"effort": "max"}
@@ -419,6 +431,38 @@ async def test_a_pool_model_round_trips_messages_thinking(upstream, stream):
         "thinking": "Look k up.",
         "signature": "",
     }
+
+
+@pytest.mark.parametrize(
+    ("responses", "messages", "expected", "field", "off"),
+    [
+        (True, True, "/v1/messages", "thinking", {"type": "disabled"}),
+        (True, False, "/v1/responses", "reasoning", {"effort": "none"}),
+        (False, False, "/v1/chat/completions", "reasoning_effort", "none"),
+    ],
+)
+async def test_messages_thinking_disabled_turns_a_pool_models_thinking_off(
+    upstream, responses, messages, expected, field, off
+):
+    app = build_app_from_spec(
+        load_deployment_spec(_spec(responses=responses, messages=messages))
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "remote",
+                "max_tokens": 64,
+                "thinking": {"type": "disabled"},
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    assert path == expected
+    assert body[field] == off
+    assert "output_config" not in body
 
 
 async def test_an_assistant_prefill_continues_on_responses_not_messages(upstream):

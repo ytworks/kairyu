@@ -1,6 +1,6 @@
 # Anthropic Messages thinking round trip for single-model pools (DeepSeek Harness)
 
-Status: **Approved 2026-10-19 (owner); implementation in progress.**
+Status: **Approved 2026-10-19 (owner); smoke at effort max passed on `423494b0`; review fixes approved 2026-10-19, implemented.**
 
 Owner decision 2026-10-19: fix Kairyu, then run DeepSWE with DeepSeek Harness
 (`dsh` 0.2.1rc2, `sdk-minimal`, `deepseek-official` provider; kairyu-bench PR
@@ -62,3 +62,36 @@ The upstream wire needs no change: the normalized chat history's
    lost to infrastructure failures are re-run; kairyu-bench wiki as
    "DeepSeek-1017 6GPU max (DeepSeek Harness)".
 4. Merge after CI is green, by the owner's decision.
+
+## Review fixes and issue #659 item 4 (approved 2026-10-19, owner)
+
+GPU result on `423494b0` (15:13-15:25 JST): 66 `/v1/messages` calls all 200,
+65 replies with thinking (199,605 characters), 65 requests replayed 2,085
+thinking blocks, `stop_reason` tool_use 65 / end_turn 1, `model.patch` and
+reward 1 (f2p 20/20, p2p 3/3), normalized agent `deepseek-harness`.
+
+1. #659 item 4: `thinking: disabled` turns an engine or pool model's thinking
+   off (internal effort `none`, set only by the Messages boundary; public Chat
+   and Responses unchanged; AUTO unchanged). Wires: Messages
+   `thinking: {"type": "disabled"}`, Responses `reasoning.effort: "none"`, chat
+   `reasoning_effort: "none"`; Kairyu-rendered templates `thinking_mode: chat`,
+   `enable_thinking: false`. Checked on the 1017 vLLM: all three wires render or
+   generate without thinking.
+2. Review: `thinking.display: "omitted"` returns thinking blocks without text;
+   other values than `summarized`/`omitted` are 400.
+3. Review: a Kairyu upstream receives replayed thinking blocks.
+4. Review: the first thinking delta is the SLO first token (text and tool
+   streams).
+
+Tests: the forwarding round trip gains `upstream: kairyu` and `omitted` cases;
+a thinking-off test over the three wires; an SLO test (thinking 0.5 s, answer
+10 s, SLO 1 s); `disabled` leaves the no-op thinking test.
+
+GPU verification (after the review has no open findings; six-GPU 1017, only
+Kairyu replaced):
+- Smoke A, effort max, one task (15-30 min): the criteria of step 2 above.
+- Smoke B, effort off, one task (about 30 min): every call 200, no thinking
+  block in replies, the first request's input is 1,171 tokens (rendered without
+  thinking), a verifier reward.
+- Stop and report at the first failure. DeepSWE with dsh starts on the owner's
+  order.

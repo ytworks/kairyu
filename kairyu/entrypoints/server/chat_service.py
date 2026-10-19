@@ -644,7 +644,12 @@ def _render_prepared_prompt(
         )
     tools = None if request.tool_choice == "none" else request.tools
     template_kwargs = dict(request.chat_template_kwargs or {})
-    if request.reasoning_effort is not None:
+    if request.reasoning_effort == "none":
+        # Thinking off (an Anthropic thinking.disabled for a direct engine):
+        # the DeepSeek templates' chat mode and the Qwen templates' switch.
+        template_kwargs.setdefault("thinking_mode", "chat")
+        template_kwargs.setdefault("enable_thinking", False)
+    elif request.reasoning_effort is not None:
         template_kwargs.setdefault("reasoning_effort", request.reasoning_effort)
         template_kwargs.setdefault("thinking_mode", "thinking")
     if template is None:
@@ -1728,7 +1733,7 @@ def _build_choice(
     reasoning_content: str | None = None,
     reasoning_effort: str | None = None,
 ) -> Choice:
-    if reasoning_content is None and reasoning_effort is not None:
+    if reasoning_content is None and reasoning_effort not in {None, "none"}:
         candidate = text
         has_opening = candidate.startswith("<think>")
         if has_opening:
