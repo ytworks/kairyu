@@ -631,10 +631,14 @@ owner decision).*
   DeepSeek-V4.1-Flash-1017 without thinking on all three wires. A Kairyu
   upstream accepts it only on Messages (its Chat and Responses answer 400). An
   AUTO model keeps its stage policy: `disabled` stays a no-op there.
+  A templated-passthrough backend with `completion_reasoning_end_tag` reads a
+  thinking-off completion as all public text: the template closed reasoning,
+  so no terminator is required (a template must honor the switch, as it
+  honors an effort).
 - `thinking.display: "omitted"` returns the thinking block with empty text
   (unary) or without `thinking_delta` (SSE), as Anthropic does; `display`
-  must be `summarized` or `omitted`. An empty replayed thinking block adds no
-  reasoning.
+  must be `summarized` or `omitted`, and a non-string `display` or `type` is a
+  400 (it was a 500). An empty replayed thinking block adds no reasoning.
 - A Kairyu upstream receives replayed thinking blocks too; its Messages
   boundary accepts them since this amendment, so the old exclusion is gone. A
   gateway and its Kairyu replicas run the same release.
@@ -644,8 +648,10 @@ owner decision).*
 Tests: the `kairyu` and `omitted` cases of
 `test_a_pool_model_round_trips_messages_thinking`,
 `test_messages_thinking_disabled_turns_a_pool_models_thinking_off`, and
-`test_messages_thinking_is_the_first_stream_token`; `disabled` left
-`test_compatible_thinking_modes_are_accepted_as_noops`.
+`test_messages_thinking_is_the_first_stream_token`,
+`test_vllm_templated_completion_with_thinking_off_is_all_public`, and the
+non-string `display`/`type` cases of `test_error_envelope_matrix`; `disabled`
+left `test_compatible_thinking_modes_are_accepted_as_noops`.
 
 ### D5 — Vision wire format
 

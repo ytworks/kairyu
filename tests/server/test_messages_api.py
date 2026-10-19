@@ -533,6 +533,8 @@ def test_orchestrated_unknown_model_is_anthropic_404(tmp_path):
             400,
             "conflicts with output_config.effort",
         ),
+        (_body(thinking={"type": "enabled", "display": []}), 400, "thinking.display"),
+        (_body(thinking={"type": []}), 400, "thinking.type"),
         (_body(output_config={"format": {"type": "json_schema"}}), 400, "output_config"),
         (_body(context_management={"edits": []}), 400, "context_management"),
         (

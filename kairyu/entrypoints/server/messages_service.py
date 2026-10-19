@@ -537,6 +537,8 @@ def _reasoning_effort_from(request: MessagesRequest, *, direct: bool) -> str | N
         if not isinstance(thinking, dict):
             raise ChatRequestError("thinking must be an object")
         kind = thinking.get("type")
+        if kind is not None and not isinstance(kind, str):
+            raise ChatRequestError("thinking.type must be a string")
         if kind == "enabled":
             if "budget_tokens" in thinking:
                 raise ChatRequestError(
@@ -556,7 +558,10 @@ def _reasoning_effort_from(request: MessagesRequest, *, direct: bool) -> str | N
             raise ChatRequestError(
                 "thinking has unsupported fields: " + ", ".join(sorted(unknown))
             )
-        if thinking.get("display") not in {None, "summarized", "omitted"}:
+        display = thinking.get("display")
+        if display is not None and (
+            not isinstance(display, str) or display not in {"summarized", "omitted"}
+        ):
             raise ChatRequestError(
                 "thinking.display must be 'summarized' or 'omitted'"
             )
