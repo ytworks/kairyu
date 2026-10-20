@@ -414,6 +414,68 @@ def test_buffered_tool_stream_observes_first_visible_delta():
     assert app.state.slo_admission.in_flight == 0
 
 
+class _ClockedReasoningBackend(_RecordingBackend):
+    """Reasons for 0.5 seconds, then answers at 10 seconds."""
+
+    def __init__(self, clock) -> None:
+        super().__init__()
+        self._clock = clock
+
+    async def stream(self, request):
+        self.dispatched.append(request)
+        self._clock["t"] = 0.5
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text="", token_ids=(), reasoning_content="Think."),
+            ),
+            finished=False,
+        )
+        self._clock["t"] = 10.0
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="ok",
+                    token_ids=(1,),
+                    reasoning_content="Think.",
+                    finish_reason="stop",
+                ),
+            ),
+            finished=True,
+        )
+
+
+@pytest.mark.parametrize("tools", [False, True])
+def test_messages_thinking_is_the_first_stream_token(tools):
+    clock = {"t": 0.0}
+    app = create_legacy_app(
+        {"m": _ClockedReasoningBackend(clock)},
+        settings=ServerSettings(ttft_slo_s=1.0),
+    )
+    app.state.slo_admission._now = lambda: clock["t"]
+    body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 4,
+        "stream": True,
+    }
+    if tools:
+        body["tools"] = [{"name": "lookup", "input_schema": {"type": "object"}}]
+
+    with TestClient(app) as client:
+        response = client.post("/v1/messages", json=body)
+
+    assert response.status_code == 200
+    assert "thinking_delta" in response.text
+    # 0.8 * the 0.01 prior + 0.2 * (0.5 seconds / concurrency 1), as for Chat.
+    assert app.state.slo_admission.snapshot().ttft_per_unit_ema_s == pytest.approx(0.108)
+    assert app.state.slo_admission.in_flight == 0
+
+
 class _OneTokenThenBlockBackend(MockBackend):
     def __init__(self, clock) -> None:
         super().__init__()

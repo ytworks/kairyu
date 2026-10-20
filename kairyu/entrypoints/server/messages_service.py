@@ -103,7 +103,7 @@ _KEEPALIVE_SECONDS = 15.0
 _PING_EVENT = 'event: ping\ndata: {"type": "ping"}\n\n'
 
 _SUPPORTED_BLOCKS_HINT = (
-    "this endpoint currently supports text, tool_use, and tool_result blocks"
+    "this endpoint currently supports text, thinking, tool_use, and tool_result blocks"
 )
 _TOOL_RESULT_ERROR_MARKER = "[tool_result_error]"
 
@@ -248,7 +248,7 @@ def _tool_result_text(content: object, *, path: str) -> str:
     return "".join(parts)
 
 
-def _messages_to_chat(messages: list) -> list[dict]:
+def _messages_to_chat(messages: list, *, keep_reasoning: bool) -> list[dict]:
     if not isinstance(messages, list) or not messages:
         raise ChatRequestError("messages must be a non-empty array")
     chat_messages: list[dict] = []
@@ -281,7 +281,7 @@ def _messages_to_chat(messages: list) -> list[dict]:
         if role == "user":
             chat_messages.extend(_user_blocks(content, m_index))
         else:
-            chat_messages.append(_assistant_blocks(content, m_index))
+            chat_messages.append(_assistant_blocks(content, m_index, keep_reasoning=keep_reasoning))
     return chat_messages
 
 
@@ -350,8 +350,17 @@ def _user_blocks(blocks: list, m_index: int) -> list[dict]:
     return out
 
 
-def _assistant_blocks(blocks: list, m_index: int) -> dict:
+def _assistant_blocks(blocks: list, m_index: int, *, keep_reasoning: bool) -> dict:
+    """Map one assistant block array onto a chat assistant message.
+
+    ``thinking`` blocks are the model's own replayed reasoning: a direct engine
+    receives them as ``reasoning_content`` (as Responses replays reasoning
+    items), an orchestrated model drops them (its stage reasoning is private).
+    Signatures are accepted and not verified; Kairyu does not sign.
+    """
+
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     for b_index, block in enumerate(blocks):
         path = f"messages[{m_index}].content[{b_index}]"
@@ -368,6 +377,20 @@ def _assistant_blocks(blocks: list, m_index: int) -> dict:
             if not isinstance(text, str):
                 raise ChatRequestError(f"{path}.text must be a string")
             text_parts.append(text)
+        elif kind == "thinking":
+            unknown = set(block) - {"type", "thinking", "signature", "cache_control"}
+            if unknown:
+                raise ChatRequestError(
+                    f"{path} has unsupported fields: " + ", ".join(sorted(unknown))
+                )
+            thinking = block.get("thinking")
+            if not isinstance(thinking, str):
+                raise ChatRequestError(f"{path}.thinking must be a string")
+            signature = block.get("signature")
+            if signature is not None and not isinstance(signature, str):
+                raise ChatRequestError(f"{path}.signature must be a string")
+            if keep_reasoning and thinking:
+                reasoning_parts.append(thinking)
         elif kind == "tool_use":
             unknown = set(block) - {"type", "id", "name", "input", "cache_control"}
             if unknown:
@@ -403,6 +426,8 @@ def _assistant_blocks(blocks: list, m_index: int) -> dict:
     }
     if tool_calls:
         chat_message["tool_calls"] = tool_calls
+    if reasoning_parts:
+        chat_message["reasoning_content"] = "".join(reasoning_parts)
     return chat_message
 
 
@@ -498,18 +523,31 @@ def _chat_tool_choice(choice: dict | None) -> tuple[str | dict | None, bool | No
     )
 
 
-def _reasoning_effort_from(request: MessagesRequest) -> str | None:
+def _reasoning_effort_from(request: MessagesRequest, *, direct: bool) -> str | None:
+    """Kairyu's effort for the request; ``"none"`` turns a direct engine's thinking off.
+
+    ``thinking.type: disabled`` reaches a direct engine as thinking off (the
+    ``none`` effort, set only here); an orchestrated model keeps its stage
+    policy, so it stays a no-op there.
+    """
+
     thinking = request.thinking
     thinking_kind: str | None = None
     if thinking is not None:
         if not isinstance(thinking, dict):
             raise ChatRequestError("thinking must be an object")
         kind = thinking.get("type")
+        if kind is not None and not isinstance(kind, str):
+            raise ChatRequestError("thinking.type must be a string")
         if kind == "enabled":
-            raise ChatRequestError(
-                "thinking.type 'enabled' with budget_tokens is not supported; "
-                'use {"type": "adaptive"} or output_config.effort'
-            )
+            if "budget_tokens" in thinking:
+                raise ChatRequestError(
+                    "thinking.type 'enabled' with budget_tokens is not supported; "
+                    'use {"type": "adaptive"} or output_config.effort'
+                )
+            # Without a budget, enabled means thinking on with the effort of
+            # output_config (DeepSeek Harness sends it this way): adaptive.
+            kind = "adaptive"
         if kind not in {"adaptive", "disabled"}:
             raise ChatRequestError(
                 f"thinking.type {kind!r} is not supported; "
@@ -520,14 +558,20 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
             raise ChatRequestError(
                 "thinking has unsupported fields: " + ", ".join(sorted(unknown))
             )
+        display = thinking.get("display")
+        if display is not None and (
+            not isinstance(display, str) or display not in {"summarized", "omitted"}
+        ):
+            raise ChatRequestError(
+                "thinking.display must be 'summarized' or 'omitted'"
+            )
         thinking_kind = kind
         # Anthropic's current adaptive semantics are also the default when
-        # thinking is omitted. Accepting adaptive therefore preserves Claude
-        # Code compatibility without changing this adapter's visible blocks.
-        # disabled remains a no-op unless it conflicts with an explicit effort.
+        # thinking is omitted, so adaptive keeps the model's own default.
+    thinking_off = "none" if thinking_kind == "disabled" and direct else None
     output_config = request.output_config
     if output_config is None:
-        return None
+        return thinking_off
     if not isinstance(output_config, dict):
         raise ChatRequestError("output_config must be an object")
     unknown = set(output_config) - {"effort"}
@@ -539,7 +583,7 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
         )
     effort = output_config.get("effort")
     if effort is None:
-        return None
+        return thinking_off
     if thinking_kind == "disabled":
         raise ChatRequestError(
             "thinking.type 'disabled' conflicts with output_config.effort"
@@ -552,8 +596,12 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
         ) from None
 
 
-def _to_chat_request(request: MessagesRequest) -> ChatCompletionRequest:
-    messages = _system_messages(request.system) + _messages_to_chat(request.messages)
+def _to_chat_request(request: MessagesRequest, *, direct: bool) -> ChatCompletionRequest:
+    """The chat request for one Messages request; ``direct`` is a non-AUTO model."""
+
+    messages = _system_messages(request.system) + _messages_to_chat(
+        request.messages, keep_reasoning=direct
+    )
     tool_choice, parallel_tool_calls = _chat_tool_choice(request.tool_choice)
     values: dict[str, object] = {}
     if request.temperature is not None:
@@ -570,8 +618,8 @@ def _to_chat_request(request: MessagesRequest) -> ChatCompletionRequest:
                 "stop_sequences must be an array of non-empty strings"
             )
         values["stop"] = list(request.stop_sequences)
-    reasoning_effort = _reasoning_effort_from(request)
-    if reasoning_effort is not None:
+    reasoning_effort = _reasoning_effort_from(request, direct=direct)
+    if reasoning_effort not in {None, "none"}:
         values["reasoning_effort"] = reasoning_effort
     if request.metadata is not None:
         if not isinstance(request.metadata, dict):
@@ -581,7 +629,7 @@ def _to_chat_request(request: MessagesRequest) -> ChatCompletionRequest:
             if not isinstance(user_id, str):
                 raise ChatRequestError("metadata.user_id must be a string")
             values["user"] = user_id
-    return ChatCompletionRequest(
+    chat_request = ChatCompletionRequest(
         model=request.model,
         messages=messages,
         max_completion_tokens=request.max_tokens,
@@ -591,6 +639,11 @@ def _to_chat_request(request: MessagesRequest) -> ChatCompletionRequest:
         parallel_tool_calls=parallel_tool_calls,
         **values,
     )
+    if reasoning_effort == "none":
+        # Thinking off is internal: the public Chat and Responses parsers
+        # keep rejecting "none" (m11 D4 Messages thinking amendment).
+        chat_request = chat_request.model_copy(update={"reasoning_effort": "none"})
+    return chat_request
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +750,7 @@ def _tools_active(chat_request: ChatCompletionRequest) -> bool:
     return bool(chat_request.tools) and chat_request.tool_choice != "none"
 
 
-def _strip_inline_reasoning(text: str) -> str:
+def _split_inline_reasoning(text: str) -> tuple[str, str]:
     """Mirror ``_build_choice``'s inline ``<think>`` split for raw text."""
 
     candidate = text
@@ -705,11 +758,37 @@ def _strip_inline_reasoning(text: str) -> str:
     if has_opening:
         candidate = candidate[len("<think>") :]
     if "</think>" in candidate:
-        _reasoning, candidate = candidate.split("</think>", 1)
-        return candidate
+        reasoning, candidate = candidate.split("</think>", 1)
+        return reasoning, candidate
     if has_opening:
-        return ""
-    return text
+        return candidate, ""
+    return "", text
+
+
+def _thinks(reasoning_effort: str | None) -> bool:
+    """Whether reasoning may lead the output (an effort that is not thinking off)."""
+
+    return reasoning_effort not in {None, "none"}
+
+
+def _thinking_omitted(request: MessagesRequest) -> bool:
+    """``thinking.display: "omitted"``: thinking blocks carry no text."""
+
+    thinking = request.thinking
+    return isinstance(thinking, dict) and thinking.get("display") == "omitted"
+
+
+def _thinking_block(reasoning: str | None, *, omitted: bool) -> list[dict]:
+    """A direct engine's own reasoning as one Anthropic thinking block.
+
+    Kairyu does not sign thinking; the signature is empty, and an omitted
+    display leaves the text empty too. Orchestrated models never reach this
+    (their stage reasoning stays private).
+    """
+
+    if not reasoning:
+        return []
+    return [{"type": "thinking", "thinking": "" if omitted else reasoning, "signature": ""}]
 
 
 def _enforce_tool_gates(
@@ -735,6 +814,8 @@ def _enforce_tool_gates(
 def _outcome_from_execution(
     execution: ExecutedChat,
     validated: ValidatedChatRequest,
+    *,
+    omit_thinking: bool,
 ) -> tuple[list[dict], str, dict]:
     usage = _usage_payload(
         execution.metered_prompt,
@@ -754,12 +835,15 @@ def _outcome_from_execution(
         finish_reason = (
             completion.finish_reason if completion is not None else None
         )
+        reasoning = (
+            completion.reasoning_content if completion is not None else None
+        )
         if (
-            chat_request.reasoning_effort is not None
+            _thinks(chat_request.reasoning_effort)
             and completion is not None
             and completion.reasoning_content is None
         ):
-            raw = _strip_inline_reasoning(raw)
+            reasoning, raw = _split_inline_reasoning(raw)
         choice_spec = validated.input.normalized_tool_choice
         scanner = tool_stream_scanner_for(
             validated.input.tool_call_protocol, chat_request.tools, choice_spec
@@ -774,10 +858,16 @@ def _outcome_from_execution(
             if folded.committed_calls
             else _stop_reason_for(finish_reason)
         )
-        return folded.blocks, stop_reason, usage
+        return (
+            _thinking_block(reasoning, omitted=omit_thinking) + folded.blocks,
+            stop_reason,
+            usage,
+        )
     choice = execution.response.choices[0] if execution.response.choices else None
     message = choice.message.model_dump(mode="json") if choice is not None else {}
-    blocks = _content_blocks_from_message(message)
+    blocks = _thinking_block(
+        message.get("reasoning_content"), omitted=omit_thinking
+    ) + _content_blocks_from_message(message)
     stop_reason = _stop_reason_for(choice.finish_reason if choice is not None else None)
     return blocks, stop_reason, usage
 
@@ -875,6 +965,36 @@ def _error_event(message: str, error_type: str = "api_error") -> str:
     )
 
 
+def _thinking_start_event(index: int) -> str:
+    return _content_block_start_event(index, {"type": "thinking", "thinking": "", "signature": ""})
+
+
+def _thinking_delta_event(index: int, text: str) -> str:
+    return _sse(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "thinking_delta", "thinking": text},
+        },
+    )
+
+
+def _thinking_stop_events(index: int) -> list[str]:
+    # Kairyu does not sign thinking: an empty signature closes the block.
+    return [
+        _sse(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "signature_delta", "signature": ""},
+            },
+        ),
+        _content_block_stop_event(index),
+    ]
+
+
 class _AnthropicBlockEmitter:
     """Render scanner events as Anthropic SSE with stable block indices.
 
@@ -882,16 +1002,41 @@ class _AnthropicBlockEmitter:
     pure-call output keeps tool indices 0..n-1; whitespace between blocks is
     held and dropped when a tool block follows (or flushed with later text).
     New text after a tool block opens a fresh text index — Anthropic-legal
-    interleaving.
+    interleaving. A direct engine's reasoning is a ``thinking`` block that
+    closes before the next text or tool block opens.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, omit_thinking: bool = False) -> None:
         self._encoder = AnthropicTextDeltaSSEEncoder()
+        self._omit_thinking = omit_thinking
         self._next_index = 0
         self._text_index: int | None = None
+        self._thinking_index: int | None = None
         self._tool_index = 0
         self._pending_ws = ""
+        self._has_content = False
         self.deltas_emitted = 0
+
+    def thinking(self, text: str) -> list[str | bytes]:
+        """Reasoning text: opens (or continues) the current thinking block."""
+
+        if not text:
+            return []
+        out: list[str | bytes] = []
+        if self._thinking_index is None:
+            out.extend(self._close_text())
+            self._thinking_index = self._next_index
+            self._next_index += 1
+            out.append(_thinking_start_event(self._thinking_index))
+        if not self._omit_thinking:
+            out.append(_thinking_delta_event(self._thinking_index, text))
+        return out
+
+    def _close_thinking(self) -> list[str]:
+        if self._thinking_index is None:
+            return []
+        index, self._thinking_index = self._thinking_index, None
+        return _thinking_stop_events(index)
 
     def events(self, scanned) -> list[str | bytes]:
         out: list[str | bytes] = []
@@ -901,8 +1046,10 @@ class _AnthropicBlockEmitter:
                     self._pending_ws += event.text
                     continue
                 if self._text_index is None:
+                    out.extend(self._close_thinking())
                     self._text_index = self._next_index
                     self._next_index += 1
+                    self._has_content = True
                     out.append(
                         _content_block_start_event(
                             self._text_index, {"type": "text", "text": ""}
@@ -913,10 +1060,12 @@ class _AnthropicBlockEmitter:
                 out.append(self._encoder.encode(self._text_index, text))
                 self.deltas_emitted += 1
             elif isinstance(event, ToolStart):
+                out.extend(self._close_thinking())
                 out.extend(self._close_text())
                 self._pending_ws = ""
                 self._tool_index = self._next_index
                 self._next_index += 1
+                self._has_content = True
                 out.append(
                     _content_block_start_event(
                         self._tool_index,
@@ -954,8 +1103,8 @@ class _AnthropicBlockEmitter:
         return [_content_block_stop_event(index)]
 
     def finish(self) -> list[str | bytes]:
-        out: list[str | bytes] = self._close_text()
-        if self._next_index:
+        out: list[str | bytes] = [*self._close_thinking(), *self._close_text()]
+        if self._has_content:
             return out
         index = self._next_index
         self._next_index += 1
@@ -996,11 +1145,12 @@ async def _live_tool_events(
     scanner = tool_stream_scanner_for(
         validated.input.tool_call_protocol, chat_request.tools, choice_spec
     )
-    emitter = _AnthropicBlockEmitter()
+    emitter = _AnthropicBlockEmitter(omit_thinking=_thinking_omitted(request))
     reasoning_parser = (
-        ReasoningDeltaParser() if chat_request.reasoning_effort is not None else None
+        ReasoningDeltaParser() if _thinks(chat_request.reasoning_effort) else None
     )
     sent = 0
+    reasoning_sent = 0
     started = 0
     saw_final = False
     last: GenerationResult | None = None
@@ -1048,12 +1198,21 @@ async def _live_tool_events(
                 )
                 if completion is None:
                     continue
+                reasoning, reasoning_sent = completion.reasoning_delta_after(
+                    reasoning_sent
+                )
                 delta, sent = completion.delta_after(sent)
                 if reasoning_parser is not None and type(delta) is str:
-                    # <think> reasoning is stripped before the scanner.
-                    _reasoning, delta = reasoning_parser.feed(
+                    # <think> reasoning is split off before the scanner.
+                    inline_reasoning, delta = reasoning_parser.feed(
                         delta, final=partial.finished
                     )
+                    reasoning += inline_reasoning
+                for chunk in emitter.thinking(reasoning):
+                    yield chunk
+                if reasoning and slo_lease is not None and not first_token_observed:
+                    slo_lease.finished_first_token()
+                    first_token_observed = True
                 if partial.finished:
                     saw_final = True
                 if type(delta) is not str:
@@ -1278,12 +1437,17 @@ async def _live_text_events(
     """Stream a direct-engine text turn live (no tools declared)."""
 
     encoder = AnthropicTextDeltaSSEEncoder()
+    omit_thinking = _thinking_omitted(request)
     reasoning_parser = (
         ReasoningDeltaParser()
-        if validated.input.request.reasoning_effort is not None
+        if _thinks(validated.input.request.reasoning_effort)
         else None
     )
     sent = 0
+    reasoning_sent = 0
+    next_index = 0
+    text_index: int | None = None
+    thinking_index: int | None = None
     last: GenerationResult | None = None
     last_activity = time.monotonic()
     slo_lease = getattr(
@@ -1299,7 +1463,6 @@ async def _live_text_events(
     )
     try:
         yield _message_start_event(request, message_id)
-        yield _content_block_start_event(0, {"type": "text", "text": ""})
         try:
             usage_owner.mark_dispatched()
             async for partial in validated.engine.stream(validated.generation_request):
@@ -1310,26 +1473,57 @@ async def _live_text_events(
                 )
                 if completion is None:
                     continue
+                reasoning, reasoning_sent = completion.reasoning_delta_after(
+                    reasoning_sent
+                )
                 delta, sent = completion.delta_after(sent)
                 if reasoning_parser is not None and type(delta) is str:
-                    # <think> reasoning is stripped, never surfaced as text.
-                    _reasoning, delta = reasoning_parser.feed(
+                    # <think> reasoning is split off, never surfaced as text.
+                    inline_reasoning, delta = reasoning_parser.feed(
                         delta, final=partial.finished
                     )
+                    reasoning += inline_reasoning
+                if reasoning:
+                    # The engine's own reasoning is one thinking block that
+                    # closes before the next text block opens.
+                    if thinking_index is None:
+                        if text_index is not None:
+                            yield _content_block_stop_event(text_index)
+                            text_index = None
+                        thinking_index = next_index
+                        next_index += 1
+                        yield _thinking_start_event(thinking_index)
+                        last_activity = time.monotonic()
+                    if not omit_thinking:
+                        yield _thinking_delta_event(thinking_index, reasoning)
+                        last_activity = time.monotonic()
+                    if slo_lease is not None and not first_token_observed:
+                        slo_lease.finished_first_token()
+                        first_token_observed = True
                 if not delta:
                     # Reasoning-only progress: keep the byte watchdog fed.
                     if time.monotonic() - last_activity >= _KEEPALIVE_SECONDS:
                         yield _PING_EVENT
                         last_activity = time.monotonic()
                     continue
+                if thinking_index is not None:
+                    for chunk in _thinking_stop_events(thinking_index):
+                        yield chunk
+                    thinking_index = None
+                if text_index is None:
+                    text_index = next_index
+                    next_index += 1
+                    yield _content_block_start_event(
+                        text_index, {"type": "text", "text": ""}
+                    )
                 if type(delta) is str:
-                    yield encoder.encode(0, delta)
+                    yield encoder.encode(text_index, delta)
                 else:
                     yield _sse(
                         "content_block_delta",
                         {
                             "type": "content_block_delta",
-                            "index": 0,
+                            "index": text_index,
                             "delta": {"type": "text_delta", "text": delta},
                         },
                     )
@@ -1345,7 +1539,14 @@ async def _live_text_events(
         usage_owner.mark_completed()
         completion = min(completions, key=lambda item: item.index, default=None)
         finish_reason = completion.finish_reason if completion is not None else None
-        yield _content_block_stop_event(0)
+        if thinking_index is not None:
+            for chunk in _thinking_stop_events(thinking_index):
+                yield chunk
+        if text_index is None:
+            # Every message carries a text block, empty when nothing was said.
+            text_index = next_index
+            yield _content_block_start_event(text_index, {"type": "text", "text": ""})
+        yield _content_block_stop_event(text_index)
         usage = _usage_payload(
             metered_prompt(validated.generation_request),
             completions,
@@ -1657,7 +1858,7 @@ def add_messages_route(
             )
         try:
             _validate_surface(request)
-            chat_request = _to_chat_request(request)
+            chat_request = _to_chat_request(request, direct=not orchestrated)
             if orchestrated:
                 validated_input = await validate_orchestration_chat_input_async(
                     chat_request
@@ -1752,7 +1953,7 @@ def add_messages_route(
         validation_started_ns = time.perf_counter_ns()
         try:
             _validate_surface(request)
-            chat_request = _to_chat_request(request)
+            chat_request = _to_chat_request(request, direct=not orchestrated)
             if not orchestrated:
                 # The Claude Code session id keeps one session's turns on one
                 # replica (prefix-cache affinity); it is tracing metadata and
@@ -1973,7 +2174,11 @@ def add_messages_route(
                     # The OpenAI-shaped 502 gates re-evaluate on the shared
                     # scanner so the unary and stream verdicts cannot diverge.
                     _record_execution(http_request, request.model, error.execution)
-                    return _outcome_from_execution(error.execution, validated)
+                    return _outcome_from_execution(
+                        error.execution,
+                        validated,
+                        omit_thinking=_thinking_omitted(request),
+                    )
                 raise _MessagesFailure.from_chat_error(error) from error
             except Exception as error:
                 logger.exception("Anthropic Messages upstream generation failed")
@@ -1982,10 +2187,10 @@ def add_messages_route(
                 ) from error
             _record_execution(http_request, request.model, execution)
             blocks, stop_reason, usage = _outcome_from_execution(
-                execution, validated
+                execution, validated, omit_thinking=_thinking_omitted(request)
             )
             if slo_lease is not None and any(
-                block["type"] == "tool_use" or block.get("text")
+                block["type"] in {"tool_use", "thinking"} or block.get("text")
                 for block in blocks
             ):
                 slo_lease.finished_first_token()

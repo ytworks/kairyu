@@ -79,6 +79,7 @@ def _request(
     parallel_tool_calls: bool | None = None,
     trace_requested: bool = False,
     chat_template_kwargs: dict[str, object] | None = None,
+    reasoning_effort: str | None = None,
 ) -> GenerationRequest:
     params = sampling_params or SamplingParams(temperature=0.2, max_tokens=64)
     if not explicit_generation_neutrals:
@@ -96,6 +97,7 @@ def _request(
         parallel_tool_calls=parallel_tool_calls,
         trace_requested=trace_requested,
         chat_template_kwargs=chat_template_kwargs,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -2484,6 +2486,43 @@ async def test_vllm_templated_completion_stream_hides_split_reasoning_marker():
     assert results[-1].completions[0].reasoning_content == "hidden"
     assert "".join(result.text_delta or "" for result in results) == "public"
     assert all("</think>" not in result.text for result in results)
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_vllm_templated_completion_with_thinking_off_is_all_public(stream):
+    # Thinking off (Messages thinking.disabled): the template closed reasoning,
+    # so the completion is public content without a terminator.
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=(
+            _sse_chunks_transport(
+                {"choices": [{"index": 0, "text": "o"}]},
+                {"choices": [{"index": 0, "text": "k", "finish_reason": "stop"}]},
+            )
+            if stream
+            else httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
+                )
+            )
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+    request = _request(TemplatedPrompt("<Assistant></think>"), reasoning_effort="none")
+
+    if stream:
+        result = [item async for item in backend.stream(request)][-1]
+    else:
+        result = await backend.generate(request)
+
+    assert result.completions[0].text == "ok"
+    assert not result.completions[0].reasoning_content
     await backend.shutdown()
 
 

@@ -212,7 +212,7 @@ def test_output_config_effort_reaches_backend(tmp_path, effort, expected):
     assert backend.requests[-1].reasoning_effort == expected
 
 
-@pytest.mark.parametrize("thinking_type", ["adaptive", "disabled"])
+@pytest.mark.parametrize("thinking_type", ["adaptive", "enabled"])
 def test_compatible_thinking_modes_are_accepted_as_noops(tmp_path, thinking_type):
     backend = ReasoningRecordingBackend()
     response = TestClient(_app(tmp_path, backend)).post(
@@ -533,6 +533,8 @@ def test_orchestrated_unknown_model_is_anthropic_404(tmp_path):
             400,
             "conflicts with output_config.effort",
         ),
+        (_body(thinking={"type": "enabled", "display": []}), 400, "thinking.display"),
+        (_body(thinking={"type": []}), 400, "thinking.type"),
         (_body(output_config={"format": {"type": "json_schema"}}), 400, "output_config"),
         (_body(context_management={"edits": []}), 400, "context_management"),
         (

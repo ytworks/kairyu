@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D4 amended 2026-10-05; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D4 amended 2026-10-19; D4 amended 2026-10-05; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -589,6 +589,69 @@ normalized to low/high/max, `none` rejected). What changes behind it:
   function name must be a declared tool), and sums every
   L1 replica's `http_requests_total` to confirm L3 reached them on
   `/v1/responses`. Each example runs it as `verify.sh api-equivalence`.
+
+**Messages thinking amendment (2026-10-19, owner decision).** `/v1/messages`
+round-trips a direct engine's reasoning as Anthropic thinking blocks, as
+`/v1/responses` does with reasoning items (Reasoning, above):
+- `thinking: {"type": "enabled"}` without `budget_tokens` means thinking on
+  at `output_config.effort`, as `adaptive`; with `budget_tokens` it stays 400.
+- An assistant `thinking` block (`thinking`, optional `signature`,
+  `cache_control`) is accepted. For an engine or pool model it becomes the
+  turn's `reasoning_content` (a Messages upstream receives it as a thinking
+  block again); an AUTO model drops it. Signatures are not verified: Kairyu
+  does not sign.
+- An engine or pool model's reply carries its reasoning as one thinking block
+  before its text and tool blocks, with an empty signature: first in the unary
+  content; streamed as `content_block_start` (thinking), `thinking_delta`,
+  `signature_delta` (empty), `content_block_stop`. A reply still carries a text
+  block, empty when nothing was said. AUTO replies are unchanged: stage
+  reasoning stays private.
+Why: DeepSeek Harness (kairyu-bench PR #31) sends `enabled` with an effort and
+replays its earlier thinking; Kairyu answered both with 400 and never returned
+thinking, so a client that replays reasoning lost it at every tool call (issue
+#659). Framework boundary: the missing shared contract is the Messages thinking
+round trip for a direct engine (the Responses rule, applied to Messages); it
+lives in L3's request normalization, which no example extension point reaches;
+any Messages client that replays thinking needs it. Tests:
+`test_a_pool_model_round_trips_messages_thinking`,
+`test_an_auto_messages_reply_keeps_role_reasoning_private`, and the `enabled`
+case of `test_compatible_thinking_modes_are_accepted_as_noops`.
+
+*Review amendment (2026-10-19, owner review of PR #660 and issue #659 item 4;
+owner decision).*
+- `thinking: {"type": "disabled"}` turns an engine or pool model's thinking
+  off; it was a no-op, so L1 thought at its default and the reasoning was
+  dropped from the reply. Kairyu carries it as the internal effort `none`,
+  set only by this boundary: the public Chat and Responses parsers still
+  reject `none`. Each wire sends its own "off": Messages
+  `thinking: {"type": "disabled"}`, Responses `reasoning.effort: "none"`, chat
+  `reasoning_effort: "none"`; a Kairyu-rendered template gets
+  `thinking_mode: "chat"` and `enable_thinking: false`. How a model turns
+  thinking off stays with L1 (as `xhigh`): vLLM v0.32.0 renders and generates
+  DeepSeek-V4.1-Flash-1017 without thinking on all three wires. A Kairyu
+  upstream accepts it only on Messages (its Chat and Responses answer 400). An
+  AUTO model keeps its stage policy: `disabled` stays a no-op there.
+  A templated-passthrough backend with `completion_reasoning_end_tag` reads a
+  thinking-off completion as all public text: the template closed reasoning,
+  so no terminator is required (a template must honor the switch, as it
+  honors an effort).
+- `thinking.display: "omitted"` returns the thinking block with empty text
+  (unary) or without `thinking_delta` (SSE), as Anthropic does; `display`
+  must be `summarized` or `omitted`, and a non-string `display` or `type` is a
+  400 (it was a 500). An empty replayed thinking block adds no reasoning.
+- A Kairyu upstream receives replayed thinking blocks too; its Messages
+  boundary accepts them since this amendment, so the old exclusion is gone. A
+  gateway and its Kairyu replicas run the same release.
+- The first streamed thinking delta (or block, when omitted) is the TTFT
+  observation for SLO admission, as on Chat; a unary reply with a thinking
+  block counts too.
+Tests: the `kairyu` and `omitted` cases of
+`test_a_pool_model_round_trips_messages_thinking`,
+`test_messages_thinking_disabled_turns_a_pool_models_thinking_off`, and
+`test_messages_thinking_is_the_first_stream_token`,
+`test_vllm_templated_completion_with_thinking_off_is_all_public`, and the
+non-string `display`/`type` cases of `test_error_envelope_matrix`; `disabled`
+left `test_compatible_thinking_modes_are_accepted_as_noops`.
 
 ### D5 — Vision wire format
 

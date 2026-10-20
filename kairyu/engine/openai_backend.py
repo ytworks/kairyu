@@ -1982,7 +1982,13 @@ class OpenAICompatBackend:
                 else _message_text(choice["message"])
             )
             reasoning_content = None
-            if use_completions and self._completion_reasoning_end_tag is not None:
+            # A thinking-off request's template closes reasoning itself, so
+            # its completion carries no private reasoning or terminator.
+            if (
+                use_completions
+                and self._completion_reasoning_end_tag is not None
+                and request.reasoning_effort != "none"
+            ):
                 reasoning_content, text = _split_completion_reasoning(
                     text,
                     self._completion_reasoning_end_tag,
@@ -2399,7 +2405,11 @@ class OpenAICompatBackend:
                             arguments = function.get("arguments")
                             if isinstance(arguments, str):
                                 call["arguments"].append(arguments)
-                    if use_completions and self._completion_reasoning_end_tag is not None:
+                    if (
+                        use_completions
+                        and self._completion_reasoning_end_tag is not None
+                        and request.reasoning_effort != "none"
+                    ):
                         parser = completion_reasoning.setdefault(
                             index,
                             _CompletionReasoningParser(

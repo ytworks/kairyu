@@ -32,7 +32,7 @@ _PREFERENCE: dict[str, tuple[str, ...]] = {
 }
 # OpenAI's Responses enum has no ``max``; upstream templates map ``xhigh``
 # back to their top effort level (m11 D4 amendment 2026-10-17).
-_RESPONSES_EFFORT = {"low": "low", "high": "high", "max": "xhigh"}
+_RESPONSES_EFFORT = {"none": "none", "low": "low", "high": "high", "max": "xhigh"}
 _RESPONSES_ENDPOINT = "responses"
 _MESSAGES_ENDPOINT = "messages"
 
@@ -605,16 +605,14 @@ def _anthropic_user_content(content: object) -> object:
 
 def anthropic_conversation(
     messages: list[Mapping[str, object]],
-    *,
-    thinking: bool = True,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """(system blocks, messages) for the same conversation.
 
     Leading system/developer turns become the top-level system blocks; one
     later in the conversation has no Anthropic representation. Consecutive
     tool results share one user turn, as Anthropic tool_result blocks.
-    Replayed assistant reasoning becomes a thinking block only for upstreams
-    that accept one (a Kairyu replica's Messages boundary does not).
+    Replayed assistant reasoning becomes a thinking block (a Kairyu replica's
+    Messages boundary accepts one too, m11 D4 Messages thinking amendment).
     """
 
     system: list[dict[str, object]] = []
@@ -654,7 +652,7 @@ def anthropic_conversation(
             continue
         if role == "assistant":
             blocks: list[dict[str, object]] = []
-            reasoning = _reasoning(message) if thinking else None
+            reasoning = _reasoning(message)
             if reasoning is not None:
                 blocks.append({"type": "thinking", "thinking": reasoning, "signature": ""})
             text = _text(content)
@@ -775,7 +773,7 @@ def messages_expressible(
     ):
         return False
     try:
-        anthropic_conversation(messages, thinking=upstream != "kairyu")
+        anthropic_conversation(messages)
     except WireError:
         return False
     return True
@@ -801,7 +799,7 @@ def messages_body(
             "request fields cannot be sent on the Anthropic Messages wire: "
             + ", ".join(unsupported)
         )
-    system, conversation = anthropic_conversation(messages, thinking=upstream != "kairyu")
+    system, conversation = anthropic_conversation(messages)
     max_tokens = validated.get("max_tokens", validated.get("max_completion_tokens"))
     if max_tokens is None:
         # Anthropic requires max_tokens; an omitted limit means the remaining
@@ -823,7 +821,9 @@ def messages_body(
         body["stop_sequences"] = validated["stop"]
     output_config: dict[str, object] = {}
     effort = validated.get("reasoning_effort")
-    if effort is not None:
+    if effort == "none":
+        body["thinking"] = {"type": "disabled"}
+    elif effort is not None:
         output_config["effort"] = effort
     response_format = validated.get("response_format")
     if isinstance(response_format, Mapping):

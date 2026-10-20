@@ -73,7 +73,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
-- Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, OpenAI-spec Responses API (live reasoning/tool streams, store endpoints, in-band overflow; m11 D4); System One (Jev wire API) at `/v1/systemone` outside ReplicaPool (m11 D8), GPU-verified through `quyet-1.0-large-1gpu` and the two Quyet 8-GPU examples
+- Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, OpenAI-spec Responses API (live reasoning/tool streams, store endpoints, in-band overflow; m11 D4); Anthropic Messages returns and accepts a direct engine's thinking blocks (m11 D4 amendment 2026-10-19); System One (Jev wire API) at `/v1/systemone` outside ReplicaPool (m11 D8), GPU-verified through `quyet-1.0-large-1gpu` and the two Quyet 8-GPU examples
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI (0.160 GPU-verified 2026-10-06 on DeepSeek-V4.1 and an AUTO model) and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering; Helm supports immutable images, split-role labels, safe rollout/drain, hardened Pods, and ServiceMonitor plus the kind CI drill
 - AsyncRequest v1 (opt-in `async_requests`): PostgreSQL-backed non-streaming Chat with tenant-scoped status/result/cancel, lease-fenced workers, shared queue telemetry and bounded request/audit retention; the retention-inclusive three-gateway Kind gate runs in F1c CI. Runner State v1 contracts (Kubernetes observation/reconciliation, fenced drain, failure-domain backoff, PostgreSQL leader lease, WP3.1 scaling policies, WP3.2 decision log) exist as a library
@@ -106,12 +106,35 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
   Deployment, runtime instrumentation, and live acceptance remain open.
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
-- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); kairyu-bench wiki DeepSWE-Comparison updated
+- Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
+- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-20 — [progress] DeepSWE with mini-swe-agent: 81/113 on the 1017 eight-GPU example
+- What: the six-GPU mini-swe-agent run's setup (kairyu-bench `52b06ce`, effort max, 8 workers) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 81/113 (six-GPU 79/113, eight-GPU dsh 83/113), 3 h 59 min (0.66x of six-GPU), 10,012 API calls all 200 (1.00x), input 1.181 B, output 8.69 M; all 113 tasks scored. Wiki: two dsh-vs-DeepSeek-8GPU-high overlap rows corrected (a time-limit trial had been counted as correct).
+- Refs: run `deepswe-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison
+
+### 2026-10-20 — [progress] DeepSWE with DeepSeek Harness: 83/113 on the 1017 eight-GPU example
+- What: the same dsh run as the six-GPU one (dsh 0.2.1rc2, kairyu-bench PR #31, effort max, 8 workers, Kairyu code of PR #660 `0513750a`) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 83/113 (six-GPU dsh 76/113, mini-swe-agent 79/113), 4 h 33 min (0.72x), 10,753 API calls all 200 (1.00x), 10,424 with thinking, input 1.106 B, output 9.33 M; all 113 tasks scored, no re-run needed. No new Kairyu-side problem.
+- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660
+
+### 2026-10-19 — [progress] DeepSWE with DeepSeek Harness via Messages: 76/113 on the 1017 six-GPU example
+- What: PR #660 (`0513750a`, Kairyu only replaced) passed the GPU smokes: dsh effort max (91 calls 200, 88 replies with thinking, 3,857 replayed blocks accepted, reward 1) and effort off (thinking off, first input 1,171 tokens, reward 1). DeepSWE v1.1 with DeepSeek Harness (dsh 0.2.1rc2, kairyu-bench PR #31) on `deepseek-v4.1-flash-1017-6gpu`, effort max, 8 workers: 76/113 (mini-swe-agent on the same L1: 79/113), 6 h 20 min, 10,768 API calls all 200, 10,393 with thinking. New finding: `count_tokens` is 404 on tool-call history (vLLM v0.32.0 `/tokenize` fails on `content: null`; #659 item 5, recorded only).
+- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660; issue #659
+
+### 2026-10-19 — [amendment] Messages `thinking: disabled` turns thinking off; review fixes (m11 D4)
+- What: an engine or pool model now receives `thinking: disabled` as thinking off (internal effort `none`, per wire: Messages `thinking.disabled`, Responses/chat `none`; AUTO unchanged); `display: omitted` returns empty thinking; a Kairyu upstream gets replayed thinking; the first thinking delta is the SLO first token. GPU: the dsh smoke (effort max, 1 task) on `423494b0` passed (66 calls 200, 65 with thinking, reward 1).
+- Why: issue #659 item 4 (disabled was a no-op, so L1 thought at its default unseen) and three owner review findings on PR #660; owner decision 2026-10-19.
+- Refs: m11 D4 Messages thinking review amendment; `kairyu/entrypoints/server/messages_service.py`, `kairyu/engine/upstream_wire.py`; PR #660; issue #659
+
+### 2026-10-19 — [amendment] Messages thinking round trip for direct engines (m11 D4)
+- What: `/v1/messages` accepts `thinking: {"type": "enabled"}` without a budget (thinking on at `output_config.effort`) and assistant `thinking` blocks (an engine or pool model replays them as `reasoning_content`, AUTO drops them), and an engine or pool model's reply returns its reasoning as a thinking block with an empty signature (unary and SSE); AUTO replies are unchanged.
+- Why: DeepSeek Harness (kairyu-bench PR #31) got 400 on both and never received thinking, so its reasoning was lost at every tool call (issue #659); owner decision 2026-10-19 to fix Kairyu before the DeepSWE run with that harness.
+- Refs: m11 D4 Messages thinking amendment; `kairyu/entrypoints/server/messages_service.py`; `docs/superpowers/plans/2026-10-19-messages-thinking-dsh.md`; PR #660
 
 ### 2026-10-19 — [progress] DeepSeek-V4.1-Flash-1017 examples GPU-verified; DeepSWE 79/113 on six GPUs
 - What: both 1017 examples pass every gate (six GPUs keep DP6/EP6 on vLLM v0.32.0; eight GPUs serve TP8/EP8 with 8K batched tokens: c1/c8 +52/+30 % over DP8). DeepSWE v1.1 on the six-GPU example, effort max (rendered `Reasoning Effort: 100`), 8 workers: 79/113 (two verifier timeouts count as not correct), 6 h 04 min, 10,062 API calls (0909 six-GPU max: 85/113, 15 h 22 min, 21,985 calls).
@@ -125,28 +148,3 @@ in `.claude/rules/progress-log.md`).
 ### 2026-10-19 — [progress] PR #656 GPU final test complete
 - What: all 7 remaining Open WebUI examples pass every gate on `/v1/responses`, `api-equivalence`, the Chat UI pass (no chat requests) and the cancellation probe (release 0.02-0.23 s); Qwen on vLLM v0.31.0; the V4.1 ensemble judge routes 17/32 coding prompts to ENSEMBLE (9/32 on v0.23.0; owner accepted).
 - Refs: each example's `MEASUREMENTS.md`; FN Responses amendment, DTO-D18, VCO 2026-10-17 amendment Status lines
-
-### 2026-10-19 — [design] `glm-5.3-flash-quyet-8gpu` deleted (VCO-D23 removal amendment)
-- What: the GLM-writer verified tool example is removed with its own tests. Its final-test serving gate failed on the recorded `dedup-case` limit (c4: GLM's think route answered a turn done without the call it still needed; c8/c16 made the call). The same turn on the live stack: done without a call 2/6 on `/v1/responses`, 1/6 on chat, so not caused by the caller-API forwarding.
-- Why: owner decision 2026-10-19 — the example is unusable once the limit recurred.
-- Refs: VCO-D23 removal amendment (`docs/design/example-verified-checklist-orchestration.md`); plan decision 33; PR #656
-
-### 2026-10-18 — [progress] A client leaving an AUTO stream ends every role call at once
-- What: the Orchestrator's keep-alive wrappers awaited their cancelled per-event task through `asyncio.gather`, which forwarded the disconnect's per-iteration re-cancels into the Conductor stream and its producer and cut httpcore's connection close short: on public chat every in-flight role call (parallel DAG roles, a publisher route) kept its upstream connection open and vLLM generated on. Pre-existing (also before `565c1da7`, which only made a disconnect right after the first delta meet pending roles); Responses AUTO released at once on CPU. Both wrappers and the Conductor producer now use `cancel_and_wait` (moved to `kairyu/async_thread.py`).
-- Why: GPU final test (V4.1 ensemble disconnect probe); reproduced on CPU with real sockets, gc on and off.
-- Refs: `kairyu/orchestration/orchestrator.py`, `kairyu/orchestration/conductor.py`; `test_a_client_leaving_an_auto_stream_ends_every_role_call_at_once`; PR #656
-
-### 2026-10-18 — [amendment] An AUTO answer emptied by the caller's own cap is incomplete, not 502 (m11 D1)
-- What: a final unit whose published attempt ran at exactly the caller's remaining `max_tokens` and stopped with `length` without public text now answers `finish_reason: "length"` (Responses `incomplete` / `max_output_tokens`) with empty content and real usage, unary and streamed. A failed unit, an empty `stop`, no caller cap, a refused retry, or a smaller role cap / floor reserve stays the #496 502 / SSE error.
-- Why: GPU final test: `kairyu-verified-tool` (Quyet) answered `max_output_tokens: 16` / `max_tokens: 16` with 502 because its thinking final unit spent the cap on reasoning; a direct engine and OpenAI answer incomplete; owner decision 2026-10-18.
-- Refs: m11 D1 amendment 2026-10-18 (issue #496); `kairyu/orchestration/conductor.py`; `test_auto_final_unit_out_of_the_callers_cap_answers_incomplete`; PR #656
-
-### 2026-10-18 — [amendment] Qwen3.8 examples serve on vLLM v0.31.0 (FN, DTO-D16)
-- What: qwen3.8-27b-1gpu, qwen3.8-27b-dp8-8gpu and the V4.1 ensemble's Qwen pools move from the pinned vLLM v0.23.0 to the official v0.31.0 image (GLM's pin); flags and launchers unchanged; every gate of the three runs again.
-- Why: on v0.23.0 a request carrying `extra_args`, which its Responses serving always sets, prefilled about 3x slower (16 concurrent judge calls: chat 1.43 s, Responses 4.33 s; v0.31.0 1.26/1.27 s), pushing the ensemble's 5 s route judge past its timeout on 13 of 32 coding c32 requests; owner decision 2026-10-18.
-- Refs: FN Qwen3.8 v0.31.0 amendment, DTO-D16 amendment 2026-10-18; PR #656
-
-### 2026-10-18 — [amendment] A streamed AUTO response names the final answer's L1 model first (m11 D1)
-- What: with `expose_intermediate_outputs`, the Conductor stream sends the selected final unit's "Final answer attribution" (L2 role, L1 worker, engine, model) as its first reasoning event, before any head or answer delta, and its result's `reasoning_content` has the unary shape; chat streams carry it as the first `reasoning_content` delta, Responses streams as a reasoning item before the message. Only unary results carried it before (`75efaae0`, when the Chat UIs were non-streaming). Limits: a head-streamed DAG's stage sections form a second Responses reasoning item after the message; a budget stand-in without a head is named only by its own section.
-- Why: after PR #656 moved the Chat UIs to streaming, the V4.1 ensemble's browser smoke found no attribution on `deepseek_think`; owner decision 2026-10-18 (PR #656 GPU final test).
-- Refs: m11 D1 amendment 2026-10-18; EO-D4; `kairyu/orchestration/conductor.py`; `test_visible_intermediates_use_reasoning_content_with_model_attribution`; PR #656
