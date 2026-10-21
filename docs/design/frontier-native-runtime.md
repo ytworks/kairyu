@@ -609,6 +609,8 @@ pinned docling-serve (CPU; text layers kept, bitmaps read by RapidOCR with
 (offline), and runs hybrid search with BM25 weight 0, because Open WebUI's
 BM25 splits terms on whitespace and cannot tokenize Japanese. Chunks are
 300 characters (the English-sized default of 1,000 diluted the asked
-passage out of the reranker's 20 candidates). Docling is capped at 8 CPUs
-(16 cost c1 serving 4.1 % during OCR) and the Chat UI at 16 with 16 torch
-threads. L1, L2, `kairyu/` and the other examples are unchanged.
+passage out of the reranker's 20 candidates). Docling is capped at 4 CPUs
+and the Chat UI at 8 with 8 torch threads: the Chat UI's embedding at 16
+CPUs cut c1 serving 12.4 %, Docling at 4 CPUs 1.4 %; with both at their caps
+c1/c8 stay at 99.8 / 99.2 % of their record. L1, L2, `kairyu/` and the
+other examples are unchanged.

@@ -10,8 +10,10 @@ added 300-character chunks (default 1,000 diluted the asked passage),
 `OMP_NUM_THREADS=16` for the Chat UI (64 threads under 16 CPUs) and
 Docling at 8 CPUs (16 cost c1 serving 4.1 % during OCR). Review amendment
 (owner, 2026-10-21): V5's load evidence is Docling's own cgroup CPU time
-(rows start once it is busy; busy in 95 % of the rows' seconds), with two
-load streams so Docling runs at its CPU cap.
+(rows start once it is busy; busy in 95 % of the rows' seconds). Owner
+decisions after the GPU re-run: three load streams (two left Docling idle
+while both embedded), the Chat UI at 8 CPUs (its embedding at 16 CPUs cut
+c1 12.4 %) and Docling at 4 CPUs (c1 −1.4 % at full use).
 
 Accepted scope (owner, 2026-10-21):
 

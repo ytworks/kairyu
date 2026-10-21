@@ -115,7 +115,7 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-10-21 — [design] Japanese knowledge bases in the 1017 eight-GPU Chat UI
-- What: `deepseek-v4.1-flash-1017-8gpu`'s Open WebUI extracts through a pinned docling-serve (RapidOCR `iso:ja`, 8 CPUs), embeds with `BAAI/bge-m3`, reranks with `BAAI/bge-reranker-v2-m3` (pinned, hashed, offline), hybrid search at BM25 weight 0, 300-character chunks; `run.sh up` fails closed on any other retrieval configuration. GPU gates pass: OCR 2.7 s/page, 20-page scan ingested in 56 s, Japanese query top-1 in 2.2 s, Chat UI answers from the base with a citation, c1/c8 serving during OCR at 96.2 / 99.1 % of the recorded rows.
+- What: `deepseek-v4.1-flash-1017-8gpu`'s Open WebUI extracts through a pinned docling-serve (RapidOCR `iso:ja`), embeds with `BAAI/bge-m3`, reranks with `BAAI/bge-reranker-v2-m3` (pinned, hashed, offline), hybrid search at BM25 weight 0, 300-character chunks; Docling 4 CPUs, Chat UI 8; `run.sh up` fails closed on any other retrieval configuration. GPU gates pass: OCR 4.7 s/page, 20-page scan ingested in 80 s, Japanese query top-1 in 3.5 s, Chat UI answers from the base with a citation, c1/c8 serving with Docling and embedding at their caps at 99.8 / 99.2 % of the recorded rows.
 - Why: Japanese documents (incl. scans) in knowledge bases; Open WebUI's BM25 splits on whitespace and its 1,000-character default chunk dilutes Japanese passages (dense rank 27/40 vs 9/120 at 300).
 - Refs: PR #661; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plan `docs/superpowers/plans/2026-10-21-1017-8gpu-japanese-knowledge.md`; the example's `MEASUREMENTS.md`
 
