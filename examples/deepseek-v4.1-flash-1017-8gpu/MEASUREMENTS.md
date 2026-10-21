@@ -168,3 +168,56 @@ For orientation (same host): `deepseek-v4.1-flash-8gpu` (0909 weights, TP8
 on its 0909 image, fixed 256-token chat rows) measured 126.8 / 275.4 /
 305.4 / 326.8 / 314.3 tok/s at c1/8/16/32/64; the six-GPU 1017 example
 measured 101.8 / 278.0 / 364.2 / 579.0 / 803.7 on these Responses rows.
+
+## Japanese knowledge bases (2026-10-21)
+
+Branch `claude/1017-8gpu-japanese-knowledge` (PR #661), L1/L2 as above.
+Fixtures are generated per run: Japanese report pages built from shared
+templates (every page names other `KR-73xx` samples and storage
+temperatures), rendered as an image-only A4 PDF at 150 dpi with Noto Sans
+JP 2.004; the key sentence (`KR-7319`, `マイナス四十二度`, `冷凍庫で保管`) is
+on page 13 of 20. Results are under
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-1017-8gpu/verification-results/`.
+
+Final runs on the committed configuration (Docling 4 CPUs, Chat UI 8 CPUs,
+2026-10-21 15:45-15:58 UTC):
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `docling` | PASS | 3/3 image-only pages carry the key sentence, 4.7 s per page; the Chromium text-layer PDF keeps all 18 lines; Docling on an internal network (no route out) (`20261021T154536Z-docling`) |
+| `knowledge` | PASS | 20-page scan ingested in 80.2 s, 20 text distractors in 31.0 s; the key sentence is in the OCR text; the Japanese question's top chunk is the key one (reranker 0.984, next 0.533); query 3.52 s (`20261021T154625Z-knowledge`); second fixture 80.7 s, 0.993, 3.55 s (`20261021T155515Z-knowledge`) |
+| `chat-ui` | PASS | Chromium: `323`, `324` in the same chat, `Red` for an attached PNG; with the knowledge base picked by `#`, "KR-7319は摂氏マイナス42度（−42℃）の冷凍庫で保管するよう決められており…" citing `kairyu-gate-scan.pdf`; Kairyu `/v1/responses` 133 → 146, `/v1/chat/completions` 0 → 0; cleanup left no gate base or file (`20261021T155715Z-chat-ui`) |
+| `knowledge-serving` | PASS | three load streams; Docling busy (≥ 1 core) for 100 % of the 154 s of rows, observed 100 %, mean 3.79 cores of 4; c1 150.9 tok/s (99.8 % of 151.2), c8 375.9 (99.2 % of 378.8); the references are the final `serving` rows above (`20261018T215333Z-serving`) (`20261021T154830Z-knowledge-serving`) |
+
+Restart checks (Docling 8 CPUs, Chat UI 16 CPUs; the services' limits do
+not change startup): `run.sh up` with the new services and its retrieval
+check, ready in about 5 min; `run.sh down` / `up` again in about 4 min, and
+the kept knowledge base answered the same query with the same ranking
+(0.998), 2.28 s (`20261021T143049Z-knowledge`).
+
+Settings changed by these gates (one cause each, measured before the fix):
+
+- **Chunk size 300 characters, overlap 30** (Open WebUI's default 1,000 / 100
+  is sized for English). One 20-page fixture, `bge-m3` dense rank of the key
+  chunk among all chunks: 1,000 characters 27 / 40, 500 48 / 80, 300 9 / 120,
+  200 2 / 166. With 1,000 the key page missed the reranker's 20 candidates.
+- **Chat UI `OMP_NUM_THREADS=16`**: torch sees 128 host CPUs and started 64
+  threads under the 16-CPU limit. Reranking 20 real pairs: 64 threads 20.1 s,
+  16 threads 7.9 s, 8 threads 10.5 s; a knowledge query took 17.4 s before.
+- **Docling 4 CPUs, 2 threads; Chat UI 8 CPUs, 8 threads** (were 16 / 8
+  and 16 / 16). With one load stream and Docling at 16 CPUs, c1 fell to
+  142.8 tok/s against 148.9 idle the same day. The load gate then measured
+  Docling's own CPU time (review): with two streams Docling at 8 CPUs gave
+  c1 141.7 (93.7 %), at 4 CPUs 143.4 (94.9 %), with Docling busy only 91.9 %
+  and 94.4 % of the rows because both streams embedded at once. Splitting
+  the load, same day: idle c1 / c8 155.1 / 378.1; Docling alone at 4 CPUs
+  (busy 100 %) 153.0 / 379.0; Chat UI embedding alone at 16 CPUs (two text
+  streams) 135.9 / 358.4. The embedding was the cost, so the Chat UI went to
+  8 CPUs and the gate to three streams (owner decisions).
+- **OCR language `iso:ja`**: Docling 2.138 treats a bare `ja` as a RapidOCR
+  engine code and fails the conversion. The image's prefetched PP-OCRv6
+  recognizer is the same file `docling-tools` fetches for `iso:ja`
+  (`PP-OCRv6_rec_small.onnx`, sha256 `6f327246…`), so the stock image is used.
+- **Key fragments**: RapidOCR read the kanji `一` of `一回` as the long-vowel
+  `ー` on two of three pages (identical glyphs), so the key check uses
+  fragments without such twins.

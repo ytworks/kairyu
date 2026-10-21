@@ -1144,6 +1144,878 @@ def runtime_evidence(*, allow_override: bool = False) -> dict:
     }
 
 
+# --- Japanese knowledge bases (Chat UI) --------------------------------------------
+#
+# The Chat UI extracts documents with Docling (RapidOCR for bitmaps), embeds them
+# with bge-m3 and reranks with bge-reranker-v2-m3 (control.py). These gates use
+# generated Japanese documents: an image-only "scanned" PDF rendered with a
+# pinned Noto Sans JP, a text-layer PDF printed by Chromium, and plain-text
+# distractors that share the scanned document's vocabulary.
+
+KNOWLEDGE = SPEC["verification"]["knowledge"]
+KNOWLEDGE_NAME = "kairyu-knowledge-gate"
+KNOWLEDGE_SCAN = "kairyu-gate-scan.pdf"
+KNOWLEDGE_KEY_SENTENCE = (
+    "保存条件：試料KR-7319は摂氏マイナス四十二度の冷凍庫で保管し、解凍は一回までとする。"
+)
+# Fragments without glyph twins: OCR may read the kanji "一" as the long-vowel "ー".
+KNOWLEDGE_KEY_FRAGMENTS = ("KR-7319", "マイナス四十二度", "冷凍庫で保管")
+KNOWLEDGE_QUERY = "KR-7319という試料は、どのような温度で保存するよう決められていますか。"
+_JA_SUBJECTS = (
+    "第一分析室",
+    "第二分析室",
+    "品質管理課",
+    "設備保全班",
+    "試料受付窓口",
+    "安全衛生委員会",
+    "製剤開発グループ",
+    "物性評価チーム",
+)
+_JA_TEMPLATES = (
+    "{subject}では、{month}月の点検で{device}の校正記録を{count}件確認した。",
+    "{subject}は、試料{code}の受入時に外観と重量を記録し、異常がないことを確かめた。",
+    "{device}の稼働時間は月平均{count}時間で、前年同月より{delta}時間増えた。",
+    "{subject}の報告によると、試料{code}は摂氏{temp}度の保管庫に移された。",
+    "手順書の改訂案では、{device}の清掃を{count}日ごとに行うことが提案されている。",
+    "{month}月の会議で、{subject}は廃液の分別方法について{count}項目の見直しを求めた。",
+    "試料{code}の分析結果は、規格の範囲内であったため再試験は行わない。",
+    "{subject}は、{device}の消耗品を{count}個発注し、納期を{month}月末とした。",
+)
+_JA_DEVICES = ("液体クロマトグラフ", "分光光度計", "恒温槽", "遠心分離機", "電子天秤", "乾燥機")
+_JA_TEMPS = ("四", "五", "マイナス二十", "マイナス八十", "二十五", "マイナス四十")
+
+
+def _normalized(text: str) -> str:
+    """NFKC, no whitespace, every dash-like character as ``-`` (OCR spacing varies)."""
+    import unicodedata
+
+    text = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+    text = re.sub("[\u2010-\u2015\u2212]", "-", text)
+    # OCR may read the sample code's hyphen as a long-vowel mark or a kanji one.
+    return re.sub("KR[-\u30fc\u4e00]?(?=\\d)", "KR-", text)
+
+
+def _has_key(text: str) -> bool:
+    flat = _normalized(text)
+    return all(_normalized(fragment) in flat for fragment in KNOWLEDGE_KEY_FRAGMENTS)
+
+
+def knowledge_lines(page: int, *, key: bool, namespace: str) -> list[str]:
+    """Deterministic Japanese report lines for one page; ``key`` plants the key sentence."""
+    lines = [f"技術報告書 {namespace} 第{page}頁"]
+    for index in range(16):
+        digest = hashlib.sha256(f"{namespace}:{page}:{index}".encode()).digest()
+        code = f"KR-{7300 + digest[1] % 90 + (1 if 7300 + digest[1] % 90 >= 7319 else 0)}"
+        lines.append(
+            _JA_TEMPLATES[digest[0] % len(_JA_TEMPLATES)].format(
+                subject=_JA_SUBJECTS[digest[2] % len(_JA_SUBJECTS)],
+                device=_JA_DEVICES[digest[3] % len(_JA_DEVICES)],
+                month=1 + digest[4] % 12,
+                count=2 + digest[5] % 30,
+                delta=1 + digest[6] % 9,
+                temp=_JA_TEMPS[digest[7] % len(_JA_TEMPS)],
+                code=code,
+            )
+        )
+        if key and index == 7:
+            lines.append(KNOWLEDGE_KEY_SENTENCE)
+    return lines
+
+
+def knowledge_font() -> Path:
+    """The pinned Noto Sans JP (OFL) used to render the Japanese fixtures."""
+    target = ENVIRONMENT_STORAGE / "bench-tmp" / "NotoSansJP-Regular.otf"
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(KNOWLEDGE["font_url"], timeout=120) as response:
+            target.write_bytes(response.read())
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    if digest != KNOWLEDGE["font_sha256"]:
+        target.unlink()
+        raise RuntimeError(f"Noto Sans JP digest {digest} differs from the pinned font")
+    return target
+
+
+def scan_pdf(path: Path, pages: int, key_pages: set[int], *, namespace: str) -> None:
+    """An image-only A4 PDF at 150 dpi: there is no text layer, only pixels to OCR."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype(str(knowledge_font()), 28)
+    width, height, margin, line_height = 1240, 1754, 110, 46
+    images = []
+    for page in range(1, pages + 1):
+        image = Image.new("L", (width, height), 255)
+        draw = ImageDraw.Draw(image)
+        y = margin
+        for line in knowledge_lines(page, key=page in key_pages, namespace=namespace):
+            row = ""
+            for character in line:
+                if draw.textlength(row + character, font=font) > width - 2 * margin:
+                    draw.text((margin, y), row, font=font, fill=0)
+                    y, row = y + line_height, ""
+                row += character
+            draw.text((margin, y), row, font=font, fill=0)
+            y += line_height + 10
+        images.append(image)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    images[0].save(path, save_all=True, append_images=images[1:], resolution=150)
+
+
+def browser_image() -> str:
+    """Build the pinned Playwright image (shared Dockerfile, as the sibling examples do)."""
+    image = KNOWLEDGE["browser_image"]
+    build = subprocess.run(
+        [
+            "docker",
+            "build",
+            "--file",
+            str(ROOT / "deploy/compose/Dockerfile.webui-browser"),
+            "--tag",
+            image,
+            str(ROOT),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if build.returncode:
+        raise RuntimeError(f"building {image} failed: {build.stderr[-2000:]}")
+    return image
+
+
+def text_pdf(path: Path, lines: list[str]) -> None:
+    """A text-layer PDF of ``lines``, printed by Chromium with the pinned font embedded."""
+    import html
+
+    work = path.parent
+    font = knowledge_font()
+    (work / font.name).write_bytes(font.read_bytes())
+    body = "".join(f"<p>{html.escape(line)}</p>" for line in lines)
+    (work / "text.html").write_text(
+        "<!doctype html><meta charset='utf-8'><style>"
+        f"@font-face{{font-family:jp;src:url('{font.name}')}}"
+        "body{font-family:jp;font-size:14pt;margin:2cm}</style>" + body,
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--env",
+            "HOME=/tmp",
+            "--volume",
+            f"{work}:/fixtures",
+            "--entrypoint",
+            "/ms-playwright/chromium-1223/chrome-linux64/chrome",
+            browser_image(),
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--disable-crash-reporter",
+            "--no-pdf-header-footer",
+            f"--print-to-pdf=/fixtures/{path.name}",
+            "file:///fixtures/text.html",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def distractor_documents(count: int, *, namespace: str) -> list[tuple[str, str]]:
+    return [
+        (
+            f"kairyu-gate-note-{index:02d}.md",
+            "\n".join(knowledge_lines(100 + index, key=False, namespace=namespace)) + "\n",
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def _compose_service(name: str) -> dict:
+    import yaml
+
+    return yaml.safe_load((HERE / "compose.yaml").read_text(encoding="utf-8"))["services"][name]
+
+
+_LOADER_PROGRAM = r"""
+import json, os, sys, time
+sys.path.insert(0, '/app/backend')
+os.makedirs(os.environ['DATA_DIR'], exist_ok=True)
+from open_webui.retrieval.loaders.main import DoclingLoader
+params = json.loads(os.environ['DOCLING_PARAMS'])
+report = {}
+for name in sys.argv[1:]:
+    started = time.monotonic()
+    documents = DoclingLoader(url=os.environ['DOCLING_SERVER_URL'], file_path='/fixtures/' + name,
+                              mime_type='application/pdf', params=params).load()
+    report[name] = {'seconds': time.monotonic() - started,
+                    'pages': [document.page_content for document in documents]}
+print('LOADER-REPORT ' + json.dumps(report, ensure_ascii=False))
+"""
+
+
+def docling(run_dir: Path) -> int:
+    """Docling alone, offline: Japanese image-only and text-layer PDFs via Open WebUI's loader."""
+    env = control._compose_env()
+    fixtures = run_dir / "fixtures"
+    pages = int(KNOWLEDGE["probe_pages"])
+    scan_pdf(fixtures / "scan.pdf", pages, set(range(1, pages + 1)), namespace=run_dir.name)
+    text_lines = knowledge_lines(1, key=True, namespace=f"{run_dir.name}-text")
+    text_pdf(fixtures / "text.pdf", text_lines)
+    service = _compose_service("docling")
+    network = f"kairyu-docling-probe-{run_dir.name.lower()}"
+    container = f"{network}-docling"
+    environment = [
+        item
+        for key, value in service["environment"].items()
+        for item in ("--env", f"{key}={value}")
+    ]
+    report: dict = {"docling_image": env["DOCLING_IMAGE"], "docling_params": env["DOCLING_PARAMS"]}
+    subprocess.run(
+        ["docker", "network", "create", "--internal", network], check=True, capture_output=True
+    )
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                container,
+                "--network",
+                network,
+                "--network-alias",
+                "docling",
+                "--cpus",
+                str(service["cpus"]),
+                *environment,
+                env["DOCLING_IMAGE"],
+            ],
+            check=True,
+            capture_output=True,
+        )
+        deadline = time.monotonic() + 300
+        while subprocess.run(
+            [
+                "docker",
+                "exec",
+                container,
+                "python3",
+                "-c",
+                "import urllib.request; "
+                "urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=2)",
+            ],
+            capture_output=True,
+        ).returncode:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Docling did not become healthy")
+            time.sleep(2)
+        loaded = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                network,
+                "--volume",
+                f"{fixtures}:/fixtures:ro",
+                "--env",
+                "DATA_DIR=/tmp/open-webui",
+                "--env",
+                # A throwaway key: only the loader is imported, no server runs.
+                f"WEBUI_SECRET_KEY={hashlib.sha256(run_dir.name.encode()).hexdigest()}",
+                "--env",
+                f"DOCLING_SERVER_URL={env['DOCLING_SERVER_URL']}",
+                "--env",
+                f"DOCLING_PARAMS={env['DOCLING_PARAMS']}",
+                "--entrypoint",
+                "python3",
+                env["OPEN_WEBUI_IMAGE"],
+                "-c",
+                _LOADER_PROGRAM,
+                "scan.pdf",
+                "text.pdf",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        (run_dir / "loader.log").write_text(loaded.stdout + loaded.stderr)
+        line = next(
+            (row for row in loaded.stdout.splitlines() if row.startswith("LOADER-REPORT ")), None
+        )
+        if line is None:
+            print("Open WebUI's Docling loader returned no report (loader.log)", file=sys.stderr)
+            return 1
+        extracted = json.loads(line.removeprefix("LOADER-REPORT "))
+    finally:
+        subprocess.run(
+            ["docker", "logs", container],
+            stdout=(run_dir / "docling.log").open("w"),
+            stderr=subprocess.STDOUT,
+        )
+        subprocess.run(["docker", "rm", "--force", container], capture_output=True)
+        subprocess.run(["docker", "network", "rm", network], capture_output=True)
+    scan = extracted["scan.pdf"]
+    text = extracted["text.pdf"]
+    flat_text = _normalized("".join(text["pages"]))
+    report.update(
+        scan_pages=len(scan["pages"]),
+        scan_seconds=round(scan["seconds"], 1),
+        scan_seconds_per_page=round(scan["seconds"] / pages, 1),
+        scan_pages_with_key=[
+            index + 1 for index, page in enumerate(scan["pages"]) if _has_key(page)
+        ],
+        text_seconds=round(text["seconds"], 1),
+        text_missing_lines=[line for line in text_lines if _normalized(line) not in flat_text],
+        scan_excerpt=scan["pages"][:1],
+    )
+    passed = (
+        report["scan_pages"] == pages
+        and report["scan_pages_with_key"] == list(range(1, pages + 1))
+        and report["scan_seconds_per_page"] <= float(KNOWLEDGE["seconds_per_page"])
+        and not report["text_missing_lines"]
+    )
+    report["passed"] = passed
+    (run_dir / "docling.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({k: v for k, v in report.items() if k != "scan_excerpt"}, ensure_ascii=False))
+    return 0 if passed else 1
+
+
+def _chat_ui_url() -> str:
+    return f"http://127.0.0.1:{os.environ.get('CHAT_UI_PORT', SPEC['webui']['port'])}"
+
+
+def _chat_ui_token(ui_url: str) -> str:
+    signin = control._webui_api(
+        ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""}
+    )
+    return signin["token"]
+
+
+def _webui_request(method: str, path: str, token: str, *, payload=None, timeout_s: float = 600):
+    request = urllib.request.Request(
+        f"{_chat_ui_url()}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return json.loads(response.read() or b"null")
+
+
+def _webui_upload(token: str, name: str, data: bytes, content_type: str) -> dict:
+    boundary = f"kairyu{hashlib.sha256(data).hexdigest()[:24]}"
+    body = (
+        (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        + data
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    request = urllib.request.Request(
+        f"{_chat_ui_url()}/api/v1/files/?process=true&process_in_background=true",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=600) as response:
+        return json.loads(response.read())
+
+
+def _knowledge_by_name(token: str, name: str) -> dict | None:
+    listed = _webui_request("GET", "/api/v1/knowledge/", token)
+    rows = listed.get("items", listed) if isinstance(listed, dict) else listed
+    return next((row for row in rows or [] if row.get("name") == name), None)
+
+
+def _knowledge_files(token: str, knowledge_id: str) -> list[dict]:
+    # The knowledge detail's ``files`` is empty in v0.12.3; the list has its own route.
+    listed = _webui_request("GET", f"/api/v1/knowledge/{knowledge_id}/files", token)
+    return listed.get("items", []) if isinstance(listed, dict) else listed or []
+
+
+# Every file a gate uploads is recorded under its knowledge base, so cleanup
+# deletes exactly those (failed uploads included) and never a user's file.
+GATE_UPLOADS = RESULTS_ROOT / "knowledge-gate-uploads.json"
+_GATE_UPLOADS_LOCK = __import__("threading").Lock()
+
+
+def _gate_uploads() -> dict[str, list[str]]:
+    return json.loads(GATE_UPLOADS.read_text()) if GATE_UPLOADS.exists() else {}
+
+
+def _record_upload(knowledge_id: str, file_id: str) -> None:
+    with _GATE_UPLOADS_LOCK:
+        uploads = _gate_uploads()
+        uploads.setdefault(knowledge_id, []).append(file_id)
+        GATE_UPLOADS.parent.mkdir(parents=True, exist_ok=True)
+        GATE_UPLOADS.write_text(json.dumps(uploads, indent=2) + "\n")
+
+
+def _delete_knowledge(token: str, knowledge_id: str) -> None:
+    """Delete a gate knowledge base and the files the gates recorded for it."""
+    try:
+        _webui_request("DELETE", f"/api/v1/knowledge/{knowledge_id}/delete", token)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    with _GATE_UPLOADS_LOCK:
+        uploads = _gate_uploads()
+        for file_id in uploads.pop(knowledge_id, []):
+            try:
+                _webui_request("DELETE", f"/api/v1/files/{file_id}", token)
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+        if GATE_UPLOADS.exists():
+            GATE_UPLOADS.write_text(json.dumps(uploads, indent=2) + "\n")
+
+
+def _ingest(
+    token: str, knowledge_id: str, name: str, data: bytes, content_type: str
+) -> tuple[str, float]:
+    """Upload, wait for Open WebUI's extraction, add to the knowledge base; seconds taken."""
+    started = time.monotonic()
+    file_id = _webui_upload(token, name, data, content_type)["id"]
+    _record_upload(knowledge_id, file_id)
+    deadline = started + 2 * float(KNOWLEDGE["ingestion_seconds"])
+    while True:
+        status = _webui_request("GET", f"/api/v1/files/{file_id}/process/status", token).get(
+            "status"
+        )
+        if status == "completed":
+            break
+        if status == "failed" or time.monotonic() > deadline:
+            detail = _webui_request("GET", f"/api/v1/files/{file_id}", token)
+            raise RuntimeError(
+                f"{name}: processing {status}: {json.dumps(detail.get('data'))[:500]}"
+            )
+        time.sleep(1)
+    _webui_request(
+        "POST",
+        f"/api/v1/knowledge/{knowledge_id}/file/add",
+        token,
+        payload={"file_id": file_id},
+        timeout_s=1800,
+    )
+    return file_id, time.monotonic() - started
+
+
+def knowledge(run_dir: Path) -> int:
+    """Japanese knowledge base through the Chat UI: OCR text, retrieval, ingestion and query time.
+
+    ``KNOWLEDGE_KEEP=1`` keeps the knowledge base for the ``chat-ui`` gate;
+    ``KNOWLEDGE_REUSE=1`` checks a kept one (after a restart) without ingesting.
+    """
+    token = _chat_ui_token(_chat_ui_url())
+    existing = _knowledge_by_name(token, KNOWLEDGE_NAME)
+    report: dict = {"name": KNOWLEDGE_NAME, "reused": False}
+    if existing is not None and os.environ.get("KNOWLEDGE_REUSE") == "1":
+        knowledge_id = existing["id"]
+        report["reused"] = True
+        scan_id = next(
+            row["id"]
+            for row in _knowledge_files(token, knowledge_id)
+            if row["filename"] == KNOWLEDGE_SCAN
+        )
+    else:
+        if existing is not None:
+            _delete_knowledge(token, existing["id"])
+        knowledge_id = _webui_request(
+            "POST",
+            "/api/v1/knowledge/create",
+            token,
+            payload={
+                "name": KNOWLEDGE_NAME,
+                "description": "Kairyu gate: 試料の保存条件を含む日本語の技術報告書",
+            },
+        )["id"]
+        scan = run_dir / KNOWLEDGE_SCAN
+        scan_pdf(
+            scan, int(KNOWLEDGE["scan_pages"]), {int(KNOWLEDGE["key_page"])}, namespace=run_dir.name
+        )
+        scan_id, seconds = _ingest(
+            token, knowledge_id, KNOWLEDGE_SCAN, scan.read_bytes(), "application/pdf"
+        )
+        report["scan_ingestion_seconds"] = round(seconds, 1)
+        distractor_seconds = []
+        for name, text in distractor_documents(
+            int(KNOWLEDGE["distractor_documents"]), namespace=run_dir.name
+        ):
+            distractor_seconds.append(
+                _ingest(token, knowledge_id, name, text.encode(), "text/markdown")[1]
+            )
+        report["distractor_ingestion_seconds"] = round(sum(distractor_seconds), 1)
+    content = (
+        _webui_request("GET", f"/api/v1/files/{scan_id}/data/content", token).get("content") or ""
+    )
+    report["ocr_has_key"] = _has_key(content)
+    report["ocr_characters"] = len(content)
+    started = time.monotonic()
+    result = _webui_request(
+        "POST",
+        "/api/v1/retrieval/query/collection",
+        token,
+        payload={"collection_names": [knowledge_id], "query": KNOWLEDGE_QUERY},
+    )
+    report["query_seconds"] = round(time.monotonic() - started, 2)
+    documents = (result.get("documents") or [[]])[0]
+    sources = [
+        meta.get("name") or meta.get("source") for meta in (result.get("metadatas") or [[]])[0]
+    ]
+    top_n = int(KNOWLEDGE["top_n"])
+    report["returned"] = len(documents)
+    report["key_rank"] = next(
+        (rank + 1 for rank, text in enumerate(documents) if _has_key(text)), None
+    )
+    report["sources"] = sources
+    report["scores"] = (result.get("distances") or [[]])[0]
+    passed = (
+        report["ocr_has_key"]
+        and report["key_rank"] is not None
+        and report["key_rank"] <= top_n
+        and report["query_seconds"] <= float(KNOWLEDGE["query_seconds"])
+        and report.get("scan_ingestion_seconds", 0) <= float(KNOWLEDGE["ingestion_seconds"])
+    )
+    report["passed"] = passed
+    (run_dir / "knowledge.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(report, ensure_ascii=False))
+    if os.environ.get("KNOWLEDGE_KEEP") != "1":
+        _delete_knowledge(token, knowledge_id)
+    return 0 if passed else 1
+
+
+def _kairyu_api_counts() -> dict[str, int]:
+    logs = subprocess.run(
+        ["docker", "logs", f"{control.PROJECT}-kairyu-1"], capture_output=True, text=True
+    )
+    text = logs.stdout + logs.stderr
+    return {
+        path: len(re.findall(rf'"path": "{re.escape(path)}"', text))
+        for path in ("/v1/responses", "/v1/chat/completions")
+    }
+
+
+def chat_ui(run_dir: Path) -> int:
+    """The Chat UI in Chromium: 323, then 324 in one chat, Red for an image, a knowledge answer.
+
+    The knowledge-base turn needs the base kept by ``KNOWLEDGE_KEEP=1 verify.sh knowledge``.
+    """
+    fixtures = run_dir / "fixtures"
+    fixtures.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    Image.new("RGB", (256, 256), (220, 20, 20)).save(fixtures / "red.png")
+    before = _kairyu_api_counts()
+    browser = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "--network",
+            "host",
+            "--env",
+            f"WEBUI_SMOKE_BASE_URL={_chat_ui_url()}",
+            "--env",
+            f"WEBUI_SMOKE_MODEL={SERVED_MODEL}",
+            "--env",
+            f"WEBUI_SMOKE_KNOWLEDGE={KNOWLEDGE_NAME}",
+            "--env",
+            f"WEBUI_SMOKE_KNOWLEDGE_QUERY={KNOWLEDGE_QUERY}",
+            "--env",
+            f"WEBUI_SMOKE_KNOWLEDGE_SOURCE={KNOWLEDGE_SCAN}",
+            "--volume",
+            f"{HERE / 'webui-browser-smoke.mjs'}:/work/webui_browser_smoke.mjs:ro",
+            "--volume",
+            f"{fixtures}:/fixtures:ro",
+            browser_image(),
+            "node",
+            "/work/webui_browser_smoke.mjs",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    (run_dir / "browser.log").write_text(browser.stdout + browser.stderr)
+    after = _kairyu_api_counts()
+    report = {"before": before, "after": after, "browser_exit": browser.returncode}
+    passed = (
+        browser.returncode == 0
+        and after["/v1/responses"] > before["/v1/responses"]
+        and after["/v1/chat/completions"] == before["/v1/chat/completions"]
+    )
+    report["passed"] = passed
+    (run_dir / "chat-ui.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(browser.stdout[-2000:] + browser.stderr[-2000:])
+    print(json.dumps(report))
+    token = _chat_ui_token(_chat_ui_url())
+    kept = _knowledge_by_name(token, KNOWLEDGE_NAME)
+    if kept is not None and os.environ.get("KNOWLEDGE_KEEP") != "1":
+        _delete_knowledge(token, kept["id"])
+    return 0 if passed else 1
+
+
+class DoclingCpu:
+    """Docling's own CPU use, sampled once a second from its cgroup counter.
+
+    This is the OCR load itself: Open WebUI's upload, queue and embedding time
+    does not count, only CPU time the Docling container spends.
+    """
+
+    def __init__(self, interval_s: float = 1.0) -> None:
+        import threading
+
+        container = f"{control.PROJECT}-docling-1"
+        identity = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Id}}", container],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        candidates = (
+            Path(f"/sys/fs/cgroup/system.slice/docker-{identity}.scope/cpu.stat"),
+            Path(f"/sys/fs/cgroup/docker/{identity}/cpu.stat"),
+        )
+        self.path = next((path for path in candidates if path.exists()), None)
+        if self.path is None:
+            raise RuntimeError(f"no cgroup CPU counter for {container}")
+        self.interval_s = interval_s
+        # (start, end, cores used) per sample, monotonic seconds.
+        self.samples: list[tuple[float, float, float]] = []
+        self.error: str | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _usage_s(self) -> float:
+        for line in self.path.read_text().splitlines():
+            key, value = line.split()
+            if key == "usage_usec":
+                return int(value) / 1e6
+        raise RuntimeError(f"{self.path} has no usage_usec")
+
+    def _run(self) -> None:
+        # A failed read ends sampling; ``error`` fails the gate and the time
+        # after the last sample counts as unobserved, never as busy.
+        try:
+            last_time, last_usage = time.monotonic(), self._usage_s()
+            while not self._stop.wait(self.interval_s):
+                now, usage = time.monotonic(), self._usage_s()
+                self.samples.append((last_time, now, (usage - last_usage) / (now - last_time)))
+                last_time, last_usage = now, usage
+        except Exception as error:  # noqa: BLE001 - reported through ``error``
+            self.error = repr(error)
+
+    def __enter__(self) -> DoclingCpu:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def wait_busy(self, cores: float, seconds: int, timeout_s: float) -> bool:
+        """True once the last ``seconds`` samples each used at least ``cores``."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and self.error is None:
+            recent = self.samples[-seconds:]
+            if len(recent) == seconds and all(used >= cores for *_, used in recent):
+                return True
+            time.sleep(self.interval_s / 2)
+        return False
+
+    def wait_idle(self, cores: float, seconds: int, timeout_s: float) -> bool:
+        """True once the last ``seconds`` samples each used less than ``cores``."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and self.error is None:
+            recent = self.samples[-seconds:]
+            if len(recent) == seconds and all(used < cores for *_, used in recent):
+                return True
+            time.sleep(self.interval_s / 2)
+        return False
+
+    def wait_past(self, moment: float) -> None:
+        """Wait (up to three intervals) for a sample that ends after ``moment``."""
+        deadline = time.monotonic() + 3 * self.interval_s
+        while time.monotonic() < deadline and self.error is None:
+            if self.samples and self.samples[-1][1] >= moment:
+                return
+            time.sleep(self.interval_s / 4)
+
+    def summary(self, started: float, ended: float, cores: float) -> dict:
+        """Busy and observed shares of [started, ended], weighted by time.
+
+        Seconds without a sample (a stopped sampler) are unobserved and so not
+        busy: the busy share's denominator is the whole window.
+        """
+        window = max(ended - started, 0.0)
+        observed = busy = core_seconds = 0.0
+        for first, last, used in self.samples:
+            overlap = max(0.0, min(last, ended) - max(first, started))
+            observed += overlap
+            core_seconds += overlap * used
+            if used >= cores:
+                busy += overlap
+        return {
+            "busy_share": busy / window if window else 0.0,
+            "observed_share": observed / window if window else 0.0,
+            "mean_cores": core_seconds / observed if observed else 0.0,
+        }
+
+
+def knowledge_serving(run_dir: Path) -> int:
+    """Serving rows (c1/c8) while Docling OCRs scanned PDFs at its CPU cap: within the record.
+
+    Three load streams, one more than Docling's two conversion workers, keep
+    a document queued at Docling while another stream embeds and adds its
+    document; the second and third start when the first one's conversion
+    ends. The rows start only once every stream has started and Docling is
+    busy, and the gate fails unless Docling used at
+    least ``docling_busy_cores`` in ``docling_busy_share`` of the seconds the
+    rows took.
+    """
+    import queue
+    import threading
+
+    token = _chat_ui_token(_chat_ui_url())
+    name = f"{KNOWLEDGE_NAME}-load"
+    stale = _knowledge_by_name(token, name)
+    if stale is not None:
+        _delete_knowledge(token, stale["id"])
+    knowledge_id = _webui_request(
+        "POST",
+        "/api/v1/knowledge/create",
+        token,
+        payload={"name": name, "description": "Kairyu gate load"},
+    )["id"]
+    # Open WebUI refuses a document whose content it already holds, so every
+    # ingestion uploads a different scan; enough for both streams to outlast the rows.
+    pending: queue.Queue[Path] = queue.Queue()
+    for index in range(1, int(KNOWLEDGE["load_documents"]) + 1):
+        scan = run_dir / f"load-{index:02d}-{KNOWLEDGE_SCAN}"
+        scan_pdf(
+            scan,
+            int(KNOWLEDGE["scan_pages"]),
+            {int(KNOWLEDGE["key_page"])},
+            namespace=f"{run_dir.name}-load-{index}",
+        )
+        pending.put(scan)
+    stop = threading.Event()
+    ingestions: list[dict] = []
+    errors: list[str] = []
+
+    def load(stream: int) -> None:
+        while not stop.is_set():
+            try:
+                scan = pending.get_nowait()
+            except queue.Empty:
+                return
+            started = time.monotonic()
+            try:
+                _ingest(token, knowledge_id, scan.name, scan.read_bytes(), "application/pdf")
+            except Exception as error:  # noqa: BLE001 - recorded and fails the gate
+                errors.append(f"stream {stream}: {error!r}")
+                stop.set()
+                return
+            ingestions.append({"stream": stream, "start": started, "end": time.monotonic()})
+
+    busy_cores = float(KNOWLEDGE["docling_busy_cores"])
+    report: dict = {"load_streams": int(KNOWLEDGE["load_streams"])}
+    code = 1
+    with DoclingCpu() as cpu:
+        workers = [
+            threading.Thread(target=load, args=(stream,), daemon=True)
+            for stream in range(1, int(KNOWLEDGE["load_streams"]) + 1)
+        ]
+        # The first stream starts alone; the others start when its conversion
+        # ends (Docling goes idle while it embeds and adds its document). With
+        # one stream more than Docling's two workers, a document is always
+        # queued at Docling while another stream embeds.
+        busy_seconds = int(KNOWLEDGE["docling_start_busy_seconds"])
+        start_timeout = float(KNOWLEDGE["docling_start_seconds"])
+        workers[0].start()
+        started_busy = cpu.wait_busy(busy_cores, busy_seconds, start_timeout)
+        if len(workers) > 1:
+            cpu.wait_idle(busy_cores, 2, float(KNOWLEDGE["ingestion_seconds"]))
+            for worker in workers[1:]:
+                worker.start()
+            started_busy = started_busy and cpu.wait_busy(busy_cores, busy_seconds, start_timeout)
+        rows_started = time.monotonic()
+        try:
+            if started_busy and not errors:
+                code = serving(
+                    run_dir, concurrency=[int(level) for level in KNOWLEDGE["serving_concurrency"]]
+                )
+        finally:
+            rows_ended = time.monotonic()
+            stop.set()
+            for worker in workers:
+                worker.join(timeout=float(KNOWLEDGE["ingestion_seconds"]) * 2)
+            stuck = sum(worker.is_alive() for worker in workers)
+        cpu.wait_past(rows_ended)
+        load = cpu.summary(rows_started, rows_ended, busy_cores)
+    if not stuck:
+        _delete_knowledge(token, knowledge_id)
+    sampler_error = cpu.error
+    rows = {}
+    for level in KNOWLEDGE["serving_concurrency"]:
+        row_path = run_dir / f"capped-c{level}" / "row.json"
+        if not row_path.exists():
+            continue
+        row = json.loads(row_path.read_text())
+        reference = float(KNOWLEDGE["serving_reference_tok_s"][str(level)])
+        rows[str(level)] = {
+            "output_tokens_per_s": round(row["summary"]["output_tokens_per_s"], 1),
+            "reference": reference,
+            "fraction": round(row["summary"]["output_tokens_per_s"] / reference, 3),
+        }
+    report.update(
+        docling_started_busy=started_busy,
+        docling_sampler_error=sampler_error,
+        docling_busy_share=round(load["busy_share"], 3),
+        docling_observed_share=round(load["observed_share"], 3),
+        docling_mean_cores=round(load["mean_cores"], 2),
+        load_workers_stuck=stuck,
+        rows_seconds=round(rows_ended - rows_started, 1),
+        rows=rows,
+        ingestions=[
+            {
+                "stream": row["stream"],
+                "start_s": round(row["start"] - rows_started, 1),
+                "end_s": round(row["end"] - rows_started, 1),
+            }
+            for row in sorted(ingestions, key=lambda row: row["start"])
+        ],
+        errors=errors,
+    )
+    passed = (
+        code == 0
+        and started_busy
+        and sampler_error is None
+        and not errors
+        and not stuck
+        and load["busy_share"] >= float(KNOWLEDGE["docling_busy_share"])
+        and len(rows) == len(KNOWLEDGE["serving_concurrency"])
+        and all(
+            row["fraction"] >= float(KNOWLEDGE["serving_min_fraction"]) for row in rows.values()
+        )
+    )
+    report["passed"] = passed
+    (run_dir / "knowledge-serving.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report))
+    return 0 if passed else 1
+
+
 GATES = {
     "l1": l1,
     "serving": serving,
@@ -1155,6 +2027,10 @@ GATES = {
     "long-context": long_context,
     "restart": restart,
     "api-equivalence": api_equivalence,
+    "docling": docling,
+    "knowledge": knowledge,
+    "chat-ui": chat_ui,
+    "knowledge-serving": knowledge_serving,
 }
 
 

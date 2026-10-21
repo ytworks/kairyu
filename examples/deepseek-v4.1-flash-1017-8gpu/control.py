@@ -25,6 +25,15 @@ PROJECT = SPEC["environment"].replace(".", "-")
 L1_CONTAINER = f"{PROJECT}-deepseek-1"
 
 
+RETRIEVAL = SPEC["webui"]["retrieval"]
+# Open WebUI's data volume; the retrieval models live in a subdirectory of it.
+WEBUI_DATA = "/app/backend/data"
+
+
+def _webui_model_path(role: str) -> str:
+    return f"{WEBUI_DATA}/{RETRIEVAL['models_dir']}/{RETRIEVAL[role]['slug']}"
+
+
 def _check_allocation() -> None:
     tp = int(ALLOCATION["tensor_parallel_size"])
     dp = int(ALLOCATION["data_parallel_size"])
@@ -113,6 +122,16 @@ def _compose_env() -> dict[str, str]:
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
             "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "127.0.0.1"),
+            "DOCLING_IMAGE": os.environ.get("DOCLING_IMAGE", RETRIEVAL["docling_image"]),
+            "DOCLING_SERVER_URL": RETRIEVAL["docling_url"],
+            "DOCLING_PARAMS": json.dumps(RETRIEVAL["docling_params"], separators=(",", ":")),
+            "RAG_EMBEDDING_MODEL_PATH": _webui_model_path("embedding"),
+            "RAG_RERANKING_MODEL_PATH": _webui_model_path("reranking"),
+            "RAG_HYBRID_BM25_WEIGHT": str(RETRIEVAL["hybrid_bm25_weight"]),
+            "RAG_TOP_K": str(RETRIEVAL["top_k"]),
+            "CHUNK_SIZE": str(RETRIEVAL["chunk_size"]),
+            "CHUNK_OVERLAP": str(RETRIEVAL["chunk_overlap"]),
+            "RAG_TOP_K_RERANKER": str(RETRIEVAL["top_k_reranker"]),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the union of the DP ranks' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
@@ -318,7 +337,8 @@ import hashlib, json, os, sys
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
-repo, revision, slug, expected_tree = sys.argv[1:]
+repo, revision, slug, expected_tree, *rest = sys.argv[1:]
+allow_patterns = json.loads(rest[0]) if rest else None
 target = Path('/models') / slug
 attestation = target / '.kairyu-model-attestation.json'
 
@@ -349,7 +369,7 @@ if attestation.exists():
         raise SystemExit('model files differ from the pinned attestation')
     raise SystemExit(0)
 
-snapshot_download(repo, revision=revision, local_dir=target,
+snapshot_download(repo, revision=revision, local_dir=target, allow_patterns=allow_patterns,
                   token=os.environ.get('HF_TOKEN') or None)
 rows, tree = inventory()
 if tree != expected_tree:
@@ -379,15 +399,9 @@ def _seed_model(target: Path) -> bool:
     return True
 
 
-def _ensure_model(env: dict[str, str]) -> None:
-    model = SPEC["model"]
-    target = Path(env["DEEPSEEK_MODEL_STORAGE_PATH"]) / model["slug"]
-    seeded = _seed_model(target)
-    if not (target / ".kairyu-model-attestation.json").exists() and not seeded:
-        free_gib = shutil.disk_usage(target.parent).free // (1024**3)
-        minimum = int(SPEC["storage"]["minimum_free_gib"])
-        if free_gib < minimum:
-            raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
+def _attest_model(env: dict[str, str], volume: Path, model: dict, *extra: str) -> None:
+    """Download ``model`` into ``volume`` at its pinned revision and check its tree hash."""
+
     command = [
         "docker",
         "run",
@@ -395,7 +409,7 @@ def _ensure_model(env: dict[str, str]) -> None:
         "--entrypoint",
         "python3",
         "--volume",
-        f"{env['DEEPSEEK_MODEL_STORAGE_PATH']}:/models",
+        f"{volume}:/models",
     ]
     if "HF_TOKEN" in os.environ:
         command.extend(["--env", "HF_TOKEN"])
@@ -410,9 +424,36 @@ def _ensure_model(env: dict[str, str]) -> None:
             model["revision"],
             model["slug"],
             model["tree_sha256"],
+            *extra,
         ]
     )
     _run(command)
+
+
+def _ensure_model(env: dict[str, str]) -> None:
+    model = SPEC["model"]
+    target = Path(env["DEEPSEEK_MODEL_STORAGE_PATH"]) / model["slug"]
+    seeded = _seed_model(target)
+    if not (target / ".kairyu-model-attestation.json").exists() and not seeded:
+        free_gib = shutil.disk_usage(target.parent).free // (1024**3)
+        minimum = int(SPEC["storage"]["minimum_free_gib"])
+        if free_gib < minimum:
+            raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
+    _attest_model(env, Path(env["DEEPSEEK_MODEL_STORAGE_PATH"]), model)
+
+
+def _ensure_retrieval_models(env: dict[str, str]) -> None:
+    """Fetch the Chat UI's embedding and reranking models on the host side.
+
+    Open WebUI runs with ``OFFLINE_MODE`` and loads both from its data volume,
+    so a pinned, hashed copy must be there before it starts.
+    """
+
+    volume = Path(env["WEBUI_STORAGE_PATH"]) / RETRIEVAL["models_dir"]
+    volume.mkdir(parents=True, exist_ok=True)
+    for role in ("embedding", "reranking"):
+        model = RETRIEVAL[role]
+        _attest_model(env, volume, model, json.dumps(model["allow_patterns"]))
 
 
 def _json_url(url: str) -> dict:
@@ -936,6 +977,54 @@ def _check_chat_ui_connection(ui_url: str, token: str) -> None:
         )
 
 
+def _check_chat_ui_retrieval(ui_url: str, token: str) -> None:
+    """Open WebUI must extract with Docling and search with the pinned models.
+
+    BM25 must stay off: Open WebUI splits BM25 terms on whitespace, which
+    cannot tokenize Japanese, so hybrid search runs vector search plus the
+    reranker only.
+    """
+
+    config = _webui_api(ui_url, "/api/v1/retrieval/config", token=token)
+    embedding = _webui_api(ui_url, "/api/v1/retrieval/embedding", token=token)
+    observed = {
+        "CONTENT_EXTRACTION_ENGINE": config.get("CONTENT_EXTRACTION_ENGINE"),
+        "DOCLING_SERVER_URL": config.get("DOCLING_SERVER_URL"),
+        "DOCLING_PARAMS": config.get("DOCLING_PARAMS"),
+        "RAG_EMBEDDING_ENGINE": embedding.get("RAG_EMBEDDING_ENGINE"),
+        "RAG_EMBEDDING_MODEL": embedding.get("RAG_EMBEDDING_MODEL"),
+        "RAG_RERANKING_ENGINE": config.get("RAG_RERANKING_ENGINE"),
+        "RAG_RERANKING_MODEL": config.get("RAG_RERANKING_MODEL"),
+        "ENABLE_RAG_HYBRID_SEARCH": config.get("ENABLE_RAG_HYBRID_SEARCH"),
+        "HYBRID_BM25_WEIGHT": config.get("HYBRID_BM25_WEIGHT"),
+        "TOP_K": config.get("TOP_K"),
+        "TOP_K_RERANKER": config.get("TOP_K_RERANKER"),
+        "CHUNK_SIZE": config.get("CHUNK_SIZE"),
+        "CHUNK_OVERLAP": config.get("CHUNK_OVERLAP"),
+    }
+    expected = {
+        "CONTENT_EXTRACTION_ENGINE": "docling",
+        "DOCLING_SERVER_URL": RETRIEVAL["docling_url"],
+        "DOCLING_PARAMS": RETRIEVAL["docling_params"],
+        "RAG_EMBEDDING_ENGINE": "",
+        "RAG_EMBEDDING_MODEL": _webui_model_path("embedding"),
+        "RAG_RERANKING_ENGINE": "",
+        "RAG_RERANKING_MODEL": _webui_model_path("reranking"),
+        "ENABLE_RAG_HYBRID_SEARCH": True,
+        "HYBRID_BM25_WEIGHT": RETRIEVAL["hybrid_bm25_weight"],
+        "TOP_K": RETRIEVAL["top_k"],
+        "TOP_K_RERANKER": RETRIEVAL["top_k_reranker"],
+        "CHUNK_SIZE": RETRIEVAL["chunk_size"],
+        "CHUNK_OVERLAP": RETRIEVAL["chunk_overlap"],
+    }
+    wrong = {key: value for key, value in observed.items() if value != expected[key]}
+    if wrong:
+        raise SystemExit(
+            f"Chat UI retrieval configuration differs from example.json: {wrong!r}; "
+            f"expected { ({key: expected[key] for key in wrong})!r}"
+        )
+
+
 def _provision_chat_ui_effort_selector(ui_url: str) -> None:
     """Install the Reasoning Effort dropdown filter into the pinned Open WebUI."""
 
@@ -969,6 +1058,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
         if not (state.get("is_active") and state.get("is_global")):
             raise SystemExit("Chat UI effort selector could not be activated globally")
         _check_chat_ui_connection(ui_url, token)
+        _check_chat_ui_retrieval(ui_url, token)
         spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
     except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
@@ -984,6 +1074,7 @@ def up() -> None:
     _preflight(env)
     _ensure_vllm_image(env)
     _ensure_model(env)
+    _ensure_retrieval_models(env)
     _run(
         [
             "docker",
