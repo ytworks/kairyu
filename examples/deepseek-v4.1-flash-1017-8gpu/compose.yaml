@@ -138,6 +138,31 @@ services:
       timeout: 3s
       retries: 120
     restart: unless-stopped
+  # Document extraction for the Chat UI's knowledge bases: Docling with
+  # RapidOCR (PP-OCRv6; one recognizer covers Japanese, Chinese and English),
+  # CPU only. The OCR language and the rest of the request options come from
+  # the Chat UI's DOCLING_PARAMS. Its CPU limit keeps OCR from slowing the L1,
+  # whose cpuset spans every host CPU.
+  docling:
+    image: ${DOCLING_IMAGE}
+    environment:
+      DOCLING_SERVE_MAX_SYNC_WAIT: '3600'
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: '2'
+      OMP_NUM_THREADS: '8'
+      HF_HUB_OFFLINE: '1'
+    cpus: 16
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:5001/health",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
   chat-ui:
     image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
     environment:
@@ -157,7 +182,23 @@ services:
       WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
       ENABLE_OLLAMA_API: 'false'
       ENABLE_EVALUATION_ARENA_MODELS: 'false'
+      # Japanese knowledge bases: Docling extraction (OCR for bitmaps only),
+      # multilingual embedding and reranking from the pinned, hashed copies in
+      # the data volume (control.py), no model downloads. Open WebUI's BM25
+      # splits on whitespace and cannot tokenize Japanese, so hybrid search
+      # runs with BM25 weight 0: vector search, then the reranker.
+      CONTENT_EXTRACTION_ENGINE: docling
+      DOCLING_SERVER_URL: ${DOCLING_SERVER_URL}
+      DOCLING_PARAMS: ${DOCLING_PARAMS}
       RAG_EMBEDDING_ENGINE: ''
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL_PATH}
+      RAG_RERANKING_ENGINE: ''
+      RAG_RERANKING_MODEL: ${RAG_RERANKING_MODEL_PATH}
+      ENABLE_RAG_HYBRID_SEARCH: 'true'
+      RAG_HYBRID_BM25_WEIGHT: ${RAG_HYBRID_BM25_WEIGHT}
+      RAG_TOP_K: ${RAG_TOP_K}
+      RAG_TOP_K_RERANKER: ${RAG_TOP_K_RERANKER}
+      OFFLINE_MODE: 'true'
     volumes:
     - type: bind
       source: ${WEBUI_STORAGE_PATH}
@@ -165,6 +206,10 @@ services:
     depends_on:
       kairyu:
         condition: service_healthy
+      docling:
+        condition: service_healthy
+    # Embedding and reranking run on CPU in this container.
+    cpus: 16
     ports:
     - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3018}:8080
     restart: unless-stopped
