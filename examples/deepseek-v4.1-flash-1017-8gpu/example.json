@@ -99,6 +99,8 @@
         "tree_sha256": "5c3ea0eb074cf88bcea847b2ecb77246dcfe136dee5666fc2e599aec82cb9fba",
         "allow_patterns": ["config.json", "model.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
       },
+      "chunk_size": 300,
+      "chunk_overlap": 30,
       "hybrid_bm25_weight": 0,
       "top_k": 20,
       "top_k_reranker": 5
@@ -133,6 +135,7 @@
       "query_seconds": 10,
       "top_n": 5,
       "serving_concurrency": [1, 8],
+      "load_documents": 8,
       "serving_min_fraction": 0.95,
       "serving_reference_tok_s": {"1": 151.2, "8": 378.8}
     }

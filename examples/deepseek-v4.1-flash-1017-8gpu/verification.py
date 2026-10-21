@@ -1517,13 +1517,22 @@ def _knowledge_by_name(token: str, name: str) -> dict | None:
     return next((row for row in rows or [] if row.get("name") == name), None)
 
 
+def _knowledge_files(token: str, knowledge_id: str) -> list[dict]:
+    # The knowledge detail's ``files`` is empty in v0.12.3; the list has its own route.
+    listed = _webui_request("GET", f"/api/v1/knowledge/{knowledge_id}/files", token)
+    return listed.get("items", []) if isinstance(listed, dict) else listed or []
+
+
 def _delete_knowledge(token: str, knowledge: dict) -> None:
-    detail = _webui_request("GET", f"/api/v1/knowledge/{knowledge['id']}", token)
-    files = [row["id"] for row in (detail or {}).get("files") or []]
+    """Delete a gate knowledge base and every file the gates uploaded (orphans included)."""
     _webui_request("DELETE", f"/api/v1/knowledge/{knowledge['id']}/delete", token)
-    for file_id in files:
+    listed = _webui_request("GET", "/api/v1/files/", token)
+    rows = listed.get("items", listed) if isinstance(listed, dict) else listed
+    for row in rows or []:
+        if not str(row.get("filename", "")).startswith(("kairyu-gate-", "load-")):
+            continue
         try:
-            _webui_request("DELETE", f"/api/v1/files/{file_id}", token)
+            _webui_request("DELETE", f"/api/v1/files/{row['id']}", token)
         except urllib.error.HTTPError:
             pass
 
@@ -1569,9 +1578,10 @@ def knowledge(run_dir: Path) -> int:
     if existing is not None and os.environ.get("KNOWLEDGE_REUSE") == "1":
         knowledge_id = existing["id"]
         report["reused"] = True
-        detail = _webui_request("GET", f"/api/v1/knowledge/{knowledge_id}", token)
         scan_id = next(
-            row["id"] for row in detail["files"] if row["meta"]["name"] == KNOWLEDGE_SCAN
+            row["id"]
+            for row in _knowledge_files(token, knowledge_id)
+            if row["filename"] == KNOWLEDGE_SCAN
         )
     else:
         if existing is not None:
@@ -1726,27 +1736,29 @@ def knowledge_serving(run_dir: Path) -> int:
         token,
         payload={"name": name, "description": "Kairyu gate load"},
     )["id"]
-    scan = run_dir / KNOWLEDGE_SCAN
-    scan_pdf(
-        scan, int(KNOWLEDGE["scan_pages"]), {int(KNOWLEDGE["key_page"])}, namespace=run_dir.name
-    )
+    # Open WebUI refuses a document whose content it already holds, so every
+    # load iteration uploads a different scan; enough to outlast the rows.
+    scans = []
+    for index in range(1, int(KNOWLEDGE["load_documents"]) + 1):
+        scan = run_dir / f"load-{index:02d}-{KNOWLEDGE_SCAN}"
+        scan_pdf(
+            scan,
+            int(KNOWLEDGE["scan_pages"]),
+            {int(KNOWLEDGE["key_page"])},
+            namespace=f"{run_dir.name}-load-{index}",
+        )
+        scans.append(scan)
     stop = threading.Event()
     ingestions: list[float] = []
     errors: list[str] = []
 
     def load() -> None:
-        index = 0
-        while not stop.is_set():
-            index += 1
+        for scan in scans:
+            if stop.is_set():
+                return
             try:
                 ingestions.append(
-                    _ingest(
-                        token,
-                        knowledge_id,
-                        f"load-{index:02d}-{KNOWLEDGE_SCAN}",
-                        scan.read_bytes(),
-                        "application/pdf",
-                    )[1]
+                    _ingest(token, knowledge_id, scan.name, scan.read_bytes(), "application/pdf")[1]
                 )
             except Exception as error:  # noqa: BLE001 - recorded and fails the gate
                 errors.append(repr(error))
@@ -1773,6 +1785,7 @@ def knowledge_serving(run_dir: Path) -> int:
             "fraction": round(row["summary"]["output_tokens_per_s"] / reference, 3),
         }
     report = {
+        "load_outlasted_rows": len(ingestions) < len(scans),
         "rows": rows,
         "ingestions_seconds": [round(value, 1) for value in ingestions],
         "errors": errors,
@@ -1780,7 +1793,7 @@ def knowledge_serving(run_dir: Path) -> int:
     passed = (
         code == 0
         and not errors
-        and bool(ingestions)
+        and report["load_outlasted_rows"]
         and all(
             row["fraction"] >= float(KNOWLEDGE["serving_min_fraction"]) for row in rows.values()
         )

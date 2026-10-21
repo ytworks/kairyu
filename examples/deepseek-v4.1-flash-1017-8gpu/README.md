@@ -7,7 +7,12 @@ API, and Open WebUI.
 
 ```text
 Open WebUI (:3018) -> Kairyu (:8018) -> ReplicaPool -> vLLM (TP8 / EP8 + DSpark, GPUs 0-7)
+   |
+   +-> Docling (OCR, CPU) for knowledge-base documents
 ```
+
+Unlike its sibling examples, this one's Chat UI is set up for Japanese
+knowledge bases (below).
 
 1017 (2026-10-17) is DeepSeek's weight refresh of V4.1-Flash: `config.json`,
 the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
@@ -75,6 +80,39 @@ and `upstream_messages_models`; Kairyu checks at startup that vLLM serves
 Responses as Responses, Anthropic Messages as Messages. On the Responses
 wire Kairyu spells L3 `max` as OpenAI `xhigh`, which `patch_sm120.py` maps to
 the max budget (100); chat callers reach vLLM with `max` (100).
+
+## Japanese knowledge bases
+
+Open WebUI's knowledge bases (Workspace > Knowledge) are configured for
+Japanese documents in `compose.yaml`, with every value pinned in
+`example.json`:
+
+- **Extraction**: documents other than plain text go to a Docling service
+  (`docling-serve-cpu` v1.37.0, pinned by digest). Text layers are kept;
+  bitmaps (scanned pages, images in a PDF) are read by RapidOCR with
+  `ocr_lang` `iso:ja` (PP-OCRv6, one recognizer for Japanese, Chinese and
+  English). Docling and the Chat UI are limited to 16 CPUs each so OCR and
+  embedding do not slow the L1, whose cpuset spans every host CPU.
+- **Embedding** `BAAI/bge-m3` and **reranking** `BAAI/bge-reranker-v2-m3`,
+  both multilingual. `run.sh up` downloads them at pinned revisions into the
+  Chat UI's data volume (`webui-data/rag-models`) and hashes them as it does
+  the checkpoint; Open WebUI runs with `OFFLINE_MODE` and loads those copies.
+- **Search**: hybrid search with BM25 weight 0. Open WebUI's BM25 splits
+  text on whitespace, which cannot tokenize Japanese, so a query runs vector
+  search for 20 candidates and the reranker keeps the best 5.
+
+`run.sh up` fails unless Open WebUI reports exactly this configuration.
+Because the Chat UI starts with `RESET_CONFIG_ON_START`, Admin Panel changes
+to these settings are reset at the next start; change `example.json`
+instead. Documents are embedded when they are added: after changing the
+embedding model or the OCR settings, add the documents again (or use
+Admin Panel > Settings > Documents > Reindex).
+
+To use one: create it in Workspace > Knowledge with a name and a description
+that says what it holds (the model chooses among knowledge bases by them),
+add files, then either attach it to the model (Workspace > Models) or pick it
+in a chat with `#`. Knowledge bases live in `webui-data` and survive
+`run.sh down` / `up`.
 
 ## Why this configuration
 
@@ -154,6 +192,21 @@ on vLLM's chat API.
 - `api-equivalence`: the same Responses requests sent to vLLM directly and
   to Kairyu agree, and vLLM's own request counters show Kairyu reached it on
   `/v1/responses` (`verification/product/correctness/upstream_api_equivalence.py`).
+- `docling` (no GPU, the running stack untouched): the pinned Docling on an
+  internal network converts a generated image-only Japanese PDF through Open
+  WebUI's own loader, with each page's key sentence extracted, and a
+  Chromium-printed text-layer PDF with every line intact.
+- `knowledge`: through the Chat UI's API, a knowledge base of a 20-page
+  scanned PDF and 20 Japanese text distractors; the key sentence is in the
+  OCR text, a Japanese question returns its chunk in the top 5, within the
+  ingestion and query budgets. `KNOWLEDGE_KEEP=1` keeps it for `chat-ui`;
+  `KNOWLEDGE_REUSE=1` re-checks a kept one (after a restart).
+- `chat-ui`: Chromium (`webui-browser-smoke.mjs`): `323`, then `324` in the
+  same chat, `Red` for an attached PNG, and a Japanese question with the kept
+  knowledge base picked by `#` answered from the scanned PDF with it cited;
+  Kairyu sees `/v1/responses` only.
+- `knowledge-serving`: the `serving` c1/c8 rows while the Chat UI OCRs
+  scanned PDFs, at least 95 % of the recorded throughput.
 
 L1 candidates are compared with `tune.py` (one parameter at a time, the
 committed configuration restored afterwards; `dp8` is the other measured

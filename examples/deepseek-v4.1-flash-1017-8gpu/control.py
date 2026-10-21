@@ -129,6 +129,8 @@ def _compose_env() -> dict[str, str]:
             "RAG_RERANKING_MODEL_PATH": _webui_model_path("reranking"),
             "RAG_HYBRID_BM25_WEIGHT": str(RETRIEVAL["hybrid_bm25_weight"]),
             "RAG_TOP_K": str(RETRIEVAL["top_k"]),
+            "CHUNK_SIZE": str(RETRIEVAL["chunk_size"]),
+            "CHUNK_OVERLAP": str(RETRIEVAL["chunk_overlap"]),
             "RAG_TOP_K_RERANKER": str(RETRIEVAL["top_k_reranker"]),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the union of the DP ranks' NUMA-local CPU sets.
@@ -997,6 +999,8 @@ def _check_chat_ui_retrieval(ui_url: str, token: str) -> None:
         "HYBRID_BM25_WEIGHT": config.get("HYBRID_BM25_WEIGHT"),
         "TOP_K": config.get("TOP_K"),
         "TOP_K_RERANKER": config.get("TOP_K_RERANKER"),
+        "CHUNK_SIZE": config.get("CHUNK_SIZE"),
+        "CHUNK_OVERLAP": config.get("CHUNK_OVERLAP"),
     }
     expected = {
         "CONTENT_EXTRACTION_ENGINE": "docling",
@@ -1010,6 +1014,8 @@ def _check_chat_ui_retrieval(ui_url: str, token: str) -> None:
         "HYBRID_BM25_WEIGHT": RETRIEVAL["hybrid_bm25_weight"],
         "TOP_K": RETRIEVAL["top_k"],
         "TOP_K_RERANKER": RETRIEVAL["top_k_reranker"],
+        "CHUNK_SIZE": RETRIEVAL["chunk_size"],
+        "CHUNK_OVERLAP": RETRIEVAL["chunk_overlap"],
     }
     wrong = {key: value for key, value in observed.items() if value != expected[key]}
     if wrong:
