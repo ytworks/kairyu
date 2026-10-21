@@ -142,16 +142,16 @@ services:
   # RapidOCR (PP-OCRv6; one recognizer covers Japanese, Chinese and English),
   # CPU only. The OCR language and the rest of the request options come from
   # the Chat UI's DOCLING_PARAMS. Its CPU limit keeps OCR from slowing the L1,
-  # whose cpuset spans every host CPU: with 16 CPUs, c1 serving fell 4.1 %
-  # during OCR (MEASUREMENTS.md); two workers x four threads fill 8 CPUs.
+  # whose cpuset spans every host CPU: fully used, these 4 CPUs cost c1
+  # serving 1.4 % (MEASUREMENTS.md); two workers x two threads fill them.
   docling:
     image: ${DOCLING_IMAGE}
     environment:
       DOCLING_SERVE_MAX_SYNC_WAIT: '3600'
       DOCLING_SERVE_ENG_LOC_NUM_WORKERS: '2'
-      OMP_NUM_THREADS: '4'
+      OMP_NUM_THREADS: '2'
       HF_HUB_OFFLINE: '1'
-    cpus: 8
+    cpus: 4
     healthcheck:
       test:
       - CMD
@@ -206,9 +206,9 @@ services:
       CHUNK_OVERLAP: ${CHUNK_OVERLAP}
       OFFLINE_MODE: 'true'
       # torch sees all 128 host CPUs and would start 64 threads under the
-      # 16-CPU limit below; measured on 20 reranker pairs: 20.1 s with 64
-      # threads, 7.9 s with 16.
-      OMP_NUM_THREADS: '16'
+      # CPU limit below (20 reranker pairs at 16 CPUs: 20.1 s with 64 threads,
+      # 7.9 s with 16); one thread per CPU.
+      OMP_NUM_THREADS: '8'
     volumes:
     - type: bind
       source: ${WEBUI_STORAGE_PATH}
@@ -218,8 +218,9 @@ services:
         condition: service_healthy
       docling:
         condition: service_healthy
-    # Embedding and reranking run on CPU in this container.
-    cpus: 16
+    # Embedding and reranking run on CPU in this container. With 16 CPUs,
+    # embedding alone cut c1 serving 12.4 % (MEASUREMENTS.md).
+    cpus: 8
     ports:
     - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3018}:8080
     restart: unless-stopped

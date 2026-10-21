@@ -136,7 +136,7 @@
       "top_n": 5,
       "serving_concurrency": [1, 8],
       "load_documents": 12,
-      "load_streams": 2,
+      "load_streams": 3,
       "docling_busy_cores": 1.0,
       "docling_busy_share": 0.95,
       "docling_start_busy_seconds": 3,

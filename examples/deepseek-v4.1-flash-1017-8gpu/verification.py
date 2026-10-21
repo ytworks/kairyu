@@ -1834,6 +1834,16 @@ class DoclingCpu:
             time.sleep(self.interval_s / 2)
         return False
 
+    def wait_idle(self, cores: float, seconds: int, timeout_s: float) -> bool:
+        """True once the last ``seconds`` samples each used less than ``cores``."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and self.error is None:
+            recent = self.samples[-seconds:]
+            if len(recent) == seconds and all(used < cores for *_, used in recent):
+                return True
+            time.sleep(self.interval_s / 2)
+        return False
+
     def wait_past(self, moment: float) -> None:
         """Wait (up to three intervals) for a sample that ends after ``moment``."""
         deadline = time.monotonic() + 3 * self.interval_s
@@ -1866,9 +1876,11 @@ class DoclingCpu:
 def knowledge_serving(run_dir: Path) -> int:
     """Serving rows (c1/c8) while Docling OCRs scanned PDFs at its CPU cap: within the record.
 
-    Two load streams (Docling's two conversion workers) keep a conversion
-    running while the other stream embeds and adds its document. The rows
-    start only once Docling is busy, and the gate fails unless Docling used at
+    Three load streams, one more than Docling's two conversion workers, keep
+    a document queued at Docling while another stream embeds and adds its
+    document; the second and third start when the first one's conversion
+    ends. The rows start only once every stream has started and Docling is
+    busy, and the gate fails unless Docling used at
     least ``docling_busy_cores`` in ``docling_busy_share`` of the seconds the
     rows took.
     """
@@ -1925,13 +1937,19 @@ def knowledge_serving(run_dir: Path) -> int:
             threading.Thread(target=load, args=(stream,), daemon=True)
             for stream in range(1, int(KNOWLEDGE["load_streams"]) + 1)
         ]
-        for worker in workers:
-            worker.start()
-        started_busy = cpu.wait_busy(
-            busy_cores,
-            int(KNOWLEDGE["docling_start_busy_seconds"]),
-            float(KNOWLEDGE["docling_start_seconds"]),
-        )
+        # The first stream starts alone; the others start when its conversion
+        # ends (Docling goes idle while it embeds and adds its document). With
+        # one stream more than Docling's two workers, a document is always
+        # queued at Docling while another stream embeds.
+        busy_seconds = int(KNOWLEDGE["docling_start_busy_seconds"])
+        start_timeout = float(KNOWLEDGE["docling_start_seconds"])
+        workers[0].start()
+        started_busy = cpu.wait_busy(busy_cores, busy_seconds, start_timeout)
+        if len(workers) > 1:
+            cpu.wait_idle(busy_cores, 2, float(KNOWLEDGE["ingestion_seconds"]))
+            for worker in workers[1:]:
+                worker.start()
+            started_busy = started_busy and cpu.wait_busy(busy_cores, busy_seconds, start_timeout)
         rows_started = time.monotonic()
         try:
             if started_busy and not errors:

@@ -93,7 +93,7 @@ Japanese documents in `compose.yaml`, with every value pinned in
   (`docling-serve-cpu` v1.37.0, pinned by digest). Text layers are kept;
   bitmaps (scanned pages, images in a PDF) are read by RapidOCR with
   `ocr_lang` `iso:ja` (PP-OCRv6, one recognizer for Japanese, Chinese and
-  English). Docling is limited to 8 CPUs and the Chat UI to 16 (with as
+  English). Docling is limited to 4 CPUs and the Chat UI to 8 (with as
   many torch threads), so OCR and embedding do not slow the L1, whose cpuset
   spans every host CPU.
 - **Embedding** `BAAI/bge-m3` and **reranking** `BAAI/bge-reranker-v2-m3`,
@@ -211,8 +211,9 @@ on vLLM's chat API.
   same chat, `Red` for an attached PNG, and a Japanese question with the kept
   knowledge base picked by `#` answered from the scanned PDF with it cited;
   Kairyu sees `/v1/responses` only.
-- `knowledge-serving`: the `serving` c1/c8 rows while two streams of
-  scanned PDFs keep Docling at its CPU cap, at least 95 % of the recorded
+- `knowledge-serving`: the `serving` c1/c8 rows while three streams of
+  scanned PDFs (one more than Docling's two workers) keep Docling and the
+  Chat UI's embedding at their CPU caps, at least 95 % of the recorded
   throughput. The load is Docling's own CPU time, read from its cgroup every
   second: the rows start once Docling has used at least one core for 3
   seconds, and the gate fails unless it did so in 95 % of the seconds the
