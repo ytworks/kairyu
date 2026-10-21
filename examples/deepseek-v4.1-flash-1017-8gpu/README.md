@@ -216,7 +216,8 @@ on vLLM's chat API.
   throughput. The load is Docling's own CPU time, read from its cgroup every
   second: the rows start once Docling has used at least one core for 3
   seconds, and the gate fails unless it did so in 95 % of the seconds the
-  rows took.
+  rows took. Seconds without a sample count as idle, and a failed counter
+  read fails the gate.
 
 `docling` and `chat-ui` build the Playwright image from the shared
 `deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every

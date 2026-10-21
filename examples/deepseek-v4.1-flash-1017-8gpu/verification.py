@@ -1791,7 +1791,9 @@ class DoclingCpu:
         if self.path is None:
             raise RuntimeError(f"no cgroup CPU counter for {container}")
         self.interval_s = interval_s
-        self.samples: list[tuple[float, float]] = []  # (monotonic time, cores used)
+        # (start, end, cores used) per sample, monotonic seconds.
+        self.samples: list[tuple[float, float, float]] = []
+        self.error: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -1803,11 +1805,16 @@ class DoclingCpu:
         raise RuntimeError(f"{self.path} has no usage_usec")
 
     def _run(self) -> None:
-        last_time, last_usage = time.monotonic(), self._usage_s()
-        while not self._stop.wait(self.interval_s):
-            now, usage = time.monotonic(), self._usage_s()
-            self.samples.append((now, (usage - last_usage) / (now - last_time)))
-            last_time, last_usage = now, usage
+        # A failed read ends sampling; ``error`` fails the gate and the time
+        # after the last sample counts as unobserved, never as busy.
+        try:
+            last_time, last_usage = time.monotonic(), self._usage_s()
+            while not self._stop.wait(self.interval_s):
+                now, usage = time.monotonic(), self._usage_s()
+                self.samples.append((last_time, now, (usage - last_usage) / (now - last_time)))
+                last_time, last_usage = now, usage
+        except Exception as error:  # noqa: BLE001 - reported through ``error``
+            self.error = repr(error)
 
     def __enter__(self) -> DoclingCpu:
         self._thread.start()
@@ -1820,15 +1827,40 @@ class DoclingCpu:
     def wait_busy(self, cores: float, seconds: int, timeout_s: float) -> bool:
         """True once the last ``seconds`` samples each used at least ``cores``."""
         deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and self.error is None:
             recent = self.samples[-seconds:]
-            if len(recent) == seconds and all(used >= cores for _, used in recent):
+            if len(recent) == seconds and all(used >= cores for *_, used in recent):
                 return True
             time.sleep(self.interval_s / 2)
         return False
 
-    def window(self, started: float, ended: float) -> list[float]:
-        return [used for at, used in self.samples if started < at <= ended]
+    def wait_past(self, moment: float) -> None:
+        """Wait (up to three intervals) for a sample that ends after ``moment``."""
+        deadline = time.monotonic() + 3 * self.interval_s
+        while time.monotonic() < deadline and self.error is None:
+            if self.samples and self.samples[-1][1] >= moment:
+                return
+            time.sleep(self.interval_s / 4)
+
+    def summary(self, started: float, ended: float, cores: float) -> dict:
+        """Busy and observed shares of [started, ended], weighted by time.
+
+        Seconds without a sample (a stopped sampler) are unobserved and so not
+        busy: the busy share's denominator is the whole window.
+        """
+        window = max(ended - started, 0.0)
+        observed = busy = core_seconds = 0.0
+        for first, last, used in self.samples:
+            overlap = max(0.0, min(last, ended) - max(first, started))
+            observed += overlap
+            core_seconds += overlap * used
+            if used >= cores:
+                busy += overlap
+        return {
+            "busy_share": busy / window if window else 0.0,
+            "observed_share": observed / window if window else 0.0,
+            "mean_cores": core_seconds / observed if observed else 0.0,
+        }
 
 
 def knowledge_serving(run_dir: Path) -> int:
@@ -1912,10 +1944,11 @@ def knowledge_serving(run_dir: Path) -> int:
             for worker in workers:
                 worker.join(timeout=float(KNOWLEDGE["ingestion_seconds"]) * 2)
             stuck = sum(worker.is_alive() for worker in workers)
-        during = cpu.window(rows_started, rows_ended)
+        cpu.wait_past(rows_ended)
+        load = cpu.summary(rows_started, rows_ended, busy_cores)
     if not stuck:
         _delete_knowledge(token, knowledge_id)
-    busy_share = sum(used >= busy_cores for used in during) / len(during) if during else 0.0
+    sampler_error = cpu.error
     rows = {}
     for level in KNOWLEDGE["serving_concurrency"]:
         row_path = run_dir / f"capped-c{level}" / "row.json"
@@ -1930,9 +1963,10 @@ def knowledge_serving(run_dir: Path) -> int:
         }
     report.update(
         docling_started_busy=started_busy,
-        docling_busy_share=round(busy_share, 3),
-        docling_mean_cores=round(sum(during) / len(during), 2) if during else 0.0,
-        docling_samples=len(during),
+        docling_sampler_error=sampler_error,
+        docling_busy_share=round(load["busy_share"], 3),
+        docling_observed_share=round(load["observed_share"], 3),
+        docling_mean_cores=round(load["mean_cores"], 2),
         load_workers_stuck=stuck,
         rows_seconds=round(rows_ended - rows_started, 1),
         rows=rows,
@@ -1949,9 +1983,10 @@ def knowledge_serving(run_dir: Path) -> int:
     passed = (
         code == 0
         and started_busy
+        and sampler_error is None
         and not errors
         and not stuck
-        and busy_share >= float(KNOWLEDGE["docling_busy_share"])
+        and load["busy_share"] >= float(KNOWLEDGE["docling_busy_share"])
         and len(rows) == len(KNOWLEDGE["serving_concurrency"])
         and all(
             row["fraction"] >= float(KNOWLEDGE["serving_min_fraction"]) for row in rows.values()
