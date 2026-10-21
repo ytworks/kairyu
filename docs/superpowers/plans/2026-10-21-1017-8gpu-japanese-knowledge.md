@@ -8,7 +8,10 @@ file fetched for `iso:ja`, so the pinned image is used as is); the OCR
 language is `iso:ja` (a bare `ja` is a RapidOCR engine code); gate fixes
 added 300-character chunks (default 1,000 diluted the asked passage),
 `OMP_NUM_THREADS=16` for the Chat UI (64 threads under 16 CPUs) and
-Docling at 8 CPUs (16 cost c1 serving 4.1 % during OCR).
+Docling at 8 CPUs (16 cost c1 serving 4.1 % during OCR). Review amendment
+(owner, 2026-10-21): V5's load evidence is Docling's own cgroup CPU time
+(rows start once it is busy; busy in 95 % of the rows' seconds), with two
+load streams so Docling runs at its CPU cap.
 
 Accepted scope (owner, 2026-10-21):
 

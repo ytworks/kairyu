@@ -211,9 +211,12 @@ on vLLM's chat API.
   same chat, `Red` for an attached PNG, and a Japanese question with the kept
   knowledge base picked by `#` answered from the scanned PDF with it cited;
   Kairyu sees `/v1/responses` only.
-- `knowledge-serving`: the `serving` c1/c8 rows while the Chat UI OCRs
-  scanned PDFs, at least 95 % of the recorded throughput; it fails unless
-  completed ingestions span the whole measurement without a gap.
+- `knowledge-serving`: the `serving` c1/c8 rows while two streams of
+  scanned PDFs keep Docling at its CPU cap, at least 95 % of the recorded
+  throughput. The load is Docling's own CPU time, read from its cgroup every
+  second: the rows start once Docling has used at least one core for 3
+  seconds, and the gate fails unless it did so in 95 % of the seconds the
+  rows took.
 
 `docling` and `chat-ui` build the Playwright image from the shared
 `deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every

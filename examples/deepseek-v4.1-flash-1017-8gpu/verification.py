@@ -1766,8 +1766,81 @@ def chat_ui(run_dir: Path) -> int:
     return 0 if passed else 1
 
 
+class DoclingCpu:
+    """Docling's own CPU use, sampled once a second from its cgroup counter.
+
+    This is the OCR load itself: Open WebUI's upload, queue and embedding time
+    does not count, only CPU time the Docling container spends.
+    """
+
+    def __init__(self, interval_s: float = 1.0) -> None:
+        import threading
+
+        container = f"{control.PROJECT}-docling-1"
+        identity = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Id}}", container],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        candidates = (
+            Path(f"/sys/fs/cgroup/system.slice/docker-{identity}.scope/cpu.stat"),
+            Path(f"/sys/fs/cgroup/docker/{identity}/cpu.stat"),
+        )
+        self.path = next((path for path in candidates if path.exists()), None)
+        if self.path is None:
+            raise RuntimeError(f"no cgroup CPU counter for {container}")
+        self.interval_s = interval_s
+        self.samples: list[tuple[float, float]] = []  # (monotonic time, cores used)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _usage_s(self) -> float:
+        for line in self.path.read_text().splitlines():
+            key, value = line.split()
+            if key == "usage_usec":
+                return int(value) / 1e6
+        raise RuntimeError(f"{self.path} has no usage_usec")
+
+    def _run(self) -> None:
+        last_time, last_usage = time.monotonic(), self._usage_s()
+        while not self._stop.wait(self.interval_s):
+            now, usage = time.monotonic(), self._usage_s()
+            self.samples.append((now, (usage - last_usage) / (now - last_time)))
+            last_time, last_usage = now, usage
+
+    def __enter__(self) -> DoclingCpu:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def wait_busy(self, cores: float, seconds: int, timeout_s: float) -> bool:
+        """True once the last ``seconds`` samples each used at least ``cores``."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            recent = self.samples[-seconds:]
+            if len(recent) == seconds and all(used >= cores for _, used in recent):
+                return True
+            time.sleep(self.interval_s / 2)
+        return False
+
+    def window(self, started: float, ended: float) -> list[float]:
+        return [used for at, used in self.samples if started < at <= ended]
+
+
 def knowledge_serving(run_dir: Path) -> int:
-    """Serving rows (c1/c8) while the Chat UI OCRs a scanned PDF: within the recorded throughput."""
+    """Serving rows (c1/c8) while Docling OCRs scanned PDFs at its CPU cap: within the record.
+
+    Two load streams (Docling's two conversion workers) keep a conversion
+    running while the other stream embeds and adds its document. The rows
+    start only once Docling is busy, and the gate fails unless Docling used at
+    least ``docling_busy_cores`` in ``docling_busy_share`` of the seconds the
+    rows took.
+    """
+    import queue
     import threading
 
     token = _chat_ui_token(_chat_ui_url())
@@ -1782,8 +1855,8 @@ def knowledge_serving(run_dir: Path) -> int:
         payload={"name": name, "description": "Kairyu gate load"},
     )["id"]
     # Open WebUI refuses a document whose content it already holds, so every
-    # load iteration uploads a different scan; enough to outlast the rows.
-    scans = []
+    # ingestion uploads a different scan; enough for both streams to outlast the rows.
+    pending: queue.Queue[Path] = queue.Queue()
     for index in range(1, int(KNOWLEDGE["load_documents"]) + 1):
         scan = run_dir / f"load-{index:02d}-{KNOWLEDGE_SCAN}"
         scan_pdf(
@@ -1792,79 +1865,94 @@ def knowledge_serving(run_dir: Path) -> int:
             {int(KNOWLEDGE["key_page"])},
             namespace=f"{run_dir.name}-load-{index}",
         )
-        scans.append(scan)
+        pending.put(scan)
     stop = threading.Event()
-    # (start, end) of every ingestion, monotonic seconds; an error stops the load.
-    ingestions: list[tuple[float, float]] = []
+    ingestions: list[dict] = []
     errors: list[str] = []
 
-    def load() -> None:
-        for scan in scans:
-            if stop.is_set():
+    def load(stream: int) -> None:
+        while not stop.is_set():
+            try:
+                scan = pending.get_nowait()
+            except queue.Empty:
                 return
             started = time.monotonic()
             try:
                 _ingest(token, knowledge_id, scan.name, scan.read_bytes(), "application/pdf")
             except Exception as error:  # noqa: BLE001 - recorded and fails the gate
-                errors.append(repr(error))
+                errors.append(f"stream {stream}: {error!r}")
+                stop.set()
                 return
-            ingestions.append((started, time.monotonic()))
+            ingestions.append({"stream": stream, "start": started, "end": time.monotonic()})
 
-    worker = threading.Thread(target=load, daemon=True)
-    worker.start()
-    time.sleep(20)  # the first conversion is under way before the rows start
-    rows_started = time.monotonic()
-    try:
-        code = serving(
-            run_dir, concurrency=[int(level) for level in KNOWLEDGE["serving_concurrency"]]
+    busy_cores = float(KNOWLEDGE["docling_busy_cores"])
+    report: dict = {"load_streams": int(KNOWLEDGE["load_streams"])}
+    code = 1
+    with DoclingCpu() as cpu:
+        workers = [
+            threading.Thread(target=load, args=(stream,), daemon=True)
+            for stream in range(1, int(KNOWLEDGE["load_streams"]) + 1)
+        ]
+        for worker in workers:
+            worker.start()
+        started_busy = cpu.wait_busy(
+            busy_cores,
+            int(KNOWLEDGE["docling_start_busy_seconds"]),
+            float(KNOWLEDGE["docling_start_seconds"]),
         )
-    finally:
-        rows_ended = time.monotonic()
-        stop.set()
-        worker.join(timeout=float(KNOWLEDGE["ingestion_seconds"]) * 2)
-        worker_stuck = worker.is_alive()
-        if not worker_stuck:
-            _delete_knowledge(token, knowledge_id)
+        rows_started = time.monotonic()
+        try:
+            if started_busy and not errors:
+                code = serving(
+                    run_dir, concurrency=[int(level) for level in KNOWLEDGE["serving_concurrency"]]
+                )
+        finally:
+            rows_ended = time.monotonic()
+            stop.set()
+            for worker in workers:
+                worker.join(timeout=float(KNOWLEDGE["ingestion_seconds"]) * 2)
+            stuck = sum(worker.is_alive() for worker in workers)
+        during = cpu.window(rows_started, rows_ended)
+    if not stuck:
+        _delete_knowledge(token, knowledge_id)
+    busy_share = sum(used >= busy_cores for used in during) / len(during) if during else 0.0
     rows = {}
     for level in KNOWLEDGE["serving_concurrency"]:
-        row = json.loads((run_dir / f"capped-c{level}" / "row.json").read_text())
+        row_path = run_dir / f"capped-c{level}" / "row.json"
+        if not row_path.exists():
+            continue
+        row = json.loads(row_path.read_text())
         reference = float(KNOWLEDGE["serving_reference_tok_s"][str(level)])
         rows[str(level)] = {
             "output_tokens_per_s": round(row["summary"]["output_tokens_per_s"], 1),
             "reference": reference,
             "fraction": round(row["summary"]["output_tokens_per_s"] / reference, 3),
         }
-    # OCR load is present over the whole measurement only if completed
-    # ingestions start before the rows, end after them, and follow each other
-    # without a gap (an upload, the status poll and the add take a few seconds).
-    gaps = [after[0] - before[1] for before, after in zip(ingestions, ingestions[1:], strict=False)]
-    covered = (
-        bool(ingestions)
-        and ingestions[0][0] <= rows_started
-        and ingestions[-1][1] >= rows_ended
-        and all(gap <= 5.0 for gap in gaps)
-    )
-    report = {
-        "load_covered_rows": covered,
-        "load_worker_stuck": worker_stuck,
-        "rows_seconds": round(rows_ended - rows_started, 1),
-        "rows": rows,
-        "ingestions": [
+    report.update(
+        docling_started_busy=started_busy,
+        docling_busy_share=round(busy_share, 3),
+        docling_mean_cores=round(sum(during) / len(during), 2) if during else 0.0,
+        docling_samples=len(during),
+        load_workers_stuck=stuck,
+        rows_seconds=round(rows_ended - rows_started, 1),
+        rows=rows,
+        ingestions=[
             {
-                "start_s": round(start - rows_started, 1),
-                "end_s": round(end - rows_started, 1),
-                "seconds": round(end - start, 1),
+                "stream": row["stream"],
+                "start_s": round(row["start"] - rows_started, 1),
+                "end_s": round(row["end"] - rows_started, 1),
             }
-            for start, end in ingestions
+            for row in sorted(ingestions, key=lambda row: row["start"])
         ],
-        "max_gap_s": round(max(gaps), 1) if gaps else None,
-        "errors": errors,
-    }
+        errors=errors,
+    )
     passed = (
         code == 0
+        and started_busy
         and not errors
-        and not worker_stuck
-        and covered
+        and not stuck
+        and busy_share >= float(KNOWLEDGE["docling_busy_share"])
+        and len(rows) == len(KNOWLEDGE["serving_concurrency"])
         and all(
             row["fraction"] >= float(KNOWLEDGE["serving_min_fraction"]) for row in rows.values()
         )

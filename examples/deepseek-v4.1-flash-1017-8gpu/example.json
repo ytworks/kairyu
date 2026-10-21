@@ -135,7 +135,12 @@
       "query_seconds": 10,
       "top_n": 5,
       "serving_concurrency": [1, 8],
-      "load_documents": 8,
+      "load_documents": 12,
+      "load_streams": 2,
+      "docling_busy_cores": 1.0,
+      "docling_busy_share": 0.95,
+      "docling_start_busy_seconds": 3,
+      "docling_start_seconds": 120,
       "serving_min_fraction": 0.95,
       "serving_reference_tok_s": {"1": 151.2, "8": 378.8}
     }
