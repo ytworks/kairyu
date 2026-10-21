@@ -1261,6 +1261,27 @@ def scan_pdf(path: Path, pages: int, key_pages: set[int], *, namespace: str) -> 
     images[0].save(path, save_all=True, append_images=images[1:], resolution=150)
 
 
+def browser_image() -> str:
+    """Build the pinned Playwright image (shared Dockerfile, as the sibling examples do)."""
+    image = KNOWLEDGE["browser_image"]
+    build = subprocess.run(
+        [
+            "docker",
+            "build",
+            "--file",
+            str(ROOT / "deploy/compose/Dockerfile.webui-browser"),
+            "--tag",
+            image,
+            str(ROOT),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if build.returncode:
+        raise RuntimeError(f"building {image} failed: {build.stderr[-2000:]}")
+    return image
+
+
 def text_pdf(path: Path, lines: list[str]) -> None:
     """A text-layer PDF of ``lines``, printed by Chromium with the pinned font embedded."""
     import html
@@ -1290,7 +1311,7 @@ def text_pdf(path: Path, lines: list[str]) -> None:
             f"{work}:/fixtures",
             "--entrypoint",
             "/ms-playwright/chromium-1223/chrome-linux64/chrome",
-            KNOWLEDGE["browser_image"],
+            browser_image(),
             "--headless",
             "--no-sandbox",
             "--disable-gpu",
@@ -1523,18 +1544,41 @@ def _knowledge_files(token: str, knowledge_id: str) -> list[dict]:
     return listed.get("items", []) if isinstance(listed, dict) else listed or []
 
 
-def _delete_knowledge(token: str, knowledge: dict) -> None:
-    """Delete a gate knowledge base and every file the gates uploaded (orphans included)."""
-    _webui_request("DELETE", f"/api/v1/knowledge/{knowledge['id']}/delete", token)
-    listed = _webui_request("GET", "/api/v1/files/", token)
-    rows = listed.get("items", listed) if isinstance(listed, dict) else listed
-    for row in rows or []:
-        if not str(row.get("filename", "")).startswith(("kairyu-gate-", "load-")):
-            continue
-        try:
-            _webui_request("DELETE", f"/api/v1/files/{row['id']}", token)
-        except urllib.error.HTTPError:
-            pass
+# Every file a gate uploads is recorded under its knowledge base, so cleanup
+# deletes exactly those (failed uploads included) and never a user's file.
+GATE_UPLOADS = RESULTS_ROOT / "knowledge-gate-uploads.json"
+_GATE_UPLOADS_LOCK = __import__("threading").Lock()
+
+
+def _gate_uploads() -> dict[str, list[str]]:
+    return json.loads(GATE_UPLOADS.read_text()) if GATE_UPLOADS.exists() else {}
+
+
+def _record_upload(knowledge_id: str, file_id: str) -> None:
+    with _GATE_UPLOADS_LOCK:
+        uploads = _gate_uploads()
+        uploads.setdefault(knowledge_id, []).append(file_id)
+        GATE_UPLOADS.parent.mkdir(parents=True, exist_ok=True)
+        GATE_UPLOADS.write_text(json.dumps(uploads, indent=2) + "\n")
+
+
+def _delete_knowledge(token: str, knowledge_id: str) -> None:
+    """Delete a gate knowledge base and the files the gates recorded for it."""
+    try:
+        _webui_request("DELETE", f"/api/v1/knowledge/{knowledge_id}/delete", token)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    with _GATE_UPLOADS_LOCK:
+        uploads = _gate_uploads()
+        for file_id in uploads.pop(knowledge_id, []):
+            try:
+                _webui_request("DELETE", f"/api/v1/files/{file_id}", token)
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+        if GATE_UPLOADS.exists():
+            GATE_UPLOADS.write_text(json.dumps(uploads, indent=2) + "\n")
 
 
 def _ingest(
@@ -1543,6 +1587,7 @@ def _ingest(
     """Upload, wait for Open WebUI's extraction, add to the knowledge base; seconds taken."""
     started = time.monotonic()
     file_id = _webui_upload(token, name, data, content_type)["id"]
+    _record_upload(knowledge_id, file_id)
     deadline = started + 2 * float(KNOWLEDGE["ingestion_seconds"])
     while True:
         status = _webui_request("GET", f"/api/v1/files/{file_id}/process/status", token).get(
@@ -1585,7 +1630,7 @@ def knowledge(run_dir: Path) -> int:
         )
     else:
         if existing is not None:
-            _delete_knowledge(token, existing)
+            _delete_knowledge(token, existing["id"])
         knowledge_id = _webui_request(
             "POST",
             "/api/v1/knowledge/create",
@@ -1646,7 +1691,7 @@ def knowledge(run_dir: Path) -> int:
     (run_dir / "knowledge.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False))
     if os.environ.get("KNOWLEDGE_KEEP") != "1":
-        _delete_knowledge(token, {"id": knowledge_id})
+        _delete_knowledge(token, knowledge_id)
     return 0 if passed else 1
 
 
@@ -1694,7 +1739,7 @@ def chat_ui(run_dir: Path) -> int:
             f"{HERE / 'webui-browser-smoke.mjs'}:/work/webui_browser_smoke.mjs:ro",
             "--volume",
             f"{fixtures}:/fixtures:ro",
-            KNOWLEDGE["browser_image"],
+            browser_image(),
             "node",
             "/work/webui_browser_smoke.mjs",
         ],
@@ -1717,7 +1762,7 @@ def chat_ui(run_dir: Path) -> int:
     token = _chat_ui_token(_chat_ui_url())
     kept = _knowledge_by_name(token, KNOWLEDGE_NAME)
     if kept is not None and os.environ.get("KNOWLEDGE_KEEP") != "1":
-        _delete_knowledge(token, kept)
+        _delete_knowledge(token, kept["id"])
     return 0 if passed else 1
 
 
@@ -1729,7 +1774,7 @@ def knowledge_serving(run_dir: Path) -> int:
     name = f"{KNOWLEDGE_NAME}-load"
     stale = _knowledge_by_name(token, name)
     if stale is not None:
-        _delete_knowledge(token, stale)
+        _delete_knowledge(token, stale["id"])
     knowledge_id = _webui_request(
         "POST",
         "/api/v1/knowledge/create",
@@ -1749,32 +1794,37 @@ def knowledge_serving(run_dir: Path) -> int:
         )
         scans.append(scan)
     stop = threading.Event()
-    ingestions: list[float] = []
+    # (start, end) of every ingestion, monotonic seconds; an error stops the load.
+    ingestions: list[tuple[float, float]] = []
     errors: list[str] = []
 
     def load() -> None:
         for scan in scans:
             if stop.is_set():
                 return
+            started = time.monotonic()
             try:
-                ingestions.append(
-                    _ingest(token, knowledge_id, scan.name, scan.read_bytes(), "application/pdf")[1]
-                )
+                _ingest(token, knowledge_id, scan.name, scan.read_bytes(), "application/pdf")
             except Exception as error:  # noqa: BLE001 - recorded and fails the gate
                 errors.append(repr(error))
                 return
+            ingestions.append((started, time.monotonic()))
 
     worker = threading.Thread(target=load, daemon=True)
     worker.start()
     time.sleep(20)  # the first conversion is under way before the rows start
+    rows_started = time.monotonic()
     try:
         code = serving(
             run_dir, concurrency=[int(level) for level in KNOWLEDGE["serving_concurrency"]]
         )
     finally:
+        rows_ended = time.monotonic()
         stop.set()
         worker.join(timeout=float(KNOWLEDGE["ingestion_seconds"]) * 2)
-        _delete_knowledge(token, {"id": knowledge_id})
+        worker_stuck = worker.is_alive()
+        if not worker_stuck:
+            _delete_knowledge(token, knowledge_id)
     rows = {}
     for level in KNOWLEDGE["serving_concurrency"]:
         row = json.loads((run_dir / f"capped-c{level}" / "row.json").read_text())
@@ -1784,16 +1834,37 @@ def knowledge_serving(run_dir: Path) -> int:
             "reference": reference,
             "fraction": round(row["summary"]["output_tokens_per_s"] / reference, 3),
         }
+    # OCR load is present over the whole measurement only if completed
+    # ingestions start before the rows, end after them, and follow each other
+    # without a gap (an upload, the status poll and the add take a few seconds).
+    gaps = [after[0] - before[1] for before, after in zip(ingestions, ingestions[1:], strict=False)]
+    covered = (
+        bool(ingestions)
+        and ingestions[0][0] <= rows_started
+        and ingestions[-1][1] >= rows_ended
+        and all(gap <= 5.0 for gap in gaps)
+    )
     report = {
-        "load_outlasted_rows": len(ingestions) < len(scans),
+        "load_covered_rows": covered,
+        "load_worker_stuck": worker_stuck,
+        "rows_seconds": round(rows_ended - rows_started, 1),
         "rows": rows,
-        "ingestions_seconds": [round(value, 1) for value in ingestions],
+        "ingestions": [
+            {
+                "start_s": round(start - rows_started, 1),
+                "end_s": round(end - rows_started, 1),
+                "seconds": round(end - start, 1),
+            }
+            for start, end in ingestions
+        ],
+        "max_gap_s": round(max(gaps), 1) if gaps else None,
         "errors": errors,
     }
     passed = (
         code == 0
         and not errors
-        and report["load_outlasted_rows"]
+        and not worker_stuck
+        and covered
         and all(
             row["fraction"] >= float(KNOWLEDGE["serving_min_fraction"]) for row in rows.values()
         )

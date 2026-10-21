@@ -212,7 +212,13 @@ on vLLM's chat API.
   knowledge base picked by `#` answered from the scanned PDF with it cited;
   Kairyu sees `/v1/responses` only.
 - `knowledge-serving`: the `serving` c1/c8 rows while the Chat UI OCRs
-  scanned PDFs, at least 95 % of the recorded throughput.
+  scanned PDFs, at least 95 % of the recorded throughput; it fails unless
+  completed ingestions span the whole measurement without a gap.
+
+`docling` and `chat-ui` build the Playwright image from the shared
+`deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every
+file they upload under its knowledge base
+(`verification-results/knowledge-gate-uploads.json`) and delete only those.
 
 L1 candidates are compared with `tune.py` (one parameter at a time, the
 committed configuration restored afterwards; `dp8` is the other measured
