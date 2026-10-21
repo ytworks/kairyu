@@ -107,12 +107,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
 - Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
-- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated
+- DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated; the eight-GPU one's Chat UI also serves Japanese knowledge bases (Docling OCR, bge-m3, multilingual reranker; GPU-verified 2026-10-21, PR #661)
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-21 — [design] Japanese knowledge bases in the 1017 eight-GPU Chat UI
+- What: `deepseek-v4.1-flash-1017-8gpu`'s Open WebUI extracts through a pinned docling-serve (RapidOCR `iso:ja`, 8 CPUs), embeds with `BAAI/bge-m3`, reranks with `BAAI/bge-reranker-v2-m3` (pinned, hashed, offline), hybrid search at BM25 weight 0, 300-character chunks; `run.sh up` fails closed on any other retrieval configuration. GPU gates pass: OCR 2.7 s/page, 20-page scan ingested in 56 s, Japanese query top-1 in 2.2 s, Chat UI answers from the base with a citation, c1/c8 serving during OCR at 96.2 / 99.1 % of the recorded rows.
+- Why: Japanese documents (incl. scans) in knowledge bases; Open WebUI's BM25 splits on whitespace and its 1,000-character default chunk dilutes Japanese passages (dense rank 27/40 vs 9/120 at 300).
+- Refs: PR #661; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plan `docs/superpowers/plans/2026-10-21-1017-8gpu-japanese-knowledge.md`; the example's `MEASUREMENTS.md`
 
 ### 2026-10-20 — [progress] DeepSWE with mini-swe-agent: 81/113 on the 1017 eight-GPU example
 - What: the six-GPU mini-swe-agent run's setup (kairyu-bench `52b06ce`, effort max, 8 workers) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 81/113 (six-GPU 79/113, eight-GPU dsh 83/113), 3 h 59 min (0.66x of six-GPU), 10,012 API calls all 200 (1.00x), input 1.181 B, output 8.69 M; all 113 tasks scored. Wiki: two dsh-vs-DeepSeek-8GPU-high overlap rows corrected (a time-limit trial had been counted as correct).

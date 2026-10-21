@@ -592,3 +592,23 @@ replica shape is measured too: DP8 / EP8 with host or HBM-sharded
 (`embedding_across_dp`) Engram tables, or the 0909 eight-GPU example's
 TP8 / EP8, selected by c8 throughput (the concurrency of the DeepSWE run on
 the six-GPU example), then c32.
+
+#### Eight-GPU Chat UI for Japanese knowledge bases (2026-10-21)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-10-21-1017-8gpu-japanese-knowledge.md`, PR
+#661); GPU-verified 2026-10-21: `docling`, `knowledge`, `chat-ui`,
+`knowledge-serving` and the restart check pass (the example's
+`MEASUREMENTS.md`).
+
+`examples/deepseek-v4.1-flash-1017-8gpu` alone departs from the V4.1
+examples' L3: its Open WebUI extracts knowledge-base documents through a
+pinned docling-serve (CPU; text layers kept, bitmaps read by RapidOCR with
+`iso:ja`), embeds with `BAAI/bge-m3` and reranks with
+`BAAI/bge-reranker-v2-m3` from pinned, hashed copies in its data volume
+(offline), and runs hybrid search with BM25 weight 0, because Open WebUI's
+BM25 splits terms on whitespace and cannot tokenize Japanese. Chunks are
+300 characters (the English-sized default of 1,000 diluted the asked
+passage out of the reranker's 20 candidates). Docling is capped at 8 CPUs
+(16 cost c1 serving 4.1 % during OCR) and the Chat UI at 16 with 16 torch
+threads. L1, L2, `kairyu/` and the other examples are unchanged.

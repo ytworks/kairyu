@@ -20,6 +20,8 @@ the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 
 > **GPU-verified 2026-10-19.** TP8 / EP8 with 8,192 batched tokens; every
 > gate, `api-equivalence` and the Chat UI pass succeed (`MEASUREMENTS.md`).
+> Japanese knowledge bases GPU-verified 2026-10-21 (`docling`, `knowledge`,
+> `chat-ui`, `knowledge-serving`).
 
 ## Start
 
@@ -91,8 +93,9 @@ Japanese documents in `compose.yaml`, with every value pinned in
   (`docling-serve-cpu` v1.37.0, pinned by digest). Text layers are kept;
   bitmaps (scanned pages, images in a PDF) are read by RapidOCR with
   `ocr_lang` `iso:ja` (PP-OCRv6, one recognizer for Japanese, Chinese and
-  English). Docling and the Chat UI are limited to 16 CPUs each so OCR and
-  embedding do not slow the L1, whose cpuset spans every host CPU.
+  English). Docling is limited to 8 CPUs and the Chat UI to 16 (with as
+  many torch threads), so OCR and embedding do not slow the L1, whose cpuset
+  spans every host CPU.
 - **Embedding** `BAAI/bge-m3` and **reranking** `BAAI/bge-reranker-v2-m3`,
   both multilingual. `run.sh up` downloads them at pinned revisions into the
   Chat UI's data volume (`webui-data/rag-models`) and hashes them as it does
@@ -100,12 +103,15 @@ Japanese documents in `compose.yaml`, with every value pinned in
 - **Search**: hybrid search with BM25 weight 0. Open WebUI's BM25 splits
   text on whitespace, which cannot tokenize Japanese, so a query runs vector
   search for 20 candidates and the reranker keeps the best 5.
+- **Chunks** of 300 characters with 30 overlapping (Open WebUI's 1,000 is
+  sized for English; a 1,000-character Japanese chunk dilutes the passage a
+  question asks about, `MEASUREMENTS.md`).
 
 `run.sh up` fails unless Open WebUI reports exactly this configuration.
 Because the Chat UI starts with `RESET_CONFIG_ON_START`, Admin Panel changes
 to these settings are reset at the next start; change `example.json`
 instead. Documents are embedded when they are added: after changing the
-embedding model or the OCR settings, add the documents again (or use
+embedding model, the chunks or the OCR settings, add the documents again (or use
 Admin Panel > Settings > Documents > Reindex).
 
 To use one: create it in Workspace > Knowledge with a name and a description

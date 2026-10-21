@@ -168,3 +168,42 @@ For orientation (same host): `deepseek-v4.1-flash-8gpu` (0909 weights, TP8
 on its 0909 image, fixed 256-token chat rows) measured 126.8 / 275.4 /
 305.4 / 326.8 / 314.3 tok/s at c1/8/16/32/64; the six-GPU 1017 example
 measured 101.8 / 278.0 / 364.2 / 579.0 / 803.7 on these Responses rows.
+
+## Japanese knowledge bases (2026-10-21)
+
+Branch `claude/1017-8gpu-japanese-knowledge` (PR #661), L1/L2 as above.
+Fixtures are generated per run: Japanese report pages built from shared
+templates (every page names other `KR-73xx` samples and storage
+temperatures), rendered as an image-only A4 PDF at 150 dpi with Noto Sans
+JP 2.004; the key sentence (`KR-7319`, `マイナス四十二度`, `冷凍庫で保管`) is
+on page 13 of 20. Results are under
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-1017-8gpu/verification-results/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `docling` | PASS | 3/3 image-only pages carry the key sentence, 2.7 s per page; the Chromium text-layer PDF keeps all 18 lines; Docling on an internal network (no route out) (`20261021T142423Z-docling`) |
+| restart | PASS | `run.sh up` with the new services and its retrieval check, ready in about 5 min |
+| `knowledge` | PASS | 20-page scan ingested in 56.2 s, 20 text distractors in 28.6 s; the key sentence is in the OCR text; the Japanese question's top chunk is the key one (reranker 0.998, next 0.498); query 2.22 s (`20261021T142502Z-knowledge`); an earlier fixture: 0.989 / 0.494, 1.97 s |
+| `chat-ui` | PASS | Chromium: `323`, `324` in the same chat, `Red` for an attached PNG; with the knowledge base picked by `#`, "KR-7319は 摂氏マイナス42度（-42℃）の冷凍庫で保管…" citing `kairyu-gate-scan.pdf`; Kairyu `/v1/responses` 4 → 17, `/v1/chat/completions` 0 → 0 (`20261021T140849Z-chat-ui`) |
+| restart, kept base | PASS | `run.sh down` / `up` (ready in about 4 min); the kept knowledge base answers the same query with the same ranking (0.998), 2.28 s (`20261021T143049Z-knowledge`) |
+| `knowledge-serving` | PASS | during four back-to-back 20-page OCR ingestions (56.5-60.5 s each): c1 145.5 tok/s (96.2 % of 151.2), c8 375.2 (99.1 % of 378.8) (`20261021T141958Z-knowledge-serving`) |
+
+Settings changed by these gates (one cause each, measured before the fix):
+
+- **Chunk size 300 characters, overlap 30** (Open WebUI's default 1,000 / 100
+  is sized for English). One 20-page fixture, `bge-m3` dense rank of the key
+  chunk among all chunks: 1,000 characters 27 / 40, 500 48 / 80, 300 9 / 120,
+  200 2 / 166. With 1,000 the key page missed the reranker's 20 candidates.
+- **Chat UI `OMP_NUM_THREADS=16`**: torch sees 128 host CPUs and started 64
+  threads under the 16-CPU limit. Reranking 20 real pairs: 64 threads 20.1 s,
+  16 threads 7.9 s, 8 threads 10.5 s; a knowledge query took 17.4 s before.
+- **Docling 8 CPUs, 4 threads** (was 16 / 8): with 16 CPUs, c1 fell to
+  142.8 tok/s during OCR against 148.9 idle the same day (−4.1 %, 94.4 % of
+  the recorded row); c8 369.7 against 377.6.
+- **OCR language `iso:ja`**: Docling 2.138 treats a bare `ja` as a RapidOCR
+  engine code and fails the conversion. The image's prefetched PP-OCRv6
+  recognizer is the same file `docling-tools` fetches for `iso:ja`
+  (`PP-OCRv6_rec_small.onnx`, sha256 `6f327246…`), so the stock image is used.
+- **Key fragments**: RapidOCR read the kanji `一` of `一回` as the long-vowel
+  `ー` on two of three pages (identical glyphs), so the key check uses
+  fragments without such twins.

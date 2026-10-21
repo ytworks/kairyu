@@ -1,6 +1,14 @@
 # Japanese knowledge bases for the 1017 eight-GPU Chat UI
 
-Status: **Approved 2026-10-21 (owner).**
+Status: **Approved 2026-10-21 (owner); implemented and GPU-verified 2026-10-21.**
+
+Outcome against the plan (details in the example's `MEASUREMENTS.md`):
+no `docling-ja.Dockerfile` (the stock image's PP-OCRv6 recognizer is the
+file fetched for `iso:ja`, so the pinned image is used as is); the OCR
+language is `iso:ja` (a bare `ja` is a RapidOCR engine code); gate fixes
+added 300-character chunks (default 1,000 diluted the asked passage),
+`OMP_NUM_THREADS=16` for the Chat UI (64 threads under 16 CPUs) and
+Docling at 8 CPUs (16 cost c1 serving 4.1 % during OCR).
 
 Accepted scope (owner, 2026-10-21):
 
