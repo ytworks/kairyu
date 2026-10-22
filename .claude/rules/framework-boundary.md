@@ -19,6 +19,11 @@ resource-accounting, and lifecycle contracts. Before changing it, identify:
 3. A concrete use and observable regression independent of the target example.
 4. The smallest shared mechanism needed, and the policy that stays in the example.
 
+L4 (`deploy/workspace/`, gates in `verification/workspace/`) owns the chat
+workspace mechanism every example's Chat UI uses: its services, Open WebUI
+setup and checks, plugins, and immutable versioned profiles. An example selects
+a profile and owns its model ids, ports, bind, auth, CPU caps and effort levels.
+
 Generic names, configurable switches, examples with arbitrary role names, and
 speculative future reuse are not evidence of genericity. Do not disguise an
 example workflow as a framework feature. A non-generalizable framework change

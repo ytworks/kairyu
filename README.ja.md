@@ -63,11 +63,16 @@ Python API とひとつの OpenAI 互換エンドポイントの背後に統合�
 
 ### 2.1 レイヤ構成
 
-Kairyu は **L3 Interface / L2 Orchestration / L1 Engines** の 3 層構成です。L1 より上の
+Kairyu は **L4 Workspace / L3 Interface / L2 Orchestration / L1 Engines** の 4 層構成です。L1 より上の
 すべては `EngineBackend` プロトコル(`kairyu/engine/backend.py`)だけに依存するため、
-独自エンジンは「もうひとつのバックエンド」であって書き直しではありません:
+独自エンジンは「もうひとつのバックエンド」であって書き直しではありません。L4 は Kairyu
+サーバーの外で動き、L3 の公開 API だけを使います:
 
 ```
+L4  Workspace       deploy/workspace     Open WebUI (固定版、改造なし) + Docling OCR,
+                                         検索用モデル, ブラウザ内コードインタプリタ,
+                                         Responses フィルター, ダウンロードツール;
+                                         全 example の Chat UI (docs/design/l4-chat-workspace.md)
 L3  Interface       kairyu.entrypoints   LLM / AsyncLLMEngine (vLLM ドロップイン),
                                          OpenAI 互換 FastAPI サーバ (SSE, tools,
                                          batch, embeddings, responses), kairyu CLI
@@ -676,12 +681,10 @@ Open WebUI は `/v1/responses` で Kairyu に接続します。`WEBUI_ADMIN_EMAI
 新規登録を閉じます（最初のアカウントは作らず、その管理者でサインインします）。
 続けて
 `docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
-を一度実行すると
-[`webui-responses-filter.py`](deploy/compose/webui-responses-filter.py) が
-グローバルフィルターとして導入されます。これにより、Responses API にない
+を一度実行すると、L4 ワークスペースの設定処理（[`deploy/workspace`](deploy/workspace/README.md)）が
+Responses フィルターをグローバルフィルターとして導入します。これにより、Responses API にない
 Chat Controls の項目（seed、top_k、effort 欄）が Responses の形に直されます。
-未設定なら `webui-setup` は警告だけを出し、管理者がフィルターを導入するまで
-それらの項目は拒否されます。モデルごとの保存設定（Admin Panel > Models >
+`webui-setup` にはこの資格情報が必要です。フィルターがない間は、それらの項目は拒否されます。モデルごとの保存設定（Admin Panel > Models >
 Advanced Params）は Open WebUI が送信直前にもう一度当てるため、フィルターでは
 直せません。保存できるのは Responses の項目だけで、既定の effort は Custom
 Parameter `reasoning` = `{"effort": "high"}` として保存します。保存した `seed`、

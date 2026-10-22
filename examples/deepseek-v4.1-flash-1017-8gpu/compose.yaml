@@ -1,4 +1,6 @@
 name: kairyu-deepseek-v4.1-flash-1017-8gpu
+# The Chat UI and its Docling are the shared L4 workspace
+# (deploy/workspace/compose.yaml), started after this file by control.py.
 services:
   # One DeepSeek-V4.1-Flash-1017 replica on GPUs 0-7: TP8 with EP8 over the
   # 384 routed experts (48 per rank) and TP-sharded, GPU-resident Engram
@@ -137,100 +139,4 @@ services:
       interval: 5s
       timeout: 3s
       retries: 120
-    restart: unless-stopped
-  # Document extraction for the Chat UI's knowledge bases: Docling with
-  # RapidOCR (PP-OCRv6; one recognizer covers Japanese, Chinese and English),
-  # CPU only. The OCR language and the rest of the request options come from
-  # the Chat UI's DOCLING_PARAMS. Its CPU limit keeps OCR from slowing the L1,
-  # whose cpuset spans every host CPU: fully used, these 4 CPUs cost c1
-  # serving 1.4 % (MEASUREMENTS.md); two workers x two threads fill them.
-  docling:
-    image: ${DOCLING_IMAGE}
-    environment:
-      DOCLING_SERVE_MAX_SYNC_WAIT: '3600'
-      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: '2'
-      OMP_NUM_THREADS: '2'
-      HF_HUB_OFFLINE: '1'
-    cpus: 4
-    healthcheck:
-      test:
-      - CMD
-      - python3
-      - -c
-      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:5001/health",
-        timeout=2)
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 10s
-    restart: unless-stopped
-  chat-ui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
-    environment:
-      OPENAI_API_BASE_URL: http://kairyu:8000/v1
-      OPENAI_API_KEY: sk-local-kairyu
-      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
-      # /v1/responses (connection 0 is OPENAI_API_BASE_URL).
-      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
-      DEFAULT_MODELS: deepseek-v4.1-flash-1017
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":1.0}'
-      ENABLE_PERSISTENT_CONFIG: 'false'
-      RESET_CONFIG_ON_START: 'true'
-      ENABLE_SIGNUP: 'false'
-      ENABLE_LOGIN_FORM: 'false'
-      WEBUI_AUTH: 'false'
-      WEBUI_URL: ${WEBUI_URL:-http://localhost:3018}
-      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
-      ENABLE_OLLAMA_API: 'false'
-      ENABLE_EVALUATION_ARENA_MODELS: 'false'
-      # Japanese knowledge bases: Docling extraction (OCR for bitmaps only),
-      # multilingual embedding and reranking from the pinned, hashed copies in
-      # the data volume (control.py), no model downloads. Open WebUI's BM25
-      # splits on whitespace and cannot tokenize Japanese, so hybrid search
-      # runs with BM25 weight 0: vector search, then the reranker.
-      CONTENT_EXTRACTION_ENGINE: docling
-      DOCLING_SERVER_URL: ${DOCLING_SERVER_URL}
-      DOCLING_PARAMS: ${DOCLING_PARAMS}
-      RAG_EMBEDDING_ENGINE: ''
-      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL_PATH}
-      RAG_RERANKING_ENGINE: ''
-      RAG_RERANKING_MODEL: ${RAG_RERANKING_MODEL_PATH}
-      ENABLE_RAG_HYBRID_SEARCH: 'true'
-      RAG_HYBRID_BM25_WEIGHT: ${RAG_HYBRID_BM25_WEIGHT}
-      RAG_TOP_K: ${RAG_TOP_K}
-      RAG_TOP_K_RERANKER: ${RAG_TOP_K_RERANKER}
-      # Chunks in characters. The default 1,000 is sized for English; a
-      # 1,000-character Japanese chunk holds several times the content and
-      # dilutes the passage a question asks about (MEASUREMENTS.md).
-      CHUNK_SIZE: ${CHUNK_SIZE}
-      CHUNK_OVERLAP: ${CHUNK_OVERLAP}
-      OFFLINE_MODE: 'true'
-      # Word / Excel / PowerPoint: the code interpreter runs Pyodide in the
-      # user's browser (python-docx, python-pptx, openpyxl are bundled); the
-      # chat's attachments are written to /mnt/uploads before the model's code
-      # runs and results are downloaded from Chat Controls > Files. Without
-      # file persistence it runs in a sandboxed iframe. On in every chat by
-      # default (owner decision 2026-10-22).
-      ENABLE_CODE_INTERPRETER: 'true'
-      CODE_INTERPRETER_ENGINE: ${CODE_INTERPRETER_ENGINE}
-      ENABLE_PYODIDE_FILE_PERSISTENCE: ${ENABLE_PYODIDE_FILE_PERSISTENCE}
-      DEFAULT_MODEL_METADATA: ${DEFAULT_MODEL_METADATA}
-      # torch sees all 128 host CPUs and would start 64 threads under the
-      # CPU limit below (20 reranker pairs at 16 CPUs: 20.1 s with 64 threads,
-      # 7.9 s with 16); one thread per CPU.
-      OMP_NUM_THREADS: '8'
-    volumes:
-    - type: bind
-      source: ${WEBUI_STORAGE_PATH}
-      target: /app/backend/data
-    depends_on:
-      kairyu:
-        condition: service_healthy
-      docling:
-        condition: service_healthy
-    # Embedding and reranking run on CPU in this container. With 16 CPUs,
-    # embedding alone cut c1 serving 12.4 % (MEASUREMENTS.md).
-    cpus: 8
-    ports:
-    - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3018}:8080
     restart: unless-stopped

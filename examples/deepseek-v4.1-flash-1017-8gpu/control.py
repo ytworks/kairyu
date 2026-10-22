@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -24,15 +25,13 @@ DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in ALLOCATION["dp_rank
 PROJECT = SPEC["environment"].replace(".", "-")
 L1_CONTAINER = f"{PROJECT}-deepseek-1"
 
+# The Chat UI is the shared L4 workspace (deploy/workspace/README.md); this
+# example owns only its values, checked here at import.
+sys.path.append(str(ROOT / "deploy" / "workspace"))
+import kairyu_workspace as workspace  # noqa: E402
 
-RETRIEVAL = SPEC["webui"]["retrieval"]
-CODE_INTERPRETER = SPEC["webui"]["code_interpreter"]
-# Open WebUI's data volume; the retrieval models live in a subdirectory of it.
-WEBUI_DATA = "/app/backend/data"
-
-
-def _webui_model_path(role: str) -> str:
-    return f"{WEBUI_DATA}/{RETRIEVAL['models_dir']}/{RETRIEVAL[role]['slug']}"
+WORKSPACE = workspace.load(SPEC["workspace"])
+COMPOSE_FILES = (HERE / "compose.yaml", workspace.COMPOSE_FILE)
 
 
 def _check_allocation() -> None:
@@ -94,6 +93,9 @@ def _storage_paths() -> dict[str, Path]:
         "webui": environment / "webui-data",
         "placement_log": environment / "placement-log",
         "cache": environment / "compile-cache",
+        # Shared by every example's workspace: the retrieval models are
+        # pinned by the profile, attested by hash and mounted read-only.
+        "workspace_models": environment.parent / "workspace-models",
     }
     for path in paths.values():
         try:
@@ -116,60 +118,27 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_PROJECT_NAME": PROJECT,
             "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["models"]),
             "DEEPSEEK_CACHE_PATH": str(paths["cache"]),
-            "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["image"]),
-            "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
-            "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
-            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "127.0.0.1"),
-            "DOCLING_IMAGE": os.environ.get("DOCLING_IMAGE", RETRIEVAL["docling_image"]),
-            "DOCLING_SERVER_URL": RETRIEVAL["docling_url"],
-            "DOCLING_PARAMS": json.dumps(RETRIEVAL["docling_params"], separators=(",", ":")),
-            "RAG_EMBEDDING_MODEL_PATH": _webui_model_path("embedding"),
-            "RAG_RERANKING_MODEL_PATH": _webui_model_path("reranking"),
-            "RAG_HYBRID_BM25_WEIGHT": str(RETRIEVAL["hybrid_bm25_weight"]),
-            "RAG_TOP_K": str(RETRIEVAL["top_k"]),
-            "CHUNK_SIZE": str(RETRIEVAL["chunk_size"]),
-            "CHUNK_OVERLAP": str(RETRIEVAL["chunk_overlap"]),
-            "CODE_INTERPRETER_ENGINE": CODE_INTERPRETER["engine"],
-            "ENABLE_PYODIDE_FILE_PERSISTENCE": str(CODE_INTERPRETER["file_persistence"]).lower(),
-            # A default feature applies only to models whose capabilities
-            # include it, so the defaults carry Open WebUI v0.12.3's own default
-            # capability set (DEFAULT_CAPABILITIES) unchanged.
-            "DEFAULT_MODEL_METADATA": json.dumps(
-                {
-                    "capabilities": CODE_INTERPRETER["capabilities"],
-                    "defaultFeatureIds": CODE_INTERPRETER["default_features"],
-                    # Files the code interpreter writes reach the user through
-                    # this tool's download link (webui-file-download-tool.py).
-                    "toolIds": CODE_INTERPRETER["default_tools"],
-                },
-                separators=(",", ":"),
-            ),
-            "RAG_TOP_K_RERANKER": str(RETRIEVAL["top_k_reranker"]),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the union of the DP ranks' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
         }
     )
+    env.update(
+        workspace.compose_env(WORKSPACE, data=paths["webui"], models=paths["workspace_models"])
+    )
     return env
 
 
+def _compose_command(*arguments: str) -> list[str]:
+    files = [item for path in COMPOSE_FILES for item in ("--file", str(path))]
+    return ["docker", "compose", "--project-directory", str(HERE), *files, *arguments]
+
+
 def _compose(arguments: list[str], *, check: bool = True) -> None:
-    _run(
-        [
-            "docker",
-            "compose",
-            "--project-directory",
-            str(HERE),
-            "--file",
-            str(HERE / "compose.yaml"),
-            *arguments,
-        ],
-        env=_compose_env(),
-        check=check,
-    )
+    _run(_compose_command(*arguments), env=_compose_env(), check=check)
 
 
 def gpu_inventory(text: str) -> dict[int, dict[str, object]]:
@@ -353,8 +322,7 @@ import hashlib, json, os, sys
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
-repo, revision, slug, expected_tree, *rest = sys.argv[1:]
-allow_patterns = json.loads(rest[0]) if rest else None
+repo, revision, slug, expected_tree = sys.argv[1:]
 target = Path('/models') / slug
 attestation = target / '.kairyu-model-attestation.json'
 
@@ -385,7 +353,7 @@ if attestation.exists():
         raise SystemExit('model files differ from the pinned attestation')
     raise SystemExit(0)
 
-snapshot_download(repo, revision=revision, local_dir=target, allow_patterns=allow_patterns,
+snapshot_download(repo, revision=revision, local_dir=target,
                   token=os.environ.get('HF_TOKEN') or None)
 rows, tree = inventory()
 if tree != expected_tree:
@@ -415,7 +383,7 @@ def _seed_model(target: Path) -> bool:
     return True
 
 
-def _attest_model(env: dict[str, str], volume: Path, model: dict, *extra: str) -> None:
+def _attest_model(env: dict[str, str], volume: Path, model: dict) -> None:
     """Download ``model`` into ``volume`` at its pinned revision and check its tree hash."""
 
     command = [
@@ -440,7 +408,6 @@ def _attest_model(env: dict[str, str], volume: Path, model: dict, *extra: str) -
             model["revision"],
             model["slug"],
             model["tree_sha256"],
-            *extra,
         ]
     )
     _run(command)
@@ -456,20 +423,6 @@ def _ensure_model(env: dict[str, str]) -> None:
         if free_gib < minimum:
             raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
     _attest_model(env, Path(env["DEEPSEEK_MODEL_STORAGE_PATH"]), model)
-
-
-def _ensure_retrieval_models(env: dict[str, str]) -> None:
-    """Fetch the Chat UI's embedding and reranking models on the host side.
-
-    Open WebUI runs with ``OFFLINE_MODE`` and loads both from its data volume,
-    so a pinned, hashed copy must be there before it starts.
-    """
-
-    volume = Path(env["WEBUI_STORAGE_PATH"]) / RETRIEVAL["models_dir"]
-    volume.mkdir(parents=True, exist_ok=True)
-    for role in ("embedding", "reranking"):
-        model = RETRIEVAL[role]
-        _attest_model(env, volume, model, json.dumps(model["allow_patterns"]))
 
 
 def _json_url(url: str) -> dict:
@@ -956,249 +909,33 @@ def validate_serving(api_url: str) -> None:
     validate_vision(api_url)
 
 
-_CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
-_CHAT_UI_FILE_TOOL_ID = "file_download"
-
-
-def _provision_chat_ui_file_download(ui_url: str, token: str) -> None:
-    """Install the file-download tool the model's default toolIds name, and check it.
-
-    The code interpreter's files live in the user's browser; this tool stores
-    one in Open WebUI's file store and returns a download link for the reply.
-    """
-
-    if CODE_INTERPRETER["default_tools"] != [_CHAT_UI_FILE_TOOL_ID]:
-        raise SystemExit(
-            f"example.json default_tools must be [{_CHAT_UI_FILE_TOOL_ID!r}], "
-            f"got {CODE_INTERPRETER['default_tools']!r}"
-        )
-    source = (HERE / "webui-file-download-tool.py").read_text(encoding="utf-8")
-    body = {
-        "id": _CHAT_UI_FILE_TOOL_ID,
-        "name": "File download",
-        "content": source,
-        "meta": {"description": "Give the user a download link for a file the code wrote."},
-    }
-    listed = _webui_api(ui_url, "/api/v1/tools/", token=token)
-    if any(row.get("id") == _CHAT_UI_FILE_TOOL_ID for row in listed):
-        _webui_api(
-            ui_url, f"/api/v1/tools/id/{_CHAT_UI_FILE_TOOL_ID}/update", token=token, payload=body
-        )
-    else:
-        _webui_api(ui_url, "/api/v1/tools/create", token=token, payload=body)
-    exported = _webui_api(ui_url, "/api/v1/tools/export", token=token)
-    installed = next((row for row in exported if row.get("id") == _CHAT_UI_FILE_TOOL_ID), None)
-    if installed is None or installed.get("content") != source:
-        raise SystemExit("Chat UI file-download tool is not installed with this example's source")
-    if not any(spec.get("name") == "provide_download" for spec in installed.get("specs") or ()):
-        raise SystemExit("Chat UI file-download tool does not expose provide_download")
-
-
-_CHAT_UI_EFFORT_LEVELS: list[str] = list(SPEC["webui"]["reasoning_effort_levels"])
-
-
-def _webui_api(
-    ui_url: str,
-    path: str,
-    *,
-    token: str | None = None,
-    payload: dict | None = None,
-):
-    headers = {"Content-Type": "application/json"}
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        f"{ui_url}{path}",
-        data=json.dumps(payload).encode() if payload is not None else None,
-        headers=headers,
-        method="POST" if payload is not None else "GET",
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read())
-
-
-def _check_chat_ui_code_interpreter(ui_url: str, token: str) -> None:
-    """Word / Excel / PowerPoint editing needs the browser code interpreter, on by default."""
-
-    config = _webui_api(ui_url, "/api/config", token=token)
-    features = config.get("features") or {}
-    code = config.get("code") or {}
-    models = _webui_api(ui_url, "/api/models", token=token).get("data") or []
-    model = next((row for row in models if row.get("id") == SPEC["model"]["served_name"]), {})
-    meta = (model.get("info") or {}).get("meta") or {}
-    default_features = meta.get("defaultFeatureIds") or []
-    observed = {
-        "enable_code_interpreter": features.get("enable_code_interpreter"),
-        "interpreter_engine": code.get("interpreter_engine"),
-        "enable_pyodide_file_persistence": features.get("enable_pyodide_file_persistence"),
-        "default_features": sorted(default_features),
-        "default_tools": sorted(meta.get("toolIds") or []),
-        "capabilities": meta.get("capabilities"),
-    }
-    expected = {
-        "enable_code_interpreter": True,
-        "interpreter_engine": CODE_INTERPRETER["engine"],
-        "enable_pyodide_file_persistence": CODE_INTERPRETER["file_persistence"],
-        "default_features": sorted(CODE_INTERPRETER["default_features"]),
-        "default_tools": sorted(CODE_INTERPRETER["default_tools"]),
-        "capabilities": CODE_INTERPRETER["capabilities"],
-    }
-    if observed != expected:
-        raise SystemExit(
-            f"Chat UI code interpreter differs from example.json: {observed!r}; "
-            f"expected {expected!r}"
-        )
-
-
-def _check_chat_ui_connection(ui_url: str, token: str) -> None:
-    """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
-
-    config = _webui_api(ui_url, "/openai/config", token=token)
-    api_type = ((config.get("OPENAI_API_CONFIGS") or {}).get("0") or {}).get("api_type")
-    if api_type != "responses":
-        raise SystemExit(
-            "Chat UI connection 0 must use api_type=responses, got "
-            f"{api_type!r}; an existing Open WebUI volume keeps its saved connection, so set "
-            "Admin Panel > Settings > Connections > Kairyu > API Type to Responses"
-        )
-
-
-def _check_chat_ui_retrieval(ui_url: str, token: str) -> None:
-    """Open WebUI must extract with Docling and search with the pinned models.
-
-    BM25 must stay off: Open WebUI splits BM25 terms on whitespace, which
-    cannot tokenize Japanese, so hybrid search runs vector search plus the
-    reranker only.
-    """
-
-    config = _webui_api(ui_url, "/api/v1/retrieval/config", token=token)
-    embedding = _webui_api(ui_url, "/api/v1/retrieval/embedding", token=token)
-    observed = {
-        "CONTENT_EXTRACTION_ENGINE": config.get("CONTENT_EXTRACTION_ENGINE"),
-        "DOCLING_SERVER_URL": config.get("DOCLING_SERVER_URL"),
-        "DOCLING_PARAMS": config.get("DOCLING_PARAMS"),
-        "RAG_EMBEDDING_ENGINE": embedding.get("RAG_EMBEDDING_ENGINE"),
-        "RAG_EMBEDDING_MODEL": embedding.get("RAG_EMBEDDING_MODEL"),
-        "RAG_RERANKING_ENGINE": config.get("RAG_RERANKING_ENGINE"),
-        "RAG_RERANKING_MODEL": config.get("RAG_RERANKING_MODEL"),
-        "ENABLE_RAG_HYBRID_SEARCH": config.get("ENABLE_RAG_HYBRID_SEARCH"),
-        "HYBRID_BM25_WEIGHT": config.get("HYBRID_BM25_WEIGHT"),
-        "TOP_K": config.get("TOP_K"),
-        "TOP_K_RERANKER": config.get("TOP_K_RERANKER"),
-        "CHUNK_SIZE": config.get("CHUNK_SIZE"),
-        "CHUNK_OVERLAP": config.get("CHUNK_OVERLAP"),
-    }
-    expected = {
-        "CONTENT_EXTRACTION_ENGINE": "docling",
-        "DOCLING_SERVER_URL": RETRIEVAL["docling_url"],
-        "DOCLING_PARAMS": RETRIEVAL["docling_params"],
-        "RAG_EMBEDDING_ENGINE": "",
-        "RAG_EMBEDDING_MODEL": _webui_model_path("embedding"),
-        "RAG_RERANKING_ENGINE": "",
-        "RAG_RERANKING_MODEL": _webui_model_path("reranking"),
-        "ENABLE_RAG_HYBRID_SEARCH": True,
-        "HYBRID_BM25_WEIGHT": RETRIEVAL["hybrid_bm25_weight"],
-        "TOP_K": RETRIEVAL["top_k"],
-        "TOP_K_RERANKER": RETRIEVAL["top_k_reranker"],
-        "CHUNK_SIZE": RETRIEVAL["chunk_size"],
-        "CHUNK_OVERLAP": RETRIEVAL["chunk_overlap"],
-    }
-    wrong = {key: value for key, value in observed.items() if value != expected[key]}
-    if wrong:
-        raise SystemExit(
-            f"Chat UI retrieval configuration differs from example.json: {wrong!r}; "
-            f"expected { ({key: expected[key] for key in wrong})!r}"
-        )
-
-
-def _provision_chat_ui_effort_selector(ui_url: str) -> None:
-    """Install the Reasoning Effort dropdown filter into the pinned Open WebUI."""
-
-    filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
-    base = f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}"
-    try:
-        signin = _webui_api(ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""})
-        if not isinstance(signin, dict) or not signin.get("token"):
-            raise SystemExit("Chat UI signin did not return an auth-disabled session token")
-        if signin.get("role") != "admin":
-            raise SystemExit("Chat UI auth-disabled session must be the admin user")
-        token = signin["token"]
-        listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
-        existing = next((row for row in listed if row.get("id") == _CHAT_UI_EFFORT_FILTER_ID), None)
-        body = {
-            "id": _CHAT_UI_EFFORT_FILTER_ID,
-            "name": "Reasoning Effort",
-            "content": filter_source,
-            "meta": {"description": "Select the DeepSeek reasoning effort from a dropdown."},
-        }
-        if existing is None:
-            state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
-        else:
-            updated = _webui_api(ui_url, f"{base}/update", token=token, payload=body)
-            state = {**existing, **(updated or {})}
-        # The toggle endpoints flip state, so call them only while a flag is off.
-        if not state.get("is_active"):
-            state = _webui_api(ui_url, f"{base}/toggle", token=token, payload={})
-        if not state.get("is_global"):
-            state = _webui_api(ui_url, f"{base}/toggle/global", token=token, payload={})
-        if not (state.get("is_active") and state.get("is_global")):
-            raise SystemExit("Chat UI effort selector could not be activated globally")
-        _check_chat_ui_connection(ui_url, token)
-        _check_chat_ui_retrieval(ui_url, token)
-        _provision_chat_ui_file_download(ui_url, token)
-        _check_chat_ui_code_interpreter(ui_url, token)
-        spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
-        enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
-    except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
-        raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
-    if enum != _CHAT_UI_EFFORT_LEVELS:
-        raise SystemExit(
-            f"Chat UI effort selector must expose exactly {_CHAT_UI_EFFORT_LEVELS!r}, got {enum!r}"
-        )
-
-
 def up() -> None:
     env = _compose_env()
     _preflight(env)
     _ensure_vllm_image(env)
     _ensure_model(env)
-    _ensure_retrieval_models(env)
-    _run(
-        [
-            "docker",
-            "compose",
-            "--project-directory",
-            str(HERE),
-            "--file",
-            str(HERE / "compose.yaml"),
-            "up",
-            "--build",
-            "--detach",
-            "--wait",
-            "--wait-timeout",
-            "7200",
-        ],
-        env=env,
-    )
+    workspace.fetch_models(WORKSPACE, Path(env["KAIRYU_WORKSPACE_MODELS"]))
+    _run(_compose_command("up", "--build", "--detach", "--wait", "--wait-timeout", "7200"), env=env)
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_serving(api_url)
-    ui_bind = env["CHAT_UI_BIND_ADDRESS"]
-    _provision_chat_ui_effort_selector(
-        f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{env['CHAT_UI_PORT']}"
+    ui_bind = workspace.chat_ui_bind(WORKSPACE)
+    ui_port = workspace.chat_ui_port(WORKSPACE)
+    workspace.setup(
+        f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{ui_port}", WORKSPACE
     )
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     ui_host = os.environ.get("PUBLIC_HOST", ui_bind)
     if ui_host == "0.0.0.0":
         ui_host = "127.0.0.1"
-    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
+    print(f"Chat UI:    http://{ui_host}:{ui_port} (no authentication)")
     print(
         f"Chat model: {SPEC['model']['served_name']} "
         "(one TP8 / EP8 replica on GPUs 0-7; text + image input; thinking high)"
     )
     print(
         "Reasoning effort: Chat Controls -> Valves -> Reasoning Effort "
-        f"({'/'.join(_CHAT_UI_EFFORT_LEVELS)})"
+        f"({'/'.join(WORKSPACE.effort_levels)})"
     )
 
 

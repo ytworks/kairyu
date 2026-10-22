@@ -1,7 +1,8 @@
 # L4 chat workspace: the 1017 eight-GPU Chat UI in every example
 
-Status: **Plan approved 2026-10-22 (owner); PR A (this PR) awaits approval of
-the full plan below, including the verification plan, before implementation.**
+Status: **Plan approved 2026-10-22 (owner), including the verification plan;
+PR A implemented (CPU checks and the CPU demo's browser E2E pass locally),
+review and GPU gates pending.**
 
 ## Problem
 
@@ -79,12 +80,12 @@ example launchers run on the host's standard-library Python and cannot import
 | File | Content |
 |---|---|
 | `deploy/workspace/README.md` | the L4 contract: spec keys, profiles, lifecycle, the one supported Open WebUI version |
-| `deploy/workspace/compose.yaml` | shared services `workspace-models` (one-shot fetch and attestation, `service_completed_successfully`), `docling`, `chat-ui`; merged after each example's file with a second `-f` |
+| `deploy/workspace/compose.yaml` | shared services `docling` and `chat-ui`, merged after each example's file with a second `-f`; the retrieval models are fetched and attested before `up` on the host side (`docker run` of the Open WebUI image on the default network, as the 1017 example did: the Chat UI container failed an IPv6-first fetch) |
 | `deploy/workspace/profiles/ja-v1.json` | the 1017 eight-GPU retrieval settings: Docling image and parameters, bge-m3 / reranker repo, revision and tree hash, chunk 300/30, BM25 0, top_k 20/5, code interpreter and default tool, model-independent gate fixtures; immutable (a change becomes `ja-v2`) |
 | `deploy/workspace/plugins/responses_filter.py` | the one Responses filter; effort levels from the Chat UI's environment (no levels = no effort valve), replacing every example's filter |
 | `deploy/workspace/plugins/file_download_tool.py` | moved unchanged from the 1017 eight-GPU example |
 | `deploy/workspace/kairyu_workspace/` (`spec.py`, `models.py`, `openwebui.py`, `__main__.py`) | standard library only: load and check the example's `workspace` spec and profile at import time, compute compose values, fetch and attest retrieval models, sign in (auth on or off), check `/api/version`, install the filter and tool, and fail closed on any retrieval, code-interpreter or model-metadata drift |
-| `verification/workspace/` (`client.py`, `correctness/docling.py`, `knowledge.py`, `browser.py`, `browser.mjs`) | the 1017 eight-GPU Chat UI gates (`verification.py` 1147-2349, `webui-browser-smoke.mjs`) moved here; examples load `client.py` by path |
+| `verification/workspace/` (`gates.py`, `browser.mjs`) | the 1017 eight-GPU Chat UI gates (`verification.py` 1147-2349, `webui-browser-smoke.mjs`) moved here as one `WorkspaceGates` class; examples load `gates.py` by path |
 
 ### Example side
 
@@ -139,8 +140,11 @@ example launchers run on the host's standard-library Python and cannot import
   example filter becomes the one L4 filter, with and without effort levels),
   static compose / filter assertions in example tests that the spec loader now
   enforces (e.g. `test_frontier_examplectl.py:51-66`), duplicated filter tests.
-- Base/head collection counts with the same pytest command are reported; the
-  count must fall. Locally only ruff and the touched tests run; CI runs all.
+- Base/head collection counts with the same pytest command are reported. PR A:
+  6,460 -> 6,461 (the two setup cases; the 1017 eight-GPU filter case goes);
+  PR B removes the per-example filter cases and static compose checks, so the
+  count falls over the whole change. Locally only ruff and the touched tests
+  run; CI runs all.
 
 ## Verification plan
 
@@ -151,8 +155,8 @@ PR A:
 
 | Gate | Checks | Pass | Budget |
 |---|---|---|---|
-| L4 `docling` (CPU) | image-only Japanese PDF OCR; text-layer PDF | key sentence on 3/3 pages, <= 30 s per page, no text-layer line lost | 10 min |
-| L4 `knowledge` (CPU) | 20-page scan plus 20 distractors in a knowledge base | key chunk in the top 5, query <= 10 s, scan ingestion <= 300 s | 10 min |
+| L4 `docling` (CPU, standalone containers) | image-only Japanese PDF OCR; text-layer PDF | key sentence on 3/3 pages, <= 30 s per page, no text-layer line lost | 10 min |
+| L4 `knowledge` (no GPU use; on the 1017 stack's Chat UI) | 20-page scan plus 20 distractors in a knowledge base | key chunk in the top 5, query <= 10 s, scan ingestion <= 300 s | 10 min |
 | CI `webui-e2e` | demo with the L4 setup | green | CI |
 | 1017-8gpu restart | `run.sh up` with L4 setup and checks | ready; every check matches | 15 min |
 | `chat-ui` | 323 then 324, an image answered Red, `#` knowledge answer with citation | all answered; `/v1/chat/completions` unchanged | 10 min |

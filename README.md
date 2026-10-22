@@ -61,11 +61,16 @@ tuning are the remaining hardware-bound work, tracked in
 
 ### 2.1 Layered architecture
 
-Kairyu is layered as **L3 Interface / L2 Orchestration / L1 Engines**. Everything above L1
-depends only on the `EngineBackend` protocol (`kairyu/engine/backend.py`), so the custom
-engine is "one more backend", not a rewrite:
+Kairyu is layered as **L4 Workspace / L3 Interface / L2 Orchestration / L1 Engines**.
+Everything above L1 depends only on the `EngineBackend` protocol
+(`kairyu/engine/backend.py`), so the custom engine is "one more backend", not a rewrite.
+L4 runs outside the Kairyu server and uses only L3's public API:
 
 ```
+L4  Workspace       deploy/workspace     Open WebUI (pinned, not forked) + Docling OCR,
+                                         retrieval models, browser code interpreter,
+                                         Responses filter and download tool; every
+                                         example's Chat UI (docs/design/l4-chat-workspace.md)
 L3  Interface       kairyu.entrypoints   LLM / AsyncLLMEngine (vLLM drop-in),
                                          OpenAI-compatible FastAPI server (SSE, tools,
                                          batch, embeddings, responses), kairyu CLI
@@ -660,12 +665,11 @@ Open WebUI reaches Kairyu over `/v1/responses`. Start the demo with
 creates that admin and closes sign-up (sign in as that admin instead of
 creating the first account), then run
 `docker compose -f deploy/compose/docker-compose.webui.yaml run --rm webui-setup`
-once: it installs
-[`webui-responses-filter.py`](deploy/compose/webui-responses-filter.py) as a
-global filter, which turns Chat Controls fields the Responses API lacks (seed,
-top_k, the effort field) into a Responses body. Without the credentials
-`webui-setup` only warns, and those Chat Controls fields are rejected until an
-admin installs the filter. The filter cannot reach a model's saved settings
+once: it runs the L4 workspace setup ([`deploy/workspace`](deploy/workspace/README.md)),
+which installs its Responses filter as a global filter that turns Chat Controls
+fields the Responses API lacks (seed, top_k, the effort field) into a Responses
+body. `webui-setup` needs those credentials; without the filter those Chat
+Controls fields are rejected. The filter cannot reach a model's saved settings
 (Admin Panel > Models > Advanced Params), which Open WebUI applies again just
 before sending: save only Responses fields there, and a default effort as the
 Custom Parameter `reasoning` = `{"effort": "high"}`; a saved `seed`, `top_k` or

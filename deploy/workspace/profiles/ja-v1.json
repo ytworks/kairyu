@@ -1,0 +1,53 @@
+{
+  "name": "ja-v1",
+  "docling": {
+    "image": "quay.io/docling-project/docling-serve-cpu:v1.37.0@sha256:6eda9c524992147c1b0b06a1a9be4894bd68b1f43c86d92c32f996c4c60d18a3",
+    "params": {"do_ocr": true, "force_ocr": false, "ocr_preset": "rapidocr", "ocr_lang": ["iso:ja"]}
+  },
+  "retrieval": {
+    "embedding": {
+      "repo": "BAAI/bge-m3",
+      "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+      "slug": "bge-m3",
+      "tree_sha256": "5a88b2f1bd9bc81d3133b9a453c490f241a86f8b261533583d841fb4786c50f0",
+      "allow_patterns": ["1_Pooling/config.json", "config.json", "config_sentence_transformers.json", "modules.json", "pytorch_model.bin", "sentence_bert_config.json", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
+    },
+    "reranking": {
+      "repo": "BAAI/bge-reranker-v2-m3",
+      "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "slug": "bge-reranker-v2-m3",
+      "tree_sha256": "5c3ea0eb074cf88bcea847b2ecb77246dcfe136dee5666fc2e599aec82cb9fba",
+      "allow_patterns": ["config.json", "model.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
+    },
+    "chunk_size": 300,
+    "chunk_overlap": 30,
+    "hybrid_bm25_weight": 0,
+    "top_k": 20,
+    "top_k_reranker": 5
+  },
+  "code_interpreter": {
+    "engine": "pyodide",
+    "file_persistence": false,
+    "default_features": ["code_interpreter"],
+    "default_tools": ["file_download"]
+  },
+  "gates": {
+    "font_url": "https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf",
+    "font_sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
+    "browser_image": "kairyu-webui-browser:playwright-1.60.0",
+    "probe_pages": 3,
+    "scan_pages": 20,
+    "key_page": 13,
+    "distractor_documents": 20,
+    "seconds_per_page": 30,
+    "ingestion_seconds": 300,
+    "query_seconds": 10,
+    "top_n": 5,
+    "load_documents": 12,
+    "load_streams": 3,
+    "docling_busy_cores": 1.0,
+    "docling_busy_share": 0.95,
+    "docling_start_busy_seconds": 3,
+    "docling_start_seconds": 120
+  }
+}

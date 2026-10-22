@@ -1,0 +1,111 @@
+# L4 chat workspace (README.md): Open WebUI and its document extraction in
+# front of an example's Kairyu. An example starts this file after its own
+# (`docker compose -f <example>/compose.yaml -f deploy/workspace/compose.yaml`),
+# which defines the `kairyu` service; every value comes from the example's
+# `workspace` section through kairyu_workspace.compose_env().
+services:
+  # Document extraction for knowledge bases: Docling with RapidOCR (PP-OCRv6;
+  # one recognizer covers Japanese, Chinese and English), CPU only. The OCR
+  # language and the other request options come from the Chat UI's
+  # DOCLING_PARAMS. Its CPU limit keeps OCR from slowing the L1 (the 1017
+  # eight-GPU measurement: 4 CPUs fully used cost c1 serving 1.4 %).
+  docling:
+    image: ${KAIRYU_WORKSPACE_DOCLING_IMAGE:?}
+    environment:
+      DOCLING_SERVE_MAX_SYNC_WAIT: '3600'
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: ${KAIRYU_WORKSPACE_DOCLING_WORKERS:?}
+      OMP_NUM_THREADS: ${KAIRYU_WORKSPACE_DOCLING_THREADS:?}
+      HF_HUB_OFFLINE: '1'
+    cpus: ${KAIRYU_WORKSPACE_DOCLING_CPUS:?}
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:5001/health",
+        timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
+  chat-ui:
+    image: ${KAIRYU_WORKSPACE_OPEN_WEBUI_IMAGE:?}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses (connection 0 is OPENAI_API_BASE_URL).
+      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
+      DEFAULT_MODELS: ${KAIRYU_WORKSPACE_DEFAULT_MODEL:?}
+      DEFAULT_MODEL_PARAMS: ${KAIRYU_WORKSPACE_DEFAULT_MODEL_PARAMS:?}
+      # The environment is the configuration on every start: setup checks it
+      # and Admin Panel changes do not survive a restart.
+      ENABLE_PERSISTENT_CONFIG: 'false'
+      RESET_CONFIG_ON_START: 'true'
+      WEBUI_AUTH: ${KAIRYU_WORKSPACE_AUTH:?}
+      ENABLE_SIGNUP: ${KAIRYU_WORKSPACE_AUTH:?}
+      ENABLE_LOGIN_FORM: ${KAIRYU_WORKSPACE_AUTH:?}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_URL: ${KAIRYU_WORKSPACE_URL:?}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: 'false'
+      ENABLE_EVALUATION_ARENA_MODELS: 'false'
+      # The Responses filter's effort dropdown (plugins/responses_filter.py).
+      KAIRYU_WORKSPACE_EFFORT_LEVELS: ${KAIRYU_WORKSPACE_EFFORT_LEVELS:?}
+      KAIRYU_WORKSPACE_EFFORT_HELP: ${KAIRYU_WORKSPACE_EFFORT_HELP:-}
+      # Knowledge bases: Docling extraction (OCR for bitmaps only), embedding
+      # and reranking from the pinned, hashed copies on the read-only models
+      # mount, no model downloads. Open WebUI's BM25 splits on whitespace and
+      # cannot tokenize Japanese, so hybrid search runs with BM25 weight 0:
+      # vector search, then the reranker.
+      CONTENT_EXTRACTION_ENGINE: docling
+      DOCLING_SERVER_URL: http://docling:5001
+      DOCLING_PARAMS: ${KAIRYU_WORKSPACE_DOCLING_PARAMS:?}
+      RAG_EMBEDDING_ENGINE: ''
+      RAG_EMBEDDING_MODEL: ${KAIRYU_WORKSPACE_EMBEDDING_MODEL:?}
+      RAG_RERANKING_ENGINE: ''
+      RAG_RERANKING_MODEL: ${KAIRYU_WORKSPACE_RERANKING_MODEL:?}
+      ENABLE_RAG_HYBRID_SEARCH: 'true'
+      RAG_HYBRID_BM25_WEIGHT: ${KAIRYU_WORKSPACE_BM25_WEIGHT:?}
+      RAG_TOP_K: ${KAIRYU_WORKSPACE_TOP_K:?}
+      RAG_TOP_K_RERANKER: ${KAIRYU_WORKSPACE_TOP_K_RERANKER:?}
+      # Chunks in characters. Open WebUI's 1,000 is sized for English; a
+      # 1,000-character Japanese chunk holds several times the content and
+      # dilutes the passage a question asks about.
+      CHUNK_SIZE: ${KAIRYU_WORKSPACE_CHUNK_SIZE:?}
+      CHUNK_OVERLAP: ${KAIRYU_WORKSPACE_CHUNK_OVERLAP:?}
+      OFFLINE_MODE: 'true'
+      # Word / Excel / PowerPoint: the code interpreter runs Pyodide in the
+      # user's browser (python-docx, python-pptx, openpyxl are bundled); the
+      # chat's attachments are written to /mnt/uploads before the model's code
+      # runs, and the file_download tool links the results in the reply.
+      # Without file persistence it runs in a sandboxed iframe. On in every
+      # chat by default.
+      ENABLE_CODE_INTERPRETER: 'true'
+      CODE_INTERPRETER_ENGINE: ${KAIRYU_WORKSPACE_CODE_INTERPRETER_ENGINE:?}
+      ENABLE_PYODIDE_FILE_PERSISTENCE: ${KAIRYU_WORKSPACE_PYODIDE_FILE_PERSISTENCE:?}
+      DEFAULT_MODEL_METADATA: ${KAIRYU_WORKSPACE_DEFAULT_MODEL_METADATA:?}
+      # torch would start one thread per host CPU under the CPU limit below
+      # (20 reranker pairs at 16 CPUs: 20.1 s with 64 threads, 7.9 s with 16).
+      OMP_NUM_THREADS: ${KAIRYU_WORKSPACE_CHAT_UI_CPUS:?}
+    volumes:
+    - type: bind
+      source: ${KAIRYU_WORKSPACE_DATA:?}
+      target: /app/backend/data
+    - type: bind
+      source: ${KAIRYU_WORKSPACE_MODELS:?}
+      target: /opt/kairyu-workspace-models
+      read_only: true
+    depends_on:
+      kairyu:
+        condition: service_healthy
+      docling:
+        condition: service_healthy
+    # Embedding and reranking run on CPU in this container (the 1017 eight-GPU
+    # measurement: at 16 CPUs embedding alone cut c1 serving 12.4 %).
+    cpus: ${KAIRYU_WORKSPACE_CHAT_UI_CPUS:?}
+    ports:
+    - ${KAIRYU_WORKSPACE_BIND:?}:${KAIRYU_WORKSPACE_PORT:?}:8080
+    restart: unless-stopped

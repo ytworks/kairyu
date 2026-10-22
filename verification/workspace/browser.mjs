@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * Browser gate for this example's Open WebUI (run by `verify.sh chat-ui`):
- * two typed turns of one chat answer 323 and 324, an attached red PNG answers
+ * Browser gates of the L4 chat workspace (gates.py; an example runs them as
+ * `verify.sh chat-ui`, `office` and `file-download`). In the default mode two
+ * typed turns of one chat answer 323 and 324, an attached red PNG answers
  * Red, and a Japanese question with the gate's knowledge base selected by `#`
  * is answered from its scanned PDF with that document cited.
  *
@@ -19,8 +20,8 @@
 
 import { chromium, devices } from 'playwright';
 
-const baseUrl = new URL(process.env.WEBUI_SMOKE_BASE_URL ?? 'http://127.0.0.1:3018');
-const model = process.env.WEBUI_SMOKE_MODEL ?? 'deepseek-v4.1-flash-1017';
+const baseUrl = new URL(process.env.WEBUI_SMOKE_BASE_URL);
+const models = JSON.parse(process.env.WEBUI_SMOKE_MODELS);
 const knowledge = process.env.WEBUI_SMOKE_KNOWLEDGE;
 const knowledgeQuery = process.env.WEBUI_SMOKE_KNOWLEDGE_QUERY;
 const knowledgeSource = process.env.WEBUI_SMOKE_KNOWLEDGE_SOURCE;
@@ -96,14 +97,14 @@ async function main() {
 	const context = await browser.newContext({ serviceWorkers: 'block', locale: 'ja-JP' });
 	page = await context.newPage();
 	await step('open the no-auth chat', newChat);
-	await step('the public model is offered', async () => {
+	await step('the public models are offered', async () => {
 		const ids = await page.evaluate(async () => {
 			const response = await fetch('/api/models', {
 				headers: { Authorization: `Bearer ${localStorage.token}` }
 			});
 			return (await response.json()).data.map((row) => row.id).sort();
 		});
-		invariant(JSON.stringify(ids) === JSON.stringify([model]), `models offered: ${JSON.stringify(ids)}`);
+		invariant(JSON.stringify(ids) === JSON.stringify([...models].sort()), `models offered: ${JSON.stringify(ids)}`);
 	});
 	await step('a typed turn answers 323', async () => {
 		const { text } = await ask('What is 17 * 19? Reply with the number only.');

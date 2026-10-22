@@ -59,8 +59,9 @@ Chat UI: `http://127.0.0.1:3018` (local, no authentication).
 
 Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
 `api_type: responses`; m11 D7 amendment 2026-10-17). `run.sh up` installs
-the Reasoning Effort filter (`webui-reasoning-effort-filter.py`) as a
-global filter and checks the connection type. Besides the effort dropdown,
+the L4 workspace's Responses filter (`deploy/workspace/plugins/responses_filter.py`,
+shown as Reasoning Effort with this example's levels) as a global filter and
+checks the connection type. Besides the effort dropdown,
 the filter turns Open WebUI's chat body into a strict Responses body: the
 effort becomes `reasoning.effort`, Chat Controls fields the Responses API
 lacks (`seed`, `top_k`, ...) are dropped, saved output items keep only their
@@ -87,9 +88,12 @@ the max budget (100); chat callers reach vLLM with `max` (100).
 
 ## Japanese knowledge bases
 
-Open WebUI's knowledge bases (Workspace > Knowledge) are configured for
-Japanese documents in `compose.yaml`, with every value pinned in
-`example.json`:
+The Chat UI is the shared L4 chat workspace
+([`deploy/workspace`](../../deploy/workspace/README.md)): this example's
+`workspace` section in `example.json` selects the profile `ja-v1` and sets
+the model, effort levels, port and CPU caps. Open WebUI's knowledge bases
+(Workspace > Knowledge) are configured for Japanese documents by that
+profile:
 
 - **Extraction**: documents other than plain text go to a Docling service
   (`docling-serve-cpu` v1.37.0, pinned by digest). Text layers are kept;
@@ -99,9 +103,10 @@ Japanese documents in `compose.yaml`, with every value pinned in
   many torch threads), so OCR and embedding do not slow the L1, whose cpuset
   spans every host CPU.
 - **Embedding** `BAAI/bge-m3` and **reranking** `BAAI/bge-reranker-v2-m3`,
-  both multilingual. `run.sh up` downloads them at pinned revisions into the
-  Chat UI's data volume (`webui-data/rag-models`) and hashes them as it does
-  the checkpoint; Open WebUI runs with `OFFLINE_MODE` and loads those copies.
+  both multilingual. `run.sh up` downloads them at pinned revisions into
+  `model-volumes/workspace-models/` (shared by every example's workspace) and
+  hashes them as it does the checkpoint; Open WebUI runs with `OFFLINE_MODE`
+  and loads those copies from a read-only mount.
 - **Search**: hybrid search with BM25 weight 0. Open WebUI's BM25 splits
   text on whitespace, which cannot tokenize Japanese, so a query runs vector
   search for 20 candidates and the reranker keeps the best 5.
@@ -111,8 +116,7 @@ Japanese documents in `compose.yaml`, with every value pinned in
 
 `run.sh up` fails unless Open WebUI reports exactly this configuration.
 Because the Chat UI starts with `RESET_CONFIG_ON_START`, Admin Panel changes
-to these settings are reset at the next start; change `example.json`
-instead. Documents are embedded when they are added: after changing the
+to these settings are reset at the next start; they are the profile's. Documents are embedded when they are added: after changing the
 embedding model, the chunks or the OCR settings, add the documents again (or use
 Admin Panel > Settings > Documents > Reindex).
 
@@ -135,20 +139,20 @@ Attach a docx, xlsx or pptx with the clip and ask about it or for a change.
   browser copies the chat's attachments to `/mnt/uploads`, and the model
   writes its result there.
 - **Downloading**: the model then calls the `file_download` tool
-  (`webui-file-download-tool.py`, installed by `run.sh up` and on in every
-  chat through the model's default `toolIds`). The tool reads the file from
+  (L4's `plugins/file_download_tool.py`, installed by `run.sh up` and on in
+  every chat through the model's default `toolIds`). The tool reads the file from
   your browser's workspace, stores it in Open WebUI's file store, attaches it
   to the reply and gives the model a link to show. Tap or click the link in
   the reply to save the file; it keeps working after a reload and on another
   device. Chat Controls > Files still lists the working files. The tool's
   description also tells the model to import the Office libraries directly
   (Open WebUI loads a bundled package only on a plain `import`).
-- **Configuration**: `compose.yaml` sets the code interpreter, the pyodide
-  engine, file persistence off (a sandboxed iframe) and
+- **Configuration**: L4's `compose.yaml` sets the code interpreter, the
+  pyodide engine, file persistence off (a sandboxed iframe) and
   `DEFAULT_MODEL_METADATA`, which carries Open WebUI v0.12.3's default
   capabilities plus `defaultFeatureIds: [code_interpreter]` (a default
   feature applies only to a model whose capabilities include it). Values are
-  in `example.json`; `run.sh up` fails unless Open WebUI reports them.
+  in the `ja-v1` profile; `run.sh up` fails unless Open WebUI reports them.
 - **Images after tool use**: Open WebUI passes its built-in tools in every
   chat, so an image often follows a tool call. Kairyu forwards images beside
   tool calls, tool results and reasoning to this upstream-rendered model
@@ -255,7 +259,7 @@ on vLLM's chat API.
   OCR text, a Japanese question returns its chunk in the top 5, within the
   ingestion and query budgets. `KNOWLEDGE_KEEP=1` keeps it for `chat-ui`;
   `KNOWLEDGE_REUSE=1` re-checks a kept one (after a restart).
-- `chat-ui`: Chromium (`webui-browser-smoke.mjs`): `323`, then `324` in the
+- `chat-ui`: Chromium (`verification/workspace/browser.mjs`): `323`, then `324` in the
   same chat, `Red` for an attached PNG, and a Japanese question with the kept
   knowledge base picked by `#` answered from the scanned PDF with it cited;
   Kairyu sees `/v1/responses` only.
@@ -281,7 +285,9 @@ on vLLM's chat API.
   cells; after a reload the same link saves the same file; then the same
   request on an emulated iPhone 13, saved by tapping the link.
 
-`docling`, `chat-ui`, `office` and `file-download` build the Playwright image from the shared
+The Chat UI gates (`docling` to `file-download`) are the shared L4 gates
+(`verification/workspace/gates.py`), run with this example's serving rows and
+references. `docling`, `chat-ui`, `office` and `file-download` build the Playwright image from the shared
 `deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every
 file they upload under its knowledge base
 (`verification-results/knowledge-gate-uploads.json`) and delete only those.

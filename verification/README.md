@@ -18,6 +18,10 @@ Kairyu verification, not model-evaluation benchmark rows.
 
 The four scopes are `l1`, `orchestration`, `fleet`, and `product`. The four
 kinds are `correctness`, `performance`, `resilience`, and `diagnostic`.
+`verification/workspace/` is not a scope: it is the L4 chat workspace's gate
+library (`gates.py`, `browser.mjs`; `docs/design/l4-chat-workspace.md`),
+which examples load and run through their own `verify.sh`; it has no
+entrypoint of its own.
 `verification/registry.toml` is the strict v1 source of truth for every active
 entrypoint and records a stable ID, scope, kind, prerequisites, documentation,
 output schema, formal status, module, path, and invocation forms.

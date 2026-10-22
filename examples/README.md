@@ -19,6 +19,11 @@ All of them use Kairyu as L3, vLLM as L1 and Open WebUI as the public chat
 surface, except `quyet-1.0-large-1gpu`, a System One decision model with no
 chat: Kairyu publishes only `/v1/systemone`, and an example-owned adapter reads
 the answers from an internal vLLM.
+The Chat UI is becoming the shared L4 chat workspace
+([`deploy/workspace`](../deploy/workspace/README.md): Japanese OCR knowledge
+bases, Word / Excel / PowerPoint, download links), selected by each example's
+`workspace` section; `deepseek-v4.1-flash-1017-8gpu` runs on it first and the
+other chat examples follow (`docs/design/l4-chat-workspace.md`).
 Every Open WebUI talks to Kairyu over `/v1/responses` (`api_type: responses`,
 m11 D7 amendment 2026-10-17) through an example-owned filter that leaves only
 Responses fields, and Kairyu forwards each request to vLLM in the API its
