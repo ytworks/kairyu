@@ -22,7 +22,11 @@ import uuid
 
 ROOT = "/mnt/uploads/"
 CHUNK_BYTES = 4 * 1024 * 1024
-_READ = r"""
+# ``execute:python`` runs in the code interpreter's persistent namespace, where
+# a plain script would bind or overwrite the user's own names (data, path, os,
+# ...) and break their next edit. The read therefore runs inside exec() with a
+# fresh globals dict: the program the browser runs is that one expression.
+_READ_BODY = r"""
 import base64, json, os
 path = {path!r}
 size = os.path.getsize(path)
@@ -31,6 +35,13 @@ with open(path, "rb") as stream:
     data = stream.read({length})
 print("KAIRYU-FILE " + json.dumps({{"size": size, "data": base64.b64encode(data).decode()}}))
 """
+
+
+def _read_program(path: str, offset: int, length: int) -> str:
+    body = _READ_BODY.format(path=path, offset=offset, length=length)
+    return f"exec({body!r}, {{}})"
+
+
 mimetypes.add_type(
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
 )
@@ -57,9 +68,10 @@ class Tools:
         link in your reply exactly as written. Never write sandbox: links or
         file paths as links, and never describe screens, buttons or folders for
         downloading. In the code interpreter, python-docx (import docx),
-        python-pptx (import pptx), openpyxl, xlsxwriter and pandas are
-        available: import them with a plain import statement at the top of the
-        code, which loads them (an importlib check reports them missing).
+        python-pptx (import pptx), openpyxl and pandas load when the code
+        imports them with a plain import statement at the top (an importlib
+        check reports them missing); write Excel files with openpyxl, since
+        xlsxwriter is not loaded.
         :param path: Path of the file under /mnt/uploads, e.g. /mnt/uploads/plan.xlsx.
         :return: A Markdown download link to show the user.
         """
@@ -78,7 +90,7 @@ class Tools:
                     "type": "execute:python",
                     "data": {
                         "id": str(uuid.uuid4()),
-                        "code": _READ.format(path=path, offset=offset, length=CHUNK_BYTES),
+                        "code": _read_program(path, offset, CHUNK_BYTES),
                         "session_id": (__metadata__ or {}).get("session_id"),
                         "files": [],
                     },

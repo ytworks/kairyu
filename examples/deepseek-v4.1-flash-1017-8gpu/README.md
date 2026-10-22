@@ -129,8 +129,9 @@ Attach a docx, xlsx or pptx with the clip and ask about it or for a change.
 - **Reading**: the file goes through the Docling service above, like a
   knowledge-base document.
 - **Editing and creating**: the Chat UI's code interpreter is on in every chat
-  by default. It runs Pyodide in your browser with python-docx, python-pptx,
-  openpyxl, xlsxwriter and pandas bundled. When the model runs code, the
+  by default. It runs Pyodide in your browser; python-docx, python-pptx,
+  openpyxl and pandas load when the code imports them (xlsxwriter is bundled
+  but Open WebUI does not load it). When the model runs code, the
   browser copies the chat's attachments to `/mnt/uploads`, and the model
   writes its result there.
 - **Downloading**: the model then calls the `file_download` tool
