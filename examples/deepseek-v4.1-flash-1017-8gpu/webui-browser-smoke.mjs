@@ -8,11 +8,16 @@
  *
  * With WEBUI_SMOKE_MODE=office (run by `verify.sh office`), each Word, Excel
  * and PowerPoint fixture is attached with the clip, asked about, then edited
- * by the code interpreter; the result is downloaded from Chat Controls >
- * Files into /results for the gate to check.
+ * by the code interpreter; the result is saved from the download link in the
+ * reply into /results for the gate to check.
+ *
+ * With WEBUI_SMOKE_MODE=download (run by `verify.sh file-download`), the
+ * owner's request for an Excel template is asked on a desktop screen and on
+ * an emulated phone; the file is saved from the reply's link, then again from
+ * the same link after a reload.
  */
 
-import { chromium } from 'playwright';
+import { chromium, devices } from 'playwright';
 
 const baseUrl = new URL(process.env.WEBUI_SMOKE_BASE_URL ?? 'http://127.0.0.1:3018');
 const model = process.env.WEBUI_SMOKE_MODEL ?? 'deepseek-v4.1-flash-1017';
@@ -21,6 +26,7 @@ const knowledgeQuery = process.env.WEBUI_SMOKE_KNOWLEDGE_QUERY;
 const knowledgeSource = process.env.WEBUI_SMOKE_KNOWLEDGE_SOURCE;
 const mode = process.env.WEBUI_SMOKE_MODE ?? 'chat';
 const officeCases = JSON.parse(process.env.WEBUI_SMOKE_OFFICE ?? '{}');
+const downloadRequest = process.env.WEBUI_SMOKE_DOWNLOAD_REQUEST;
 const actionTimeoutMs = 20_000;
 const navigationTimeoutMs = 60_000;
 const responseTimeoutMs = 1_800_000;
@@ -174,21 +180,28 @@ async function attach(path) {
 	}
 }
 
-// Download /mnt/uploads/<name> from Chat Controls > Files into /results.
-async function downloadResult(name) {
-	await dismissNotices();
-	const tab = page.getByRole('button', { name: 'Files', exact: true });
-	if ((await tab.count()) === 0) {
-		await page.locator('button[aria-label="Controls"]').first().click({ timeout: actionTimeoutMs });
-	}
-	await tab.first().click({ timeout: actionTimeoutMs });
-	const browserPanel = page.locator('[aria-label="Pyodide file browser"]').first();
-	const row = browserPanel.getByText(name, { exact: true }).first();
-	await row.waitFor({ state: 'visible', timeout: actionTimeoutMs });
-	await row.click({ timeout: actionTimeoutMs });
-	const download = page.waitForEvent('download', { timeout: actionTimeoutMs });
-	await browserPanel.locator('button[aria-label="Download"]').first().click({ timeout: actionTimeoutMs });
-	await (await download).saveAs(`/results/${name}`);
+// Save the file behind the reply's download link (the file-download tool's
+// /api/v1/files/<id>/content link) as /results/<saveAs>, the way a user
+// clicks or taps it: the link opens a new tab that downloads the file.
+async function downloadFromReply(item, saveAs, { tap = false } = {}) {
+	const text = (await item.innerText()).trim();
+	invariant(!/sandbox:/i.test(text), `the reply still writes a sandbox: link: ${text.slice(0, 400)}`);
+	const link = item.locator('a[href*="/api/v1/files/"]').last();
+	invariant((await link.count()) > 0, `the reply has no download link: ${text.slice(0, 600)}`);
+	const href = await link.getAttribute('href');
+	const popup = page.waitForEvent('popup', { timeout: actionTimeoutMs });
+	await (tap ? link.tap({ timeout: actionTimeoutMs }) : link.click({ timeout: actionTimeoutMs }));
+	const tab = await popup;
+	const download = await tab.waitForEvent('download', { timeout: navigationTimeoutMs });
+	await download.saveAs(`/results/${saveAs}`);
+	await tab.close().catch(() => {});
+	console.log(JSON.stringify({ saved: saveAs, href, suggested: download.suggestedFilename() }));
+	return href;
+}
+
+// The last assistant message of the open chat.
+function lastReply() {
+	return page.locator('ul[role="log"] [role="listitem"]').last();
 }
 
 async function officeMain() {
@@ -217,9 +230,9 @@ async function officeMain() {
 		});
 		await step(`${format}: the code interpreter edits it into ${item.result}`, async () => {
 			await page.locator('#chat-input').fill(item.edit);
-			const { text } = await sendAndRead();
+			const { item: reply, text } = await sendAndRead();
 			console.log(JSON.stringify({ format, edit_answer: text.slice(0, 400) }));
-			await downloadResult(item.result);
+			await downloadFromReply(reply, item.result);
 		});
 	}
 	// The last chat used the code interpreter; an image there now travels
@@ -239,8 +252,47 @@ async function officeMain() {
 	console.log('WEBUI OFFICE SMOKE PASS');
 }
 
+async function downloadMain() {
+	browser = await chromium.launch({ headless: true });
+	const desktop = await browser.newContext({
+		serviceWorkers: 'block',
+		locale: 'ja-JP',
+		acceptDownloads: true,
+		viewport: { width: 1600, height: 1000 }
+	});
+	page = await desktop.newPage();
+	let href;
+	await step('desktop: the owner\'s request gets a download link that saves the file', async () => {
+		await newChat();
+		const { item, text } = await ask(downloadRequest);
+		console.log(JSON.stringify({ desktop_answer: text.slice(0, 500) }));
+		href = await downloadFromReply(item, 'desktop.xlsx');
+	});
+	await step('desktop: after a reload the same link saves the same file', async () => {
+		await page.reload({ waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
+		await page.locator('ul[role="log"] [role="listitem"]').first().waitFor({ timeout: navigationTimeoutMs });
+		const again = await downloadFromReply(lastReply(), 'desktop-after-reload.xlsx');
+		invariant(again === href, `the link changed after the reload: ${href} -> ${again}`);
+	});
+	await desktop.close();
+	const phone = await browser.newContext({
+		...devices['iPhone 13'],
+		serviceWorkers: 'block',
+		locale: 'ja-JP',
+		acceptDownloads: true
+	});
+	page = await phone.newPage();
+	await step('phone: tapping the reply\'s link saves the file', async () => {
+		await newChat();
+		const { item, text } = await ask(downloadRequest);
+		console.log(JSON.stringify({ phone_answer: text.slice(0, 300) }));
+		await downloadFromReply(item, 'phone.xlsx', { tap: true });
+	});
+	console.log('WEBUI DOWNLOAD SMOKE PASS');
+}
+
 try {
-	await (mode === 'office' ? officeMain() : main());
+	await (mode === 'office' ? officeMain() : mode === 'download' ? downloadMain() : main());
 } catch (error) {
 	console.error(`WEBUI BROWSER SMOKE FAIL [step=${currentStep}]\n${error?.stack ?? error}`);
 	if (page) {

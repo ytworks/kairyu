@@ -2188,7 +2188,7 @@ def office(run_dir: Path) -> int:
 
     Chromium attaches each fixture with the clip, asks about its key fact, then
     asks for an edit; the code interpreter writes the result to /mnt/uploads
-    and the gate downloads it from Chat Controls > Files and checks it. Last,
+    and the gate saves it from the reply's download link and checks it. Last,
     an image attached to that chat (after its tool calls) must be answered.
     """
     fixtures = run_dir / "fixtures"
@@ -2253,6 +2253,102 @@ def office(run_dir: Path) -> int:
     return 0 if passed else 1
 
 
+# The owner's own request (2026-10-22, on a phone) that produced a file the
+# Chat UI could not hand over.
+DOWNLOAD_REQUEST = "一年の事業計画のフォーマットをエクセルで作って"
+_DOWNLOAD_CHECK = r"""
+import hashlib, json, openpyxl, os, sys
+out = sys.argv[1]
+report = {}
+for name in ("desktop.xlsx", "desktop-after-reload.xlsx", "phone.xlsx"):
+    path = os.path.join(out, name)
+    if not os.path.exists(path):
+        report[name] = {"exists": False, "passed": False}
+        continue
+    try:
+        book = openpyxl.load_workbook(path)
+        cells = sum(
+            1 for sheet in book.worksheets for row in sheet.iter_rows(values_only=True)
+            for value in row if value not in (None, "")
+        )
+        report[name] = {
+            "exists": True,
+            "sheets": book.sheetnames,
+            "filled_cells": cells,
+            "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest(),
+            "passed": bool(book.sheetnames) and cells >= 10,
+        }
+    except Exception as error:
+        report[name] = {"exists": True, "passed": False, "error": repr(error)}
+first, again = report["desktop.xlsx"], report["desktop-after-reload.xlsx"]
+digest = first.get("sha256")
+report["same_after_reload"] = bool(digest) and digest == again.get("sha256")
+print("DOWNLOAD-CHECK " + json.dumps(report, ensure_ascii=False))
+"""
+
+
+def file_download(run_dir: Path) -> int:
+    """A file the model makes is saved from the reply's link: desktop, after a reload, phone."""
+    results = run_dir / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    os.chmod(results, 0o777)  # the browser container writes downloads here
+    before = _kairyu_api_counts()
+    browser = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "--network",
+            "host",
+            "--env",
+            f"WEBUI_SMOKE_BASE_URL={_chat_ui_url()}",
+            "--env",
+            f"WEBUI_SMOKE_MODEL={SERVED_MODEL}",
+            "--env",
+            "WEBUI_SMOKE_MODE=download",
+            "--env",
+            f"WEBUI_SMOKE_DOWNLOAD_REQUEST={DOWNLOAD_REQUEST}",
+            "--volume",
+            f"{HERE / 'webui-browser-smoke.mjs'}:/work/webui_browser_smoke.mjs:ro",
+            "--volume",
+            f"{results}:/results",
+            browser_image(),
+            "node",
+            "/work/webui_browser_smoke.mjs",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    (run_dir / "browser.log").write_text(browser.stdout + browser.stderr)
+    after = _kairyu_api_counts()
+    line = _docling_python(_DOWNLOAD_CHECK, results, "/work")
+    checks = json.loads(line.split("DOWNLOAD-CHECK ", 1)[1])
+    report = {
+        "browser_exit": browser.returncode,
+        "checks": checks,
+        "kairyu": {"before": before, "after": after},
+    }
+    passed = (
+        browser.returncode == 0
+        and all(
+            checks[name].get("passed")
+            for name in ("desktop.xlsx", "desktop-after-reload.xlsx", "phone.xlsx")
+        )
+        and checks["same_after_reload"]
+        and after["/v1/responses"] > before["/v1/responses"]
+        and after["/v1/chat/completions"] == before["/v1/chat/completions"]
+    )
+    report["passed"] = passed
+    (run_dir / "file-download.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    )
+    print(browser.stdout[-3000:] + browser.stderr[-2000:])
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if passed else 1
+
+
 GATES = {
     "l1": l1,
     "serving": serving,
@@ -2269,6 +2365,7 @@ GATES = {
     "chat-ui": chat_ui,
     "knowledge-serving": knowledge_serving,
     "office": office,
+    "file-download": file_download,
 }
 
 
