@@ -632,3 +632,12 @@ passes built-in tools in every chat, an image often follows a tool call;
 that needed Kairyu to carry images beside tool history for
 upstream-rendered models (m9 D2 images-beside-tools amendment 2026-10-22).
 L1, L2 and the other examples are unchanged.
+
+Download links (2026-10-22, plan
+`docs/superpowers/plans/2026-10-22-1017-8gpu-file-download.md`, PR #664;
+GPU-verified: `file-download`, `office`, `chat-ui`, `knowledge`): the
+code interpreter's files exist only in the viewer's page, so an
+example-owned Open WebUI tool (`file_download`, on by default) reads a file
+from that workspace through the code interpreter's own browser event,
+stores it in Open WebUI's file store, attaches it to the reply and returns
+a link that works on a phone, after a reload and from another device.

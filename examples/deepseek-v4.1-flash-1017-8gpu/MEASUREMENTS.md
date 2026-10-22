@@ -257,3 +257,33 @@ Kairyu's upstream body equals the caller's apart from those two defaults
 (captured on CPU). Without tool history both sides answered red 10 / 10,
 and greedy both answered "red PLUM" 5 / 5 on each API, so the gate decodes
 `image-tools` greedily.
+
+## Download links for files the Chat UI makes (2026-10-22)
+
+PR #664. The owner's chat of 2026-10-22 18:14 JST (a phone) made an Excel
+template it could not hand over: the model wrote a `sandbox:` link, which
+Open WebUI does not render as a link, described screens that do not exist,
+and had probed openpyxl with `importlib` (Open WebUI loads a bundled
+package only on a plain `import`), so it wrote the xlsx XML by hand. The
+`file_download` tool now stores the file and puts a link in the reply.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| restart | PASS | `run.sh up` installs the tool (content checked through `/api/v1/tools/export`) and the model's default `toolIds` |
+| `file-download` | PASS | the owner's request on a desktop screen: 13 code runs and `provide_download`, link saved a 10-sheet xlsx (861 filled cells) in 186.8 s; after a reload the same link saved the identical file (same SHA-256); on an emulated iPhone 13 a tap saved an 11-sheet xlsx (1,657 cells) in 445.5 s (80 code runs, 11 of them retries after errors); both chats imported openpyxl directly; Kairyu `/v1/chat/completions` unchanged (`20261022T093713Z-file-download`) |
+| `office` | PASS | docx / xlsx / pptx edits saved from the reply's link and checked as before; the image after the code-interpreter calls answered "Red" (`20261022T094817Z-office`) |
+| `knowledge` | PASS | (`20261022T094922Z-knowledge`) |
+| `chat-ui` | PASS | 323, 324, Red, knowledge answer; Kairyu `/v1/responses` only (`20261022T095121Z-chat-ui`) |
+
+In headless Chromium the reply's link opens a new tab whose attachment
+response becomes a download of the opening page; the tab closes. The gate
+takes the download from either the page or the tab. The time a request
+takes is the model's own work on the workbook (13 versus 80 code runs for
+the same request); storing and linking the file takes seconds.
+
+Re-run after the review fixes (`038ba016`: the browser read runs in an
+isolated `exec` namespace; the guidance names only libraries Open WebUI
+loads): `file-download` PASS (desktop 194.9 s, 6 sheets / 775 cells; the
+same file after a reload; phone 233.7 s, 8 sheets / 887 cells;
+`20261022T101210Z-file-download`) and `office` PASS
+(`20261022T101922Z-office`).

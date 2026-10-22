@@ -141,6 +141,9 @@ def _compose_env() -> dict[str, str]:
                 {
                     "capabilities": CODE_INTERPRETER["capabilities"],
                     "defaultFeatureIds": CODE_INTERPRETER["default_features"],
+                    # Files the code interpreter writes reach the user through
+                    # this tool's download link (webui-file-download-tool.py).
+                    "toolIds": CODE_INTERPRETER["default_tools"],
                 },
                 separators=(",", ":"),
             ),
@@ -954,6 +957,43 @@ def validate_serving(api_url: str) -> None:
 
 
 _CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
+_CHAT_UI_FILE_TOOL_ID = "file_download"
+
+
+def _provision_chat_ui_file_download(ui_url: str, token: str) -> None:
+    """Install the file-download tool the model's default toolIds name, and check it.
+
+    The code interpreter's files live in the user's browser; this tool stores
+    one in Open WebUI's file store and returns a download link for the reply.
+    """
+
+    if CODE_INTERPRETER["default_tools"] != [_CHAT_UI_FILE_TOOL_ID]:
+        raise SystemExit(
+            f"example.json default_tools must be [{_CHAT_UI_FILE_TOOL_ID!r}], "
+            f"got {CODE_INTERPRETER['default_tools']!r}"
+        )
+    source = (HERE / "webui-file-download-tool.py").read_text(encoding="utf-8")
+    body = {
+        "id": _CHAT_UI_FILE_TOOL_ID,
+        "name": "File download",
+        "content": source,
+        "meta": {"description": "Give the user a download link for a file the code wrote."},
+    }
+    listed = _webui_api(ui_url, "/api/v1/tools/", token=token)
+    if any(row.get("id") == _CHAT_UI_FILE_TOOL_ID for row in listed):
+        _webui_api(
+            ui_url, f"/api/v1/tools/id/{_CHAT_UI_FILE_TOOL_ID}/update", token=token, payload=body
+        )
+    else:
+        _webui_api(ui_url, "/api/v1/tools/create", token=token, payload=body)
+    exported = _webui_api(ui_url, "/api/v1/tools/export", token=token)
+    installed = next((row for row in exported if row.get("id") == _CHAT_UI_FILE_TOOL_ID), None)
+    if installed is None or installed.get("content") != source:
+        raise SystemExit("Chat UI file-download tool is not installed with this example's source")
+    if not any(spec.get("name") == "provide_download" for spec in installed.get("specs") or ()):
+        raise SystemExit("Chat UI file-download tool does not expose provide_download")
+
+
 _CHAT_UI_EFFORT_LEVELS: list[str] = list(SPEC["webui"]["reasoning_effort_levels"])
 
 
@@ -992,6 +1032,7 @@ def _check_chat_ui_code_interpreter(ui_url: str, token: str) -> None:
         "interpreter_engine": code.get("interpreter_engine"),
         "enable_pyodide_file_persistence": features.get("enable_pyodide_file_persistence"),
         "default_features": sorted(default_features),
+        "default_tools": sorted(meta.get("toolIds") or []),
         "capabilities": meta.get("capabilities"),
     }
     expected = {
@@ -999,6 +1040,7 @@ def _check_chat_ui_code_interpreter(ui_url: str, token: str) -> None:
         "interpreter_engine": CODE_INTERPRETER["engine"],
         "enable_pyodide_file_persistence": CODE_INTERPRETER["file_persistence"],
         "default_features": sorted(CODE_INTERPRETER["default_features"]),
+        "default_tools": sorted(CODE_INTERPRETER["default_tools"]),
         "capabilities": CODE_INTERPRETER["capabilities"],
     }
     if observed != expected:
@@ -1103,6 +1145,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
             raise SystemExit("Chat UI effort selector could not be activated globally")
         _check_chat_ui_connection(ui_url, token)
         _check_chat_ui_retrieval(ui_url, token)
+        _provision_chat_ui_file_download(ui_url, token)
         _check_chat_ui_code_interpreter(ui_url, token)
         spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")

@@ -84,6 +84,7 @@
       "engine": "pyodide",
       "file_persistence": false,
       "default_features": ["code_interpreter"],
+      "default_tools": ["file_download"],
       "capabilities": {
         "file_context": true,
         "vision": true,

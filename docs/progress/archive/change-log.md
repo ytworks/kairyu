@@ -11,6 +11,29 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-19 — [amendment] Messages `thinking: disabled` turns thinking off; review fixes (m11 D4)
+- What: an engine or pool model now receives `thinking: disabled` as thinking off (internal effort `none`, per wire: Messages `thinking.disabled`, Responses/chat `none`; AUTO unchanged); `display: omitted` returns empty thinking; a Kairyu upstream gets replayed thinking; the first thinking delta is the SLO first token. GPU: the dsh smoke (effort max, 1 task) on `423494b0` passed (66 calls 200, 65 with thinking, reward 1).
+- Why: issue #659 item 4 (disabled was a no-op, so L1 thought at its default unseen) and three owner review findings on PR #660; owner decision 2026-10-19.
+- Refs: m11 D4 Messages thinking review amendment; `kairyu/entrypoints/server/messages_service.py`, `kairyu/engine/upstream_wire.py`; PR #660; issue #659
+
+### 2026-10-19 — [amendment] Messages thinking round trip for direct engines (m11 D4)
+- What: `/v1/messages` accepts `thinking: {"type": "enabled"}` without a budget (thinking on at `output_config.effort`) and assistant `thinking` blocks (an engine or pool model replays them as `reasoning_content`, AUTO drops them), and an engine or pool model's reply returns its reasoning as a thinking block with an empty signature (unary and SSE); AUTO replies are unchanged.
+- Why: DeepSeek Harness (kairyu-bench PR #31) got 400 on both and never received thinking, so its reasoning was lost at every tool call (issue #659); owner decision 2026-10-19 to fix Kairyu before the DeepSWE run with that harness.
+- Refs: m11 D4 Messages thinking amendment; `kairyu/entrypoints/server/messages_service.py`; `docs/superpowers/plans/2026-10-19-messages-thinking-dsh.md`; PR #660
+
+### 2026-10-19 — [progress] DeepSeek-V4.1-Flash-1017 examples GPU-verified; DeepSWE 79/113 on six GPUs
+- What: both 1017 examples pass every gate (six GPUs keep DP6/EP6 on vLLM v0.32.0; eight GPUs serve TP8/EP8 with 8K batched tokens: c1/c8 +52/+30 % over DP8). DeepSWE v1.1 on the six-GPU example, effort max (rendered `Reasoning Effort: 100`), 8 workers: 79/113 (two verifier timeouts count as not correct), 6 h 04 min, 10,062 API calls (0909 six-GPU max: 85/113, 15 h 22 min, 21,985 calls).
+- Refs: each example's `MEASUREMENTS.md`; run `deepswe-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #658
+
+### 2026-10-19 — [design] DeepSeek-V4.1-Flash-1017 six- and eight-GPU examples (FN-D9 1017 amendment)
+- What: two new examples for the 1017 weight refresh with the V4.1 L2/L3 unchanged; their overlay ports the 1017 encoder rule (a tool-result-only user message does not start a turn) into vLLM's encoder copy, maps `xhigh` to 100, and follows the 1017 card's top_p 1.0; the L1 (v0.32.0 vs the pinned nightly, recipe levers, DP8 vs TP8 on eight GPUs) is selected by measurement.
+- Why: owner request 2026-10-19 (fastest L1 without lowering accuracy; DeepSWE on the six-GPU example).
+- Refs: `docs/design/frontier-native-runtime.md` FN-D9 1017 amendment; `docs/superpowers/plans/2026-10-19-deepseek-v41-flash-1017-examples.md`; PR #658
+
+### 2026-10-19 — [progress] PR #656 GPU final test complete
+- What: all 7 remaining Open WebUI examples pass every gate on `/v1/responses`, `api-equivalence`, the Chat UI pass (no chat requests) and the cancellation probe (release 0.02-0.23 s); Qwen on vLLM v0.31.0; the V4.1 ensemble judge routes 17/32 coding prompts to ENSEMBLE (9/32 on v0.23.0; owner accepted).
+- Refs: each example's `MEASUREMENTS.md`; FN Responses amendment, DTO-D18, VCO 2026-10-17 amendment Status lines
+
 ### 2026-10-19 — [design] `glm-5.3-flash-quyet-8gpu` deleted (VCO-D23 removal amendment)
 - What: the GLM-writer verified tool example is removed with its own tests. Its final-test serving gate failed on the recorded `dedup-case` limit (c4: GLM's think route answered a turn done without the call it still needed; c8/c16 made the call). The same turn on the live stack: done without a call 2/6 on `/v1/responses`, 1/6 on chat, so not caused by the caller-API forwarding.
 - Why: owner decision 2026-10-19 — the example is unusable once the limit recurred.
