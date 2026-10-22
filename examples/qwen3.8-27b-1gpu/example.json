@@ -36,12 +36,19 @@
     "kv_cache_dtype": "fp8",
     "cudagraph_mode": "PIECEWISE"
   },
-  "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
-    "port": 3000
+  "workspace": {
+    "profile": "ja-v2",
+    "port": 3000,
+    "bind": "127.0.0.1",
+    "auth": "admin",
+    "models": ["qwen3.8-27b"],
+    "default_params": {"max_tokens": 32768, "temperature": 1.0, "top_p": 0.95},
+    "reasoning_effort": null,
+    "cpus": {"chat_ui": 8, "docling": 4, "docling_workers": 2}
   },
   "api_port": 8001,
   "verification": {
+    "knowledge_serving": {"concurrency": [1, 8], "min_fraction": 0.95},
     "serving": {
       "api": "responses",
       "prompt_tokens_approx": 8192,

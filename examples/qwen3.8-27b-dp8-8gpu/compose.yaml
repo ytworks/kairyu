@@ -81,6 +81,8 @@ x-qwen: &qwen
     start_period: 30s
   restart: unless-stopped
 
+# The Chat UI and its Docling are the shared L4 workspace
+# (deploy/workspace/compose.yaml), started after this file by control.py.
 services:
   qwen-0:
     <<: *qwen
@@ -279,33 +281,4 @@ services:
       interval: 5s
       timeout: 3s
       retries: 120
-    restart: unless-stopped
-
-  chat-ui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
-    environment:
-      OPENAI_API_BASE_URL: http://kairyu:8000/v1
-      OPENAI_API_KEY: sk-local-kairyu
-      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
-      # /v1/responses. An existing webui-data volume keeps its saved
-      # connection; control.py checks it when the admin credentials are set.
-      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
-      DEFAULT_MODELS: qwen3.8-27b
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":0.95}'
-      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
-      WEBUI_AUTH: "true"
-      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
-      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
-      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
-      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
-      ENABLE_OLLAMA_API: "false"
-      RAG_EMBEDDING_ENGINE: ""
-    volumes:
-      - type: bind
-        source: ${WEBUI_STORAGE_PATH}
-        target: /app/backend/data
-    depends_on:
-      kairyu: {condition: service_healthy}
-    ports:
-      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
     restart: unless-stopped

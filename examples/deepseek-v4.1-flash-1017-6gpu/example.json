@@ -68,13 +68,22 @@
     "indexer_kv_dtype": "mxfp4",
     "indexer_sparse_logits": false
   },
-  "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
+  "workspace": {
+    "profile": "ja-v2",
     "port": 3017,
-    "reasoning_effort_levels": ["default", "low", "high", "max"]
+    "bind": "127.0.0.1",
+    "auth": "none",
+    "models": ["deepseek-v4.1-flash-1017"],
+    "default_params": {"max_tokens": 32768, "temperature": 1.0, "top_p": 1.0},
+    "reasoning_effort": {
+      "levels": ["default", "low", "high", "max"],
+      "help": "Reasoning effort for DeepSeek-V4.1-Flash-1017. default = thinking high (75)."
+    },
+    "cpus": {"chat_ui": 8, "docling": 4, "docling_workers": 2}
   },
   "api_port": 8017,
   "verification": {
+    "knowledge_serving": {"concurrency": [1, 8], "min_fraction": 0.95},
     "serving": {
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,

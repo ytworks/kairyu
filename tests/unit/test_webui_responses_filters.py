@@ -1,26 +1,33 @@
-"""Every Chat UI filter (examples, the L4 workspace's) leaves an OpenAI Responses body (m11 D7).
+"""Every Chat UI filter leaves an OpenAI Responses body (m11 D7).
 
 Open WebUI v0.12.3 (as v0.11.0) forwards unknown top-level keys and replays
 saved reasoning items verbatim when it converts its chat body for an
 ``api_type: responses`` connection, and Kairyu's /v1/responses rejects both
 (replays 2026-10-17 and 2026-10-18: ``reasoning_effort`` and chat-era
-``attributes`` answered 400).
+``attributes`` answered 400). L4's filter serves every workspace, with or
+without effort levels; the two orchestrated examples keep their own until
+they move to L4.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-FILTERS = sorted(
-    [
-        *ROOT.glob("examples/*/webui-*filter.py"),
-        ROOT / "deploy/workspace/plugins/responses_filter.py",
-    ]
-)
+L4_FILTER = ROOT / "deploy/workspace/plugins/responses_filter.py"
+LEVELS = ["default", "low", "high", "max"]
+FILTERS = [
+    pytest.param(L4_FILTER, LEVELS, id="l4-effort"),
+    pytest.param(L4_FILTER, None, id="l4-plain"),
+    *(
+        pytest.param(path, None, id=path.parent.name)
+        for path in sorted(ROOT.glob("examples/*/webui-*filter.py"))
+    ),
+]
 # Keys the pinned Open WebUI either converts (messages, max_tokens) or drops
 # itself (stream_options, presence_penalty, ...); everything else must already
 # be a Responses field when the filter returns.
@@ -33,22 +40,17 @@ _ITEM_FIELDS = {
 }
 
 
-def _load(path: Path):
+def _load(path: Path, levels: list[str] | None, monkeypatch):
+    # L4's filter reads the workspace's effort levels from the Chat UI's environment.
+    monkeypatch.setenv("KAIRYU_WORKSPACE_EFFORT_LEVELS", json.dumps(levels or []))
     spec = importlib.util.spec_from_file_location(f"filter_{path.parent.name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.Filter()
 
 
-def test_every_non_jev_example_with_a_chat_ui_ships_a_filter():
-    assert {path.parent.name for path in FILTERS} >= {
-        "qwen3.8-27b-1gpu",
-        "qwen3.8-27b-dp8-8gpu",
-    }
-
-
-@pytest.mark.parametrize("path", FILTERS, ids=lambda path: path.parent.name)
-def test_filter_leaves_only_responses_fields(path: Path):
+@pytest.mark.parametrize("path,levels", FILTERS)
+def test_filter_leaves_only_responses_fields(path: Path, levels, monkeypatch):
     body = {
         "model": "m",
         "stream": True,
@@ -85,7 +87,7 @@ def test_filter_leaves_only_responses_fields(path: Path):
         ],
     }
 
-    result = _load(path).inlet(body, None)
+    result = _load(path, levels, monkeypatch).inlet(body, None)
 
     assert set(result) <= _CONVERTED | _RESPONSES_FIELDS, set(result) - _RESPONSES_FIELDS
     assert result["store"] is False
@@ -93,3 +95,16 @@ def test_filter_leaves_only_responses_fields(path: Path):
     replayed = result["messages"][1]["output"]
     assert [item["type"] for item in replayed] == ["reasoning", "message"]
     assert all(set(item) <= _ITEM_FIELDS[item["type"]] for item in replayed)
+
+
+def test_effort_dropdown_default_restores_the_model_default(monkeypatch):
+    """``default`` drops a saved ``reasoning_effort`` (deepseek-v4.1-flash-8gpu's
+    default params carry high); a level becomes ``reasoning.effort``."""
+    selector = _load(L4_FILTER, LEVELS, monkeypatch)
+
+    def choose(effort):
+        body = {"reasoning_effort": "high", "max_tokens": 32768}
+        return selector.inlet(body, {"valves": selector.UserValves(reasoning_effort=effort)})
+
+    assert choose("default") == {"max_tokens": 32768, "store": False}
+    assert choose("low")["reasoning"] == {"effort": "low"}

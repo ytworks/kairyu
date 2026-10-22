@@ -43,19 +43,11 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
     assert spec["model"]["tree_sha256"] == (
         "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e"
     )
-    assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
+    assert set(compose["services"]) == {"vllm", "kairyu"}
     assert spec["vllm"]["release"] == "v0.31.0"
     assert compose["services"]["vllm"]["image"] == (
         f"${{VLLM_IMAGE:-{spec['vllm']['image']}}}"
     )
-    webui = compose["services"]["chat-ui"]
-    assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
-    assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
-        "max_tokens": 32768,
-        "temperature": 1.0,
-        "top_p": 0.95,
-    }
-    assert webui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
     assert compose["services"]["kairyu"]["depends_on"] == {"vllm": {"condition": "service_healthy"}}
     devices = compose["services"]["vllm"]["deploy"]["resources"]["reservations"]["devices"][0]
     assert devices["device_ids"] == ["${GPU_ID:-0}"]
@@ -63,7 +55,6 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
         model_mount = compose["services"][service]["volumes"][0]
         assert model_mount["source"] == "${MODEL_STORAGE_PATH}"
     assert compose["services"]["vllm"]["volumes"][1]["source"] == "${VLLM_CACHE_PATH}"
-    assert webui["volumes"][0]["source"] == "${WEBUI_STORAGE_PATH}"
     assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
 
 
@@ -168,15 +159,15 @@ def test_qwen_control_selects_one_gpu_and_forces_nvme_storage() -> None:
 def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> None:
     benchmark = _load(QWEN_EXAMPLE / "verification.py", "qwen_example_serving")
     dataset = tmp_path / "serving.json"
-    benchmark._serving_dataset(dataset, requests=4, approximate_tokens=32)
+    benchmark._serving_dataset(dataset, requests=4, approximate_tokens=32, namespace="r1-c8")
     rows = json.loads(dataset.read_text())
     prompts = [row["conversations"][0]["value"] for row in rows]
     assert len(set(prompts)) == 4
     assert [prompt.split(":", 1)[0] for prompt in prompts] == [
-        "Case 0",
-        "Case 1",
-        "Case 2",
-        "Case 3",
+        "Run r1-c8, case 0",
+        "Run r1-c8, case 1",
+        "Run r1-c8, case 2",
+        "Run r1-c8, case 3",
     ]
 
 

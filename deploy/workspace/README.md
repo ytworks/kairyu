@@ -11,7 +11,8 @@ L4 uses only Kairyu's public `/v1/responses`; design and rationale:
 |---|---|
 | `compose.yaml` | the `docling` and `chat-ui` services, started after an example's compose file (which defines `kairyu`) |
 | `kairyu_workspace/` | standard library only: `load` checks a `workspace` section, `compose_env` fills `compose.yaml`, `fetch_models` fetches and attests the retrieval models, `setup` installs the plugins and checks the running Open WebUI |
-| `profiles/ja-v1.json` | the pinned extraction, retrieval and code-interpreter settings and the gates' thresholds; immutable (a change is a new name) |
+| `profiles/ja-v2.json` | the pinned extraction, retrieval and code-interpreter settings and the gates' thresholds; immutable (a change is a new name) |
+| `profiles/ja-v1.json` | `ja-v2` with 20 reranker candidates instead of 50; the 1017 eight-GPU example's PR A evidence |
 | `plugins/responses_filter.py` | the one global filter: only Responses fields reach Kairyu; with effort levels, a Reasoning Effort dropdown |
 | `plugins/file_download_tool.py` | `file_download`: stores a file the code interpreter wrote and returns a link that works on any device |
 
@@ -23,7 +24,7 @@ Gates: [`verification/workspace/gates.py`](../../verification/workspace/gates.py
 
 ```json
 "workspace": {
-  "profile": "ja-v1",
+  "profile": "ja-v2",
   "port": 3018,
   "bind": "127.0.0.1",
   "auth": "none",

@@ -90,7 +90,7 @@ the max budget (100); chat callers reach vLLM with `max` (100).
 
 The Chat UI is the shared L4 chat workspace
 ([`deploy/workspace`](../../deploy/workspace/README.md)): this example's
-`workspace` section in `example.json` selects the profile `ja-v1` and sets
+`workspace` section in `example.json` selects the profile `ja-v2` and sets
 the model, effort levels, port and CPU caps. Open WebUI's knowledge bases
 (Workspace > Knowledge) are configured for Japanese documents by that
 profile:
@@ -152,7 +152,7 @@ Attach a docx, xlsx or pptx with the clip and ask about it or for a change.
   `DEFAULT_MODEL_METADATA`, which carries Open WebUI v0.12.3's default
   capabilities plus `defaultFeatureIds: [code_interpreter]` (a default
   feature applies only to a model whose capabilities include it). Values are
-  in the `ja-v1` profile; `run.sh up` fails unless Open WebUI reports them.
+  in the `ja-v2` profile; `run.sh up` fails unless Open WebUI reports them.
 - **Images after tool use**: Open WebUI passes its built-in tools in every
   chat, so an image often follows a tool call. Kairyu forwards images beside
   tool calls, tool results and reasoning to this upstream-rendered model

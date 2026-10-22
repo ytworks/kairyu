@@ -410,7 +410,9 @@ class WorkspaceGates:
 
     ``serving(run_dir, concurrency)`` runs the example's own serving rows and
     ``serving_tok_s(run_dir, level)`` reads one row's output tokens per second;
-    ``knowledge_serving`` holds the example's reference for those rows.
+    ``knowledge_serving`` holds those rows' concurrency, the minimum fraction
+    and, optionally, a recorded reference (``reference_tok_s``); without one
+    the gate measures the same rows unloaded first, in the same run.
     """
 
     def __init__(
@@ -750,6 +752,9 @@ class WorkspaceGates:
             "WEBUI_SMOKE_MODELS": json.dumps(list(self.workspace.models)),
             **environment,
         }
+        if self.workspace.auth == "admin":
+            environment["WEBUI_SMOKE_EMAIL"] = os.environ.get("WEBUI_ADMIN_EMAIL", "")
+            environment["WEBUI_SMOKE_PASSWORD"] = os.environ.get("WEBUI_ADMIN_PASSWORD", "")
         for key, value in environment.items():
             command += ["--env", f"{key}={value}"]
         for volume in (f"{BROWSER_SCRIPT}:/work/webui_browser_smoke.mjs:ro", *volumes):
@@ -1038,6 +1043,17 @@ class WorkspaceGates:
         import queue
 
         limits = self.limits
+        concurrency = [int(level) for level in self.reference["concurrency"]]
+        reference = self.reference.get("reference_tok_s")
+        report: dict = {"load_streams": int(limits["load_streams"])}
+        if reference is None:
+            unloaded = run_dir / f"{run_dir.name}-unloaded"
+            unloaded.mkdir(parents=True, exist_ok=True)
+            if self.serving(unloaded, concurrency):
+                print("unloaded reference rows failed", file=sys.stderr)
+                return 1
+            reference = {str(level): self.serving_tok_s(unloaded, level) for level in concurrency}
+            report["reference_measured_unloaded"] = reference
         token = self._token()
         name = f"{KNOWLEDGE_NAME}-load"
         stale = self._knowledge_by_name(token, name)
@@ -1083,8 +1099,6 @@ class WorkspaceGates:
                 ingestions.append({"stream": stream, "start": started, "end": time.monotonic()})
 
         busy_cores = float(limits["docling_busy_cores"])
-        concurrency = [int(level) for level in self.reference["concurrency"]]
-        report: dict = {"load_streams": int(limits["load_streams"])}
         code = 1
         with DoclingCpu(f"{self.project}-docling-1") as cpu:
             workers = [
@@ -1126,11 +1140,11 @@ class WorkspaceGates:
             tok_s = self.serving_tok_s(run_dir, level)
             if tok_s is None:
                 continue
-            reference = float(self.reference["reference_tok_s"][str(level)])
+            row_reference = float(reference[str(level)])
             rows[str(level)] = {
                 "output_tokens_per_s": round(tok_s, 1),
-                "reference": reference,
-                "fraction": round(tok_s / reference, 3),
+                "reference": row_reference,
+                "fraction": round(tok_s / row_reference, 3),
             }
         report.update(
             docling_started_busy=started_busy,

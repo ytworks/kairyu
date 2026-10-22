@@ -197,3 +197,26 @@ across four streams, and about 125 tok/s with its tuned MTP case. A separate RTX
 tok/s at concurrency 8–16 with an 8K maximum context. Quantization, GPU variant,
 prompt length, maximum context, and vLLM revision differ from this run; links
 and exact caveats are maintained in the example README.
+
+## On the L4 chat workspace (2026-10-22, in progress)
+
+PR #666 (`6b32bdcf`), profile `ja-v1`, admin sign-in. `run.sh up` on L4
+passed (L4 setup signed in as the existing admin, installed the filter and
+`file_download`, checked retrieval and the code interpreter). `knowledge`
+failed (`20261022T134438Z`): the OCR text holds the key sentence, but the key
+chunk was not among the reranker's 20 candidates (top score 0.491). Asked
+with more candidates the reranker puts it first (0.989-0.991). Four fresh
+fixtures: the key chunk was within the 20 candidates in 2 (gate passes) and
+needed 30 and 34 in the others (`20261022T135835Z`, `140136Z`, `140431Z`,
+`140727Z`); the first fixture needed more than 40. Query time by candidates
+on 8 CPUs: 20 3.5 s, 40 6.0 s, 50 7.9 s, 60 9.7 s, 80 11.8 s. bge-m3 on the
+exact fixture text over 20 namespaces: the key chunk ranked beyond 20 in 2
+at 300-character chunks (50, 22) and in 5 at 200 (35-67).
+
+Gates that do not use the candidate count, run on the same stack (still
+`ja-v1`; from `file-download` on, the working tree already named `ja-v2`):
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `office` | PASS | docx / xlsx / pptx edited and saved from the reply's links, each checked; the image after the code-interpreter calls answered "Red."; `/v1/chat/completions` 0 (`20261022T144419Z`) |
+| `file-download` | PASS | the owner's Excel request: desktop 8 sheets / 168 filled cells in 194.8 s, the same file (SHA-256) after a reload; emulated iPhone 13: 1 sheet / 68 cells in 69.6 s (`20261022T144558Z`) |

@@ -79,16 +79,15 @@ Open WebUI talks to Kairyu over the OpenAI Responses API (m11 D7 amendment,
 Open WebUI then forwards some chat-only fields unchanged (Chat Controls'
 reasoning effort, `seed`, `top_k`) and replays saved answers with its own
 bookkeeping fields, which Kairyu's strict `/v1/responses` rejects, so the UI
-needs the global filter in `webui-responses-filter.py`: it moves the effort to
+needs the L4 workspace's global Responses filter: it moves the effort to
 `reasoning.effort`, drops fields the Responses API lacks, keeps only Responses
-fields on saved items, and sends `store: false`. Sign-in is enabled here, so
-`./run.sh up` installs the filter only when `WEBUI_ADMIN_EMAIL` and
-`WEBUI_ADMIN_PASSWORD` are set (the administrator Open WebUI creates on a fresh
-volume) and switches the saved Kairyu connection to `api_type=responses` when
-an existing Open WebUI volume still has the chat connection it saved earlier;
-without them it prints a warning, and an administrator installs the file under
-Admin Panel > Functions as a global filter and sets Admin Panel > Settings >
-Connections > Kairyu > API Type to Responses.
+fields on saved items, and sends `store: false`. Sign-in is enabled here
+(`auth: admin`), so `./run.sh up` needs `WEBUI_ADMIN_EMAIL` and
+`WEBUI_ADMIN_PASSWORD` (the administrator Open WebUI creates on a fresh volume,
+or the existing one): it signs in as that admin, installs the filter and the
+download tool, switches a saved chat connection to `api_type=responses`, and
+stops if any Chat UI setting differs from the workspace. `ENABLE_SIGNUP=false`
+closes sign-up.
 
 Saved model settings: Open WebUI applies a model's saved Advanced Params
 (Admin Panel or Workspace > Models) once more after the filter, just before it
@@ -99,6 +98,22 @@ with the value `{"effort": "high"}`; it applies to requests that carry no
 effort of their own. A saved `seed`, `top_k`, `min_p` or `reasoning_effort`
 makes Kairyu answer 400 `Unknown parameter`, as OpenAI's Responses API does
 (m11 D7 amendment 2026-10-18).
+
+## Knowledge bases, Word, Excel and PowerPoint
+
+The Chat UI is the shared L4 chat workspace
+([`deploy/workspace`](../../deploy/workspace/README.md)), selected by this
+example's `workspace` section in `example.json` (profile `ja-v2`). It gives
+Japanese knowledge bases (Docling OCR for scanned pages, `BAAI/bge-m3`
+embedding, then `BAAI/bge-reranker-v2-m3` reranking of the 50 nearest chunks,
+from pinned, hashed copies shared by every example; 300-character chunks), Word / Excel / PowerPoint read
+and edit through the browser code interpreter (on in every chat by default),
+and download links for the files it writes. Docling runs at 4 CPUs and the
+Chat UI at 8; `verify.sh knowledge-serving` checks that the serving rows keep
+95 % of their unloaded throughput beside OCR load. The environment is the
+Chat UI's configuration on every start, so Admin Panel changes do not
+survive a restart. A knowledge base built before this example moved to the
+workspace was embedded with another model: add its files again.
 
 ## Verification
 

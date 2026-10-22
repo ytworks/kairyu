@@ -55,7 +55,7 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
     # compose: one vLLM service per replica, GPUs 0..7 partitioned exactly once.
     services = compose["services"]
     l1 = [f"{prefix}-{index}" for index in range(replicas)]
-    assert set(services) == {*l1, "kairyu", "chat-ui"}
+    assert set(services) == {*l1, "kairyu"}
     # A DeepSeek-V4 effort overlay (xhigh -> max) is the image L1 serves.
     served = spec["vllm"].get("effort_overlay", spec["vllm"])
     served_image = served["image"]

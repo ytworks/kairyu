@@ -186,6 +186,8 @@ def compose_env(workspace: Workspace, *, data: Path, models: Path) -> dict[str, 
         "KAIRYU_WORKSPACE_PORT": port,
         "KAIRYU_WORKSPACE_URL": os.environ.get("WEBUI_URL", f"http://localhost:{port}"),
         "KAIRYU_WORKSPACE_AUTH": str(admin).lower(),
+        # With sign-in, the operator may close sign-up (ENABLE_SIGNUP=false).
+        "KAIRYU_WORKSPACE_SIGNUP": os.environ.get("ENABLE_SIGNUP", "true") if admin else "false",
         "KAIRYU_WORKSPACE_DEFAULT_MODEL": workspace.models[0],
         "KAIRYU_WORKSPACE_DEFAULT_MODEL_PARAMS": json.dumps(
             workspace.default_params, separators=(",", ":")

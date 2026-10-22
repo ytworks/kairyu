@@ -2,7 +2,8 @@
 
 Status: **Accepted 2026-10-22 (owner)**; PR A (L4 and the 1017 eight-GPU
 example, PR #665) GPU-verified 2026-10-22: every Chat UI gate passes on L4
-(the example's `MEASUREMENTS.md`). Plan:
+(the example's `MEASUREMENTS.md`). PR B (#666): the six other single-model
+chat examples, implemented. Plan:
 `docs/superpowers/plans/2026-10-22-l4-chat-workspace.md`.
 
 ## Context
@@ -44,6 +45,16 @@ every example, shared as a framework layer.
   interpreter (Pyodide, no file persistence, on by default, `file_download`
   by default) and the gates' thresholds. A profile is never edited; a change
   is a new name. An example must name one, so L4 never selects a policy.
+  **Amendment 2026-10-22 (`ja-v2`, owner decision):** the reranker gets the
+  50 nearest chunks instead of 20. On `qwen3.8-27b-1gpu` the key chunk of the
+  `knowledge` gate's Japanese scan fell outside the 20 candidates in 3 of 5
+  fresh fixtures (needed 30, 34 and more than 40; the 1017 eight-GPU example
+  0 of 4), while the reranker put it first (0.989-0.991) whenever it was a
+  candidate; bge-m3 on the exact fixture text over 20 namespaces ranked it
+  beyond 20 in 2 (22, 50), and 200-character chunks were worse (5). Cost:
+  about 0.16 s per candidate on 8 CPUs, a query 3.5 s -> about 8 s (the gate
+  allows 10 s). Every example selects `ja-v2`; `ja-v1` stays as the PR A
+  record.
 - **WS-D4 One Open WebUI.** L4 supports exactly Open WebUI v0.12.3 (pinned
   by digest): the plugins use its internals. Setup signs in as the admin,
   checks `/api/version`, keeps Kairyu's connection on Responses, installs the

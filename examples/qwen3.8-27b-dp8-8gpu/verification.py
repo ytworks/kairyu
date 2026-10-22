@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,6 +18,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
+# The Chat UI is the shared L4 workspace (deploy/workspace/README.md).
+sys.path.append(str(ROOT / "deploy" / "workspace"))
+import kairyu_workspace as workspace  # noqa: E402
+
+WORKSPACE = workspace.load(SPEC["workspace"])
 REPLICAS = int(SPEC["allocation"]["replicas"])
 TENSOR_PARALLEL = int(SPEC["allocation"]["tensor_parallel_size"])
 SERVED_MODEL = SPEC["model"]["served_name"]
@@ -27,6 +33,7 @@ SERVED_CONFIG_FILES = (
     HERE / "compose.yaml",
     HERE / "kairyu.yaml",
     HERE / "../qwen3.8-27b-1gpu/chat_template.jinja",
+    *workspace.SERVED_FILES,
 )
 
 
@@ -302,7 +309,8 @@ def _validate_serving_row(row_dir: Path, requests: int, max_output_tokens: int) 
     return 0
 
 
-def serving(run_dir: Path) -> int:
+def serving(run_dir: Path, levels: list[int] | None = None) -> int:
+    """Serving rows at each configured concurrency, or at ``levels``."""
     config = SPEC["verification"]["serving"]
     gate = config["placement_gate"]
     requests = int(config["requests_per_concurrency"])
@@ -326,7 +334,7 @@ def serving(run_dir: Path) -> int:
         return 1
 
     failures = 0
-    for concurrency in config["concurrency"]:
+    for concurrency in levels or config["concurrency"]:
         row_dir = run_dir / f"serving-c{concurrency}"
         dataset = run_dir / f"serving-8k-c{concurrency}.json"
         _serving_dataset(
@@ -983,7 +991,7 @@ def api_equivalence(run_dir: Path) -> int:
             "--l3-model",
             SERVED_MODEL,
             "--cases",
-            "text,stream,effort,tools,image,cap,openwebui",
+            "text,stream,effort,tools,image,image-tools,cap,openwebui",
             # L3 max reaches L1 as xhigh; any explicit effort selects thinking.
             "--efforts",
             "low,high,xhigh",
@@ -997,10 +1005,45 @@ def api_equivalence(run_dir: Path) -> int:
     )
 
 
+# --- Chat UI (L4 workspace) --------------------------------------------------------
+#
+# Docling OCR, Japanese knowledge bases, the browser Chat UI, serving beside OCR
+# load, Word / Excel / PowerPoint and download links are the shared L4 gates
+# (verification/workspace/gates.py), run here with this example's serving rows.
+
+
+def _serving_tok_s(run_dir: Path, level: int) -> float | None:
+    rows = list((run_dir / f"serving-c{level}").glob("*-serving.json"))
+    if len(rows) != 1:
+        return None
+    return float(json.loads(rows[0].read_text())["summary"]["output_tokens_per_s"])
+
+
+def _workspace_gates():
+    # Loaded by path: this example's own module is named ``verification``.
+    spec = importlib.util.spec_from_file_location(
+        "kairyu_workspace_gates", ROOT / "verification/workspace/gates.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.WorkspaceGates(
+        WORKSPACE,
+        project=SPEC["environment"].replace(".", "-"),
+        results_root=RESULTS_ROOT,
+        work_dir=ENVIRONMENT_STORAGE / "bench-tmp",
+        serving=serving,
+        serving_tok_s=_serving_tok_s,
+        knowledge_serving=SPEC["verification"]["knowledge_serving"],
+    )
+
+
+WORKSPACE_GATES = _workspace_gates()
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
     for path in SERVED_CONFIG_FILES:
-        digest.update(path.name.encode())
+        digest.update(path.resolve().relative_to(ROOT).as_posix().encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
@@ -1009,9 +1052,13 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "verification", choices=("serving", "tool-calling", "api-equivalence", "list")
-    )
+    gates = {
+        "serving": serving,
+        "tool-calling": tool_calling,
+        "api-equivalence": api_equivalence,
+        **WORKSPACE_GATES.gates(),
+    }
+    parser.add_argument("verification", choices=(*gates, "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
@@ -1028,6 +1075,8 @@ def main() -> None:
             "api-equivalence  the same Responses requests to one L1 replica and to L3 "
             "agree; every replica saw them on /v1/responses"
         )
+        for gate, function in WORKSPACE_GATES.gates().items():
+            print(f"{gate:16} {function.__doc__.strip().splitlines()[0]}")
         return
 
     _ensure_environment(args.no_start)
@@ -1040,15 +1089,12 @@ def main() -> None:
         "requested": args.verification,
         "served_config_sha256": _served_config_sha256(),
         "spec": SPEC,
+        "runtime": {"workspace": WORKSPACE_GATES.runtime_evidence()},
     }
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    target = {
-        "serving": serving,
-        "tool-calling": tool_calling,
-        "api-equivalence": api_equivalence,
-    }[args.verification]
+    target = gates[args.verification]
     try:
         code = target(run_dir)
     except Exception as error:

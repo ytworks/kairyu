@@ -28,6 +28,9 @@ const knowledgeSource = process.env.WEBUI_SMOKE_KNOWLEDGE_SOURCE;
 const mode = process.env.WEBUI_SMOKE_MODE ?? 'chat';
 const officeCases = JSON.parse(process.env.WEBUI_SMOKE_OFFICE ?? '{}');
 const downloadRequest = process.env.WEBUI_SMOKE_DOWNLOAD_REQUEST;
+// Set for a workspace with sign-in (`auth: admin`): the gates use the admin.
+const email = process.env.WEBUI_SMOKE_EMAIL;
+const password = process.env.WEBUI_SMOKE_PASSWORD;
 const actionTimeoutMs = 20_000;
 const navigationTimeoutMs = 60_000;
 const responseTimeoutMs = 1_800_000;
@@ -64,6 +67,30 @@ async function dismissNotices() {
 		.evaluateAll((elements) => elements.forEach((element) => element.remove()));
 }
 
+// With sign-in on, sign in as the admin through Open WebUI's own API and keep
+// the token where its pages read it; without, the page opens signed in.
+async function signIn() {
+	if (!email) return;
+	await page.goto(new URL('/auth', baseUrl).href, {
+		waitUntil: 'domcontentloaded',
+		timeout: navigationTimeoutMs
+	});
+	const token = await page.evaluate(
+		async ([user, secret]) => {
+			const response = await fetch('/api/v1/auths/signin', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ email: user, password: secret })
+			});
+			const body = await response.json();
+			localStorage.token = body.token ?? '';
+			return body.token;
+		},
+		[email, password]
+	);
+	invariant(token, 'the admin sign-in returned no token');
+}
+
 async function newChat() {
 	await page.goto(baseUrl.href, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
 	await page.locator('#chat-input').waitFor({ state: 'visible', timeout: navigationTimeoutMs });
@@ -96,7 +123,8 @@ async function main() {
 	browser = await chromium.launch({ headless: true });
 	const context = await browser.newContext({ serviceWorkers: 'block', locale: 'ja-JP' });
 	page = await context.newPage();
-	await step('open the no-auth chat', newChat);
+	await signIn();
+	await step('open the chat', newChat);
 	await step('the public models are offered', async () => {
 		const ids = await page.evaluate(async () => {
 			const response = await fetch('/api/models', {
@@ -220,6 +248,7 @@ async function officeMain() {
 		viewport: { width: 1600, height: 1000 }
 	});
 	page = await context.newPage();
+	await signIn();
 	for (const [format, item] of Object.entries(officeCases)) {
 		await step(`${format}: attach ${item.fixture}`, async () => {
 			await newChat();
@@ -268,6 +297,7 @@ async function downloadMain() {
 		viewport: { width: 1600, height: 1000 }
 	});
 	page = await desktop.newPage();
+	await signIn();
 	let href;
 	await step('desktop: the owner\'s request gets a download link that saves the file', async () => {
 		await newChat();
@@ -289,6 +319,7 @@ async function downloadMain() {
 		acceptDownloads: true
 	});
 	page = await phone.newPage();
+	await signIn();
 	await step('phone: tapping the reply\'s link saves the file', async () => {
 		await newChat();
 		const { item, text } = await ask(downloadRequest);
