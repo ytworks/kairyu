@@ -205,6 +205,16 @@ services:
       CHUNK_SIZE: ${CHUNK_SIZE}
       CHUNK_OVERLAP: ${CHUNK_OVERLAP}
       OFFLINE_MODE: 'true'
+      # Word / Excel / PowerPoint: the code interpreter runs Pyodide in the
+      # user's browser (python-docx, python-pptx, openpyxl are bundled); the
+      # chat's attachments are written to /mnt/uploads before the model's code
+      # runs and results are downloaded from Chat Controls > Files. Without
+      # file persistence it runs in a sandboxed iframe. On in every chat by
+      # default (owner decision 2026-10-22).
+      ENABLE_CODE_INTERPRETER: 'true'
+      CODE_INTERPRETER_ENGINE: ${CODE_INTERPRETER_ENGINE}
+      ENABLE_PYODIDE_FILE_PERSISTENCE: ${ENABLE_PYODIDE_FILE_PERSISTENCE}
+      DEFAULT_MODEL_METADATA: ${DEFAULT_MODEL_METADATA}
       # torch sees all 128 host CPUs and would start 64 threads under the
       # CPU limit below (20 reranker pairs at 16 CPUs: 20.1 s with 64 threads,
       # 7.9 s with 16); one thread per CPU.
