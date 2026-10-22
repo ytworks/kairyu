@@ -29,6 +29,9 @@ FILTER_ID = "kairyu_responses"
 RETIRED_FILTER_IDS = ("reasoning_effort", "responses_api")
 KAIRYU_CONNECTION_URL = "http://kairyu:8000/v1"
 _EMBEDDING_KEYS = ("RAG_EMBEDDING_ENGINE", "RAG_EMBEDDING_MODEL")
+# Every signed-in user may use a tool L4 installs: Open WebUI keeps an admin's
+# tool without grants private and leaves it out of other users' chats.
+USERS_READ = {"principal_type": "user", "principal_id": "*", "permission": "read"}
 _TOOL_META = {
     "file_download": ("File download", "Give the user a download link for a file the code wrote.")
 }
@@ -136,10 +139,22 @@ def _install_tool(ui_url: str, token: str, tool_id: str) -> None:
         api(ui_url, f"/api/v1/tools/id/{tool_id}/update", token=token, payload=body)
     else:
         api(ui_url, "/api/v1/tools/create", token=token, payload=body)
+    api(
+        ui_url,
+        f"/api/v1/tools/id/{tool_id}/access/update",
+        token=token,
+        payload={"access_grants": [USERS_READ]},
+    )
     exported = api(ui_url, "/api/v1/tools/export", token=token)
     installed = next((row for row in exported if row.get("id") == tool_id), {})
     if installed.get("content") != source or not installed.get("specs"):
         raise SystemExit(f"Open WebUI tool {tool_id} is not installed with L4's source")
+    grants = [
+        {key: grant.get(key) for key in USERS_READ}
+        for grant in installed.get("access_grants") or ()
+    ]
+    if USERS_READ not in grants:
+        raise SystemExit(f"Open WebUI tool {tool_id} is not readable by every user: {grants}")
 
 
 def _check_retrieval(ui_url: str, token: str, workspace: Workspace) -> None:
