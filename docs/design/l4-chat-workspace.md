@@ -2,7 +2,8 @@
 
 Status: **Accepted 2026-10-22 (owner)**; PR A (L4 and the 1017 eight-GPU
 example, PR #665) GPU-verified 2026-10-22: every Chat UI gate passes on L4
-(the example's `MEASUREMENTS.md`). Plan:
+(the example's `MEASUREMENTS.md`). PR B (#666): the six other single-model
+chat examples, implemented. Plan:
 `docs/superpowers/plans/2026-10-22-l4-chat-workspace.md`.
 
 ## Context

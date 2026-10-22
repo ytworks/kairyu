@@ -59,13 +59,22 @@
     "mtp_speculative_tokens": 3,
     "custom_all_reduce": false
   },
-  "webui": {
-    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
+  "workspace": {
+    "profile": "ja-v1",
     "port": 3016,
-    "reasoning_effort_levels": ["default", "low", "high", "max"]
+    "bind": "0.0.0.0",
+    "auth": "none",
+    "models": ["glm-5.3-flash"],
+    "default_params": {"max_tokens": 131072, "temperature": 1.0, "top_p": 0.95},
+    "reasoning_effort": {
+      "levels": ["default", "low", "high", "max"],
+      "help": "Reasoning effort for GLM-5.3-Flash. default = max (the model's default)."
+    },
+    "cpus": {"chat_ui": 8, "docling": 4, "docling_workers": 2}
   },
   "api_port": 8015,
   "verification": {
+    "knowledge_serving": {"concurrency": [1, 8], "min_fraction": 0.95},
     "serving": {
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,

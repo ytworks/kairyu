@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -37,7 +38,7 @@ SERVED_CONFIG_FILES = (
     HERE / "example.json",
     HERE / "compose.yaml",
     HERE / "kairyu.yaml",
-    HERE / "webui-reasoning-effort-filter.py",
+    *control.workspace.SERVED_FILES,
 )
 ENVIRONMENT_STORAGE = control.environment_storage()
 RESULTS_ROOT = Path(
@@ -662,8 +663,10 @@ def chat_ui_body(payload: dict, effort: str) -> dict:
     """``payload`` as the Chat UI sends it with the effort dropdown at ``effort``."""
     import importlib.util
 
+    # L4's one Responses filter reads the workspace's effort levels when loaded.
+    os.environ["KAIRYU_WORKSPACE_EFFORT_LEVELS"] = json.dumps(list(control.WORKSPACE.effort_levels))
     spec = importlib.util.spec_from_file_location(
-        "glm_effort_filter", HERE / "webui-reasoning-effort-filter.py"
+        "glm_effort_filter", ROOT / "deploy/workspace/plugins/responses_filter.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1135,7 +1138,7 @@ def api_equivalence(run_dir: Path) -> int:
         "--l3-model",
         SERVED_MODEL,
         "--cases",
-        "text,stream,effort,tools,image,cap,openwebui",
+        "text,stream,effort,tools,image,image-tools,cap,openwebui",
         # low/high reach the template as they are; xhigh is L3 max on the wire.
         "--efforts",
         "low,high,xhigh",
@@ -1196,7 +1199,8 @@ def restart(run_dir: Path) -> int:
 def served_config_sha256() -> str:
     digest = hashlib.sha256()
     for path in SERVED_CONFIG_FILES:
-        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+        name = path.relative_to(ROOT).as_posix()
+        digest.update(name.encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
 
 
@@ -1220,7 +1224,43 @@ def runtime_evidence(*, allow_override: bool = False) -> dict:
         "started_at": container["State"]["StartedAt"],
         "cpuset": container["HostConfig"]["CpusetCpus"],
         "gateway_config_sha256": hashlib.sha256(mounted).hexdigest(),
+        "workspace": WORKSPACE_GATES.runtime_evidence(),
     }
+
+
+# --- Chat UI (L4 workspace) --------------------------------------------------------
+#
+# Docling OCR, Japanese knowledge bases, the browser Chat UI, serving beside OCR
+# load, Word / Excel / PowerPoint and download links are the shared L4 gates
+# (verification/workspace/gates.py), run here with this example's serving rows.
+
+
+def _serving_tok_s(run_dir: Path, level: int) -> float | None:
+    row = run_dir / f"capped-c{level}" / "row.json"
+    if not row.exists():
+        return None
+    return float(json.loads(row.read_text())["summary"]["output_tokens_per_s"])
+
+
+def _workspace_gates():
+    # Loaded by path: this example's own module is named ``verification``.
+    spec = importlib.util.spec_from_file_location(
+        "kairyu_workspace_gates", ROOT / "verification/workspace/gates.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.WorkspaceGates(
+        control.WORKSPACE,
+        project=control.PROJECT,
+        results_root=RESULTS_ROOT,
+        work_dir=ENVIRONMENT_STORAGE / "bench-tmp",
+        serving=lambda run_dir, concurrency: serving(run_dir, concurrency=concurrency),
+        serving_tok_s=_serving_tok_s,
+        knowledge_serving=SPEC["verification"]["knowledge_serving"],
+    )
+
+
+WORKSPACE_GATES = _workspace_gates()
 
 
 GATES = {
@@ -1234,6 +1274,7 @@ GATES = {
     "long-context": long_context,
     "restart": restart,
     "api-equivalence": api_equivalence,
+    **WORKSPACE_GATES.gates(),
 }
 
 

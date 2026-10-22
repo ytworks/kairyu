@@ -51,7 +51,7 @@ Open WebUI `OPENAI_API_CONFIGS` `api_type: responses`), and Kairyu sends each
 request to vLLM in the API its caller used: chat as chat, Responses as
 Responses, Anthropic Messages as Messages (`kairyu.yaml` lists the model in
 `upstream_chat_models`, `upstream_responses_models` and
-`upstream_messages_models`). `run.sh up` installs the effort filter, which
+`upstream_messages_models`). `run.sh up` installs the L4 workspace's effort filter, which
 also leaves only Responses fields in the Chat UI's body (`reasoning.effort`,
 no `seed`/`top_k`/`chat_template_kwargs`, saved output items reduced to their
 Responses fields, `store: false`), and checks that the Chat UI's connection
@@ -67,6 +67,22 @@ with the value `{"effort": "high"}`; it applies to requests that carry no
 effort of their own. A saved `seed`, `top_k`, `min_p` or `reasoning_effort`
 makes Kairyu answer 400 `Unknown parameter`, as OpenAI's Responses API does
 (m11 D7 amendment 2026-10-18).
+
+## Knowledge bases, Word, Excel and PowerPoint
+
+The Chat UI is the shared L4 chat workspace
+([`deploy/workspace`](../../deploy/workspace/README.md)), selected by this
+example's `workspace` section in `example.json` (profile `ja-v1`). It gives
+Japanese knowledge bases (Docling OCR for scanned pages, `BAAI/bge-m3`
+embedding and `BAAI/bge-reranker-v2-m3` reranking from pinned, hashed copies
+shared by every example, 300-character chunks), Word / Excel / PowerPoint read
+and edit through the browser code interpreter (on in every chat by default),
+and download links for the files it writes. Docling runs at 4 CPUs and the
+Chat UI at 8; `verify.sh knowledge-serving` checks that the serving rows keep
+95 % of their unloaded throughput beside OCR load. The environment is the
+Chat UI's configuration on every start, so Admin Panel changes do not
+survive a restart. A knowledge base built before this example moved to the
+workspace was embedded with another model: add its files again.
 
 ## Usage
 

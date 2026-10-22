@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,14 @@ GPU_IDS: list[int] = [int(index) for index in ALLOCATION["gpu_ids"]]
 DP_RANK_GPU_IDS: list[list[int]] = [list(group) for group in ALLOCATION["dp_rank_gpu_ids"]]
 PROJECT = SPEC["environment"].replace(".", "-")
 L1_CONTAINER = f"{PROJECT}-deepseek-1"
+
+# The Chat UI is the shared L4 workspace (deploy/workspace/README.md); this
+# example owns only its values, checked here at import.
+sys.path.append(str(ROOT / "deploy" / "workspace"))
+import kairyu_workspace as workspace  # noqa: E402
+
+WORKSPACE = workspace.load(SPEC["workspace"])
+COMPOSE_FILE_ARGS = ("--file", str(HERE / "compose.yaml"), "--file", str(workspace.COMPOSE_FILE))
 
 
 def _check_allocation() -> None:
@@ -82,6 +91,9 @@ def _storage_paths() -> dict[str, Path]:
     paths = {
         "models": environment / "models",
         "webui": environment / "webui-data",
+        # Shared by every example's workspace: the retrieval models are
+        # pinned by the profile, attested by hash and mounted read-only.
+        "workspace_models": environment.parent / "workspace-models",
         "placement_log": environment / "placement-log",
         "cache": environment / "compile-cache",
     }
@@ -106,17 +118,16 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_PROJECT_NAME": PROJECT,
             "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["models"]),
             "DEEPSEEK_CACHE_PATH": str(paths["cache"]),
-            "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
             "DEEPSEEK_VLLM_IMAGE": os.environ.get("DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["image"]),
-            "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
-            "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
-            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "127.0.0.1"),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the union of the DP ranks' NUMA-local CPU sets.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
         }
+    )
+    env.update(
+        workspace.compose_env(WORKSPACE, data=paths["webui"], models=paths["workspace_models"])
     )
     return env
 
@@ -128,8 +139,7 @@ def _compose(arguments: list[str], *, check: bool = True) -> None:
             "compose",
             "--project-directory",
             str(HERE),
-            "--file",
-            str(HERE / "compose.yaml"),
+            *COMPOSE_FILE_ARGS,
             *arguments,
         ],
         env=_compose_env(),
@@ -908,99 +918,19 @@ def validate_serving(api_url: str) -> None:
     validate_vision(api_url)
 
 
-_CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
-_CHAT_UI_EFFORT_LEVELS: list[str] = list(SPEC["webui"]["reasoning_effort_levels"])
-
-
-def _webui_api(
-    ui_url: str,
-    path: str,
-    *,
-    token: str | None = None,
-    payload: dict | None = None,
-):
-    headers = {"Content-Type": "application/json"}
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        f"{ui_url}{path}",
-        data=json.dumps(payload).encode() if payload is not None else None,
-        headers=headers,
-        method="POST" if payload is not None else "GET",
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read())
-
-
-def _check_chat_ui_connection(ui_url: str, token: str) -> None:
-    """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
-
-    config = _webui_api(ui_url, "/openai/config", token=token)
-    api_type = ((config.get("OPENAI_API_CONFIGS") or {}).get("0") or {}).get("api_type")
-    if api_type != "responses":
-        raise SystemExit(
-            "Chat UI connection 0 must use api_type=responses, got "
-            f"{api_type!r}; an existing Open WebUI volume keeps its saved connection, so set "
-            "Admin Panel > Settings > Connections > Kairyu > API Type to Responses"
-        )
-
-
-def _provision_chat_ui_effort_selector(ui_url: str) -> None:
-    """Install the Reasoning Effort dropdown filter into the pinned Open WebUI."""
-
-    filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
-    base = f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}"
-    try:
-        signin = _webui_api(ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""})
-        if not isinstance(signin, dict) or not signin.get("token"):
-            raise SystemExit("Chat UI signin did not return an auth-disabled session token")
-        if signin.get("role") != "admin":
-            raise SystemExit("Chat UI auth-disabled session must be the admin user")
-        token = signin["token"]
-        listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
-        existing = next((row for row in listed if row.get("id") == _CHAT_UI_EFFORT_FILTER_ID), None)
-        body = {
-            "id": _CHAT_UI_EFFORT_FILTER_ID,
-            "name": "Reasoning Effort",
-            "content": filter_source,
-            "meta": {"description": "Select the DeepSeek reasoning effort from a dropdown."},
-        }
-        if existing is None:
-            state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
-        else:
-            updated = _webui_api(ui_url, f"{base}/update", token=token, payload=body)
-            state = {**existing, **(updated or {})}
-        # The toggle endpoints flip state, so call them only while a flag is off.
-        if not state.get("is_active"):
-            state = _webui_api(ui_url, f"{base}/toggle", token=token, payload={})
-        if not state.get("is_global"):
-            state = _webui_api(ui_url, f"{base}/toggle/global", token=token, payload={})
-        if not (state.get("is_active") and state.get("is_global")):
-            raise SystemExit("Chat UI effort selector could not be activated globally")
-        _check_chat_ui_connection(ui_url, token)
-        spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
-        enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
-    except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
-        raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
-    if enum != _CHAT_UI_EFFORT_LEVELS:
-        raise SystemExit(
-            f"Chat UI effort selector must expose exactly {_CHAT_UI_EFFORT_LEVELS!r}, got {enum!r}"
-        )
-
-
 def up() -> None:
     env = _compose_env()
     _preflight(env)
     _ensure_vllm_image(env)
     _ensure_model(env)
+    workspace.fetch_models(WORKSPACE, Path(env["KAIRYU_WORKSPACE_MODELS"]))
     _run(
         [
             "docker",
             "compose",
             "--project-directory",
             str(HERE),
-            "--file",
-            str(HERE / "compose.yaml"),
+            *COMPOSE_FILE_ARGS,
             "up",
             "--build",
             "--detach",
@@ -1012,23 +942,23 @@ def up() -> None:
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_serving(api_url)
-    ui_bind = env["CHAT_UI_BIND_ADDRESS"]
-    _provision_chat_ui_effort_selector(
-        f"http://{'127.0.0.1' if ui_bind == '0.0.0.0' else ui_bind}:{env['CHAT_UI_PORT']}"
-    )
+    ui_bind = workspace.chat_ui_bind(WORKSPACE)
+    ui_port = workspace.chat_ui_port(WORKSPACE)
+    ui_local = "127.0.0.1" if ui_bind == "0.0.0.0" else ui_bind
+    workspace.setup(f"http://{ui_local}:{ui_port}", WORKSPACE)
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     ui_host = os.environ.get("PUBLIC_HOST", ui_bind)
     if ui_host == "0.0.0.0":
         ui_host = "127.0.0.1"
-    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
+    print(f"Chat UI:    http://{ui_host}:{ui_port} (no authentication)")
     print(
         f"Chat model: {SPEC['model']['served_name']} "
         "(one DP6 / EP6 replica on GPUs 0-5; text + image input; thinking high)"
     )
     print(
         "Reasoning effort: Chat Controls -> Valves -> Reasoning Effort "
-        f"({'/'.join(_CHAT_UI_EFFORT_LEVELS)})"
+        f"({'/'.join(WORKSPACE.effort_levels)})"
     )
 
 

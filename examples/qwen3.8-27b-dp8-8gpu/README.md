@@ -102,18 +102,16 @@ Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
 `api_type: responses` in [`compose.yaml`](compose.yaml); m11 D7 amendment
 2026-10-17). Open WebUI converts its chat body into a Responses body but keeps
 a few fields the strict Responses API does not have, so `run.sh up` installs
-[`webui-responses-filter.py`](webui-responses-filter.py) as a global filter:
+the L4 workspace's Responses filter as a global filter:
 Chat Controls' reasoning effort becomes `reasoning.effort`, sampling keys
 outside the Responses API (`seed`, `top_k`, ...) are dropped, saved output
 items keep only their Responses fields, and `store` is false because the UI
-sends the whole conversation every turn. Installing it needs the admin
-account, so it happens only when `WEBUI_ADMIN_EMAIL` and
-`WEBUI_ADMIN_PASSWORD` are set (they also create that account on the first
-start); otherwise `run.sh up` prints a warning and an admin installs the file
-under Admin Panel > Functions and sets Admin Panel > Settings > Connections >
-API Type to Responses. With the credentials set, `run.sh up` also switches the
-saved Kairyu connection to the Responses API when an existing `webui-data`
-volume still has the chat connection it saved earlier.
+sends the whole conversation every turn. Sign-in is enabled here
+(`auth: admin`), so `run.sh up` needs `WEBUI_ADMIN_EMAIL` and
+`WEBUI_ADMIN_PASSWORD` (they also create that account on the first start): it
+signs in as that admin, installs the filter and the download tool, switches a
+saved chat connection to the Responses API, and stops if any Chat UI setting
+differs from the workspace. `ENABLE_SIGNUP=false` closes sign-up.
 
 Saved model settings: Open WebUI applies a model's saved Advanced Params
 (Admin Panel or Workspace > Models) once more after the filter, just before it
@@ -124,6 +122,22 @@ with the value `{"effort": "high"}`; it applies to requests that carry no
 effort of their own. A saved `seed`, `top_k`, `min_p` or `reasoning_effort`
 makes Kairyu answer 400 `Unknown parameter`, as OpenAI's Responses API does
 (m11 D7 amendment 2026-10-18).
+
+## Knowledge bases, Word, Excel and PowerPoint
+
+The Chat UI is the shared L4 chat workspace
+([`deploy/workspace`](../../deploy/workspace/README.md)), selected by this
+example's `workspace` section in `example.json` (profile `ja-v1`). It gives
+Japanese knowledge bases (Docling OCR for scanned pages, `BAAI/bge-m3`
+embedding and `BAAI/bge-reranker-v2-m3` reranking from pinned, hashed copies
+shared by every example, 300-character chunks), Word / Excel / PowerPoint read
+and edit through the browser code interpreter (on in every chat by default),
+and download links for the files it writes. Docling runs at 4 CPUs and the
+Chat UI at 8; `verify.sh knowledge-serving` checks that the serving rows keep
+95 % of their unloaded throughput beside OCR load. The environment is the
+Chat UI's configuration on every start, so Admin Panel changes do not
+survive a restart. A knowledge base built before this example moved to the
+workspace was embedded with another model: add its files again.
 
 ## Serving verification
 

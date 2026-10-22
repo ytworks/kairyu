@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -15,6 +16,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
+# The Chat UI is the shared L4 workspace (deploy/workspace/README.md).
+sys.path.append(str(ROOT / "deploy" / "workspace"))
+import kairyu_workspace as workspace  # noqa: E402
+
+WORKSPACE = workspace.load(SPEC["workspace"])
 
 
 def _nvme_root() -> Path:
@@ -63,7 +69,9 @@ def _ensure_environment(no_start: bool) -> None:
         _run([sys.executable, str(HERE / "control.py"), "up"])
 
 
-def _serving_dataset(path: Path, requests: int, approximate_tokens: int) -> None:
+def _serving_dataset(
+    path: Path, requests: int, approximate_tokens: int, *, namespace: str
+) -> None:
     vocabulary = (
         "code",
         "review",
@@ -91,7 +99,7 @@ def _serving_dataset(path: Path, requests: int, approximate_tokens: int) -> None
             vocabulary[(request * 7 + position * 11) % len(vocabulary)]
             for position in range(approximate_tokens)
         ]
-        prompt = f"Case {request}: " + " ".join(words)
+        prompt = f"Run {namespace}, case {request}: " + " ".join(words)
         rows.append({"conversations": [{"from": "human", "value": prompt}]})
     path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
@@ -100,15 +108,22 @@ def _api_url() -> str:
     return f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}"
 
 
-def serving(run_dir: Path) -> int:
+def serving(run_dir: Path, levels: list[int] | None = None) -> int:
+    """Serving rows at each configured concurrency, or at ``levels``."""
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
     max_output_tokens = int(config["max_output_tokens"])
-    dataset = run_dir / "serving-8k.json"
-    _serving_dataset(dataset, requests, int(config["prompt_tokens_approx"]))
+    run_dir.mkdir(parents=True, exist_ok=True)
     failures = 0
-    for concurrency in config["concurrency"]:
+    for concurrency in levels or config["concurrency"]:
         row_dir = run_dir / f"serving-c{concurrency}"
+        dataset = run_dir / f"serving-8k-c{concurrency}.json"
+        _serving_dataset(
+            dataset,
+            requests,
+            int(config["prompt_tokens_approx"]),
+            namespace=f"{run_dir.name}-c{concurrency}",
+        )
         # Rows run on the public Responses API (m11 D7 amendment 2026-10-17).
         # It has no ignore_eos/min_tokens/seed, so each request ends naturally
         # within max_output_tokens; rows are not comparable with the
@@ -237,7 +252,7 @@ def api_equivalence(run_dir: Path) -> int:
             "--l3-model",
             served,
             "--cases",
-            "text,stream,effort,tools,image,cap,openwebui",
+            "text,stream,effort,tools,image,image-tools,cap,openwebui",
             # The template clamps every effort to low; each still thinks.
             "--efforts",
             "low,high,xhigh",
@@ -251,10 +266,45 @@ def api_equivalence(run_dir: Path) -> int:
     )
 
 
+# --- Chat UI (L4 workspace) --------------------------------------------------------
+#
+# Docling OCR, Japanese knowledge bases, the browser Chat UI, serving beside OCR
+# load, Word / Excel / PowerPoint and download links are the shared L4 gates
+# (verification/workspace/gates.py), run here with this example's serving rows.
+
+
+def _serving_tok_s(run_dir: Path, level: int) -> float | None:
+    rows = list((run_dir / f"serving-c{level}").glob("*-serving.json"))
+    if len(rows) != 1:
+        return None
+    return float(json.loads(rows[0].read_text())["summary"]["output_tokens_per_s"])
+
+
+def _workspace_gates():
+    # Loaded by path: this example's own module is named ``verification``.
+    spec = importlib.util.spec_from_file_location(
+        "kairyu_workspace_gates", ROOT / "verification/workspace/gates.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.WorkspaceGates(
+        WORKSPACE,
+        project=SPEC["environment"].replace(".", "-"),
+        results_root=RESULTS_ROOT,
+        work_dir=ENVIRONMENT_STORAGE / "bench-tmp",
+        serving=serving,
+        serving_tok_s=_serving_tok_s,
+        knowledge_serving=SPEC["verification"]["knowledge_serving"],
+    )
+
+
+WORKSPACE_GATES = _workspace_gates()
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
-    for name in ("compose.yaml", "kairyu.yaml"):
-        path = HERE / name
+    for path in (HERE / "compose.yaml", HERE / "kairyu.yaml", *workspace.SERVED_FILES):
+        name = path.relative_to(ROOT).as_posix()
         digest.update(name.encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -264,7 +314,8 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("verification", choices=("serving", "api-equivalence", "list"))
+    gates = {"serving": serving, "api-equivalence": api_equivalence, **WORKSPACE_GATES.gates()}
+    parser.add_argument("verification", choices=(*gates, "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
@@ -277,6 +328,8 @@ def main() -> None:
             "api-equivalence  the same Responses requests to vLLM L1 and Kairyu L3 agree, "
             "and L3 reached L1 on /v1/responses"
         )
+        for gate, function in WORKSPACE_GATES.gates().items():
+            print(f"{gate:16} {function.__doc__.strip().splitlines()[0]}")
         return
 
     _ensure_environment(args.no_start)
@@ -289,11 +342,12 @@ def main() -> None:
         "requested": args.verification,
         "served_config_sha256": _served_config_sha256(),
         "spec": SPEC,
+        "runtime": {"workspace": WORKSPACE_GATES.runtime_evidence()},
     }
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    target = serving if args.verification == "serving" else api_equivalence
+    target = gates[args.verification]
     try:
         code = target(run_dir)
     except Exception as error:

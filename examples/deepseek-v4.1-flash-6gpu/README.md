@@ -47,8 +47,8 @@ Chat UI: `http://127.0.0.1:3008` (local, no authentication).
 
 Open WebUI talks to Kairyu over `/v1/responses` (`OPENAI_API_CONFIGS`
 `api_type: responses`; m11 D7 amendment 2026-10-17). `run.sh up` installs
-the Reasoning Effort filter (`webui-reasoning-effort-filter.py`) as a
-global filter and checks the connection type. Besides the effort dropdown,
+the L4 workspace's Responses filter (shown as Reasoning Effort) as a global
+filter and checks the connection type. Besides the effort dropdown,
 the filter turns Open WebUI's chat body into a strict Responses body: the
 effort becomes `reasoning.effort`, Chat Controls fields the Responses API
 lacks (`seed`, `top_k`, ...) are dropped, saved output items keep only their
@@ -72,6 +72,22 @@ and `upstream_messages_models`; Kairyu checks at startup that vLLM serves
 Responses as Responses, Anthropic Messages as Messages. On the Responses
 wire Kairyu spells L3 `max` as OpenAI `xhigh`, which `patch_sm120.py` maps to
 the max budget (100).
+
+## Knowledge bases, Word, Excel and PowerPoint
+
+The Chat UI is the shared L4 chat workspace
+([`deploy/workspace`](../../deploy/workspace/README.md)), selected by this
+example's `workspace` section in `example.json` (profile `ja-v1`). It gives
+Japanese knowledge bases (Docling OCR for scanned pages, `BAAI/bge-m3`
+embedding and `BAAI/bge-reranker-v2-m3` reranking from pinned, hashed copies
+shared by every example, 300-character chunks), Word / Excel / PowerPoint read
+and edit through the browser code interpreter (on in every chat by default),
+and download links for the files it writes. Docling runs at 4 CPUs and the
+Chat UI at 8; `verify.sh knowledge-serving` checks that the serving rows keep
+95 % of their unloaded throughput beside OCR load. The environment is the
+Chat UI's configuration on every start, so Admin Panel changes do not
+survive a restart. A knowledge base built before this example moved to the
+workspace was embedded with another model: add its files again.
 
 ## Why this configuration
 

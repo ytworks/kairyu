@@ -84,26 +84,6 @@ def test_mxfp4_enablement_is_limited_to_verified_model_and_device(capability, mo
             namespace["guard"](config)
 
 
-def test_ui_restores_default_and_forwards_only_supported_effort_fields():
-    selector = load("webui-reasoning-effort-filter").Filter()
-    body = {"reasoning_effort": "high", "max_tokens": 32768}
-
-    def choose(effort):
-        return selector.inlet(body, {"valves": selector.UserValves(reasoning_effort=effort)})
-
-    body["chat_template_kwargs"] = {"thinking": False, "enable_thinking": False}
-    choose("default")
-    assert body == {"max_tokens": 32768, "store": False}
-    for effort in ("low", "high", "max"):
-        choose(effort)
-        # The Chat UI's Responses connection carries it as reasoning.effort.
-        assert body["reasoning"] == {"effort": effort}
-        assert "reasoning_effort" not in body
-        assert "chat_template_kwargs" not in body
-    with pytest.raises(ValueError):
-        choose("off")
-
-
 def test_default_high_is_set_at_l1_and_ui():
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
     spec = json.loads((EXAMPLE / "example.json").read_text())
@@ -112,7 +92,7 @@ def test_default_high_is_set_at_l1_and_ui():
     defaults = json.loads(command[command.index("--default-chat-template-kwargs") + 1])
     assert defaults == {"thinking": True, "reasoning_effort": "high"}
     assert worker["environment"]["VLLM_USE_RUST_FRONTEND"] == "0"
-    ui = json.loads(compose["services"]["chat-ui"]["environment"]["DEFAULT_MODEL_PARAMS"])
+    ui = spec["workspace"]["default_params"]
     assert ui["reasoning_effort"] == spec["model"]["default_reasoning_effort"] == "high"
     assert spec["model"]["reasoning_effort_budgets"]["high"] == 75
 
@@ -137,6 +117,7 @@ def test_evidence_rejects_stale_pcie_candidate_with_identical_command(monkeypatc
         return (EXAMPLE / "kairyu.yaml").read_bytes()
 
     monkeypatch.setattr(verification.subprocess, "check_output", inspect)
+    monkeypatch.setattr(verification.WORKSPACE_GATES, "runtime_evidence", lambda: {})
     assert verification.runtime_evidence()["replicas"][0]["started_at"] == "test-start"
     flag = "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC"
     environment[flag] = "0" if environment.get(flag, "0") == "1" else "1"

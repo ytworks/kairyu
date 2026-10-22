@@ -1,4 +1,6 @@
 name: kairyu-glm-5.3-flash-6gpu
+# The Chat UI and its Docling are the shared L4 workspace
+# (deploy/workspace/compose.yaml), started after this file by control.py.
 services:
   # One GLM-5.3-Flash replica on GPUs 0-5: TP2 pairs on NUMA-local GPUs
   # (0,1)(2,3)(4,5), attention data parallel DP3, EP6 over the 288 routed
@@ -132,35 +134,4 @@ services:
       interval: 5s
       timeout: 3s
       retries: 120
-    restart: unless-stopped
-  chat-ui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de}
-    environment:
-      OPENAI_API_BASE_URL: http://kairyu:8000/v1
-      OPENAI_API_KEY: sk-local-kairyu
-      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
-      # /v1/responses (connection 0 is OPENAI_API_BASE_URL).
-      OPENAI_API_CONFIGS: '{"0":{"api_type":"responses"}}'
-      DEFAULT_MODELS: glm-5.3-flash
-      # The model author's sampling and its 128K output limit.
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":131072,"temperature":1.0,"top_p":0.95}'
-      ENABLE_PERSISTENT_CONFIG: 'false'
-      RESET_CONFIG_ON_START: 'true'
-      ENABLE_SIGNUP: 'false'
-      ENABLE_LOGIN_FORM: 'false'
-      WEBUI_AUTH: 'false'
-      WEBUI_URL: ${WEBUI_URL:-http://localhost:3016}
-      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
-      ENABLE_OLLAMA_API: 'false'
-      ENABLE_EVALUATION_ARENA_MODELS: 'false'
-      RAG_EMBEDDING_ENGINE: ''
-    volumes:
-    - type: bind
-      source: ${WEBUI_STORAGE_PATH}
-      target: /app/backend/data
-    depends_on:
-      kairyu:
-        condition: service_healthy
-    ports:
-    - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3016}:8080
     restart: unless-stopped

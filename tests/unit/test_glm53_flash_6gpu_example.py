@@ -90,23 +90,6 @@ def test_a_tp_group_must_share_a_numa_node(example):
         control.dp_rank_numa_layout({0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 2}, pairs)
 
 
-def test_chat_ui_filter_sends_only_responses_fields():
-    """Kairyu's /v1/responses rejects chat-only fields such as chat_template_kwargs (400)."""
-    spec = importlib.util.spec_from_file_location(
-        "glm_effort_filter", EXAMPLE / "webui-reasoning-effort-filter.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    flt = module.Filter()
-
-    def user(effort):
-        return {"valves": flt.UserValves(reasoning_effort=effort)}
-
-    body = flt.inlet({"reasoning_effort": "low", "chat_template_kwargs": {"x": 1}}, user("default"))
-    assert body == {"store": False}
-    assert flt.inlet({}, user("high")) == {"reasoning": {"effort": "high"}, "store": False}
-
-
 @pytest.mark.parametrize(
     "content,ok",
     [

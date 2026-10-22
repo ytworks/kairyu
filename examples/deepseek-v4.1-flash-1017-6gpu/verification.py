@@ -15,6 +15,7 @@ import argparse
 import concurrent.futures
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -40,7 +41,7 @@ SERVED_CONFIG_FILES = (
     HERE / "kairyu.yaml",
     HERE / "vllm-sm120.Dockerfile",
     HERE / "patch_sm120.py",
-    HERE / "webui-reasoning-effort-filter.py",
+    *control.workspace.SERVED_FILES,
 )
 ENVIRONMENT_STORAGE = control.environment_storage()
 RESULTS_ROOT = Path(
@@ -1095,7 +1096,7 @@ def api_equivalence(run_dir: Path) -> int:
         "--l3-model",
         SERVED_MODEL,
         "--cases",
-        "text,stream,effort,tools,image,cap,openwebui",
+        "text,stream,effort,tools,image,image-tools,cap,openwebui",
         # xhigh is L3 max on the Responses wire (the encoder renders 100).
         "--efforts",
         "low,high,xhigh",
@@ -1113,7 +1114,8 @@ def api_equivalence(run_dir: Path) -> int:
 def served_config_sha256() -> str:
     digest = hashlib.sha256()
     for path in SERVED_CONFIG_FILES:
-        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+        name = path.relative_to(ROOT).as_posix()
+        digest.update(name.encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
 
 
@@ -1141,7 +1143,43 @@ def runtime_evidence(*, allow_override: bool = False) -> dict:
         "started_at": container["State"]["StartedAt"],
         "cpuset": container["HostConfig"]["CpusetCpus"],
         "gateway_config_sha256": hashlib.sha256(mounted).hexdigest(),
+        "workspace": WORKSPACE_GATES.runtime_evidence(),
     }
+
+
+# --- Chat UI (L4 workspace) --------------------------------------------------------
+#
+# Docling OCR, Japanese knowledge bases, the browser Chat UI, serving beside OCR
+# load, Word / Excel / PowerPoint and download links are the shared L4 gates
+# (verification/workspace/gates.py), run here with this example's serving rows.
+
+
+def _serving_tok_s(run_dir: Path, level: int) -> float | None:
+    row = run_dir / f"capped-c{level}" / "row.json"
+    if not row.exists():
+        return None
+    return float(json.loads(row.read_text())["summary"]["output_tokens_per_s"])
+
+
+def _workspace_gates():
+    # Loaded by path: this example's own module is named ``verification``.
+    spec = importlib.util.spec_from_file_location(
+        "kairyu_workspace_gates", ROOT / "verification/workspace/gates.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.WorkspaceGates(
+        control.WORKSPACE,
+        project=control.PROJECT,
+        results_root=RESULTS_ROOT,
+        work_dir=ENVIRONMENT_STORAGE / "bench-tmp",
+        serving=lambda run_dir, concurrency: serving(run_dir, concurrency=concurrency),
+        serving_tok_s=_serving_tok_s,
+        knowledge_serving=SPEC["verification"]["knowledge_serving"],
+    )
+
+
+WORKSPACE_GATES = _workspace_gates()
 
 
 GATES = {
@@ -1155,6 +1193,7 @@ GATES = {
     "long-context": long_context,
     "restart": restart,
     "api-equivalence": api_equivalence,
+    **WORKSPACE_GATES.gates(),
 }
 
 

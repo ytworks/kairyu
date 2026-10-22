@@ -22,8 +22,9 @@ the answers from an internal vLLM.
 The Chat UI is becoming the shared L4 chat workspace
 ([`deploy/workspace`](../deploy/workspace/README.md): Japanese OCR knowledge
 bases, Word / Excel / PowerPoint, download links), selected by each example's
-`workspace` section; `deepseek-v4.1-flash-1017-8gpu` runs on it first and the
-other chat examples follow (`docs/design/l4-chat-workspace.md`).
+`workspace` section. Every single-model chat example runs on it; the two
+orchestrated ones (`qwen3.8-deepseek-v4.1-8gpu`, `deepseek-v4.1-quyet-8gpu`)
+follow with an L2/L3 change (`docs/design/l4-chat-workspace.md`, WS-D8).
 Every Open WebUI talks to Kairyu over `/v1/responses` (`api_type: responses`,
 m11 D7 amendment 2026-10-17) through an example-owned filter that leaves only
 Responses fields, and Kairyu forwards each request to vLLM in the API its
