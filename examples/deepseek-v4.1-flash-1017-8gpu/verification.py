@@ -1078,7 +1078,7 @@ def restart(run_dir: Path) -> int:
 
 
 def api_equivalence(run_dir: Path) -> int:
-    """L1 and L3 /v1/responses agree; L3 reaches L1 on /v1/responses only."""
+    """L1 and L3 agree on Responses (and image-tools on chat); L3 keeps the caller's API."""
     command = [
         sys.executable,
         str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
@@ -1095,7 +1095,7 @@ def api_equivalence(run_dir: Path) -> int:
         "--l3-model",
         SERVED_MODEL,
         "--cases",
-        "text,stream,effort,tools,image,cap,openwebui",
+        "text,stream,effort,tools,image,image-tools,cap,openwebui",
         # xhigh is L3 max on the Responses wire (the encoder renders 100).
         "--efforts",
         "low,high,xhigh",

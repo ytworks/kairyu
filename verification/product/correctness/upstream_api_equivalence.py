@@ -23,9 +23,14 @@ Kairyu L3, then requires the same Responses structure from both:
   the first, since whether a model reasons around a tool call and how many
   parallel calls it makes are sampled, and every function name must be a
   declared tool;
+- the image-tools case sends an image beside an earlier tool call and its
+  result (issue #659 item 6) on Responses and, as the same conversation, on
+  Chat Completions; both sides must name the image's color and the code word
+  the tool returned;
 - with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
   replica publishes no host port), the replicas' own request counters show
-  that L3 reached them on ``/v1/responses``;
+  that L3 reached them in its caller's API: every Responses request on
+  ``/v1/responses`` and Chat Completions only for the chat requests sent;
 - with ``--l3-orchestrated`` the L3 model is an AUTO model whose output items
   come from its roles, so L1 and L3 are compared on status and usage keys
   only; both sides are still validated in full, but the image answer is
@@ -97,6 +102,7 @@ class Capture:
 
 
 _SENT = {"l1": 0, "l3": 0}
+_SENT_CHAT = {"l1": 0, "l3": 0}
 
 
 def capture(target: Target, body: dict) -> Capture:
@@ -135,6 +141,25 @@ def capture(target: Target, body: dict) -> Capture:
     except ValueError:
         response = None
     return Capture(result["status"], [], response, raw)
+
+
+def post_chat(target: Target, body: dict) -> tuple[int, dict | None]:
+    """One non-streaming Chat Completions request; (HTTP status, JSON body)."""
+    _SENT_CHAT[target.name] = _SENT_CHAT.get(target.name, 0) + 1
+    url = f"{target.base_url.rstrip('/')}/chat/completions"
+    payload = json.dumps({**body, "model": target.model}).encode()
+    command = (
+        ["docker", "exec", "-i", target.docker, "python3", "-c", _CAPTURE_PROGRAM, url]
+        + [target.api_key]
+        if target.docker
+        else [sys.executable, "-c", _CAPTURE_PROGRAM, url, target.api_key]
+    )
+    completed = subprocess.run(command, input=payload, capture_output=True, check=True)
+    result = json.loads(completed.stdout)
+    try:
+        return result["status"], json.loads(result["body"])
+    except ValueError:
+        return result["status"], None
 
 
 def _validators() -> tuple[Callable[[dict], None], Callable[[dict], None]] | None:
@@ -267,6 +292,18 @@ _TOOL = {
         "type": "object",
         "properties": {"city": {"type": "string"}},
         "required": ["city"],
+    },
+}
+
+
+_LOOKUP = {
+    "type": "function",
+    "name": "lookup",
+    "description": "Look up a fact by topic.",
+    "parameters": {
+        "type": "object",
+        "properties": {"topic": {"type": "string"}},
+        "required": ["topic"],
     },
 }
 
@@ -455,6 +492,89 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
             ),
             check_l3=not args.l3_orchestrated,
         )
+    elif case == "image-tools":
+        question = (
+            "What single color fills this image, and what code word did the "
+            "lookup tool return? Reply as: <color> <code word>."
+        )
+
+        def named(text: str) -> str | None:
+            lowered = text.lower()
+            if "red" in lowered and "plum" in lowered:
+                return None
+            return f"answer {text[:80]!r} lacks red and PLUM"
+
+        image = _red_png()
+        call_arguments = '{"topic":"code word"}'
+        both(
+            {
+                **base,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": question},
+                            {"type": "input_image", "image_url": image, "detail": "auto"},
+                        ],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_code",
+                        "name": _LOOKUP["name"],
+                        "arguments": call_arguments,
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_code",
+                        "output": "The code word is PLUM.",
+                    },
+                ],
+                "tools": [_LOOKUP],
+                "stream": True,
+            },
+            check=lambda s: named(s["text"]),
+            view=_tool_turn_view,
+        )
+        chat_body = {
+            "max_tokens": args.max_output_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {"type": "image_url", "image_url": {"url": image}},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_code",
+                            "type": "function",
+                            "function": {"name": _LOOKUP["name"], "arguments": call_arguments},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_code", "content": "The code word is PLUM."},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {k: v for k, v in _LOOKUP.items() if k != "type"},
+                }
+            ],
+        }
+        for target in targets:
+            status, body = post_chat(target, chat_body)
+            message = ((body or {}).get("choices") or [{}])[0].get("message") or {}
+            if status != 200:
+                record["findings"].append(f"{target.name}: chat HTTP {status}: {body}")
+            elif problem := named(message.get("content") or ""):
+                record["findings"].append(f"{target.name}: chat {problem}")
+            record.setdefault("chat_answers", []).append(
+                {"target": target.name, "status": status, "content": message.get("content")}
+            )
     elif case == "cap":
         both(
             {
@@ -519,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cases",
         default="text,stream,effort,tools,cap,openwebui",
-        help="comma list of text, stream, effort, tools, image, cap, openwebui",
+        help="comma list of text, stream, effort, tools, image, image-tools, cap, openwebui",
     )
     parser.add_argument("--efforts", default="low,high,xhigh")
     parser.add_argument("--expect-reasoning", action="store_true")
@@ -545,13 +665,17 @@ def main(argv: list[str] | None = None) -> int:
         delta = {h: after.get(h, 0.0) - before.get(h, 0.0) for h in after}
         report["l1_request_delta"] = delta
         report["requests_sent"] = dict(_SENT)
+        report["chat_requests_sent"] = dict(_SENT_CHAT)
         if delta.get("/v1/responses", 0.0) < _SENT["l1"] + _SENT["l3"]:
             report.setdefault("findings", []).append(
                 "L1 counted fewer /v1/responses requests than L1 and L3 sent together"
             )
-        if delta.get("/v1/chat/completions", 0.0) > 0:
+        chat_sent = _SENT_CHAT["l1"] + _SENT_CHAT["l3"]
+        if delta.get("/v1/chat/completions", 0.0) != chat_sent:
             report.setdefault("findings", []).append(
-                "L3 reached L1 on /v1/chat/completions during a Responses-only run"
+                f"L1 counted {delta.get('/v1/chat/completions', 0.0):g} chat requests; "
+                f"{chat_sent} were sent on Chat Completions (a Responses request reached "
+                "L1 on chat, or a chat request did not arrive)"
             )
     failures = [f for record in records for f in record["findings"]] + report.get("findings", [])
     report["passed"] = not failures

@@ -49,6 +49,7 @@ from kairyu.engine.openai_capabilities import (
     resolve_openai_capabilities,
 )
 from kairyu.engine.prompt import (
+    MultimodalMessage,
     MultimodalPrompt,
     TemplatedPrompt,
     TextPrompt,
@@ -366,6 +367,24 @@ def _message_text(message: Mapping[str, object]) -> str:
             + "</tool_call>"
         )
     return "".join(parts)
+
+
+def _multimodal_chat_message(
+    message: MultimodalMessage,
+    content: list[dict[str, object]],
+) -> dict[str, object]:
+    """One chat message of an image conversation, with its carried transcript.
+
+    The tool calls, tool-result call id, name and reasoning the server copied
+    for an upstream-rendered model ride beside the content parts; an assistant
+    tool call without content sends ``null`` content, as OpenAI chat does.
+    """
+
+    return {
+        "role": message.role,
+        "content": content or None,
+        **message.transcript_fields(),
+    }
 
 
 def _stream_tool_calls_text(
@@ -1612,15 +1631,15 @@ class OpenAICompatBackend:
         prompt = request.prompt
         if isinstance(prompt, MultimodalPrompt):
             messages: list[dict[str, object]] = [
-                {
-                    "role": message.role,
-                    "content": [
+                _multimodal_chat_message(
+                    message,
+                    [
                         {"type": "text", "text": part.text}
                         if part.type == "text"
                         else {"type": "image_url", "image_url": {"url": ""}}
                         for part in message.content
                     ],
-                }
+                )
                 for message in prompt.messages
             ]
         else:
@@ -1744,7 +1763,7 @@ class OpenAICompatBackend:
                             "image_url": image_url,
                         }
                     )
-                messages.append({"role": message.role, "content": content})
+                messages.append(_multimodal_chat_message(message, content))
         else:
             text = prompt_text(prompt)
             assert text is not None

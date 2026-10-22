@@ -264,7 +264,10 @@ def add_responses_route(
                     status_code=404,
                 )
             context = continuation(request.previous_response_id, owner)
-            reject_images_beside_tools(context, request.input)
+            if request.model not in (upstream_chat_models or ()):
+                # Upstream-rendered models receive images beside the tool
+                # transcript; every other backend keeps the typed rejection.
+                reject_images_beside_tools(context, request.input)
         except ChatRequestError as error:
             return responses_error_response(error)
         validation_started_ns = time.perf_counter_ns()

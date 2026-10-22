@@ -25,6 +25,7 @@ from kairyu.engine.backend import (
     validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import (
+    MULTIMODAL_TRANSCRIPT_FIELDS,
     MultimodalItem,
     MultimodalMessage,
     MultimodalMessagePart,
@@ -697,12 +698,19 @@ def _render_multimodal_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
     prepared: _PreparedChatMessages,
+    *,
+    carry_transcript: bool = False,
 ) -> MultimodalPrompt:
     """Preserve roles and content-part order for a chat-capable VLM backend.
 
     The remote VLM owns its Hugging Face processor/chat template. Rendering
     this request through Kairyu's text-only Jinja path first would collapse the
     structured image parts and apply the model template twice.
+
+    ``carry_transcript`` is set for upstream-rendered models
+    (``upstream_chat_models``): their upstream renders tool calls, tool results
+    and reasoning beside images, so those fields travel with each message.
+    Other backends have no way to render them and keep the typed rejection.
     """
 
     try:
@@ -726,13 +734,27 @@ def _render_multimodal_prompt(
     messages: list[MultimodalMessage] = []
     display_lines: list[str] = []
     for message_index, message in enumerate(prepared.messages):
-        if message.has_tool_transcript:
+        transcript: dict[str, object] | None = None
+        if carry_transcript:
+            transcript = {
+                name: message.text_message[name]
+                for name in MULTIMODAL_TRANSCRIPT_FIELDS
+                if message.text_message.get(name) is not None
+            } or None
+        elif message.has_tool_transcript:
             raise ChatRequestError(
                 f"messages[{message_index}] tool transcript fields are not "
                 "supported together with image input"
             )
         parts: list[MultimodalMessagePart] = []
-        if message.content_kind == "string":
+        if (
+            transcript is not None
+            and message.role == "assistant"
+            and transcript.get("tool_calls")
+            and message.content_kind == "none"
+        ):
+            pass  # an assistant tool call without content
+        elif message.content_kind == "string":
             part = message.content_parts[0]
             assert part.text is not None
             parts.append(MultimodalMessagePart("text", text=part.text))
@@ -758,7 +780,7 @@ def _render_multimodal_prompt(
             raise ChatRequestError(
                 f"messages[{message_index}].content must contain text or image parts"
             )
-        messages.append(MultimodalMessage(message.role, parts))
+        messages.append(MultimodalMessage(message.role, parts, transcript=transcript))
         display_lines.append(f"{message.role}: {message.display_content}")
 
     if not items:  # Defensive: the caller detects images before entering.
@@ -829,6 +851,7 @@ def validate_chat_input(
             request,
             chat_templates,
             prepared,
+            carry_transcript=request.model in (upstream_chat_models or ()),
         )
     else:
         try:

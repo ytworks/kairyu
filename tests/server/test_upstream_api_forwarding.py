@@ -10,6 +10,8 @@ Messages (vLLM opens a new turn there), and a single-call limit and JSON mode
 stay on vLLM's chat path, the only one that applies them in every pinned
 version. A client that leaves a stream mid-generation releases the upstream
 request at once on every public API, and an AUTO stream's role calls with it.
+An image beside tool-call history reaches the upstream whole (issue #659 item
+6): image parts, tool calls, tool results and reasoning in order.
 """
 
 from __future__ import annotations
@@ -198,12 +200,24 @@ def upstream(monkeypatch) -> FakeUpstream:
     return fake
 
 
-def _spec(*, responses: bool = False, messages: bool = False, extra: str = "") -> str:
+def _spec(
+    *, responses: bool = False, messages: bool = False, vision: bool = False, extra: str = ""
+) -> str:
     lists = "upstream_chat_models: [remote]\n"
     if responses:
         lists += "upstream_responses_models: [remote]\n"
     if messages:
         lists += "upstream_messages_models: [remote]\n"
+    images = (
+        """      capabilities:
+        allow_prompt_kinds: [multimodal]
+      image_input_policy:
+        max_images: 1
+        max_processed_prompt_tokens: 1024
+"""
+        if vision
+        else ""
+    )
     return (
         """
 engines:
@@ -216,6 +230,7 @@ engines:
       upstream: vllm
       max_model_len: 4096
 """
+        + images
         + lists
         + extra
     )
@@ -285,6 +300,118 @@ async def test_responses_caller_reaches_a_declared_upstream_in_responses(upstrea
     ]
     assert body["tools"] == [_TOOL]
     assert bool(body.get("stream")) is stream
+
+
+_RED_PNG = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDA"
+    "xMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
+)
+_CALL = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "lookup", "arguments": '{"key":"k"}'},
+}
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+async def test_an_image_beside_tool_history_reaches_the_upstream_whole(upstream, api):
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=True, vision=True)))
+    async with _client(app) as client:
+        if api == "chat":
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "remote",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Color? And k?"},
+                                {"type": "image_url", "image_url": {"url": _RED_PNG}},
+                            ],
+                        },
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "I need k.",
+                            "tool_calls": [_CALL],
+                        },
+                        {"role": "tool", "tool_call_id": "call_1", "content": "42"},
+                        {"role": "user", "content": "Answer now."},
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {k: v for k, v in _TOOL.items() if k != "type"},
+                        }
+                    ],
+                },
+            )
+        else:
+            response = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "remote",
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "Color? And k?"},
+                                {"type": "input_image", "image_url": _RED_PNG},
+                            ],
+                        },
+                        *_RESPONSES_INPUT[1:],
+                    ],
+                    "tools": [_TOOL],
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    if api == "chat":
+        assert path == "/v1/chat/completions"
+        assert body["messages"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Color? And k?"},
+                    {"type": "image_url", "image_url": {"url": _RED_PNG}},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "I need k.",
+                "tool_calls": [_CALL],
+            },
+            {"role": "tool", "content": [{"type": "text", "text": "42"}], "tool_call_id": "call_1"},
+            {"role": "user", "content": [{"type": "text", "text": "Answer now."}]},
+        ]
+    else:
+        assert path == "/v1/responses"
+        assert body["input"] == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Color? And k?"},
+                    {"type": "input_image", "image_url": _RED_PNG, "detail": "auto"},
+                ],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"key":"k"}',
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "42"},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Answer now."}],
+            },
+        ]
 
 
 async def test_responses_caller_stays_on_chat_without_a_declared_upstream(upstream):

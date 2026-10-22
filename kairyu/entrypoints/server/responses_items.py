@@ -364,11 +364,12 @@ def _image_paths(payload: object) -> list[str]:
 
 
 def reject_images_beside_tools(context: Sequence[dict], payload: object) -> None:
-    """Images and tool history cannot share one request (an L1 limit).
+    """Images and tool history cannot share one request on a Kairyu-rendered model.
 
-    The engine's multimodal prompt carries role and content parts only, with
-    no tool calls, tool results, or reasoning, so a request mixing them would
-    silently lose the transcript.
+    Only an upstream-rendered model (``upstream_chat_models``) receives the
+    tool transcript beside images; for any other backend the multimodal prompt
+    would silently lose it, so the request is refused. The caller skips this
+    check for upstream-rendered models.
     """
 
     tool_kinds = ("function_call", "function_call_output")
