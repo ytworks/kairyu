@@ -96,6 +96,10 @@ class FakeOpenWebUI(ThreadingHTTPServer):
             return row
         if path in ("/api/v1/tools/", "/api/v1/tools/export"):
             return list(self.tools.values())
+        if path.endswith("/access/update"):
+            tool_id = path.split("/")[-3]
+            self.tools[tool_id]["access_grants"] = body["access_grants"]
+            return self.tools[tool_id]
         if path == "/api/v1/tools/create" or path.endswith("/update"):
             self.tools[body["id"]] = {**body, "specs": [{"name": "provide_download"}]}
             return self.tools[body["id"]]
@@ -166,6 +170,10 @@ def test_setup_replaces_earlier_filters_and_keeps_an_active_one_on(open_webui):
     assert not any(call.endswith(("/toggle", "/toggle/global")) for call in open_webui.calls)
     assert open_webui.functions["kairyu_responses"]["content"].startswith('"""\ntitle:')
     assert set(open_webui.tools) == {"file_download"}
+    # Other signed-in users get the download tool too (auth-on workspaces).
+    assert open_webui.tools["file_download"]["access_grants"] == [
+        {"principal_type": "user", "principal_id": "*", "permission": "read"}
+    ]
 
 
 def test_setup_fails_closed_naming_the_drifted_setting(open_webui):

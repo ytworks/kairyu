@@ -56,8 +56,9 @@ Gates: [`verification/workspace/gates.py`](../../verification/workspace/gates.py
 4. `setup`: sign in as the admin, check Open WebUI is v0.12.3, keep Kairyu's
    connection on Responses, install the filter (removing the earlier
    per-example `reasoning_effort` / `responses_api` filters) and
-   `file_download`, then fail unless retrieval, the code interpreter and the
-   models' default metadata equal the workspace.
+   `file_download` (readable by every signed-in user, so a workspace with
+   sign-in gives it to every account), then fail unless retrieval, the code
+   interpreter and the models' default metadata equal the workspace.
 
 The environment is the configuration on every start
 (`RESET_CONFIG_ON_START`): Admin Panel changes do not survive a restart.

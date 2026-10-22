@@ -48,7 +48,9 @@ every example, shared as a framework layer.
   by digest): the plugins use its internals. Setup signs in as the admin,
   checks `/api/version`, keeps Kairyu's connection on Responses, installs the
   filter (`kairyu_responses`, removing the examples' and the demo's earlier
-  filters) and the profile's tools, and fails closed on any retrieval,
+  filters) and the profile's tools with read access for every signed-in user
+  (Open WebUI keeps an admin's tool without grants private; PR #666 review),
+  and fails closed on any retrieval,
   code-interpreter or model-metadata difference. The environment is the
   configuration on every start (`RESET_CONFIG_ON_START`); Admin Panel edits
   do not survive a restart.
