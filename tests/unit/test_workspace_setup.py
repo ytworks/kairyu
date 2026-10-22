@@ -21,7 +21,7 @@ import kairyu_workspace  # noqa: E402
 from kairyu_workspace.spec import DEFAULT_CAPABILITIES  # noqa: E402
 
 SECTION = {
-    "profile": "ja-v1",
+    "profile": "ja-v2",
     "port": 3018,
     "bind": "127.0.0.1",
     "auth": "none",

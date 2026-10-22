@@ -74,10 +74,10 @@ message), Responses as Responses, Anthropic Messages as Messages.
 
 The Chat UI is the shared L4 chat workspace
 ([`deploy/workspace`](../../deploy/workspace/README.md)), selected by this
-example's `workspace` section in `example.json` (profile `ja-v1`). It gives
+example's `workspace` section in `example.json` (profile `ja-v2`). It gives
 Japanese knowledge bases (Docling OCR for scanned pages, `BAAI/bge-m3`
-embedding and `BAAI/bge-reranker-v2-m3` reranking from pinned, hashed copies
-shared by every example, 300-character chunks), Word / Excel / PowerPoint read
+embedding, then `BAAI/bge-reranker-v2-m3` reranking of the 50 nearest chunks,
+from pinned, hashed copies shared by every example; 300-character chunks), Word / Excel / PowerPoint read
 and edit through the browser code interpreter (on in every chat by default),
 and download links for the files it writes. Docling runs at 4 CPUs and the
 Chat UI at 8; `verify.sh knowledge-serving` checks that the serving rows keep

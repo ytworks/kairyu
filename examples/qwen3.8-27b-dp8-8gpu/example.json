@@ -50,7 +50,7 @@
     "cudagraph_mode": "PIECEWISE"
   },
   "workspace": {
-    "profile": "ja-v1",
+    "profile": "ja-v2",
     "port": 3000,
     "bind": "127.0.0.1",
     "auth": "admin",

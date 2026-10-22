@@ -60,7 +60,7 @@
     "custom_all_reduce": false
   },
   "workspace": {
-    "profile": "ja-v1",
+    "profile": "ja-v2",
     "port": 3016,
     "bind": "0.0.0.0",
     "auth": "none",

@@ -95,7 +95,7 @@
     "indexer_kv_dtype": "mxfp4"
   },
   "workspace": {
-    "profile": "ja-v1",
+    "profile": "ja-v2",
     "port": 3007,
     "bind": "127.0.0.1",
     "auth": "none",
