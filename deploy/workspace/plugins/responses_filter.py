@@ -1,21 +1,24 @@
 """
-title: Reasoning Effort
-description: Select DeepSeek-V4.1-Flash-1017 reasoning effort; default is thinking high (75).
-version: 0.2.0
+title: Responses API
+description: Keep only OpenAI Responses fields in the Chat UI's requests to Kairyu.
+version: 1.0.0
 """
 
+import json
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Open WebUI v0.12.3 reaches Kairyu over the Responses API (api_type
-# "responses" in compose.yaml): it converts this chat body with
-# convert_to_responses_payload, which forwards unknown top-level keys verbatim
-# and replays saved output items as they were stored. Kairyu's /v1/responses is
-# the strict OpenAI contract, so the inlet leaves only Responses fields: the
-# effort becomes reasoning.effort, sampling keys the Responses API lacks are
-# dropped, saved output items keep their Responses fields, and store is false
-# because the Chat UI sends the whole conversation every turn.
+# L4 (deploy/workspace) installs this one filter in every workspace. Open WebUI
+# v0.12.3 reaches Kairyu over the Responses API (api_type "responses"): it
+# converts its chat body with convert_to_responses_payload, which forwards
+# unknown top-level keys verbatim and replays saved output items as they were
+# stored. Kairyu's /v1/responses is the strict OpenAI contract, so the inlet
+# leaves only Responses fields: the effort becomes reasoning.effort, sampling
+# keys the Responses API lacks are dropped, saved output items keep their
+# Responses fields, and store is false because the Chat UI sends the whole
+# conversation every turn.
 _NON_RESPONSES_FIELDS = (
     "chat_template_kwargs",
     "top_k",
@@ -44,6 +47,9 @@ _OUTPUT_ITEM_FIELDS = {
     "function_call": ("type", "id", "call_id", "name", "arguments"),
     "function_call_output": ("type", "call_id", "output"),
 }
+# The effort levels this workspace offers (the model author's vocabulary,
+# "default" first) come from the Chat UI's environment; none, no dropdown.
+_EFFORT_LEVELS = tuple(json.loads(os.environ.get("KAIRYU_WORKSPACE_EFFORT_LEVELS") or "[]"))
 
 
 def _responses_body(body: dict) -> dict:
@@ -65,24 +71,24 @@ def _responses_body(body: dict) -> dict:
 
 
 class Filter:
-    """Open WebUI global filter that turns the effort knob into a dropdown.
+    """Open WebUI global filter: the Chat UI's body as an OpenAI Responses body.
 
-    Open WebUI v0.12.3 renders an enum-typed user valve as a ``<select>`` in
-    Chat Controls. The choice reaches Kairyu as the Responses body's
-    ``reasoning.effort`` using the model author's vocabulary (low=50, high=75,
-    max=100); ``default`` omits it so the L1 default (thinking high) applies.
+    With effort levels, Open WebUI renders the enum-typed user valve as a
+    ``<select>`` in Chat Controls; the choice reaches Kairyu as
+    ``reasoning.effort``, and ``default`` omits it so the model's own default
+    applies (also over a ``reasoning_effort`` in the default model params).
     """
 
     class Valves(BaseModel):
         pass
 
-    class UserValves(BaseModel):
-        reasoning_effort: Literal["default", "low", "high", "max"] = Field(
-            default="default",
-            description=(
-                "Reasoning effort for DeepSeek-V4.1-Flash-1017. default = thinking high (75)."
-            ),
-        )
+    if _EFFORT_LEVELS:
+
+        class UserValves(BaseModel):
+            reasoning_effort: Literal[_EFFORT_LEVELS] = Field(
+                default=_EFFORT_LEVELS[0],
+                description=os.environ.get("KAIRYU_WORKSPACE_EFFORT_HELP", ""),
+            )
 
     def __init__(self):
         self.valves = self.Valves()

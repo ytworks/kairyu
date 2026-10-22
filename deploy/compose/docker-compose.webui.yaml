@@ -6,8 +6,9 @@
 #   docker compose -f deploy/compose/docker-compose.webui.yaml \
 #     --profile browser-smoke run --rm browser
 # With the admin credentials set, Open WebUI creates that admin on its first
-# start and webui-setup installs the Responses filter; without them the first
-# account is created in the browser and webui-setup only warns.
+# start; without them the first account is created in the browser. webui-setup
+# signs in as that admin (the credentials are required) and installs the L4
+# Responses filter (deploy/workspace).
 services:
   kairyu:
     build:
@@ -90,8 +91,10 @@ services:
 
   # m11 D7 amendment 2026-10-18: Kairyu's /v1/responses rejects the Chat
   # Controls fields outside the Responses API, so the admin installs the
-  # Responses filter (webui_setup.py) once Open WebUI is healthy. Run it after
-  # `up` (`run --rm webui-setup`): an exited one-shot service fails `up --wait`.
+  # Responses filter once Open WebUI is healthy, with the L4 workspace setup
+  # (deploy/workspace; this Open WebUI is set up only, not deployed by L4).
+  # Run it after `up` (`run --rm webui-setup`): an exited one-shot service
+  # fails `up --wait`.
   webui-setup:
     profiles: [setup]
     image: >-
@@ -103,10 +106,13 @@ services:
       WEBUI_URL: http://webui:8080
       WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
       WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      KAIRYU_WORKSPACE_SPEC: >-
+        {"profile": null, "auth": "admin", "models": ["default", "kairyu-auto"],
+        "reasoning_effort": null}
+      PYTHONPATH: /opt/kairyu-workspace
     volumes:
-      - ./webui_setup.py:/setup/webui_setup.py:ro
-      - ./webui-responses-filter.py:/setup/webui-responses-filter.py:ro
-    entrypoint: ["python3", "/setup/webui_setup.py"]
+      - ../workspace:/opt/kairyu-workspace:ro
+    entrypoint: ["python3", "-m", "kairyu_workspace", "setup"]
     restart: "no"
 
   browser:

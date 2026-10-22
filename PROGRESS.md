@@ -15,7 +15,8 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 - L1 stays Kairyu's own engine (kernel libraries like FlashInfer are used;
   scheduler, radix KV, spec decode, orchestration are ours). Layering:
-  L3 Interface / L2 Orchestration / L1 Engines.
+  L4 Workspace (every example's Chat UI, `deploy/workspace/`) / L3 Interface /
+  L2 Orchestration / L1 Engines.
 - Target model classes: small dense ~14B (latency tier), mid dense ~70B,
   mid MoE 100–300B, frontier MoE 500B+ (multi-node EP).
 - Parallelism/quantization strategy is derived per measured hardware profile,
@@ -107,12 +108,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Human sign-off pending on M2–M4 design reviews
 - Caller-API forwarding / example UIs on Responses (2026-10-17, PR #656): GPU final test complete 2026-10-19 — the 7 remaining examples with an Open WebUI pass every gate, `api-equivalence`, the Chat UI pass and the cancellation probe (each `MEASUREMENTS.md`); `glm-5.3-flash-quyet-8gpu` deleted (owner decision); remaining: merge after CI
 - Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
+- L4 chat workspace (WS-D1..D8, PR #665): PR A (L4 + `deepseek-v4.1-flash-1017-8gpu` + CPU demo setup) reviewed by the owner; CI green; GPU 2026-10-22: `docling`, restart, `knowledge`, `chat-ui`, `file-download`, `knowledge-serving`, `api-equivalence` pass, `office` passed 3/3 re-runs after one run where the model skipped `provide_download` (1 of 21 deliveries); remaining: merge after CI; PR B/C follow
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated; the eight-GPU one's Chat UI also serves Japanese knowledge bases (Docling OCR, bge-m3, multilingual reranker; GPU-verified 2026-10-21, PR #661) and Word / Excel / PowerPoint read and edit through its default-on browser code interpreter (GPU-verified 2026-10-22, PR #662), delivered as download links in the reply (PR #664)
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-10-22 — [design] L4 chat workspace: one Chat UI for every example
+- What: new layer L4 (Chat UI + document services, outside the Kairyu server, L3 public API only) in `deploy/workspace/` (compose services, standard-library setup that fails closed on drift, one Responses filter, `file_download`, immutable profile `ja-v1` with the 1017 eight-GPU settings) and `verification/workspace/` (the Chat UI gates); `kairyu/` unchanged. Examples keep only values (`workspace` in `example.json`). PR A moves `deepseek-v4.1-flash-1017-8gpu` and the CPU demo's `webui-setup` onto it; PR B the six other single-model chat examples; PR C the two orchestrated ones with an L2/L3 images-beside-tools change.
+- Why: owner request to give every example the 1017 eight-GPU Chat UI (OCR knowledge bases, Office, downloads) as a framework layer; owner decisions 2026-10-22 (L4 at repo level, Chat UI scripts and gates shared, orchestrated examples later).
+- Refs: WS-D1..D8 `docs/design/l4-chat-workspace.md`; PR #665; plan `docs/superpowers/plans/2026-10-22-l4-chat-workspace.md`
 
 ### 2026-10-22 — [progress] Download links for files the 1017 eight-GPU Chat UI makes
 - What: a `file_download` Open WebUI tool (installed by `run.sh up`, on by default) reads a file the browser code interpreter wrote, stores it in Open WebUI's file store, attaches it to the reply and returns a link; its description also has the model import the bundled Office libraries directly. GPU: `file-download` (owner's Excel request: link saves the file on desktop, after a reload and on an emulated phone), `office` (edits saved from the link), `chat-ui`, `knowledge` pass.

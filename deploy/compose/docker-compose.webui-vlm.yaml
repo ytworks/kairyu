@@ -23,6 +23,14 @@ services:
     environment:
       DEFAULT_MODELS: qwen3-vl-32b
 
+  # The L4 setup checks that the Chat UI offers the workspace's models; this
+  # overlay serves qwen3-vl-32b instead of the CPU demo's mock models.
+  webui-setup:
+    environment:
+      KAIRYU_WORKSPACE_SPEC: >-
+        {"profile": null, "auth": "admin", "models": ["qwen3-vl-32b"],
+        "reasoning_effort": null}
+
   vllm:
     image: >-
       vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8

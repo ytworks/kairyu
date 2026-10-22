@@ -641,3 +641,8 @@ example-owned Open WebUI tool (`file_download`, on by default) reads a file
 from that workspace through the code interpreter's own browser event,
 stores it in Open WebUI's file store, attaches it to the reply and returns
 a link that works on a phone, after a reload and from another device.
+
+L4 (2026-10-22, `docs/design/l4-chat-workspace.md`): the knowledge-base,
+Office and download-link Chat UI above is now the shared L4 chat workspace
+(`deploy/workspace/`, profile `ja-v1`), which this example and then every
+chat example use; the measured settings are unchanged.

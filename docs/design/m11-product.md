@@ -932,6 +932,14 @@ reasoning items, the Advanced Params effort stays a free-text field and enum
 user valves still render as a select, and its converted fixture body equals
 v0.11.0's. Why: owner review finding (P2) and owner request.
 
+**L4 workspace setup (2026-10-22, `docs/design/l4-chat-workspace.md`
+WS-D7).** The demo's `webui-setup` runs the L4 setup
+(`python3 -m kairyu_workspace setup`) instead of its own `webui_setup.py`
+and `webui-responses-filter.py`, which are removed: it installs L4's one
+Responses filter (`kairyu_responses`) and switches a saved chat connection
+as before, and now requires `WEBUI_ADMIN_EMAIL`/`WEBUI_ADMIN_PASSWORD`
+(`scripts/webui_smoke.sh` passes them). Why: owner decision (L4).
+
 **Saved model params (2026-10-18, owner decision on the PR #656 re-review).**
 Open WebUI v0.12.3 applies a model's saved `params` (Advanced Params,
 Custom Parameters included) a second time after the filters, just before it

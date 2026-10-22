@@ -1,5 +1,6 @@
 """Static contract for the opt-in eight-GPU OpenWebUI VLM stack."""
 
+import json
 from pathlib import Path
 
 import yaml
@@ -32,7 +33,7 @@ def _argument_value(command: list[str], option: str) -> str:
 def test_vlm_overlay_is_opt_in_and_pins_the_real_tp8_runtime() -> None:
     compose = _load_yaml(COMPOSE)
     services = compose["services"]
-    assert set(services) == {"kairyu", "webui", "vllm"}
+    assert set(services) == {"kairyu", "webui", "webui-setup", "vllm"}
 
     kairyu = services["kairyu"]
     assert kairyu["build"] == {"args": {"KAIRYU_VISION": "1"}}
@@ -45,6 +46,9 @@ def test_vlm_overlay_is_opt_in_and_pins_the_real_tp8_runtime() -> None:
     assert services["webui"]["environment"] == {
         "DEFAULT_MODELS": MODEL_NAME
     }
+    # The L4 setup checks the Chat UI offers these models (PR #665 review).
+    setup = json.loads(services["webui-setup"]["environment"]["KAIRYU_WORKSPACE_SPEC"])
+    assert setup["models"] == [MODEL_NAME]
 
     vllm = services["vllm"]
     assert vllm["image"] == VLLM_IMAGE
