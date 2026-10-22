@@ -1,7 +1,8 @@
 # L4 Design: Chat Workspace
 
 Status: **Accepted 2026-10-22 (owner)**; PR A (L4 and the 1017 eight-GPU
-example) in progress, PR #665. Plan:
+example, PR #665) GPU-verified 2026-10-22: every Chat UI gate passes on L4
+(the example's `MEASUREMENTS.md`). Plan:
 `docs/superpowers/plans/2026-10-22-l4-chat-workspace.md`.
 
 ## Context

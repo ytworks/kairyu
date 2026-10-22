@@ -1,8 +1,8 @@
 # L4 chat workspace: the 1017 eight-GPU Chat UI in every example
 
 Status: **Plan approved 2026-10-22 (owner), including the verification plan;
-PR A implemented (CPU checks and the CPU demo's browser E2E pass locally),
-review and GPU gates pending.**
+PR A implemented, reviewed and GPU-verified 2026-10-22 (the 1017 eight-GPU
+example's `MEASUREMENTS.md`, "On the L4 chat workspace").**
 
 ## Problem
 

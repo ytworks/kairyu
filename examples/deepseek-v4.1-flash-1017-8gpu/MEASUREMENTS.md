@@ -287,3 +287,26 @@ loads): `file-download` PASS (desktop 194.9 s, 6 sheets / 775 cells; the
 same file after a reload; phone 233.7 s, 8 sheets / 887 cells;
 `20261022T101210Z-file-download`) and `office` PASS
 (`20261022T101922Z-office`).
+
+## On the L4 chat workspace (2026-10-22)
+
+PR #665 (`8299d5e8`): the Chat UI moved to the shared L4 workspace
+(`deploy/workspace`, profile `ja-v1`, the settings above unchanged; the
+retrieval models now load from the shared read-only store
+`model-volumes/workspace-models/`, hard-linked from the attested copies).
+L1 / L2 as above; the gates are L4's (`verification/workspace/gates.py`).
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `docling` | PASS | 3/3 image-only pages carry the key sentence, 4.7 s per page; no text-layer line lost (`20261022T113513Z-docling`) |
+| restart | PASS | `run.sh up` on L4 in 1 min 39 s (L1 kept, gateway and Chat UI recreated): models attested, L4 setup installed `kairyu_responses` (the earlier `reasoning_effort` filter removed) and `file_download`, retrieval, code interpreter and effort levels checked |
+| `knowledge` | PASS | 20-page scan ingested in 101.3 s, distractors 31.1 s; key chunk ranked 1 (reranker 0.996, next 0.485); query 3.92 s (`20261022T114738Z-knowledge`) |
+| `chat-ui` | PASS | `323`, `324`, `Red`, and with the knowledge base picked by `#`, "KR-7319は 摂氏マイナス42度（−42℃）の冷凍庫で保管するよう定められており…" citing `kairyu-gate-scan.pdf`; Kairyu `/v1/responses` 4 → 17, `/v1/chat/completions` 0 → 0 (`20261022T114958Z-chat-ui`) |
+| `office` | FAIL, then PASS 3/3 | first run: docx edited and linked, but for the xlsx edit the model ran the code three times, saved the file and wrote "ダウンロード: kairyu-office-sales-total.xlsx" without calling `provide_download`, so the reply had no link (`20261022T115022Z-office`); the tool was offered as before (the docx chat of the same run called it) and nothing the model sees changed with L4. Three re-runs pass: every edit linked and checked, the image after the code-interpreter calls answered "Red", edits 7.4-11.9 s, `/v1/chat/completions` unchanged (`20261022T115156Z`, `115254Z`, `115349Z-office`). The model skipped the tool in 1 of 21 linked deliveries since the tool exists (10 of 10 before L4, 10 of 11 here) |
+| `file-download` | PASS | the owner's Excel request: desktop link saved a 10-sheet xlsx (959 filled cells) in 249.1 s; after a reload the same link saved the identical file (same SHA-256); emulated iPhone 13: a tap saved an 8-sheet xlsx (939 cells) in 372.2 s; `/v1/chat/completions` unchanged (`20261022T115507Z-file-download`) |
+| `knowledge-serving` | PASS | three load streams; Docling busy (>= 1 core) for 100 % of the 154.1 s of rows, mean 3.71 cores of 4; c1 150.5 tok/s (99.5 % of 151.2), c8 373.4 (98.6 % of 378.8) (`20261022T120532Z-knowledge-serving`) |
+| `api-equivalence` | PASS | every case incl. `image-tools`, no findings; vLLM counted 22 `/v1/responses` for 22 Responses requests and 2 `/v1/chat/completions` for the 2 chat requests (`20261022T121212Z-api-equivalence`) |
+
+Runs 2026-10-22 11:35-12:12 UTC on `8299d5e8`; `run.sh up` with this host's
+public bind (`CHAT_UI_BIND_ADDRESS=0.0.0.0`, `WEBUI_URL`, `PUBLIC_HOST`), as
+the stack was running before.
