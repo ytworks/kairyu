@@ -189,12 +189,18 @@ async function downloadFromReply(item, saveAs, { tap = false } = {}) {
 	const link = item.locator('a[href*="/api/v1/files/"]').last();
 	invariant((await link.count()) > 0, `the reply has no download link: ${text.slice(0, 600)}`);
 	const href = await link.getAttribute('href');
-	const popup = page.waitForEvent('popup', { timeout: actionTimeoutMs });
+	// The link opens a new tab whose response is an attachment; Chromium hands
+	// the download to the opening page and closes the tab, another browser may
+	// keep it on the tab, so take whichever reports it.
+	const onPage = page.waitForEvent('download', { timeout: navigationTimeoutMs });
+	const onTab = page
+		.waitForEvent('popup', { timeout: navigationTimeoutMs })
+		.then((tab) => tab.waitForEvent('download', { timeout: navigationTimeoutMs }));
 	await (tap ? link.tap({ timeout: actionTimeoutMs }) : link.click({ timeout: actionTimeoutMs }));
-	const tab = await popup;
-	const download = await tab.waitForEvent('download', { timeout: navigationTimeoutMs });
+	const download = await Promise.any([onPage, onTab]);
+	onPage.catch(() => {});
+	onTab.catch(() => {});
 	await download.saveAs(`/results/${saveAs}`);
-	await tab.close().catch(() => {});
 	console.log(JSON.stringify({ saved: saveAs, href, suggested: download.suggestedFilename() }));
 	return href;
 }

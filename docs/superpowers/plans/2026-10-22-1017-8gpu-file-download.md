@@ -1,6 +1,13 @@
 # Downloadable files from the 1017 eight-GPU Chat UI
 
-Status: **Approved 2026-10-22 (owner).**
+Status: **Approved 2026-10-22 (owner); implemented and GPU-verified 2026-10-22.**
+
+Outcome (details in the example's `MEASUREMENTS.md`): D0-D6 pass. The
+owner's request took 3.1 min on the desktop run and 7.4 min on the phone run
+(13 versus 80 code runs: the model's own work on the workbook; storing and
+linking takes seconds), beyond the 3 min estimate. In headless Chromium the
+link's download is reported on the opening page, so the gate accepts it from
+the page or the new tab.
 
 ## Problem
 

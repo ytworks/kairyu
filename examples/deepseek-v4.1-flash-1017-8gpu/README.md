@@ -22,7 +22,8 @@ the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 > gate, `api-equivalence` and the Chat UI pass succeed (`MEASUREMENTS.md`).
 > Japanese knowledge bases GPU-verified 2026-10-21 (`docling`, `knowledge`,
 > `chat-ui`, `knowledge-serving`); Word, Excel and PowerPoint 2026-10-22
-> (`office`, `chat-ui`, `api-equivalence` with `image-tools`).
+> (`office`, `chat-ui`, `api-equivalence` with `image-tools`); download links
+> 2026-10-22 (`file-download`, `office`).
 
 ## Start
 
@@ -130,8 +131,17 @@ Attach a docx, xlsx or pptx with the clip and ask about it or for a change.
 - **Editing and creating**: the Chat UI's code interpreter is on in every chat
   by default. It runs Pyodide in your browser with python-docx, python-pptx,
   openpyxl, xlsxwriter and pandas bundled. When the model runs code, the
-  browser copies the chat's attachments to `/mnt/uploads`; the model writes
-  its result there, and you download it from Chat Controls > Files.
+  browser copies the chat's attachments to `/mnt/uploads`, and the model
+  writes its result there.
+- **Downloading**: the model then calls the `file_download` tool
+  (`webui-file-download-tool.py`, installed by `run.sh up` and on in every
+  chat through the model's default `toolIds`). The tool reads the file from
+  your browser's workspace, stores it in Open WebUI's file store, attaches it
+  to the reply and gives the model a link to show. Tap or click the link in
+  the reply to save the file; it keeps working after a reload and on another
+  device. Chat Controls > Files still lists the working files. The tool's
+  description also tells the model to import the Office libraries directly
+  (Open WebUI loads a bundled package only on a plain `import`).
 - **Configuration**: `compose.yaml` sets the code interpreter, the pyodide
   engine, file persistence off (a sandboxed iframe) and
   `DEFAULT_MODEL_METADATA`, which carries Open WebUI v0.12.3's default
@@ -147,7 +157,8 @@ Limits:
 
 - Code runs on the viewer's device, never on the server, and one execution may
   take 60 s.
-- Working files live only in the open page; download them before reloading.
+- The working files in Chat Controls > Files live only in the open page; a
+  file the model delivered with its link is stored on the server.
 - openpyxl writes formulas without computing them; Excel computes them on
   open.
 - Legacy doc / xls / ppt and conversion to PDF are not supported (no
@@ -259,12 +270,17 @@ on vLLM's chat API.
 - `office`: Chromium attaches a Japanese docx, xlsx and pptx (built offline
   with the libraries in the Docling image), asks about each one's key fact,
   then asks for an edit (replace a word and add a paragraph; add a SUM total
-  row; add a "まとめ" slide). The result is downloaded from Chat Controls >
-  Files and checked in the Docling image: the change is there and the
+  row; add a "まとめ" slide). The result is saved from the download link in
+  the reply and checked in the Docling image: the change is there and the
   original content is kept. Last, an image attached to that chat after its
   code-interpreter calls is answered with a colour.
+- `file-download`: the owner's request "一年の事業計画のフォーマットをエクセルで作って"
+  in Chromium on a desktop screen: the reply carries a download link (no
+  `sandbox:` link) that saves an xlsx openpyxl opens with sheets and filled
+  cells; after a reload the same link saves the same file; then the same
+  request on an emulated iPhone 13, saved by tapping the link.
 
-`docling`, `chat-ui` and `office` build the Playwright image from the shared
+`docling`, `chat-ui`, `office` and `file-download` build the Playwright image from the shared
 `deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every
 file they upload under its knowledge base
 (`verification-results/knowledge-gate-uploads.json`) and delete only those.
