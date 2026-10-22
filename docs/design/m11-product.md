@@ -494,9 +494,10 @@ streams buffer", "no reasoning output", and "comment keep-alives".
     and hosted tool types
   - input items: `item_reference` and other unsupported item types
   - reasoning: `reasoning.effort=none`, non-default `reasoning.context`/`mode`
-  - media: `file_id` images, `input_file`/`input_audio`, and images in tool
-    output or beside tool-call history (L1's multimodal prompt carries no tool
-    transcript)
+  - media: `file_id` images, `input_file`/`input_audio`, images in tool
+    output, and images beside tool-call history on a model outside
+    `upstream_chat_models` (an upstream-rendered model receives them with the
+    transcript, m9 D2 images-beside-tools amendment 2026-10-22)
 - Accepted as vacuous: `service_tier` (reported as `default`), `max_tool_calls`,
   hosted-tool `include` values, prompt-cache retention, options, and
   breakpoints.

@@ -5,6 +5,11 @@
  * two typed turns of one chat answer 323 and 324, an attached red PNG answers
  * Red, and a Japanese question with the gate's knowledge base selected by `#`
  * is answered from its scanned PDF with that document cited.
+ *
+ * With WEBUI_SMOKE_MODE=office (run by `verify.sh office`), each Word, Excel
+ * and PowerPoint fixture is attached with the clip, asked about, then edited
+ * by the code interpreter; the result is downloaded from Chat Controls >
+ * Files into /results for the gate to check.
  */
 
 import { chromium } from 'playwright';
@@ -14,6 +19,8 @@ const model = process.env.WEBUI_SMOKE_MODEL ?? 'deepseek-v4.1-flash-1017';
 const knowledge = process.env.WEBUI_SMOKE_KNOWLEDGE;
 const knowledgeQuery = process.env.WEBUI_SMOKE_KNOWLEDGE_QUERY;
 const knowledgeSource = process.env.WEBUI_SMOKE_KNOWLEDGE_SOURCE;
+const mode = process.env.WEBUI_SMOKE_MODE ?? 'chat';
+const officeCases = JSON.parse(process.env.WEBUI_SMOKE_OFFICE ?? '{}');
 const actionTimeoutMs = 20_000;
 const navigationTimeoutMs = 60_000;
 const responseTimeoutMs = 1_800_000;
@@ -135,8 +142,105 @@ async function main() {
 	console.log('WEBUI BROWSER SMOKE PASS');
 }
 
+async function apiJson(path) {
+	return page.evaluate(async (target) => {
+		const response = await fetch(target, {
+			headers: { Authorization: `Bearer ${localStorage.token}` }
+		});
+		return response.json();
+	}, path);
+}
+
+// Attach a file with the clip and wait until Open WebUI has extracted it.
+async function attach(path) {
+	const upload = page.waitForResponse(
+		(response) =>
+			/\/api\/v1\/files\/?(\?|$)/.test(new URL(response.url()).pathname + new URL(response.url()).search) &&
+			response.request().method() === 'POST',
+		{ timeout: navigationTimeoutMs }
+	);
+	await page.locator('input[type="file"]').first().setInputFiles(path);
+	const response = await upload;
+	invariant(response.ok(), `upload of ${path} returned HTTP ${response.status()}`);
+	const { id } = await response.json();
+	// Images are not extracted; only documents wait for their processing.
+	if (/\.(png|jpe?g|webp|gif)$/i.test(path)) return id;
+	const deadline = Date.now() + 300_000;
+	for (;;) {
+		const { status } = await apiJson(`/api/v1/files/${id}/process/status`);
+		if (status === 'completed') return id;
+		invariant(status !== 'failed' && Date.now() < deadline, `processing ${path}: ${status}`);
+		await page.waitForTimeout(1000);
+	}
+}
+
+// Download /mnt/uploads/<name> from Chat Controls > Files into /results.
+async function downloadResult(name) {
+	await dismissNotices();
+	const tab = page.getByRole('button', { name: 'Files', exact: true });
+	if ((await tab.count()) === 0) {
+		await page.locator('button[aria-label="Controls"]').first().click({ timeout: actionTimeoutMs });
+	}
+	await tab.first().click({ timeout: actionTimeoutMs });
+	const browserPanel = page.locator('[aria-label="Pyodide file browser"]').first();
+	const row = browserPanel.getByText(name, { exact: true }).first();
+	await row.waitFor({ state: 'visible', timeout: actionTimeoutMs });
+	await row.click({ timeout: actionTimeoutMs });
+	const download = page.waitForEvent('download', { timeout: actionTimeoutMs });
+	await browserPanel.locator('button[aria-label="Download"]').first().click({ timeout: actionTimeoutMs });
+	await (await download).saveAs(`/results/${name}`);
+}
+
+async function officeMain() {
+	browser = await chromium.launch({ headless: true });
+	const context = await browser.newContext({
+		serviceWorkers: 'block',
+		locale: 'en-US',
+		acceptDownloads: true,
+		viewport: { width: 1600, height: 1000 }
+	});
+	page = await context.newPage();
+	for (const [format, item] of Object.entries(officeCases)) {
+		await step(`${format}: attach ${item.fixture}`, async () => {
+			await newChat();
+			invariant(
+				(await page.locator('button[aria-label="Disable Code Interpreter"]').count()) > 0,
+				'the code interpreter is not on by default'
+			);
+			await attach(`/fixtures/${item.fixture}`);
+		});
+		await step(`${format}: the attachment is read`, async () => {
+			await page.locator('#chat-input').fill(item.question);
+			const { text } = await sendAndRead();
+			invariant(new RegExp(item.answer).test(text), `${format} answer: ${text.slice(0, 600)}`);
+			console.log(JSON.stringify({ format, read_answer: text.slice(0, 300) }));
+		});
+		await step(`${format}: the code interpreter edits it into ${item.result}`, async () => {
+			await page.locator('#chat-input').fill(item.edit);
+			const { text } = await sendAndRead();
+			console.log(JSON.stringify({ format, edit_answer: text.slice(0, 400) }));
+			await downloadResult(item.result);
+		});
+	}
+	// The last chat used the code interpreter; an image there now travels
+	// beside that tool history (Kairyu used to refuse the turn). Any colour
+	// word shows the image reached the model; which one is the model's
+	// accuracy, which beside tool history varies on vLLM directly too.
+	await step('an image in a chat that used the code interpreter is answered', async () => {
+		await attach('/fixtures/red.png');
+		const { text } = await ask('What color is this image? Answer with one English word.');
+		invariant(!/cannot be combined|invalid_request_error/i.test(text), `image turn refused: ${text}`);
+		invariant(
+			/\b(red|crimson|scarlet|maroon|white|black|blue|green|yellow|orange|pink|purple|gray|grey|brown)\b/i.test(text),
+			`image turn names no colour: ${text.slice(0, 300)}`
+		);
+		console.log(JSON.stringify({ image_after_tools: text.slice(0, 200) }));
+	});
+	console.log('WEBUI OFFICE SMOKE PASS');
+}
+
 try {
-	await main();
+	await (mode === 'office' ? officeMain() : main());
 } catch (error) {
 	console.error(`WEBUI BROWSER SMOKE FAIL [step=${currentStep}]\n${error?.stack ?? error}`);
 	if (page) {

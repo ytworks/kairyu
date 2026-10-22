@@ -788,10 +788,11 @@ Codex-relevant behavior (codex-cli 0.160):
   admission, so size `tokens_per_minute`/`token_burst` at least that large for
   Codex tenants.
 - **Images.** `input_image` parts (data or http(s) URLs) reach vision models.
-  Two cases are rejected with a 400 that names the image: images in a tool
-  result (Codex `view_image`), and images beside tool-call history in the same
-  request. The engine's multimodal prompt has no tool transcript, so an image
-  session in Codex fails at its first tool follow-up.
+  Images in a tool result (Codex `view_image`) are rejected with a 400 that
+  names the image. Images beside tool-call history in the same request reach
+  a model in `upstream_chat_models` together with the tool calls, results and
+  reasoning (m9 D2 amendment 2026-10-22); any other model rejects them, so on
+  such a model an image session in Codex fails at its first tool follow-up.
 - **Web search is declared, not run.** Codex declares `web_search` (live or
   indexed) in full-access runs. The declaration is accepted and echoed but
   never shown to the model or executed.

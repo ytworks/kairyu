@@ -323,7 +323,9 @@ received the conversation only as a JSON transcript inside one user message,
 and DeepSeek-V4.1 at max effort then wrote its calls as JSON text (11 of 12
 on a think route, 6 of 12 on the verified tool route) while the same turns
 sent natively gave 0 of 12; (2) no extension point sends a caller's tool
-transcript natively (image prompts reject tool transcripts); (3) any DSL whose
+transcript natively (image prompts rejected tool transcripts; since the m9 D2
+images-beside-tools amendment 2026-10-22 they carry one for
+`upstream_chat_models` models, not on AUTO roles); (3) any DSL whose
 publisher answers tool turns hits it; (4) the mechanism only moves the
 caller's own messages into the worker request; which role uses it and its
 prompt stay in the example. Code: `RoleSpec.native_conversation`,

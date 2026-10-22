@@ -219,12 +219,27 @@ class MultimodalMessagePart:
             )
 
 
+# The caller's chat fields a multimodal message may carry next to its content
+# when the upstream renders the conversation itself: assistant tool calls, a
+# tool result's call id, a participant name, and replayed reasoning.
+MULTIMODAL_TRANSCRIPT_FIELDS = frozenset(
+    {"tool_calls", "tool_call_id", "name", "reasoning_content"}
+)
+
+
 @dataclass(frozen=True)
 class MultimodalMessage:
-    """One role-preserving message consumed by a capable chat backend."""
+    """One role-preserving message consumed by a capable chat backend.
+
+    ``transcript`` holds the message's tool-call, tool-result and reasoning
+    fields as canonical JSON (a mapping is accepted and canonicalized), so the
+    message stays immutable and hashable. Only an assistant message with tool
+    calls may have empty content.
+    """
 
     role: str
     content: tuple[MultimodalMessagePart, ...]
+    transcript: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.role) is not str or not self.role.strip():
@@ -235,13 +250,40 @@ class MultimodalMessage:
         ):
             raise TypeError("MultimodalMessage.content must be a sequence")
         copied = tuple(content)
-        if not copied:
-            raise ValueError("MultimodalMessage.content must not be empty")
         if any(not isinstance(part, MultimodalMessagePart) for part in copied):
             raise TypeError(
                 "MultimodalMessage.content must contain MultimodalMessagePart values"
             )
         object.__setattr__(self, "content", copied)
+        transcript = self.transcript
+        if transcript is not None:
+            fields = json.loads(transcript) if isinstance(transcript, str) else transcript
+            if not isinstance(fields, dict) or not fields:
+                raise ValueError("MultimodalMessage.transcript must be a non-empty object")
+            unknown = set(fields) - MULTIMODAL_TRANSCRIPT_FIELDS
+            if unknown:
+                raise ValueError(
+                    "MultimodalMessage.transcript has unsupported fields: "
+                    + ", ".join(sorted(map(str, unknown)))
+                )
+            if any(value is None for value in fields.values()):
+                raise ValueError("MultimodalMessage.transcript values must not be null")
+            object.__setattr__(
+                self,
+                "transcript",
+                json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+        if not copied and not (
+            self.role == "assistant" and self.transcript_fields().get("tool_calls")
+        ):
+            raise ValueError(
+                "MultimodalMessage.content must not be empty unless it is an "
+                "assistant tool call"
+            )
+
+    def transcript_fields(self) -> dict[str, object]:
+        """The carried tool-call / tool-result / reasoning fields, as a new dict."""
+        return json.loads(self.transcript) if self.transcript is not None else {}
 
 
 @dataclass(frozen=True)
@@ -443,6 +485,11 @@ def prompt_to_wire(prompt: PromptInput) -> PromptWire:
             wire["messages"] = [
                 {
                     "role": message.role,
+                    **(
+                        {"transcript": message.transcript_fields()}
+                        if message.transcript is not None
+                        else {}
+                    ),
                     "content": [
                         (
                             {"type": "text", "text": part.text}
@@ -552,7 +599,11 @@ def prompt_from_wire(value: object) -> PromptInput:
                 )
             _require_exact_fields(
                 message_value,
-                frozenset({"role", "content"}),
+                frozenset(
+                    {"role", "content", "transcript"}
+                    if "transcript" in message_value
+                    else {"role", "content"}
+                ),
                 context=f"multimodal message {message_index}",
             )
             content_values = message_value["content"]
@@ -606,7 +657,11 @@ def prompt_from_wire(value: object) -> PromptInput:
                         f"{part_type!r}"
                     )
             messages.append(
-                MultimodalMessage(role=message_value["role"], content=parts)
+                MultimodalMessage(
+                    role=message_value["role"],
+                    content=parts,
+                    transcript=message_value.get("transcript"),
+                )
             )
         return MultimodalPrompt(
             base=prompt_from_wire(value["base"]),
@@ -620,6 +675,7 @@ def prompt_from_wire(value: object) -> PromptInput:
 
 
 __all__ = [
+    "MULTIMODAL_TRANSCRIPT_FIELDS",
     "MultimodalEncoding",
     "MultimodalItem",
     "MultimodalMessage",

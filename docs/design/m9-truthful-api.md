@@ -183,7 +183,8 @@ token-granularity TPOT, results files).
   backend is constructed, unless every replica is a static `openai` backend
   whose upstream profile declares `conversation_prefix` (vLLM).
   `chat_template_kwargs` on text chats stay rejected and image chats keep the
-  multimodal path. `legacy_chat_models` is unchanged. Known limit: KV-aware
+  multimodal path (with their tool transcript since the 2026-10-22
+  amendment below). `legacy_chat_models` is unchanged. Known limit: KV-aware
   prefix placement reads the (empty) prompt text, so a multi-replica pool of
   such a model places by load and session affinity only.
   Review amendment (PR #647, owner review): when the upstream reports no usage
@@ -288,6 +289,37 @@ token-granularity TPOT, results files).
   which enforces it in every pinned version; a Kairyu replica's Responses
   boundary keeps it. Why: owner re-review finding (P2), reproduced with the
   pinned v0.23.0 conversion. Test: `test_json_mode_stays_on_vllm_chat`.
+- **Images-beside-tools amendment (2026-10-22, PR #662, owner authorization):**
+  an image chat of an `upstream_chat_models` model carries its tool
+  transcript. `MultimodalMessage` gains `transcript`, the caller's
+  `tool_calls`, `tool_call_id`, `name` and `reasoning_content` as canonical
+  JSON (round-tripped by `prompt_to_wire` / `prompt_from_wire`); an assistant
+  message with tool calls may have no content. For such a model the chat
+  service copies those validated fields into the image prompt instead of
+  refusing "tool transcript fields are not supported together with image
+  input", Responses skips its up-front "images cannot be combined with
+  tool-call history" refusal, and the `openai` backend sends the fields
+  beside the image parts on the chat wire and, through the existing
+  converters, on the Responses and Messages wires. Every other model, AUTO
+  models and Kairyu's own engines (which take no image prompt) keep the typed
+  400; images inside a tool result (Codex `view_image`) and images on
+  Anthropic Messages stay rejected. Why (framework boundary): (1) the
+  upstream-chat contract (above) promises the caller's conversation reaches
+  the upstream, but with an image present its tool transcript could not be
+  expressed and the request was refused (issue #659 item 6): Open WebUI
+  passes built-in tools in every chat, so after any tool call an image turn
+  failed; (2) no extension point carries a tool transcript inside an image
+  prompt; (3) every VLM served through `upstream_chat_models` and any client
+  that sends an image after tool use is affected, observable as the 400 on
+  the minimal request (image + `function_call` + output); (4) the mechanism
+  is one optional field on the image message and two refusals narrowed to
+  non-upstream models; which tools a UI enables stays in the examples. GPU:
+  `api-equivalence` `image-tools` (vLLM directly and Kairyu agree on
+  Responses and Chat Completions). Code: `MultimodalMessage`,
+  `chat_service._render_multimodal_prompt`, `responses_service.create_response`,
+  `openai_backend._multimodal_chat_message`; tests:
+  `test_an_image_beside_tool_history_reaches_the_upstream_whole`,
+  `test_multimodal_chat_layout_round_trip_preserves_roles_and_part_order`.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and

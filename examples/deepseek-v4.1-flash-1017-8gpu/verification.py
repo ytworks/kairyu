@@ -1078,7 +1078,7 @@ def restart(run_dir: Path) -> int:
 
 
 def api_equivalence(run_dir: Path) -> int:
-    """L1 and L3 /v1/responses agree; L3 reaches L1 on /v1/responses only."""
+    """L1 and L3 agree on Responses (and image-tools on chat); L3 keeps the caller's API."""
     command = [
         sys.executable,
         str(ROOT / "verification/product/correctness/upstream_api_equivalence.py"),
@@ -1095,7 +1095,7 @@ def api_equivalence(run_dir: Path) -> int:
         "--l3-model",
         SERVED_MODEL,
         "--cases",
-        "text,stream,effort,tools,image,cap,openwebui",
+        "text,stream,effort,tools,image,image-tools,cap,openwebui",
         # xhigh is L3 max on the Responses wire (the encoder renders 100).
         "--efforts",
         "low,high,xhigh",
@@ -2016,6 +2016,243 @@ def knowledge_serving(run_dir: Path) -> int:
     return 0 if passed else 1
 
 
+# --- Word / Excel / PowerPoint (Chat UI) ------------------------------------------
+#
+# Attached files are read through Docling; edits run in the browser's Pyodide
+# (code interpreter, on by default), which receives the chat's attachments in
+# /mnt/uploads. Fixtures are built and results checked with python-docx,
+# python-pptx and openpyxl inside the pinned Docling image, offline.
+
+OFFICE_CASES = {
+    "docx": {
+        "fixture": "kairyu-office-report.docx",
+        "result": "kairyu-office-report-revised.docx",
+        "question": "添付の報告書によると、納品期限はいつですか。日付だけ答えてください。",
+        "answer": r"(2026\s*年\s*)?12\s*月\s*18\s*日|2026[-/.]12[-/.]18|12/18",
+        "edit": (
+            "添付の kairyu-office-report.docx を編集してください。本文の「東京本社」をすべて"
+            "「大阪支社」に置き換え、文書の最後に「改訂日: 2026年10月22日」という段落を追加し、"
+            "/mnt/uploads/kairyu-office-report-revised.docx として保存してください。"
+            "表やほかの本文は変えないでください。"
+        ),
+    },
+    "xlsx": {
+        "fixture": "kairyu-office-sales.xlsx",
+        "result": "kairyu-office-sales-total.xlsx",
+        "question": "添付の売上表で、2026年9月の売上はいくらですか。数値だけ答えてください。",
+        "answer": r"\b161\b",
+        "edit": (
+            "添付の kairyu-office-sales.xlsx の「売上」シートの最終行の下に、A列が「合計」、"
+            "B列がB2からB7の合計（SUM 関数）の行を追加し、ほかのセルは変えずに "
+            "/mnt/uploads/kairyu-office-sales-total.xlsx として保存してください。"
+        ),
+    },
+    "pptx": {
+        "fixture": "kairyu-office-review.pptx",
+        "result": "kairyu-office-review-final.pptx",
+        "question": "添付の資料によると、新規顧客は何社増えましたか。数だけ答えてください。",
+        "answer": r"\b42\b|四十二",
+        "edit": (
+            "添付の kairyu-office-review.pptx の最後に、タイトルが「まとめ」で、本文に"
+            "箇条書きが3行あるスライドを1枚追加し、既存のスライドは変えずに "
+            "/mnt/uploads/kairyu-office-review-final.pptx として保存してください。"
+        ),
+    },
+}
+
+_OFFICE_FIXTURES = r"""
+import docx, openpyxl, pptx, sys
+from pptx.util import Pt
+out = sys.argv[1]
+d = docx.Document()
+d.add_heading('出張報告書', 1)
+d.add_paragraph('出張先は東京本社で、期間は2026年11月4日から6日までとする。')
+d.add_paragraph('納品期限は2026年12月18日で、担当は品質管理課の佐藤とする。')
+d.add_paragraph('東京本社の会議室は第3会議室を予約済みである。')
+table = d.add_table(rows=1, cols=3)
+for cell, text in zip(table.rows[0].cells, ('試料', '数量', '保管場所')):
+    cell.text = text
+for row in (('試料A', '12', '東京本社'), ('試料B', '8', '名古屋'), ('試料C', '5', '福岡')):
+    for cell, text in zip(table.add_row().cells, row):
+        cell.text = text
+d.save(f'{out}/kairyu-office-report.docx')
+book = openpyxl.Workbook()
+sheet = book.active
+sheet.title = '売上'
+sheet.append(['月', '売上（万円）'])
+for month, value in zip(range(4, 10), (120, 135, 128, 142, 150, 161)):
+    sheet.append([f'2026年{month}月', value])
+book.save(f'{out}/kairyu-office-sales.xlsx')
+deck = pptx.Presentation()
+for title, lines in (('第3四半期の振り返り', ['2026年7月から9月']),
+                     ('主な成果', ['新規顧客は42社増えた', '解約率は1.8%に下がった']),
+                     ('課題', ['納期遅延が3件あった', '問い合わせ対応の待ち時間'])):
+    slide = deck.slides.add_slide(deck.slide_layouts[1])
+    slide.shapes.title.text = title
+    body = slide.placeholders[1].text_frame
+    body.text = lines[0]
+    for line in lines[1:]:
+        body.add_paragraph().text = line
+deck.save(f'{out}/kairyu-office-review.pptx')
+print('fixtures ok')
+"""
+
+_OFFICE_CHECK = r"""
+import docx, json, openpyxl, os, pptx, sys
+out = sys.argv[1]
+report = {}
+def check(name, function):
+    path = os.path.join(out, name)
+    if not os.path.exists(path):
+        report[name] = {'exists': False, 'passed': False}
+        return
+    try:
+        report[name] = {'exists': True, **function(path)}
+    except Exception as error:
+        report[name] = {'exists': True, 'passed': False, 'error': repr(error)}
+def revised_docx(path):
+    d = docx.Document(path)
+    text = '\n'.join(p.text for p in d.paragraphs)
+    rows = [[c.text for c in r.cells] for r in d.tables[0].rows] if d.tables else []
+    last = next((p.text for p in reversed(d.paragraphs) if p.text.strip()), '')
+    result = {
+        'replaced': '大阪支社' in text and '東京本社' not in text,
+        'appended': '改訂日' in last and '2026年10月22日' in last,
+        'kept_sentence': '納品期限は2026年12月18日' in text,
+        'kept_table_rows': len(rows) == 4 and rows[0] == ['試料', '数量', '保管場所'],
+    }
+    return {**result, 'passed': all(result.values())}
+def total_xlsx(path):
+    sheet = openpyxl.load_workbook(path)['売上']
+    rows = list(sheet.iter_rows(values_only=True))
+    kept = rows[:7] == [('月', '売上（万円）')] + [
+        (f'2026年{m}月', v) for m, v in zip(range(4, 10), (120, 135, 128, 142, 150, 161))]
+    total = rows[7] if len(rows) > 7 else (None, None)
+    value = str(total[1]).replace(' ', '').upper()
+    result = {
+        'kept_rows': kept,
+        'total_label': total[0] == '合計',
+        'total_sum': value in ('=SUM(B2:B7)', '836', '836.0'),
+    }
+    return {**result, 'total_cell': str(total[1]), 'passed': all(result.values())}
+def final_pptx(path):
+    deck = pptx.Presentation(path)
+    titles = [s.shapes.title.text if s.shapes.title else '' for s in deck.slides]
+    last = deck.slides[-1]
+    lines = [p.text for shape in last.shapes if shape.has_text_frame and shape != last.shapes.title
+             for p in shape.text_frame.paragraphs if p.text.strip()]
+    result = {
+        'kept_titles': titles[:3] == ['第3四半期の振り返り', '主な成果', '課題'],
+        'added_slide': len(titles) == 4 and titles[3] == 'まとめ',
+        'three_bullets': len(lines) >= 3,
+    }
+    return {**result, 'titles': titles, 'passed': all(result.values())}
+check('kairyu-office-report-revised.docx', revised_docx)
+check('kairyu-office-sales-total.xlsx', total_xlsx)
+check('kairyu-office-review-final.pptx', final_pptx)
+print('OFFICE-CHECK ' + json.dumps(report, ensure_ascii=False))
+"""
+
+
+def _docling_python(program: str, directory: Path, *arguments: str) -> str:
+    """Run ``program`` offline in the pinned Docling image with ``directory`` at /work."""
+    run = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--volume",
+            f"{directory}:/work",
+            "--entrypoint",
+            "python3",
+            control._compose_env()["DOCLING_IMAGE"],
+            "-c",
+            program,
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if run.returncode:
+        raise RuntimeError(f"Docling-image program failed: {run.stderr[-2000:]}")
+    return run.stdout
+
+
+def office(run_dir: Path) -> int:
+    """Word, Excel and PowerPoint in the Chat UI: read each attachment, then edit it to a new file.
+
+    Chromium attaches each fixture with the clip, asks about its key fact, then
+    asks for an edit; the code interpreter writes the result to /mnt/uploads
+    and the gate downloads it from Chat Controls > Files and checks it. Last,
+    an image attached to that chat (after its tool calls) must be answered.
+    """
+    fixtures = run_dir / "fixtures"
+    results = run_dir / "results"
+    fixtures.mkdir(parents=True, exist_ok=True)
+    results.mkdir(parents=True, exist_ok=True)
+    os.chmod(results, 0o777)  # the browser container writes downloads here
+    _docling_python(_OFFICE_FIXTURES, fixtures, "/work")
+    from PIL import Image
+
+    Image.new("RGB", (256, 256), (220, 20, 20)).save(fixtures / "red.png")
+    before = _kairyu_api_counts()
+    browser = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "--network",
+            "host",
+            "--env",
+            f"WEBUI_SMOKE_BASE_URL={_chat_ui_url()}",
+            "--env",
+            f"WEBUI_SMOKE_MODEL={SERVED_MODEL}",
+            "--env",
+            "WEBUI_SMOKE_MODE=office",
+            "--env",
+            f"WEBUI_SMOKE_OFFICE={json.dumps(OFFICE_CASES, ensure_ascii=False)}",
+            "--volume",
+            f"{HERE / 'webui-browser-smoke.mjs'}:/work/webui_browser_smoke.mjs:ro",
+            "--volume",
+            f"{fixtures}:/fixtures:ro",
+            "--volume",
+            f"{results}:/results",
+            browser_image(),
+            "node",
+            "/work/webui_browser_smoke.mjs",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    (run_dir / "browser.log").write_text(browser.stdout + browser.stderr)
+    after = _kairyu_api_counts()
+    line = _docling_python(_OFFICE_CHECK, results, "/work")
+    checks = json.loads(line.split("OFFICE-CHECK ", 1)[1])
+    report = {
+        "browser_exit": browser.returncode,
+        "checks": checks,
+        "kairyu": {"before": before, "after": after},
+    }
+    passed = (
+        browser.returncode == 0
+        and all(row.get("passed") for row in checks.values())
+        and after["/v1/responses"] > before["/v1/responses"]
+        and after["/v1/chat/completions"] == before["/v1/chat/completions"]
+    )
+    report["passed"] = passed
+    (run_dir / "office.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print(browser.stdout[-3000:] + browser.stderr[-2000:])
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if passed else 1
+
+
 GATES = {
     "l1": l1,
     "serving": serving,
@@ -2031,6 +2268,7 @@ GATES = {
     "knowledge": knowledge,
     "chat-ui": chat_ui,
     "knowledge-serving": knowledge_serving,
+    "office": office,
 }
 
 

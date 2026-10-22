@@ -221,3 +221,39 @@ Settings changed by these gates (one cause each, measured before the fix):
 - **Key fragments**: RapidOCR read the kanji `一` of `一回` as the long-vowel
   `ー` on two of three pages (identical glyphs), so the key check uses
   fragments without such twins.
+
+## Word, Excel and PowerPoint; images beside tool history (2026-10-22)
+
+PR #662, L1 / L2 settings as above. The Chat UI's code interpreter is on by
+default; Kairyu carries images beside tool-call history for
+upstream-rendered models (issue #659 item 6). Results are under the
+`verification-results/` directory named above.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| restart | PASS | `run.sh up` with the code-interpreter settings and their startup check; the model lists `defaultFeatureIds: [code_interpreter]` with Open WebUI's default capabilities, and a new chat shows the code interpreter on and the Files tab |
+| `office` | PASS | docx / xlsx / pptx attached with the clip, read answers 2026年12月18日 / 161（万円）/ 42; edits by the code interpreter in 10.4 / 8.6 / 10.6 s, downloaded from Chat Controls > Files and checked in the Docling image (word replaced and paragraph added with the table kept; `=SUM(B2:B7)` total row with the data kept; a fourth "まとめ" slide with three bullets and the three titles kept); an image attached to that chat after the code-interpreter calls answered "Red" (`20261022T054746Z-office`) |
+| `api-equivalence` | PASS | every earlier case plus `image-tools`: L1 and L3 both "red PLUM" on Responses and on Chat Completions (greedy); vLLM counted 22 `/v1/responses` for 22 Responses requests and 2 `/v1/chat/completions` for the 2 chat requests (`20261022T053723Z-api-equivalence`) |
+| `vision` | PASS 6/6 | (`20261022T053739Z-vision`) |
+| `tool-calling` | PASS 5/5 | (`20261022T053741Z-tool-calling`) |
+| `knowledge` | PASS | 20-page scan in 80.4 s, key chunk ranked 1, query 3.51 s (`20261022T053748Z-knowledge`) |
+| `chat-ui` | PASS | `323`, `324`, `Red`, and the `#` knowledge-base answer citing `kairyu-gate-scan.pdf`, with the code interpreter on by default; Kairyu `/v1/chat/completions` unchanged (`20261022T053946Z-chat-ui`) |
+
+Before the Kairyu change the same `chat-ui` run failed at `Red`: the model
+ran the code interpreter on the image question and Kairyu refused the next
+turn with 400 "images cannot be combined with tool-call history"
+(`20261022T040102Z-chat-ui`).
+
+Sampling, not the path, decides the colour beside tool history. The
+image-tools Responses request 30 times each at the default temperature 1.0:
+
+| Target | "red" | Other colour |
+|---|---|---|
+| vLLM directly | 28 | white 1, crimson 1 |
+| vLLM directly with Kairyu's explicit defaults (`parallel_tool_calls`, `priority`) | 30 | none |
+| Kairyu | 26 | crimson 3, white 1 |
+
+Kairyu's upstream body equals the caller's apart from those two defaults
+(captured on CPU). Without tool history both sides answered red 10 / 10,
+and greedy both answered "red PLUM" 5 / 5 on each API, so the gate decodes
+`image-tools` greedily.

@@ -129,6 +129,7 @@ def test_multimodal_prompt_defensively_copies_items():
 
 
 def test_multimodal_chat_layout_round_trip_preserves_roles_and_part_order():
+    call = {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
     prompt = MultimodalPrompt(
         base=TextPrompt("display-only text"),
         items=(
@@ -148,6 +149,15 @@ def test_multimodal_chat_layout_round_trip_preserves_roles_and_part_order():
                     MultimodalMessagePart("text", text=" second="),
                     MultimodalMessagePart("item", item_index=1),
                 ),
+            ),
+            # An upstream-rendered model's tool transcript rides beside images.
+            MultimodalMessage(
+                "assistant", (), transcript={"tool_calls": [call], "reasoning_content": "r"}
+            ),
+            MultimodalMessage(
+                "tool",
+                (MultimodalMessagePart("text", text="42"),),
+                transcript={"tool_call_id": "c1"},
             ),
         ),
     )

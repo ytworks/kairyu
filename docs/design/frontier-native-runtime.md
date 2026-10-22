@@ -614,3 +614,21 @@ and the Chat UI at 8 with 8 torch threads: the Chat UI's embedding at 16
 CPUs cut c1 serving 12.4 %, Docling at 4 CPUs 1.4 %; with both at their caps
 c1/c8 stay at 99.8 / 99.2 % of their record. L1, L2, `kairyu/` and the
 other examples are unchanged.
+
+#### Eight-GPU Chat UI for Word, Excel and PowerPoint (2026-10-22)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-10-22-1017-8gpu-office-files.md`, PR #662);
+GPU-verified 2026-10-22: `office`, `chat-ui`, `knowledge`, `vision`,
+`tool-calling` and `api-equivalence` with `image-tools` pass (the example's
+`MEASUREMENTS.md`).
+
+The same example's Open WebUI has its code interpreter on by default
+(owner decision): Pyodide in the viewer's browser, with python-docx,
+python-pptx and openpyxl bundled, receives the chat's attachments in
+`/mnt/uploads` and returns files through Chat Controls > Files. Attached
+docx / xlsx / pptx are read through its Docling service. Because Open WebUI
+passes built-in tools in every chat, an image often follows a tool call;
+that needed Kairyu to carry images beside tool history for
+upstream-rendered models (m9 D2 images-beside-tools amendment 2026-10-22).
+L1, L2 and the other examples are unchanged.

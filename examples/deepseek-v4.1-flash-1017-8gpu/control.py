@@ -26,6 +26,7 @@ L1_CONTAINER = f"{PROJECT}-deepseek-1"
 
 
 RETRIEVAL = SPEC["webui"]["retrieval"]
+CODE_INTERPRETER = SPEC["webui"]["code_interpreter"]
 # Open WebUI's data volume; the retrieval models live in a subdirectory of it.
 WEBUI_DATA = "/app/backend/data"
 
@@ -131,6 +132,18 @@ def _compose_env() -> dict[str, str]:
             "RAG_TOP_K": str(RETRIEVAL["top_k"]),
             "CHUNK_SIZE": str(RETRIEVAL["chunk_size"]),
             "CHUNK_OVERLAP": str(RETRIEVAL["chunk_overlap"]),
+            "CODE_INTERPRETER_ENGINE": CODE_INTERPRETER["engine"],
+            "ENABLE_PYODIDE_FILE_PERSISTENCE": str(CODE_INTERPRETER["file_persistence"]).lower(),
+            # A default feature applies only to models whose capabilities
+            # include it, so the defaults carry Open WebUI v0.12.3's own default
+            # capability set (DEFAULT_CAPABILITIES) unchanged.
+            "DEFAULT_MODEL_METADATA": json.dumps(
+                {
+                    "capabilities": CODE_INTERPRETER["capabilities"],
+                    "defaultFeatureIds": CODE_INTERPRETER["default_features"],
+                },
+                separators=(",", ":"),
+            ),
             "RAG_TOP_K_RERANKER": str(RETRIEVAL["top_k_reranker"]),
             # Render-safe default for down/status/logs; `up` replaces it with
             # the union of the DP ranks' NUMA-local CPU sets.
@@ -964,6 +977,37 @@ def _webui_api(
         return json.loads(response.read())
 
 
+def _check_chat_ui_code_interpreter(ui_url: str, token: str) -> None:
+    """Word / Excel / PowerPoint editing needs the browser code interpreter, on by default."""
+
+    config = _webui_api(ui_url, "/api/config", token=token)
+    features = config.get("features") or {}
+    code = config.get("code") or {}
+    models = _webui_api(ui_url, "/api/models", token=token).get("data") or []
+    model = next((row for row in models if row.get("id") == SPEC["model"]["served_name"]), {})
+    meta = (model.get("info") or {}).get("meta") or {}
+    default_features = meta.get("defaultFeatureIds") or []
+    observed = {
+        "enable_code_interpreter": features.get("enable_code_interpreter"),
+        "interpreter_engine": code.get("interpreter_engine"),
+        "enable_pyodide_file_persistence": features.get("enable_pyodide_file_persistence"),
+        "default_features": sorted(default_features),
+        "capabilities": meta.get("capabilities"),
+    }
+    expected = {
+        "enable_code_interpreter": True,
+        "interpreter_engine": CODE_INTERPRETER["engine"],
+        "enable_pyodide_file_persistence": CODE_INTERPRETER["file_persistence"],
+        "default_features": sorted(CODE_INTERPRETER["default_features"]),
+        "capabilities": CODE_INTERPRETER["capabilities"],
+    }
+    if observed != expected:
+        raise SystemExit(
+            f"Chat UI code interpreter differs from example.json: {observed!r}; "
+            f"expected {expected!r}"
+        )
+
+
 def _check_chat_ui_connection(ui_url: str, token: str) -> None:
     """The Chat UI must reach Kairyu over /v1/responses (m11 D7 amendment)."""
 
@@ -1059,6 +1103,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
             raise SystemExit("Chat UI effort selector could not be activated globally")
         _check_chat_ui_connection(ui_url, token)
         _check_chat_ui_retrieval(ui_url, token)
+        _check_chat_ui_code_interpreter(ui_url, token)
         spec = _webui_api(ui_url, f"{base}/valves/user/spec", token=token)
         enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
     except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
