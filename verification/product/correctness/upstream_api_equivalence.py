@@ -25,8 +25,11 @@ Kairyu L3, then requires the same Responses structure from both:
   declared tool;
 - the image-tools case sends an image beside an earlier tool call and its
   result (issue #659 item 6) on Responses and, as the same conversation, on
-  Chat Completions; both sides must name the image's color and the code word
-  the tool returned;
+  Chat Completions, greedy; both sides must name the image's color and the
+  code word the tool returned. Sampled at temperature 1.0 the V4.1 model names
+  the colour wrongly beside tool history on about 1 in 15 requests on L1
+  directly too (2 of 30, GPU 2026-10-22), so the case decodes greedily to test
+  that both inputs arrive, not the model's accuracy;
 - with ``--l1-metrics`` (once per L1 replica, ``CONTAINER=URL`` when the
   replica publishes no host port), the replicas' own request counters show
   that L3 reached them in its caller's API: every Responses request on
@@ -509,6 +512,7 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
         both(
             {
                 **base,
+                "temperature": 0,
                 "input": [
                     {
                         "role": "user",
@@ -537,6 +541,7 @@ def run_case(case: str, targets: tuple[Target, Target], args) -> dict:
         )
         chat_body = {
             "max_tokens": args.max_output_tokens,
+            "temperature": 0,
             "messages": [
                 {
                     "role": "user",

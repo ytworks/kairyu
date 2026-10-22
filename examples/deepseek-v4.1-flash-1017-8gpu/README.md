@@ -12,7 +12,7 @@ Open WebUI (:3018) -> Kairyu (:8018) -> ReplicaPool -> vLLM (TP8 / EP8 + DSpark,
 ```
 
 Unlike its sibling examples, this one's Chat UI is set up for Japanese
-knowledge bases (below).
+knowledge bases and for Word, Excel and PowerPoint files (below).
 
 1017 (2026-10-17) is DeepSeek's weight refresh of V4.1-Flash: `config.json`,
 the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
@@ -21,7 +21,8 @@ the tokenizer, the 96,085 tensor names and the 510.3 GB total are those of the
 > **GPU-verified 2026-10-19.** TP8 / EP8 with 8,192 batched tokens; every
 > gate, `api-equivalence` and the Chat UI pass succeed (`MEASUREMENTS.md`).
 > Japanese knowledge bases GPU-verified 2026-10-21 (`docling`, `knowledge`,
-> `chat-ui`, `knowledge-serving`).
+> `chat-ui`, `knowledge-serving`); Word, Excel and PowerPoint 2026-10-22
+> (`office`, `chat-ui`, `api-equivalence` with `image-tools`).
 
 ## Start
 
@@ -120,6 +121,38 @@ add files, then either attach it to the model (Workspace > Models) or pick it
 in a chat with `#`. Knowledge bases live in `webui-data` and survive
 `run.sh down` / `up`.
 
+## Word, Excel and PowerPoint
+
+Attach a docx, xlsx or pptx with the clip and ask about it or for a change.
+
+- **Reading**: the file goes through the Docling service above, like a
+  knowledge-base document.
+- **Editing and creating**: the Chat UI's code interpreter is on in every chat
+  by default. It runs Pyodide in your browser with python-docx, python-pptx,
+  openpyxl, xlsxwriter and pandas bundled. When the model runs code, the
+  browser copies the chat's attachments to `/mnt/uploads`; the model writes
+  its result there, and you download it from Chat Controls > Files.
+- **Configuration**: `compose.yaml` sets the code interpreter, the pyodide
+  engine, file persistence off (a sandboxed iframe) and
+  `DEFAULT_MODEL_METADATA`, which carries Open WebUI v0.12.3's default
+  capabilities plus `defaultFeatureIds: [code_interpreter]` (a default
+  feature applies only to a model whose capabilities include it). Values are
+  in `example.json`; `run.sh up` fails unless Open WebUI reports them.
+- **Images after tool use**: Open WebUI passes its built-in tools in every
+  chat, so an image often follows a tool call. Kairyu forwards images beside
+  tool calls, tool results and reasoning to this upstream-rendered model
+  (`upstream_chat_models`).
+
+Limits:
+
+- Code runs on the viewer's device, never on the server, and one execution may
+  take 60 s.
+- Working files live only in the open page; download them before reloading.
+- openpyxl writes formulas without computing them; Excel computes them on
+  open.
+- Legacy doc / xls / ppt and conversion to PDF are not supported (no
+  LibreOffice).
+
 ## Why this configuration
 
 The settings start from the official sources (1017 model card and encoder,
@@ -196,8 +229,11 @@ on vLLM's chat API.
   within `max_output_tokens`, disconnected mid-stream), `long-context`
   (32K/128K/256K/≈1M retrieval), `restart`.
 - `api-equivalence`: the same Responses requests sent to vLLM directly and
-  to Kairyu agree, and vLLM's own request counters show Kairyu reached it on
-  `/v1/responses` (`verification/product/correctness/upstream_api_equivalence.py`).
+  to Kairyu agree, and vLLM's own request counters show Kairyu reached it in
+  its caller's API (`verification/product/correctness/upstream_api_equivalence.py`).
+  Its `image-tools` case sends an image beside an earlier tool call and its
+  result, greedily, on Responses and Chat Completions; both sides must name
+  the colour and the tool's code word.
 - `docling` (no GPU, the running stack untouched): the pinned Docling on an
   internal network converts a generated image-only Japanese PDF through Open
   WebUI's own loader, with each page's key sentence extracted, and a
@@ -220,7 +256,15 @@ on vLLM's chat API.
   rows took. Seconds without a sample count as idle, and a failed counter
   read fails the gate.
 
-`docling` and `chat-ui` build the Playwright image from the shared
+- `office`: Chromium attaches a Japanese docx, xlsx and pptx (built offline
+  with the libraries in the Docling image), asks about each one's key fact,
+  then asks for an edit (replace a word and add a paragraph; add a SUM total
+  row; add a "まとめ" slide). The result is downloaded from Chat Controls >
+  Files and checked in the Docling image: the change is there and the
+  original content is kept. Last, an image attached to that chat after its
+  code-interpreter calls is answered with a colour.
+
+`docling`, `chat-ui` and `office` build the Playwright image from the shared
 `deploy/compose/Dockerfile.webui-browser`. The knowledge gates record every
 file they upload under its knowledge base
 (`verification-results/knowledge-gate-uploads.json`) and delete only those.

@@ -2188,7 +2188,8 @@ def office(run_dir: Path) -> int:
 
     Chromium attaches each fixture with the clip, asks about its key fact, then
     asks for an edit; the code interpreter writes the result to /mnt/uploads
-    and the gate downloads it from Chat Controls > Files and checks it.
+    and the gate downloads it from Chat Controls > Files and checks it. Last,
+    an image attached to that chat (after its tool calls) must be answered.
     """
     fixtures = run_dir / "fixtures"
     results = run_dir / "results"
@@ -2196,6 +2197,9 @@ def office(run_dir: Path) -> int:
     results.mkdir(parents=True, exist_ok=True)
     os.chmod(results, 0o777)  # the browser container writes downloads here
     _docling_python(_OFFICE_FIXTURES, fixtures, "/work")
+    from PIL import Image
+
+    Image.new("RGB", (256, 256), (220, 20, 20)).save(fixtures / "red.png")
     before = _kairyu_api_counts()
     browser = subprocess.run(
         [

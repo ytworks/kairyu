@@ -1,6 +1,16 @@
 # Word, Excel and PowerPoint in the 1017 eight-GPU Chat UI
 
-Status: **Approved 2026-10-22 (owner).**
+Status: **Approved 2026-10-22 (owner); implemented and GPU-verified 2026-10-22.**
+
+Outcome against the plan (details in the example's `MEASUREMENTS.md`): a
+default feature applies only to a model whose capabilities include it, so
+`DEFAULT_MODEL_METADATA` also carries Open WebUI v0.12.3's default
+capability set, and the startup check covers it. W4 first failed: with the
+code interpreter on, the model ran code on the `chat-ui` image question and
+Kairyu refused the next turn (images beside tool history, issue #659 item
+6). The owner chose to fix Kairyu in this PR
+(`2026-10-22-images-beside-tool-history.md`) and keep the default on; the
+`office` gate also attaches an image after its code-interpreter calls.
 
 Accepted scope (owner, 2026-10-22):
 

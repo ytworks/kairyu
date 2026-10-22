@@ -163,6 +163,8 @@ async function attach(path) {
 	const response = await upload;
 	invariant(response.ok(), `upload of ${path} returned HTTP ${response.status()}`);
 	const { id } = await response.json();
+	// Images are not extracted; only documents wait for their processing.
+	if (/\.(png|jpe?g|webp|gif)$/i.test(path)) return id;
 	const deadline = Date.now() + 300_000;
 	for (;;) {
 		const { status } = await apiJson(`/api/v1/files/${id}/process/status`);
@@ -220,6 +222,20 @@ async function officeMain() {
 			await downloadResult(item.result);
 		});
 	}
+	// The last chat used the code interpreter; an image there now travels
+	// beside that tool history (Kairyu used to refuse the turn). Any colour
+	// word shows the image reached the model; which one is the model's
+	// accuracy, which beside tool history varies on vLLM directly too.
+	await step('an image in a chat that used the code interpreter is answered', async () => {
+		await attach('/fixtures/red.png');
+		const { text } = await ask('What color is this image? Answer with one English word.');
+		invariant(!/cannot be combined|invalid_request_error/i.test(text), `image turn refused: ${text}`);
+		invariant(
+			/\b(red|crimson|scarlet|maroon|white|black|blue|green|yellow|orange|pink|purple|gray|grey|brown)\b/i.test(text),
+			`image turn names no colour: ${text.slice(0, 300)}`
+		);
+		console.log(JSON.stringify({ image_after_tools: text.slice(0, 200) }));
+	});
 	console.log('WEBUI OFFICE SMOKE PASS');
 }
 

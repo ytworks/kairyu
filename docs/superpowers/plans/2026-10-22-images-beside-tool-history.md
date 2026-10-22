@@ -1,6 +1,12 @@
 # Images beside tool-call history for upstream-rendered models
 
-Status: **Approved 2026-10-22 (owner), in PR #662.** Owner direction: fix
+Status: **Approved 2026-10-22 (owner), in PR #662; implemented and GPU-verified 2026-10-22.**
+
+Outcome against the plan: F0-F4 pass (the example's `MEASUREMENTS.md`). No
+existing test needed changing: the rejection tests use models outside
+`upstream_chat_models`. Sampled at temperature 1.0 the model names the
+colour beside tool history wrongly on vLLM directly too (2 of 30), so the
+`image-tools` case decodes greedily. Owner direction: fix
 this in Kairyu (option 2 on PR #662), so the Chat UI can keep its code
 interpreter on by default; the fix ships in the same PR as the Chat UI change.
 
