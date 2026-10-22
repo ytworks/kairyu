@@ -280,3 +280,10 @@ response becomes a download of the opening page; the tab closes. The gate
 takes the download from either the page or the tab. The time a request
 takes is the model's own work on the workbook (13 versus 80 code runs for
 the same request); storing and linking the file takes seconds.
+
+Re-run after the review fixes (`038ba016`: the browser read runs in an
+isolated `exec` namespace; the guidance names only libraries Open WebUI
+loads): `file-download` PASS (desktop 194.9 s, 6 sheets / 775 cells; the
+same file after a reload; phone 233.7 s, 8 sheets / 887 cells;
+`20261022T101210Z-file-download`) and `office` PASS
+(`20261022T101922Z-office`).
