@@ -2231,3 +2231,142 @@ legacy_chat_models: [kairyu-auto]
     assert owned_backend.shutdown_count == 1
     assert ledger_handle is not None
     assert ledger_handle.closed
+
+
+_EMBEDDING_POOL_YAML = """
+engines:
+  chat: {{ backend: mock }}
+embeddings:
+  emb:
+    backend: openai
+    model: upstream-embedder
+    dimensions: 3
+    unhealthy_after: 1
+    probe_interval_s: 60
+    placement_log_path: {log}
+    replicas:
+      - {{ base_url: "http://emb-0:8000/v1", health_url: "http://emb-0:8000/health" }}
+      - {{ base_url: "http://emb-1:8000/v1", health_url: "http://emb-1:8000/health" }}
+"""
+
+
+class _FakeEmbeddingUpstreams:
+    """Two OpenAI-compatible embedding servers; status per host is mutable."""
+
+    def __init__(self) -> None:
+        self.status = {"emb-0": 200, "emb-1": 200}
+        self.calls: list[str] = []
+        self.hold: asyncio.Event | None = None
+        self.arrived = asyncio.Event()
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if request.url.path == "/health":
+            return httpx.Response(200)
+        self.calls.append(host)
+        body = json.loads(request.content)
+        assert body["model"] == "upstream-embedder"
+        assert "dimensions" not in body
+        if self.hold is not None:
+            if len(self.calls) == 2:
+                self.arrived.set()
+            await self.hold.wait()
+        status = self.status[host]
+        if status != 200:
+            return httpx.Response(status, json={"error": {"message": "upstream says no"}})
+        data = [
+            {"object": "embedding", "index": index, "embedding": [1.0, 0.0, 0.0]}
+            for index in reversed(range(len(body["input"])))
+        ]
+        return httpx.Response(200, json={"data": data, "usage": {"prompt_tokens": 7}})
+
+
+def _embedding_pool_app(monkeypatch, tmp_path, upstreams: _FakeEmbeddingUpstreams):
+    real = builder_module.OpenAIEmbeddingBackend
+    monkeypatch.setattr(
+        builder_module,
+        "OpenAIEmbeddingBackend",
+        lambda **options: real(**options, transport=httpx.MockTransport(upstreams.handler)),
+    )
+    log = tmp_path / "embedding-placement.jsonl"
+    app = build_app_from_spec(load_deployment_spec(_EMBEDDING_POOL_YAML.format(log=log)))
+    (prober,) = app.state.probers
+    prober._client = httpx.AsyncClient(transport=httpx.MockTransport(upstreams.handler))
+    return app, prober, log
+
+
+async def test_upstream_embedding_pool_spreads_concurrent_batches(monkeypatch, tmp_path):
+    upstreams = _FakeEmbeddingUpstreams()
+    app, prober, log = _embedding_pool_app(monkeypatch, tmp_path, upstreams)
+    async with _client(app) as client:
+        assert (await client.get("/readyz")).status_code == 503  # not probed yet
+        await prober.check_once()
+        assert (await client.get("/readyz")).status_code == 200
+        upstreams.hold = asyncio.Event()
+        pending = [
+            asyncio.create_task(
+                client.post("/v1/embeddings", json={"model": "emb", "input": ["a", "b"]})
+            )
+            for _ in range(2)
+        ]
+        await asyncio.wait_for(upstreams.arrived.wait(), timeout=2)
+        upstreams.hold.set()
+        responses = await asyncio.gather(*pending)
+        metrics = (await client.get("/metrics")).text
+
+    for response in responses:
+        assert response.status_code == 200, response.text
+        assert [item["index"] for item in response.json()["data"]] == [0, 1]
+        assert response.json()["usage"]["prompt_tokens"] == 7
+    assert sorted(upstreams.calls) == ["emb-0", "emb-1"]
+    prober._pool._log.flush()
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    placements = [row for row in rows if row["kind"] == "replica"]
+    assert sorted(row["replica_id"] for row in placements) == ["0", "1"]
+    assert 'kairyu_pool_decisions_total{pool="emb",reason="least_outstanding"} 2.0' in metrics
+
+
+async def test_upstream_embedding_pool_ejects_failed_replica_until_probe(monkeypatch, tmp_path):
+    upstreams = _FakeEmbeddingUpstreams()
+    upstreams.status["emb-0"] = 500
+    app, prober, _log = _embedding_pool_app(monkeypatch, tmp_path, upstreams)
+    async with _client(app) as client:
+        await prober.check_once()
+        failed = await client.post("/v1/embeddings", json={"model": "emb", "input": "x"})
+        later = [
+            await client.post("/v1/embeddings", json={"model": "emb", "input": "x"})
+            for _ in range(2)
+        ]
+        assert failed.status_code == 502
+        assert [response.status_code for response in later] == [200, 200]
+        assert upstreams.calls == ["emb-0", "emb-1", "emb-1"]
+
+        upstreams.status["emb-1"] = 500
+        assert (await client.post(
+            "/v1/embeddings", json={"model": "emb", "input": "x"}
+        )).status_code == 502
+        unready = await client.get("/readyz")
+        assert unready.status_code == 503
+        assert unready.json()["pools"]["emb"]["eligible_ids"] == []
+
+        upstreams.status["emb-0"] = 200
+        await prober.check_once()
+        assert (await client.get("/readyz")).status_code == 200
+        restored = await client.post("/v1/embeddings", json={"model": "emb", "input": "x"})
+        assert restored.status_code == 200
+        assert upstreams.calls[-1] == "emb-0"
+
+
+async def test_upstream_embedding_client_error_is_not_a_replica_failure(monkeypatch, tmp_path):
+    upstreams = _FakeEmbeddingUpstreams()
+    upstreams.status["emb-0"] = 400
+    app, prober, _log = _embedding_pool_app(monkeypatch, tmp_path, upstreams)
+    async with _client(app) as client:
+        await prober.check_once()
+        rejected = await client.post("/v1/embeddings", json={"model": "emb", "input": "x"})
+        upstreams.status["emb-0"] = 200
+        accepted = await client.post("/v1/embeddings", json={"model": "emb", "input": "x"})
+
+    assert rejected.status_code == 502
+    assert accepted.status_code == 200
+    assert upstreams.calls == ["emb-0", "emb-0"]

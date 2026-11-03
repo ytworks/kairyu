@@ -7,14 +7,17 @@ import gc
 import hashlib
 import json
 import math
-from collections.abc import Awaitable
+import os
+from collections.abc import Awaitable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 
-from kairyu.engine.backend import EngineReadiness
+import httpx
+
+from kairyu.engine.backend import EngineReadiness, UpstreamClientError
 
 _PROVENANCE_FILENAME = "MODEL_PROVENANCE.json"
 
@@ -43,6 +46,34 @@ class EmbeddingBackend(Protocol):
     def readiness(self) -> EngineReadiness: ...
 
     async def shutdown(self) -> None: ...
+
+
+def validate_embedding_vectors(
+    vectors,
+    *,
+    expected_count: int,
+    dimensions: int,
+) -> tuple[tuple[float, ...], ...]:
+    """Return finite float vectors, one per input, of the declared dimension."""
+
+    converted = tuple(
+        tuple(float(value) for value in vector)
+        for vector in vectors
+    )
+    if len(converted) != expected_count:
+        raise RuntimeError(
+            f"embedding backend returned {len(converted)} vectors "
+            f"for {expected_count} inputs"
+        )
+    for vector in converted:
+        if len(vector) != dimensions:
+            raise RuntimeError(
+                f"embedding backend returned dimension {len(vector)}, "
+                f"expected {dimensions}"
+            )
+        if not all(math.isfinite(value) for value in vector):
+            raise RuntimeError("embedding backend returned a non-finite value")
+    return converted
 
 
 class MockEmbeddingBackend:
@@ -224,24 +255,11 @@ class FastEmbedEmbeddingBackend:
         *,
         expected_count: int,
     ) -> tuple[tuple[float, ...], ...]:
-        converted = tuple(
-            tuple(float(value) for value in vector)
-            for vector in vectors
+        return validate_embedding_vectors(
+            vectors,
+            expected_count=expected_count,
+            dimensions=self.dimensions,
         )
-        if len(converted) != expected_count:
-            raise RuntimeError(
-                f"embedding backend returned {len(converted)} vectors "
-                f"for {expected_count} inputs"
-            )
-        for vector in converted:
-            if len(vector) != self.dimensions:
-                raise RuntimeError(
-                    f"embedding backend returned dimension {len(vector)}, "
-                    f"expected {self.dimensions}"
-                )
-            if not all(math.isfinite(value) for value in vector):
-                raise RuntimeError("embedding backend returned a non-finite value")
-        return converted
 
     def _load_sync(self):
         from fastembed import TextEmbedding
@@ -425,3 +443,110 @@ class FastEmbedEmbeddingBackend:
                 self._state = "stopped"
             if cancelled is not None:
                 raise cancelled
+
+
+class OpenAIEmbeddingBackend:
+    """One OpenAI-compatible ``/embeddings`` upstream, such as a vLLM pooling server.
+
+    An embedding engine process (vLLM ``--runner pooling``, TEI, llama.cpp)
+    serves the model; Kairyu forwards each batch to it and keeps its own wire
+    contract, usage metering and tenancy (m11 D4 upstream-embeddings
+    amendment). Several replicas go behind one ``ReplicaPool``, whose prober
+    decides readiness, so this adapter has no startup work of its own.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        dimensions: int,
+        api_key_env: str | None = None,
+        timeout_s: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if dimensions < 1:
+            raise ValueError("dimensions must be >= 1")
+        if not base_url.strip() or not model.strip():
+            raise ValueError("base_url and model must be non-empty")
+        api_key = None
+        if api_key_env is not None:
+            api_key = os.environ.get(api_key_env)
+            if not api_key:
+                raise ValueError(f"embedding API key variable {api_key_env!r} is not set")
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.dimensions = dimensions
+        self.reports_exact_usage = True
+        self._url = f"{self.base_url}/embeddings"
+        self._headers = {"authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = httpx.AsyncClient(
+            timeout=timeout_s,
+            transport=transport,
+            trust_env=False,
+        )
+
+    async def startup(self) -> None:
+        return None
+
+    def readiness(self) -> EngineReadiness:
+        return EngineReadiness(True)
+
+    def embed(self, texts: list[str]) -> Awaitable[EmbeddingResult]:
+        return self._embed(tuple(texts))
+
+    async def _embed(self, texts: Sequence[str]) -> EmbeddingResult:
+        # ``dimensions`` is never forwarded: a model the upstream does not treat
+        # as Matryoshka rejects it, and Kairyu's request has no such field.
+        response = await self._client.post(
+            self._url,
+            json={"model": self.model, "input": list(texts), "encoding_format": "float"},
+            headers=self._headers,
+        )
+        if response.status_code != 200:
+            message = (
+                f"embedding backend {self.base_url} returned HTTP "
+                f"{response.status_code}: {response.text[:500]}"
+            )
+            if 400 <= response.status_code < 500:
+                # A rejected request is not a replica health signal (O1).
+                raise UpstreamClientError(message, response.status_code)
+            raise RuntimeError(message)
+        body = response.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list):
+            raise RuntimeError("embedding backend returned no data list")
+        by_index: dict[int, object] = {}
+        for item in data:
+            index = item.get("index") if isinstance(item, dict) else None
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index in by_index
+                or not isinstance(item.get("embedding"), list)
+            ):
+                raise RuntimeError("embedding backend returned a malformed data item")
+            by_index[index] = item["embedding"]
+        if sorted(by_index) != list(range(len(texts))):
+            raise RuntimeError("embedding backend returned the wrong vector indices")
+        vectors = validate_embedding_vectors(
+            (by_index[index] for index in range(len(texts))),
+            expected_count=len(texts),
+            dimensions=self.dimensions,
+        )
+        usage = body.get("usage")
+        prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        if (
+            not isinstance(prompt_tokens, int)
+            or isinstance(prompt_tokens, bool)
+            or prompt_tokens < 0
+        ):
+            raise RuntimeError("embedding backend returned no prompt token usage")
+        return EmbeddingResult(
+            vectors=vectors,
+            prompt_tokens=prompt_tokens,
+            usage_exact=True,
+        )
+
+    async def shutdown(self) -> None:
+        await self._client.aclose()

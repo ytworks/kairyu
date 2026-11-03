@@ -353,6 +353,22 @@ sanitizes backend failures as 502, and refunds conservative tenant reservations
 only when the backend returns exact usage. The deterministic mock remains for
 wire/unit tests and never claims authoritative tokenizer usage.
 
+**Upstream embeddings amendment (2026-11-03, `gemma-4-31b-8gpu`).** An
+`embeddings:` entry with `backend: openai` names an upstream `model`, its
+`dimensions` and one or more `replicas` (`base_url`, required `health_url`).
+Each replica is an `OpenAIEmbeddingBackend` that posts `{model, input,
+encoding_format: float}` to `<base_url>/embeddings`, never forwards
+`dimensions`, reorders by `data[].index`, validates count, width and
+finiteness with the FastEmbed validator, and returns the upstream's
+`usage.prompt_tokens` as exact usage; an upstream 4xx raises
+`UpstreamClientError`. The replicas form one `ReplicaPool` (m5 D4 embedding
+amendment) with a `HealthProber`; its placement log shares the pools'
+uniqueness check, `/readyz` counts it (m7 D4) and `/metrics` tracks it. The
+route, its caps, usage and tenancy are unchanged. Why: an embedding model on
+GPU (the Gemma example's EmbeddingGemma 2 on vLLM) could not be published
+through L3 at all, and the Chat UI's knowledge bases would otherwise bypass
+Kairyu; see A20.
+
 **Typed stream/tool amendment (2026-07-28, issue #201).** Responses requests
 normalize into the existing Chat Completions validation/execution boundary so
 model-specific templates, sampling, structured output, named/required tool
@@ -1190,3 +1206,10 @@ depend on one GPU. Tests: `tests/server/test_systemone_api.py`.
   non-object provider values, provider objects on other roles, non-null legacy
   calls, and unrelated extras remain fail-closed before dispatch. These
   compatibility fields stay absent from the typed `ChatMessage` schema.
+- **A20 (D4, 2026-11-03)**: an embedding model may be served by upstream
+  engine replicas (`backend: openai`). Kairyu, not the client, owns replica
+  choice, health and ejection for them through `ReplicaPool`; an empty pool
+  makes `/readyz` 503; the public request/response contract, usage and
+  tenancy are identical to the in-process backends. Task prefixes stay with
+  the client because an OpenAI embeddings request does not say whether its
+  input is a query or a document.

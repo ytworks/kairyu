@@ -927,6 +927,37 @@ restarting only Kairyu. Existing Open WebUI data volumes may retain prior RAG
 settings in the application database; confirm the admin RAG settings or use a
 fresh/migrated volume when adopting this configuration.
 
+### GPU embeddings through upstream replicas
+
+An embedding model served by an engine process (vLLM `--runner pooling`, TEI,
+llama.cpp) is published with `backend: openai`. Each replica is an
+OpenAI-compatible `/embeddings` server; Kairyu forwards every batch to one of
+them and keeps its own wire contract, exact usage and tenancy:
+
+```yaml
+embeddings:
+  embeddinggemma-2:
+    backend: openai
+    model: google/embeddinggemma-2      # the upstream's served model name
+    dimensions: 768
+    unhealthy_after: 1
+    probe_interval_s: 2
+    placement_log_path: /var/log/kairyu/embedding-placement.jsonl
+    replicas:
+      - { base_url: http://embed-0:8000/v1, health_url: http://embed-0:8000/health }
+      - { base_url: http://embed-1:8000/v1, health_url: http://embed-1:8000/health }
+```
+
+The replicas form one `ReplicaPool` (m5 D4 embedding amendment): each batch goes
+to the least-busy validated replica, a replica takes no traffic until its
+`health_url` answers 200, `unhealthy_after` consecutive failures eject it until
+the prober sees 200 again, and an upstream 4xx is not counted as a failure.
+`/readyz` is 503 while an embedding pool has no eligible replica, and the pool
+reports the same `kairyu_pool_*` metrics as a chat pool. Kairyu never forwards
+`dimensions`; clients that need task prefixes (EmbeddingGemma's query and
+document instructions) add them to the input text themselves, as Open WebUI's
+`RAG_EMBEDDING_QUERY_PREFIX` / `RAG_EMBEDDING_CONTENT_PREFIX` do.
+
 ### Qwen3-VL image chat through stock vLLM
 
 Image chat is an opt-in GPU topology, not part of the CPU-safe default stack.

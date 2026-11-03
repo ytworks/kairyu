@@ -360,13 +360,14 @@ def add_health_routes(
         # need >=1 validated, non-ejected replica or every request would fail.
         # Declared remote readiness URLs therefore remain false here until the
         # startup prober succeeds; backend traffic is never implicit validation.
+        # Upstream embedding pools (m7 D4 amendment) count the same way.
         degraded = {
             name: {
                 "healthy": list(engine.healthy),
                 "draining": list(engine.draining_by_id().values()),
                 "eligible_ids": list(engine.eligible_ids),
             }
-            for name, engine in engines.items()
+            for name, engine in [*engines.items(), *embedding_resources.items()]
             if isinstance(engine, ReplicaPool) and not engine.eligible_ids
         }
         if degraded:

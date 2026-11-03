@@ -24,7 +24,11 @@ from kairyu.deploy.registry import (
     PoolReconciler,
     openai_replica_factory,
 )
-from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
+from kairyu.deploy.spec import (
+    DeploymentSpec,
+    OpenAIEmbeddingSection,
+    load_deployment_spec,
+)
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.dsl.spec import OrchestratorSpec
 from kairyu.engine.backend import (
@@ -35,6 +39,7 @@ from kairyu.engine.embedding import (
     EmbeddingBackend,
     FastEmbedEmbeddingBackend,
     MockEmbeddingBackend,
+    OpenAIEmbeddingBackend,
 )
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.engine.registry import create_backend
@@ -546,6 +551,39 @@ def _create_embedding_backend(section, base_dir: Path | None) -> EmbeddingBacken
     return factory(**options)
 
 
+def _create_embedding_pool(
+    name: str,
+    section: OpenAIEmbeddingSection,
+    log_path: Path | None,
+) -> tuple[ReplicaPool, list[OpenAIEmbeddingBackend], HealthProber]:
+    """Upstream embedding replicas behind one pool (m5 D4 embedding amendment)."""
+
+    replicas = [
+        OpenAIEmbeddingBackend(
+            base_url=replica.base_url,
+            model=section.model,
+            dimensions=section.dimensions,
+            api_key_env=section.api_key_env,
+            timeout_s=section.timeout_s,
+        )
+        for replica in section.replicas
+    ]
+    pool = ReplicaPool(
+        replicas,
+        log=JsonlRouterLog(log_path) if log_path is not None else None,
+        unhealthy_after=section.unhealthy_after,
+    )
+    if pool.dimensions != section.dimensions:
+        raise ValueError(f"embedding pool {name!r} replicas disagree on dimensions")
+    prober = HealthProber(
+        name,
+        pool,
+        [replica.health_url for replica in section.replicas],
+        section.probe_interval_s,
+    )
+    return pool, replicas, prober
+
+
 def _resolve_path(path: str, base_dir: Path | None) -> Path:
     resolved = Path(path)
     if base_dir is not None and not resolved.is_absolute():
@@ -709,10 +747,46 @@ def build_app_from_spec(
     # embedding/engine constructor can allocate model or GPU resources.
     chat_policy = _resolve_chat_policy(spec, base_dir)
     chat_templates = chat_policy.templates
-    embedding_backends = {
-        name: _create_embedding_backend(section, base_dir)
+    # Chat pools and upstream embedding pools share one placement-log namespace
+    # (their names are already unique across the deployment).
+    placement_log_paths: dict[str, Path] = {}
+    claimed_log_paths: dict[Path, str] = {}
+    declared_log_paths = [
+        (name, pool_spec.placement_log_path) for name, pool_spec in spec.pools.items()
+    ] + [
+        (name, section.placement_log_path)
         for name, section in spec.embeddings.items()
-    }
+        if isinstance(section, OpenAIEmbeddingSection)
+    ]
+    for name, declared in declared_log_paths:
+        if declared is None:
+            continue
+        path = _resolve_path(declared, base_dir)
+        canonical = path.resolve()
+        claimed_by = claimed_log_paths.get(canonical)
+        if claimed_by is not None:
+            raise ValueError(
+                "pool placement_log_path values must be unique; "
+                f"{name!r} and {claimed_by!r} both resolve to {canonical}"
+            )
+        claimed_log_paths[canonical] = name
+        placement_log_paths[name] = path
+
+    embedding_backends: dict[str, EmbeddingBackend] = {}
+    embedding_replicas: list[OpenAIEmbeddingBackend] = []
+    embedding_probers: list[HealthProber] = []
+    for name, section in spec.embeddings.items():
+        if isinstance(section, OpenAIEmbeddingSection):
+            pool, replicas, prober = _create_embedding_pool(
+                name,
+                section,
+                placement_log_paths.get(name),
+            )
+            embedding_backends[name] = pool
+            embedding_replicas.extend(replicas)
+            embedding_probers.append(prober)
+        else:
+            embedding_backends[name] = _create_embedding_backend(section, base_dir)
     systemone_models = {
         name: SystemOneModel(
             name=name,
@@ -754,26 +828,12 @@ def build_app_from_spec(
     startup_resources: list[object] = [
         *engines.values(),
         *embedding_backends.values(),
+        *embedding_replicas,
     ]
 
-    probers: list[HealthProber] = []
+    probers: list[HealthProber] = [*embedding_probers]
     reconcilers: list[tuple[PoolReconciler, float]] = []
     dynamic_http_client_factories: list[_DynamicPoolHTTPClientFactory] = []
-    placement_log_paths: dict[str, Path] = {}
-    claimed_log_paths: dict[Path, str] = {}
-    for name, pool_spec in spec.pools.items():
-        if pool_spec.placement_log_path is None:
-            continue
-        path = _resolve_path(pool_spec.placement_log_path, base_dir)
-        canonical = path.resolve()
-        claimed_by = claimed_log_paths.get(canonical)
-        if claimed_by is not None:
-            raise ValueError(
-                "pool placement_log_path values must be unique; "
-                f"{name!r} and {claimed_by!r} both resolve to {canonical}"
-            )
-        claimed_log_paths[canonical] = name
-        placement_log_paths[name] = path
 
     for name, pool_spec in spec.pools.items():
         pool_log = (

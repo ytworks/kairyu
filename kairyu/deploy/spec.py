@@ -321,8 +321,46 @@ class FastEmbedEmbeddingSection(BaseModel):
     max_concurrency: int = Field(default=2, ge=1, le=64)
 
 
+class EmbeddingReplicaSpec(BaseModel):
+    """One OpenAI-compatible embedding upstream and its readiness URL."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base_url: str = Field(min_length=1)
+    # Required: the prober is the only path that returns an ejected replica.
+    health_url: str = Field(min_length=1)
+
+
+class OpenAIEmbeddingSection(BaseModel):
+    """An embedding model served by upstream engine replicas behind a pool.
+
+    m11 D4 upstream-embeddings amendment: each replica is an OpenAI-compatible
+    ``/embeddings`` server (e.g. vLLM ``--runner pooling``); the replicas form
+    one ``ReplicaPool`` with the chat pools' health, drain and log rules.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    backend: Literal["openai"]
+    model: str = Field(min_length=1)
+    dimensions: int = Field(ge=1)
+    replicas: tuple[EmbeddingReplicaSpec, ...] = Field(min_length=1)
+    api_key_env: str | None = None
+    timeout_s: float = Field(default=60.0, gt=0, le=3600)
+    unhealthy_after: int = Field(default=3, ge=1)
+    probe_interval_s: float = Field(default=5.0, gt=0)
+    placement_log_path: str | None = None
+
+    @model_validator(mode="after")
+    def _distinct_replicas(self) -> OpenAIEmbeddingSection:
+        urls = [replica.base_url.rstrip("/") for replica in self.replicas]
+        if len(set(urls)) != len(urls):
+            raise ValueError("embedding replicas must have distinct base_url values")
+        return self
+
+
 EmbeddingSection = Annotated[
-    MockEmbeddingSection | FastEmbedEmbeddingSection,
+    MockEmbeddingSection | FastEmbedEmbeddingSection | OpenAIEmbeddingSection,
     Field(discriminator="backend"),
 ]
 

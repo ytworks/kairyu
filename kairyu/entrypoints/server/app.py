@@ -1963,6 +1963,9 @@ def create_app(
                 metrics.track_pool(name, engine)
             metrics.track_scheduler(name, engine)
             metrics.track_cuda_graph(name, engine)
+        for name, backend in health_embedding_backends.items():
+            if isinstance(backend, ReplicaPool):
+                metrics.track_pool(name, backend)
         for auto_name, auto_orchestrator in auto_models.items():
             stage_observer_setter = getattr(auto_orchestrator, "set_stage_observer", None)
             if stage_observer_setter is not None:

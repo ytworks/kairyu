@@ -100,6 +100,21 @@ Placement policy, in order:
 Health: a replica that fails K consecutive requests is removed from the hash ring until
 a probe succeeds; nothing more (G2 non-goal: no migration/autoscaling).
 
+**Embedding members amendment (2026-11-03, `gemma-4-31b-8gpu`).** A `ReplicaPool` may
+also hold embedding members (`EmbeddingBackend`s; in practice `OpenAIEmbeddingBackend`
+adapters to vLLM pooling servers, m11 D4 upstream-embeddings amendment).
+`ReplicaPool.embed(texts)` selects, synchronously, the least-outstanding eligible
+member: embeddings carry no session or prefix, so affinity and the prefix score do not
+apply. The decision is logged through the same `record_replica` path (reason
+`least_outstanding`) and counted with the generation decisions; health, ejection after
+`unhealthy_after` failures, drain, probe restore and outstanding accounting are shared
+with generation. An upstream 4xx or a member's own capacity rejection is not a failure
+(O1). The pool publishes `dimensions` and `reports_exact_usage` only when every member
+agrees. Why: an example's embedding replicas need the same placement and health
+contract as its chat replicas, and a second pool type would duplicate eligibility,
+drain, membership and probe logic that the prober, `/readyz` and metrics already
+consume from `ReplicaPool`.
+
 ### D5 — P-D intra-node: per-role processes on disjoint GPU sets, copy-on-handoff
 
 (Amended: the draft's zero-copy page-donation default is **withdrawn**. Review showed it
