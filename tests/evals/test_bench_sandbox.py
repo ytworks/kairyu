@@ -89,21 +89,24 @@ def test_timed_out_forking_tree_is_reaped():
 
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires Linux /proc")
 def test_successful_parent_cannot_leave_a_background_child_running():
+    # The child outlives the hang bound below by far, so only the runner's
+    # cleanup can make it disappear before the bound.
     code = (
         "import subprocess, sys\n"
         "child = subprocess.Popen(\n"
-        "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(600)'],\n"
         "    stdin=subprocess.DEVNULL,\n"
         "    stdout=subprocess.DEVNULL,\n"
         "    stderr=subprocess.DEVNULL,\n"
         ")\n"
         "print(child.pid, flush=True)\n"
     )
-    result = run_python(code, timeout_s=3.0)
+    result = run_python(code, timeout_s=30.0)
     assert result.ok, result.stderr
     child_pid = int(result.stdout.strip())
 
-    deadline = time.monotonic() + 2.0
+    # The runner kills the group before returning; this only bounds a hang.
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         try:
             state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
