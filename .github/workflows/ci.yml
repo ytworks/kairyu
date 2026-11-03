@@ -75,8 +75,11 @@ jobs:
           uv run --frozen pytest --fail-on-skip -ra \
             -n 2 --dist loadfile tests/evals \
             --cov=kairyu --cov-report= --cov-fail-under=0
+          # Four workers (the runner's four vCPUs), whole files per worker:
+          # the suite finishes inside the five-minute target, and a verdict
+          # must not depend on which worker or order a file runs in.
           uv run --frozen pytest --fail-on-skip -ra \
-            tests --ignore=tests/evals \
+            -n 4 --dist loadfile tests --ignore=tests/evals \
             --cov=kairyu --cov-append --cov-report=term-missing \
             --cov-fail-under=80
 

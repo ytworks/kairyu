@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 _selected_skip_count = 0
@@ -20,6 +22,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     global _selected_skip_count
     _selected_skip_count = 0
+    # Pin the file-creation mask: cache and staging tests check permission
+    # bits, so the invoking shell's umask (002 on some hosts, 022 on CI) must
+    # not change a verdict. xdist workers run this hook too.
+    os.umask(0o022)
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
