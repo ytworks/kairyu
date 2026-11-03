@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
+from kairyu.entrypoints.server.middleware import ConcurrencyLimitMiddleware
 from kairyu.runners import (
     RUNNER_CACHE_STARTUP_PLACEMENT_ANNOTATION,
     RUNNER_CACHE_STARTUP_SCHEDULING_GATE,
@@ -419,9 +420,16 @@ class _BlockingController(RunnerCachePlacementAdmissionController):
 
     def admit(self, *args, **kwargs):
         self.entered.set()
-        if not self.release.wait(timeout=5):
+        if not self.release.wait(timeout=10):
             raise RuntimeError("test controller timed out")
         return super().admit(*args, **kwargs)
+
+
+def _admission_waiters(app) -> int:
+    layer = app.middleware_stack
+    while not isinstance(layer, ConcurrencyLimitMiddleware):
+        layer = layer.app
+    return len(layer._waiters)  # noqa: SLF001 - queue depth is the sync point
 
 
 @pytest.mark.asyncio
@@ -431,15 +439,19 @@ async def test_active_queue_and_overflow_are_bounded() -> None:
     app, _controller = _app(
         active_limit=1,
         total_limit=2,
-        queue_wait_timeout_s=1.0,
+        queue_wait_timeout_s=10.0,
         controller_type=_BlockingController,
     )
 
+    async def queued_waiting() -> None:
+        while _admission_waiters(app) != 1:
+            await asyncio.sleep(0)
+
     async with _client(app) as client:
         active = asyncio.create_task(client.post("/v1/admit", json=_review(uid="one")))
-        assert await asyncio.to_thread(_BlockingController.entered.wait, 2)
+        assert await asyncio.to_thread(_BlockingController.entered.wait, 10)
         queued = asyncio.create_task(client.post("/v1/admit", json=_review(uid="two")))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(queued_waiting(), timeout=10)
         overflow = await client.post("/v1/admit", json=_review(uid="three"))
         _BlockingController.release.set()
         active_response, queued_response = await asyncio.gather(active, queued)

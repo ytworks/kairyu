@@ -276,7 +276,7 @@ def test_concurrent_cross_instance_claim_has_one_winner(store_factory) -> None:
     barrier = threading.Barrier(2)
 
     def claim(index: int):
-        barrier.wait(timeout=5)
+        barrier.wait(timeout=10)
         return stores[index].claim(
             command,
             claim_id=("b" if index == 0 else "c") * 64,

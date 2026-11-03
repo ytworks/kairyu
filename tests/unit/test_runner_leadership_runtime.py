@@ -20,6 +20,8 @@ from kairyu.runners import (
 )
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+# Hang bound for conditions expected within milliseconds.
+_HANG_S = 10.0
 
 
 def _config(**updates: object) -> RunnerLeaderElectionRuntimeConfig:
@@ -31,13 +33,13 @@ def _config(**updates: object) -> RunnerLeaderElectionRuntimeConfig:
         "renew_interval_seconds": 0.01,
         "readiness_max_staleness_seconds": 0.1,
         "readiness_failure_threshold": 2,
-        "shutdown_timeout_seconds": 1.0,
+        "shutdown_timeout_seconds": _HANG_S,
     }
     values.update(updates)
     return RunnerLeaderElectionRuntimeConfig.model_validate(values)
 
 
-def _wait_until(predicate, *, timeout_s: float = 1.0) -> None:
+def _wait_until(predicate, *, timeout_s: float = _HANG_S) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():
@@ -285,7 +287,7 @@ def test_close_timeout_revokes_mutations_before_delayed_renewal_finishes() -> No
     class BlockingRenewStore(_FlakyLeaseStore):
         def renew(self, lease, *, lease_seconds):
             renew_entered.set()
-            assert release_renewal.wait(1.0)
+            assert release_renewal.wait(_HANG_S)
             return super().renew(lease, lease_seconds=lease_seconds)
 
     runtime = RunnerLeaderElectionRuntime(
@@ -295,7 +297,7 @@ def test_close_timeout_revokes_mutations_before_delayed_renewal_finishes() -> No
     )
     runtime.start()
     _wait_until(lambda: runtime.status().ready)
-    assert renew_entered.wait(1.0)
+    assert renew_entered.wait(_HANG_S)
 
     with pytest.raises(RuntimeError, match="worker did not stop"):
         runtime.close()
@@ -314,6 +316,7 @@ def test_close_timeout_revokes_mutations_before_delayed_renewal_finishes() -> No
 def test_blocked_mutation_does_not_block_status_or_shutdown_deadline() -> None:
     mutation_entered = threading.Event()
     release_mutation = threading.Event()
+    mutation_left = threading.Event()
     runtime = RunnerLeaderElectionRuntime(
         store=InMemoryRunnerLeaderLeaseStore(clock=lambda: NOW),
         config=_config(shutdown_timeout_seconds=0.02),
@@ -324,29 +327,31 @@ def test_blocked_mutation_does_not_block_status_or_shutdown_deadline() -> None:
 
     def block_mutation(_authority: RunnerWriterAuthority) -> None:
         mutation_entered.set()
-        assert release_mutation.wait(1.0)
+        try:
+            assert release_mutation.wait(_HANG_S)
+        finally:
+            mutation_left.set()
 
     mutation = threading.Thread(target=lambda: runtime.controller.mutate_autoscaler(block_mutation))
     mutation.start()
-    assert mutation_entered.wait(1.0)
+    assert mutation_entered.wait(_HANG_S)
 
-    status_started = time.monotonic()
+    # Status, the shutdown deadline and the rejection each answer while the
+    # mutation is still held: none of them waited for it.
     assert runtime.status().active_mutations == 1
-    assert time.monotonic() - status_started < 0.1
+    assert not mutation_left.is_set()
 
-    close_started = time.monotonic()
     with pytest.raises(RuntimeError, match="controller mutations did not stop"):
         runtime.close()
-    assert time.monotonic() - close_started < 0.5
+    assert not mutation_left.is_set()
     assert runtime.status().state == "stopping"
 
-    rejection_started = time.monotonic()
     with pytest.raises(RunnerNotLeaderError, match="not accepting"):
         runtime.controller.mutate_autoscaler(lambda authority: authority)
-    assert time.monotonic() - rejection_started < 0.1
+    assert not mutation_left.is_set()
 
     release_mutation.set()
-    mutation.join(1.0)
+    mutation.join(_HANG_S)
     assert not mutation.is_alive()
     runtime.close()
     assert runtime.status().state == "stopped"
@@ -359,7 +364,7 @@ def test_concurrent_run_once_is_rejected_without_starting_an_operation() -> None
     class BlockingStore(_FlakyLeaseStore):
         def acquire(self, *args, **kwargs):
             entered.set()
-            assert release.wait(1.0)
+            assert release.wait(_HANG_S)
             return super().acquire(*args, **kwargs)
 
     runtime = RunnerLeaderElectionRuntime(
@@ -369,11 +374,11 @@ def test_concurrent_run_once_is_rejected_without_starting_an_operation() -> None
     )
     thread = threading.Thread(target=runtime.run_once)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_HANG_S)
     with pytest.raises(RuntimeError, match="already in progress"):
         runtime.run_once()
     release.set()
-    thread.join(1.0)
+    thread.join(_HANG_S)
     assert not thread.is_alive()
     assert runtime.status().operations_started == 1
     runtime.close()

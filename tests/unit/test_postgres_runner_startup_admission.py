@@ -25,6 +25,10 @@ _POSTGRES_DSN = os.environ.get("KAIRYU_TEST_POSTGRES_DSN")
 pytestmark = pytest.mark.postgres
 _DIGEST = "a" * 64
 _TARGET = "deployment/model-serving/qwen-runners"
+# Hang bound for calls and conditions expected within milliseconds. A plan
+# that must stay live while the test registers and claims it is also live this
+# long, so those steps never race the database clock.
+_HANG_S = 10.0
 
 if _POSTGRES_DSN:
     psycopg = pytest.importorskip("psycopg")
@@ -114,6 +118,18 @@ def _database_now() -> datetime:
         row = connection.execute("SELECT clock_timestamp()").fetchone()
     assert row is not None
     return row[0]
+
+
+def _wait_for_database_clock_after(instant: datetime) -> None:
+    """Wait for the database clock to pass ``instant``; it is re-read after
+    every wait, so a slow runner only waits longer."""
+
+    for _ in range(100):
+        remaining = (instant - _database_now()).total_seconds()
+        if remaining < 0:
+            return
+        time.sleep(remaining + 0.001)
+    raise AssertionError("database clock did not pass the requested instant")
 
 
 @pytest.fixture
@@ -248,7 +264,7 @@ def test_claimed_plan_replacement_waits_for_replay_window(store_factory) -> None
     database_now = _database_now()
     binding = _binding(
         bound_at=database_now - timedelta(milliseconds=50),
-        valid_for=timedelta(milliseconds=500),
+        valid_for=timedelta(seconds=_HANG_S),
     )
     first.register(_plan(binding))
     _claim(
@@ -263,7 +279,7 @@ def test_claimed_plan_replacement_waits_for_replay_window(store_factory) -> None
     with pytest.raises(RunnerCachePlacementAdmissionConflictError, match="safety window"):
         second.register(_plan(too_early))
 
-    time.sleep(0.9)
+    _wait_for_database_clock_after(binding.valid_until + replay_window)
     successor = _binding(suffix="c")
     second.register(_plan(successor))
     allocated = _claim(
@@ -317,30 +333,30 @@ def test_deadline_bounded_resolve_and_readiness(store_factory) -> None:
     store.register(plan)
 
     assert store.connect_timeout_s == 10
-    assert store.resolve_with_timeout(_TARGET, timeout_s=0.5) == plan
-    assert store.check_ready_with_timeout(timeout_s=0.5) is None
+    assert store.resolve_with_timeout(_TARGET, timeout_s=_HANG_S) == plan
+    assert store.check_ready_with_timeout(timeout_s=_HANG_S) is None
 
     namespace_oid = store._namespace_oid
     assert namespace_oid is not None
     store._namespace_oid = -1
     with pytest.raises(RuntimeError, match="namespace identity changed"):
-        store.check_ready_with_timeout(timeout_s=0.5)
+        store.check_ready_with_timeout(timeout_s=_HANG_S)
     store._namespace_oid = namespace_oid
 
     with pytest.raises(
         RunnerCachePlacementAdmissionConflictError,
         match="no active",
     ):
-        store.resolve_with_timeout("deployment/model-serving/missing", timeout_s=0.5)
+        store.resolve_with_timeout("deployment/model-serving/missing", timeout_s=_HANG_S)
     with pytest.raises(ValueError, match="greater than zero"):
         store.resolve_with_timeout(_TARGET, timeout_s=0)
 
     assert store._connection is not None
     store._connection.close()
     with pytest.raises(TimeoutError, match="do not reconnect"):
-        store.resolve_with_timeout(_TARGET, timeout_s=0.5)
+        store.resolve_with_timeout(_TARGET, timeout_s=_HANG_S)
     assert store.check_ready() is None
-    assert store.resolve_with_timeout(_TARGET, timeout_s=2.0) == plan
+    assert store.resolve_with_timeout(_TARGET, timeout_s=_HANG_S) == plan
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store._lock:
@@ -350,32 +366,37 @@ def test_deadline_bounded_resolve_and_readiness(store_factory) -> None:
                 timeout_s=0.05,
             )
             with pytest.raises(TimeoutError, match="lock budget"):
-                blocked.result(timeout=1)
+                blocked.result(timeout=_HANG_S)
 
-    with psycopg.connect(_POSTGRES_DSN) as blocker:
-        with blocker.transaction():
-            blocker.execute(
-                "LOCK TABLE public.runner_cache_placement_admission_plans IN ACCESS EXCLUSIVE MODE"
-            )
-            started_at = time.monotonic()
-            with pytest.raises(psycopg.Error):
-                store.resolve_with_timeout(_TARGET, timeout_s=0.05)
-            assert time.monotonic() - started_at < 0.5
+        # Each bounded call must end while the blocker still holds its table
+        # lock. The store's session timeouts follow connect_timeout_s, so with
+        # an hour-long session default only the call's own budget can end it
+        # before the hang bound; a call that waited for the lock could only
+        # finish after the blocker's transaction, which ends after the call.
+        locked = create(connect_timeout_s=3600)
+        with psycopg.connect(_POSTGRES_DSN) as blocker:
+            with blocker.transaction():
+                blocker.execute(
+                    "LOCK TABLE public.runner_cache_placement_admission_plans "
+                    "IN ACCESS EXCLUSIVE MODE"
+                )
+                locked_read = pool.submit(locked.resolve_with_timeout, _TARGET, timeout_s=0.05)
+                with pytest.raises(psycopg.Error):
+                    locked_read.result(timeout=_HANG_S)
 
-    with psycopg.connect(_POSTGRES_DSN) as blocker:
-        with blocker.transaction():
-            blocker.execute(
-                "LOCK TABLE public.runner_cache_placement_admission_store_registry "
-                "IN ACCESS EXCLUSIVE MODE"
-            )
-            assert store._connection is not None
-            store._connection.close()
-            started_at = time.monotonic()
-            with pytest.raises(TimeoutError, match="do not reconnect"):
-                store.resolve_with_timeout(_TARGET, timeout_s=1.25)
-            assert time.monotonic() - started_at < 0.5
-    assert store.check_ready() is None
-    assert store.resolve_with_timeout(_TARGET, timeout_s=2.0) == plan
+        with psycopg.connect(_POSTGRES_DSN) as blocker:
+            with blocker.transaction():
+                blocker.execute(
+                    "LOCK TABLE public.runner_cache_placement_admission_store_registry "
+                    "IN ACCESS EXCLUSIVE MODE"
+                )
+                assert locked._connection is not None
+                locked._connection.close()
+                reconnect = pool.submit(locked.resolve_with_timeout, _TARGET, timeout_s=1.25)
+                with pytest.raises(TimeoutError, match="do not reconnect"):
+                    reconnect.result(timeout=_HANG_S)
+    assert locked.check_ready() is None
+    assert locked.resolve_with_timeout(_TARGET, timeout_s=_HANG_S) == plan
 
 
 def test_claim_from_another_binding_fails_closed(store_factory) -> None:
@@ -420,10 +441,10 @@ def test_database_clock_rejects_future_plan_and_expired_backdated_claim(
     expiring = _binding(
         suffix="expiring",
         bound_at=database_now - timedelta(milliseconds=50),
-        valid_for=timedelta(milliseconds=300),
+        valid_for=timedelta(seconds=_HANG_S),
     )
     store.register(_plan(expiring))
-    time.sleep(0.4)
+    _wait_for_database_clock_after(expiring.valid_until)
     with pytest.raises(RunnerCachePlacementAdmissionConflictError, match="not live"):
         _claim(
             store,

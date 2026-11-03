@@ -161,7 +161,7 @@ class BlockingSource(RecordingSource):
                 should_block = False
         if should_block:
             self.started.set()
-            assert self.release.wait(timeout=5)
+            assert self.release.wait(timeout=10)
         yield from super().iter_blob(**kwargs)
 
 
@@ -630,10 +630,10 @@ def test_digest_lock_allows_one_concurrent_fill(tmp_path: Path):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(agent.ensure_cached, envelope, trust_store, request)
-        assert source.started.wait(timeout=5)
+        assert source.started.wait(timeout=10)
         second = pool.submit(agent.ensure_cached, envelope, trust_store, request)
         source.release.set()
-        results = (first.result(timeout=5), second.result(timeout=5))
+        results = (first.result(timeout=10), second.result(timeout=10))
 
     assert sorted(result.cache_hit for result in results) == [False, True]
     assert len(source.calls) == len(envelope.manifest.files)
@@ -658,13 +658,13 @@ def test_digest_lock_timeout_fails_without_second_writer(tmp_path: Path):
             trust_store,
             request,
         )
-        assert source.started.wait(timeout=5)
+        assert source.started.wait(timeout=10)
         try:
             with pytest.raises(NodeModelCacheLockTimeoutError, match="timed out"):
                 impatient_agent.ensure_cached(envelope, trust_store, request)
         finally:
             source.release.set()
-        filling.result(timeout=5)
+        filling.result(timeout=10)
 
     assert len(source.calls) == len(envelope.manifest.files)
 
@@ -715,7 +715,7 @@ def test_process_crash_releases_digest_lock(tmp_path: Path):
         args=(str(lock_path), ready, release),
     )
     holder.start()
-    assert ready.wait(timeout=5)
+    assert ready.wait(timeout=10)
     source = LocalModelArtifactBlobSource(source_root)
 
     with pytest.raises(NodeModelCacheLockTimeoutError, match="timed out"):
@@ -726,12 +726,12 @@ def test_process_crash_releases_digest_lock(tmp_path: Path):
         ).ensure_cached(envelope, trust_store, request)
 
     holder.terminate()
-    holder.join(timeout=5)
+    holder.join(timeout=10)
     assert holder.exitcode is not None
     result = NodeModelCacheAgent(
         cache_root,
         source,
-        lock_timeout_seconds=1,
+        lock_timeout_seconds=10,
     ).ensure_cached(envelope, trust_store, request)
     assert result.cache_hit is False
 

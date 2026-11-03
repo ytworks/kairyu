@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -37,6 +36,8 @@ else:  # Keep core-only test collection importable.
     psycopg = None
 
 NOW = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
+# Hang bound for calls expected to answer within milliseconds.
+_HANG_S = 10.0
 
 
 def _record(
@@ -187,22 +188,23 @@ def test_deadline_bounded_get_and_readiness(store_factory) -> None:
     record = store.append(_record())
 
     assert store.connect_timeout_s == 10
-    assert store.get_with_timeout(record.decision_id, timeout_s=0.5) == record
+    assert store.get_with_timeout(record.decision_id, timeout_s=_HANG_S) == record
     assert store.check_ready() is None
-    assert store.check_ready_with_timeout(timeout_s=0.5) is None
+    assert store.check_ready_with_timeout(timeout_s=_HANG_S) is None
 
     with pytest.raises(KeyError, match="unknown scaling decision"):
-        store.get_with_timeout("missing", timeout_s=0.5)
+        store.get_with_timeout("missing", timeout_s=_HANG_S)
     with pytest.raises(ValueError, match="greater than zero"):
         store.get_with_timeout(record.decision_id, timeout_s=0)
 
     assert store._connection is not None
     store._connection.close()
     with pytest.raises(TimeoutError, match="do not reconnect"):
-        store.get_with_timeout(record.decision_id, timeout_s=0.5)
+        store.get_with_timeout(record.decision_id, timeout_s=_HANG_S)
     assert store.check_ready() is None
-    assert store.get_with_timeout(record.decision_id, timeout_s=2.0) == record
+    assert store.get_with_timeout(record.decision_id, timeout_s=_HANG_S) == record
 
+    assert psycopg is not None
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store._lock:
             blocked = pool.submit(
@@ -211,30 +213,43 @@ def test_deadline_bounded_get_and_readiness(store_factory) -> None:
                 timeout_s=0.05,
             )
             with pytest.raises(TimeoutError, match="lock budget"):
-                blocked.result(timeout=1)
+                blocked.result(timeout=_HANG_S)
 
-    assert psycopg is not None
-    with psycopg.connect(_POSTGRES_DSN) as blocker:
-        with blocker.transaction():
-            blocker.execute("LOCK TABLE public.runner_scaling_decisions IN ACCESS EXCLUSIVE MODE")
-            started_at = time.monotonic()
-            with pytest.raises(psycopg.Error):
-                store.get_with_timeout(record.decision_id, timeout_s=0.05)
-            assert time.monotonic() - started_at < 0.5
+        # Each bounded call must end while the blocker still holds its table
+        # lock. The store's session timeouts follow connect_timeout_s, so with
+        # an hour-long session default only the call's own budget can end it
+        # before the hang bound; a call that waited for the lock could only
+        # finish after the blocker's transaction, which ends after the call.
+        locked = create(connect_timeout_s=3600)
+        with psycopg.connect(_POSTGRES_DSN) as blocker:
+            with blocker.transaction():
+                blocker.execute(
+                    "LOCK TABLE public.runner_scaling_decisions IN ACCESS EXCLUSIVE MODE"
+                )
+                locked_read = pool.submit(
+                    locked.get_with_timeout,
+                    record.decision_id,
+                    timeout_s=0.05,
+                )
+                with pytest.raises(psycopg.Error):
+                    locked_read.result(timeout=_HANG_S)
 
-    with psycopg.connect(_POSTGRES_DSN) as blocker:
-        with blocker.transaction():
-            blocker.execute(
-                "LOCK TABLE public.runner_scaling_log_registry IN ACCESS EXCLUSIVE MODE"
-            )
-            assert store._connection is not None
-            store._connection.close()
-            started_at = time.monotonic()
-            with pytest.raises(TimeoutError, match="do not reconnect"):
-                store.get_with_timeout(record.decision_id, timeout_s=1.25)
-            assert time.monotonic() - started_at < 0.5
-    assert store.check_ready() is None
-    assert store.get_with_timeout(record.decision_id, timeout_s=2.0) == record
+        with psycopg.connect(_POSTGRES_DSN) as blocker:
+            with blocker.transaction():
+                blocker.execute(
+                    "LOCK TABLE public.runner_scaling_log_registry IN ACCESS EXCLUSIVE MODE"
+                )
+                assert locked._connection is not None
+                locked._connection.close()
+                reconnect = pool.submit(
+                    locked.get_with_timeout,
+                    record.decision_id,
+                    timeout_s=1.25,
+                )
+                with pytest.raises(TimeoutError, match="do not reconnect"):
+                    reconnect.result(timeout=_HANG_S)
+    assert locked.check_ready() is None
+    assert locked.get_with_timeout(record.decision_id, timeout_s=_HANG_S) == record
 
     with psycopg.connect(_POSTGRES_DSN, autocommit=True) as connection:
         connection.execute(
@@ -242,7 +257,7 @@ def test_deadline_bounded_get_and_readiness(store_factory) -> None:
             (store.store_id,),
         )
     with pytest.raises(RuntimeError, match="unknown Runner scaling log store"):
-        store.get_with_timeout(record.decision_id, timeout_s=1.0)
+        store.get_with_timeout(record.decision_id, timeout_s=_HANG_S)
 
 
 def test_pre_wp34_record_fingerprint_remains_readable() -> None:

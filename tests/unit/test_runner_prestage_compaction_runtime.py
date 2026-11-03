@@ -18,6 +18,8 @@ from kairyu.runners import (
 )
 
 _NOW = datetime(2026, 9, 30, 3, 0, tzinfo=UTC)
+# Hang bound for conditions expected within milliseconds.
+_HANG_S = 10.0
 
 
 def _mark(
@@ -96,13 +98,13 @@ def _config(**updates: object) -> NodeModelPrestageCompactionRuntimeConfig:
         "max_batches_per_cycle": 3,
         "readiness_max_staleness_seconds": 30,
         "readiness_failure_threshold": 2,
-        "shutdown_timeout_seconds": 1,
+        "shutdown_timeout_seconds": _HANG_S,
     }
     values.update(updates)
     return NodeModelPrestageCompactionRuntimeConfig.model_validate(values)
 
 
-def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
+def _wait_until(predicate: Callable[[], bool], *, timeout: float = _HANG_S) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -215,7 +217,7 @@ def test_background_runtime_is_immediate_stale_aware_and_lifecycle_owned() -> No
     )
 
     runtime.start()
-    assert called.wait(timeout=1)
+    assert called.wait(timeout=_HANG_S)
     _wait_until(lambda: runtime.status().cycles_succeeded == 1)
     assert runtime.status().ready is True
     runtime.check_ready()
@@ -233,8 +235,19 @@ def test_background_runtime_is_immediate_stale_aware_and_lifecycle_owned() -> No
 
 
 def test_repeated_background_failures_cross_readiness_threshold_and_retry() -> None:
+    retried = threading.Event()
+    release_retry = threading.Event()
+
+    def hold_retry(call_number: int) -> None:
+        # Hold the retry after the two failures so no later success can reset
+        # the counters before the test reads them.
+        if call_number == 4:
+            retried.set()
+            release_retry.wait(timeout=_HANG_S)
+
     store = ScriptedCompactionStore(
-        [(), RuntimeError("first private failure"), RuntimeError("second private failure")]
+        [(), RuntimeError("first private failure"), RuntimeError("second private failure")],
+        on_call=hold_retry,
     )
     runtime = NodeModelPrestageCompactionRuntime(
         store=store,
@@ -244,13 +257,15 @@ def test_repeated_background_failures_cross_readiness_threshold_and_retry() -> N
     )
     runtime.start()
     try:
-        _wait_until(lambda: runtime.status().cycles_failed >= 2)
+        assert retried.wait(timeout=_HANG_S)
         status = runtime.status()
         assert status.cycles_succeeded == 1
+        assert status.cycles_failed == 2
         assert status.consecutive_failures == 2
         assert status.ready is False
         assert "private" not in status.model_dump_json()
     finally:
+        release_retry.set()
         runtime.close()
 
 
@@ -260,7 +275,7 @@ def test_close_reports_a_worker_that_cannot_stop_before_deadline() -> None:
 
     def block(_call_number: int) -> None:
         entered.set()
-        release.wait(timeout=1)
+        release.wait(timeout=_HANG_S)
 
     store = ScriptedCompactionStore([()], on_call=block)
     runtime = NodeModelPrestageCompactionRuntime(
@@ -270,7 +285,7 @@ def test_close_reports_a_worker_that_cannot_stop_before_deadline() -> None:
         monotonic=time.monotonic,
     )
     runtime.start()
-    assert entered.wait(timeout=1)
+    assert entered.wait(timeout=_HANG_S)
 
     with pytest.raises(RuntimeError, match="did not stop"):
         runtime.close()
@@ -288,17 +303,17 @@ def test_close_waits_for_an_explicit_cycle_before_reporting_stopped() -> None:
 
     def block(_call_number: int) -> None:
         entered.set()
-        release.wait(timeout=1)
+        release.wait(timeout=_HANG_S)
 
     runtime = NodeModelPrestageCompactionRuntime(
         store=ScriptedCompactionStore([()], on_call=block),
-        config=_config(shutdown_timeout_seconds=1),
+        config=_config(),
         clock=lambda: _NOW,
         monotonic=time.monotonic,
     )
     cycle_thread = threading.Thread(target=runtime.run_once)
     cycle_thread.start()
-    assert entered.wait(timeout=1)
+    assert entered.wait(timeout=_HANG_S)
 
     def close_runtime() -> None:
         runtime.close()
@@ -310,8 +325,8 @@ def test_close_waits_for_an_explicit_cycle_before_reporting_stopped() -> None:
     assert close_returned.is_set() is False
 
     release.set()
-    cycle_thread.join(timeout=1)
-    close_thread.join(timeout=1)
+    cycle_thread.join(timeout=_HANG_S)
+    close_thread.join(timeout=_HANG_S)
     assert close_returned.is_set() is True
     assert runtime.status().state == "stopped"
 
@@ -323,7 +338,7 @@ def test_concurrent_closes_wait_for_external_cycle_on_running_runtime() -> None:
     def block_second(call_number: int) -> None:
         if call_number == 2:
             entered.set()
-            release.wait(timeout=1)
+            release.wait(timeout=_HANG_S)
 
     runtime = NodeModelPrestageCompactionRuntime(
         store=ScriptedCompactionStore([(), ()], on_call=block_second),
@@ -335,7 +350,7 @@ def test_concurrent_closes_wait_for_external_cycle_on_running_runtime() -> None:
     _wait_until(lambda: runtime.status().cycles_succeeded == 1)
     cycle_thread = threading.Thread(target=runtime.run_once)
     cycle_thread.start()
-    assert entered.wait(timeout=1)
+    assert entered.wait(timeout=_HANG_S)
 
     close_returned = (threading.Event(), threading.Event())
 
@@ -352,9 +367,9 @@ def test_concurrent_closes_wait_for_external_cycle_on_running_runtime() -> None:
     assert not any(event.is_set() for event in close_returned)
 
     release.set()
-    cycle_thread.join(timeout=1)
+    cycle_thread.join(timeout=_HANG_S)
     for thread in close_threads:
-        thread.join(timeout=1)
+        thread.join(timeout=_HANG_S)
     assert all(event.is_set() for event in close_returned)
     assert runtime.status().state == "stopped"
 

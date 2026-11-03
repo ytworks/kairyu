@@ -629,8 +629,8 @@ def _app(authority: ScalingControllerPlacementBindingAuthority):
         reauthorize=authority.reauthorize,
         readiness_check=authority.readiness,
         bearer_token=TOKEN,
-        request_timeout_s=1.5,
-        backend_timeout_s=1.0,
+        request_timeout_s=15.0,
+        backend_timeout_s=10.0,
     )
 
 
@@ -676,7 +676,7 @@ async def test_live_controller_authority_serves_only_fully_reauthorized_binding(
     assert response.json()["binding"] == binding.model_dump(mode="json")
     assert len(source.ready_calls) == 1
     assert len(source.read_calls) == 1
-    assert source.read_calls[0][1] == 1.0
+    assert source.read_calls[0][1] == 10.0
 
 
 @pytest.mark.asyncio
@@ -1093,11 +1093,11 @@ def test_authenticated_node_live_evidence_client_binds_transport_and_readiness()
             client.read(
                 request,
                 deadline_monotonic=20.0,
-                backend_timeout_s=2.0,
+                backend_timeout_s=10.0,
             )
             == evidence
         )
-        client.readiness(deadline_monotonic=20.0, backend_timeout_s=2.0)
+        client.readiness(deadline_monotonic=20.0, backend_timeout_s=10.0)
     finally:
         client.close()
 
@@ -1156,7 +1156,7 @@ def test_authenticated_node_live_evidence_client_fails_closed(failure: str) -> N
             client.read(
                 request,
                 deadline_monotonic=20.0,
-                backend_timeout_s=2.0,
+                backend_timeout_s=10.0,
             )
     finally:
         client.close()
@@ -1199,14 +1199,14 @@ def test_authenticated_node_live_evidence_client_enforces_size_and_deadline() ->
             limited.read(
                 request,
                 deadline_monotonic=20.0,
-                backend_timeout_s=2.0,
+                backend_timeout_s=10.0,
             )
         clock[0] = 20.0
         with pytest.raises(TimeoutError, match="deadline"):
             limited.read(
                 request,
                 deadline_monotonic=20.0,
-                backend_timeout_s=2.0,
+                backend_timeout_s=10.0,
             )
     finally:
         limited.close()
@@ -1400,6 +1400,7 @@ def test_node_live_evidence_client_cancels_slow_drip_without_worker_leak() -> No
     )
     stopped = 0
     stopped_lock = threading.Lock()
+    clock = [10.0]
 
     class SlowStream(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -1407,6 +1408,9 @@ def test_node_live_evidence_client_cancels_slow_drip_without_worker_leak() -> No
             try:
                 while True:
                     await asyncio.sleep(0.01)
+                    # The drip also advances the client's clock, so its
+                    # per-chunk deadline check sees the same pace.
+                    clock[0] += 0.01
                     yield b" "
             finally:
                 with stopped_lock:
@@ -1428,6 +1432,8 @@ def test_node_live_evidence_client_cancels_slow_drip_without_worker_leak() -> No
     baseline = sum(
         thread.name == "kairyu-node-cache-live-evidence" for thread in threading.enumerate()
     )
+    # The client clock restarts at 10.0 for each read, so the 0.04 s budget
+    # starts with the read and can only expire while the drip is being read.
     client = AuthenticatedNodeModelCacheLiveEvidenceClient(
         httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
@@ -1435,13 +1441,15 @@ def test_node_live_evidence_client_cancels_slow_drip_without_worker_leak() -> No
         ),
         endpoints=(NodeModelCacheAgentEndpoint(node_id="gpu-a", base_url="https://gpu-a.test"),),
         bearer_token=TOKEN,
+        monotonic_clock=lambda: clock[0],
     )
     try:
         for _ in range(3):
+            clock[0] = 10.0
             with pytest.raises(TimeoutError):
                 client.read(
                     request,
-                    deadline_monotonic=time.monotonic() + 0.04,
+                    deadline_monotonic=10.04,
                     backend_timeout_s=1.0,
                 )
             assert (
@@ -1484,7 +1492,8 @@ def test_node_live_evidence_client_cancels_sibling_after_partial_failure() -> No
             return httpx.Response(409, json={"error": {"code": "prestage_conflict"}})
         sibling_started.set()
         try:
-            await asyncio.sleep(10)
+            # Outlasts the hang bound below: only cancellation stops it in time.
+            await asyncio.sleep(60)
         finally:
             sibling_stopped.set()
         raise AssertionError("cancelled sibling resumed")
@@ -1500,15 +1509,16 @@ def test_node_live_evidence_client_cancels_sibling_after_partial_failure() -> No
         ),
         bearer_token=TOKEN,
         max_parallel_requests=2,
+        monotonic_clock=lambda: 10.0,
     )
     try:
         with pytest.raises(RunnerCachePlacementBindingAuthorizationDeniedError):
             client.read_many(
                 (first, second),
-                deadline_monotonic=time.monotonic() + 1.0,
-                backend_timeout_s=1.0,
+                deadline_monotonic=20.0,
+                backend_timeout_s=10.0,
             )
-        assert sibling_stopped.wait(timeout=0.1)
+        assert sibling_stopped.wait(timeout=10)
     finally:
         client.close()
 
@@ -1544,12 +1554,15 @@ def test_node_live_evidence_client_bounds_pending_tasks_for_large_fanout() -> No
         endpoints=(NodeModelCacheAgentEndpoint(node_id="gpu-a", base_url="https://gpu-a.test"),),
         bearer_token=TOKEN,
         max_parallel_requests=3,
+        # Fixed clock: the 0.04 s budget starts with the fan-out, whose three
+        # requests reach the handler before the loop can run the deadline.
+        monotonic_clock=lambda: 10.0,
     )
     try:
         with pytest.raises(TimeoutError):
             client.read_many(
                 (request,) * 100,
-                deadline_monotonic=time.monotonic() + 0.04,
+                deadline_monotonic=10.04,
                 backend_timeout_s=1.0,
             )
     finally:
@@ -1781,6 +1794,8 @@ def _inventory_payload(
 def _kubernetes_live_reader(
     tmp_path: Path,
     handler,
+    *,
+    monotonic_clock=time.monotonic,
 ) -> KubernetesKueueRunnerCachePlacementBindingReader:
     token = tmp_path / "token"
     token.write_text("service-account-token\n", encoding="ascii")
@@ -1802,6 +1817,7 @@ def _kubernetes_live_reader(
         ),
         close_client=True,
         wall_clock=lambda: LIVE,
+        monotonic_clock=monotonic_clock,
     )
 
 
@@ -1844,25 +1860,25 @@ def test_kubernetes_kueue_live_reader_reads_target_quota_and_inventory(tmp_path:
         return httpx.Response(200, json=routes[request.url.path])
 
     reader = _kubernetes_live_reader(tmp_path, handler)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + 10
     try:
         target = reader.read_target(
             binding,
             decision,
             deadline_monotonic=deadline,
-            backend_timeout_s=0.5,
+            backend_timeout_s=10.0,
         )
         quota = reader.read_quota(
             binding,
             decision,
             deadline_monotonic=deadline,
-            backend_timeout_s=0.5,
+            backend_timeout_s=10.0,
         )
         inventory = reader.read_inventory(
             binding,
             decision,
             deadline_monotonic=deadline,
-            backend_timeout_s=0.5,
+            backend_timeout_s=10.0,
         )
     finally:
         reader.close()
@@ -1895,8 +1911,8 @@ def test_kubernetes_kueue_live_reader_readiness_checks_all_authority_routes(
     reader = _kubernetes_live_reader(tmp_path, handler)
     try:
         reader.readiness(
-            deadline_monotonic=time.monotonic() + 1,
-            backend_timeout_s=0.5,
+            deadline_monotonic=time.monotonic() + 10,
+            backend_timeout_s=10.0,
         )
     finally:
         reader.close()
@@ -1926,8 +1942,8 @@ def test_kubernetes_kueue_live_reader_maps_missing_authority_to_denial(tmp_path:
             reader.read_target(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -1947,8 +1963,8 @@ def test_kubernetes_kueue_live_reader_keeps_api_failures_as_dependency_errors(
             reader.read_target(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -1978,8 +1994,8 @@ def test_kubernetes_kueue_live_reader_rejects_stale_quota_projection(tmp_path: P
             reader.read_quota(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2010,8 +2026,8 @@ def test_kubernetes_kueue_live_reader_returns_revoked_kueue_admission(tmp_path: 
         quota = reader.read_quota(
             binding,
             decision,
-            deadline_monotonic=time.monotonic() + 1,
-            backend_timeout_s=0.5,
+            deadline_monotonic=time.monotonic() + 10,
+            backend_timeout_s=10.0,
         )
     finally:
         reader.close()
@@ -2043,8 +2059,8 @@ def test_kubernetes_kueue_live_reader_rejects_inventory_binding_drift(tmp_path: 
             reader.read_inventory(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2071,8 +2087,8 @@ def test_kubernetes_kueue_live_reader_rejects_unready_projection(tmp_path: Path)
             reader.read_inventory(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2097,8 +2113,8 @@ def test_kubernetes_kueue_live_reader_rejects_duplicate_json(tmp_path: Path) -> 
             reader.read_target(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2111,32 +2127,42 @@ def test_kubernetes_kueue_live_reader_uses_one_backend_budget_for_multi_get(
     binding = _binding(decision, command_id=_prestage_command(decision).command_id)
     routes = _kubernetes_live_routes(decision, binding)
 
+    clock = [10.0]
+    gets = 0
+
     async def handler(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.03)
+        nonlocal gets
+        gets += 1
+        # Each GET spends 20 s of the reader's clock: one fits the 30 s
+        # backend budget, two only if each GET had its own budget.
+        clock[0] += 20.0
         return httpx.Response(200, json=routes[request.url.path])
 
-    reader = _kubernetes_live_reader(tmp_path, handler)
-    started = time.monotonic()
+    reader = _kubernetes_live_reader(tmp_path, handler, monotonic_clock=lambda: clock[0])
     try:
         with pytest.raises(TimeoutError):
             reader.read_quota(
                 binding,
                 decision,
-                deadline_monotonic=started + 1,
-                backend_timeout_s=0.05,
+                deadline_monotonic=1000.0,
+                backend_timeout_s=30.0,
             )
     finally:
         reader.close()
-    assert time.monotonic() - started < 0.15
+    assert gets == 2
 
 
 def test_kubernetes_kueue_live_reader_bounds_python_lock_wait(tmp_path: Path) -> None:
     decision = _decision()
     binding = _binding(decision, command_id=_prestage_command(decision).command_id)
     routes = _kubernetes_live_routes(decision, binding)
+    # Fixed clock: the 0.04 s lock budget starts with the read, never earlier.
+    # The backend budget outlasts the holder, so only the deadline can end the
+    # wait while the lock is still held.
     reader = _kubernetes_live_reader(
         tmp_path,
         lambda request: httpx.Response(200, json=routes[request.url.path]),
+        monotonic_clock=lambda: 10.0,
     )
     acquired = threading.Event()
     release = threading.Event()
@@ -2144,25 +2170,24 @@ def test_kubernetes_kueue_live_reader_bounds_python_lock_wait(tmp_path: Path) ->
     def hold_lock() -> None:
         with reader._lock:  # noqa: SLF001 - deadline lock regression coverage.
             acquired.set()
-            release.wait(timeout=1)
+            release.wait(timeout=10)
 
     thread = threading.Thread(target=hold_lock)
     thread.start()
-    assert acquired.wait(timeout=0.2)
-    started = time.monotonic()
+    assert acquired.wait(timeout=10)
     try:
+        # The read gives up while the holder still has the lock.
         with pytest.raises(TimeoutError, match="lock"):
             reader.read_target(
                 binding,
                 decision,
-                deadline_monotonic=started + 0.04,
-                backend_timeout_s=0.5,
+                deadline_monotonic=10.04,
+                backend_timeout_s=30.0,
             )
     finally:
         release.set()
-        thread.join(timeout=0.2)
+        thread.join(timeout=10)
         reader.close()
-    assert time.monotonic() - started < 0.15
 
 
 def test_kubernetes_kueue_live_reader_joins_cancelled_request_before_close(
@@ -2176,22 +2201,25 @@ def test_kubernetes_kueue_live_reader_joins_cancelled_request_before_close(
     async def handler(_request: httpx.Request) -> httpx.Response:
         started.set()
         try:
-            await asyncio.sleep(10)
+            # Outlasts the hang bound below: only cancellation stops it in time.
+            await asyncio.sleep(60)
         finally:
             stopped.set()
         raise AssertionError("cancelled Kubernetes request resumed")
 
-    reader = _kubernetes_live_reader(tmp_path, handler)
+    # Fixed clock: the 0.04 s budget starts with the read, so it can only
+    # expire while the request is outstanding.
+    reader = _kubernetes_live_reader(tmp_path, handler, monotonic_clock=lambda: 10.0)
     loop_thread = reader._loop_thread  # noqa: SLF001 - lifecycle regression coverage.
     with pytest.raises(TimeoutError):
         reader.read_target(
             binding,
             decision,
-            deadline_monotonic=time.monotonic() + 0.04,
+            deadline_monotonic=10.04,
             backend_timeout_s=0.5,
         )
     assert started.is_set()
-    assert stopped.wait(timeout=0.1)
+    assert stopped.wait(timeout=10)
     reader.close()
     assert not loop_thread.is_alive()
 
@@ -2215,8 +2243,8 @@ def test_kubernetes_kueue_live_reader_bounds_service_account_token_read(
             reader.read_target(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2245,8 +2273,8 @@ def test_kubernetes_kueue_live_reader_keeps_malformed_crd_type_as_dependency_fai
             reader.read_quota(
                 binding,
                 decision,
-                deadline_monotonic=time.monotonic() + 1,
-                backend_timeout_s=0.5,
+                deadline_monotonic=time.monotonic() + 10,
+                backend_timeout_s=10.0,
             )
     finally:
         reader.close()
@@ -2316,8 +2344,8 @@ def test_kubernetes_kueue_live_readiness_checks_each_api_version_per_namespace(
     )
     try:
         reader.readiness(
-            deadline_monotonic=time.monotonic() + 1,
-            backend_timeout_s=0.5,
+            deadline_monotonic=time.monotonic() + 10,
+            backend_timeout_s=10.0,
         )
     finally:
         reader.close()
