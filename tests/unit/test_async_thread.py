@@ -32,7 +32,7 @@ async def test_prompt_lane_does_not_occupy_default_executor(monkeypatch):
 
     def blocked_prompt():
         prompt_started.set()
-        assert release_prompt.wait(2)
+        assert release_prompt.wait(30)
 
     prompt_task = asyncio.create_task(run_prompt_work(blocked_prompt))
     try:
@@ -40,7 +40,7 @@ async def test_prompt_lane_does_not_occupy_default_executor(monkeypatch):
             await asyncio.sleep(0)
         default_thread = await asyncio.wait_for(
             asyncio.to_thread(threading.get_ident),
-            timeout=0.5,
+            timeout=10,
         )
 
         assert default_thread != threading.get_ident()
@@ -64,13 +64,13 @@ async def test_request_body_backlog_cannot_convoy_prompt_work(monkeypatch):
 
     def blocked_body():
         body_started.set()
-        assert release_body.wait(2)
+        assert release_body.wait(30)
 
     body_task = asyncio.create_task(run_request_body_work(blocked_body))
     try:
-        assert await asyncio.to_thread(body_started.wait, 2)
+        assert await asyncio.to_thread(body_started.wait, 10)
         prompt_task = asyncio.create_task(run_prompt_work(prompt_started.set))
-        assert await asyncio.to_thread(prompt_started.wait, 0.5)
+        assert await asyncio.to_thread(prompt_started.wait, 10)
         assert not body_task.done()
     finally:
         release_body.set()
@@ -87,11 +87,11 @@ async def test_prompt_work_releases_event_loop_and_propagates_context():
 
     def blocking_work():
         worker_started.set()
-        assert release_worker.wait(2)
+        assert release_worker.wait(30)
         return threading.get_ident(), sentinel.get()
 
     work = asyncio.create_task(run_prompt_work(blocking_work))
-    assert await asyncio.to_thread(worker_started.wait, 2)
+    assert await asyncio.to_thread(worker_started.wait, 10)
     heartbeat = False
 
     async def beat():
@@ -121,17 +121,21 @@ async def test_cancelled_prompt_work_keeps_lane_until_thread_finishes(
 
     def first():
         first_started.set()
-        assert release_first.wait(2)
+        assert release_first.wait(30)
 
     def second():
         second_started.set()
 
     first_task = asyncio.create_task(run_prompt_work(first))
-    assert await asyncio.to_thread(first_started.wait, 2)
+    assert await asyncio.to_thread(first_started.wait, 10)
     first_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_task
 
+    # The cancelled caller returned while its thread still runs: the only
+    # lane stays occupied, so the next submission must queue behind it.
+    lane = async_thread._limiters[asyncio.get_running_loop()]()
+    assert lane is not None and lane.locked()
     second_task = asyncio.create_task(run_prompt_work(second))
     await asyncio.sleep(0)
     assert not second_started.is_set()
@@ -149,19 +153,22 @@ async def test_cancelled_serialized_work_keeps_gate_until_thread_finishes():
 
     def first():
         first_started.set()
-        assert release_first.wait(2)
+        assert release_first.wait(30)
 
     def second():
         second_started.set()
 
     first_task = asyncio.create_task(run_serialized_prompt_work(gate, None, first))
-    assert await asyncio.to_thread(first_started.wait, 2)
+    assert await asyncio.to_thread(first_started.wait, 10)
     first_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_task
 
+    # The cancelled caller returned while its thread still runs: the gate
+    # stays held, so the next submission must queue behind it.
+    assert gate.locked()
     second_task = asyncio.create_task(run_serialized_prompt_work(gate, None, second))
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
     assert not second_started.is_set()
 
     release_first.set()

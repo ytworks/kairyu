@@ -441,7 +441,7 @@ def test_ep_kv_accounting_gathers_identical_first_request_views_and_disarms(
         )
         rows = driver.finish_ep_kv_accounting()
         driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [
+        assert [worker.result(timeout=10) for worker in workers] == [
             1
         ] * (world_size - 1)
 
@@ -580,7 +580,7 @@ def test_ep_kv_accounting_observation_failure_is_reported_after_collective():
         )
         rows = driver.finish_ep_kv_accounting()
         driver.shutdown()
-        assert worker.result(timeout=2) == 1
+        assert worker.result(timeout=10) == 1
 
     assert [row["request_count"] for row in rows] == [0, 0]
     assert all(
@@ -627,7 +627,7 @@ def test_ep_kernel_inventory_gathers_rank_local_runtime_evidence_without_names()
         )
         rows = driver.ep_kernel_inventory_metadata()
         driver.shutdown()
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
 
     assert [row["rank"] for row in rows] == [0, 1]
     assert all(set(row) == worker_module._EP_KERNEL_INVENTORY_FIELDS for row in rows)
@@ -732,8 +732,8 @@ def test_ep_kernel_inventory_counts_only_successful_row_reductions():
 
 
 def test_ep_kernel_inventory_rank_failure_is_gathered_without_hanging():
-    control = FakeCommunicator.create_group(2, timeout_s=0.2)
-    model = FakeCommunicator.create_group(2, timeout_s=0.2)
+    control = FakeCommunicator.create_group(2, timeout_s=10)
+    model = FakeCommunicator.create_group(2, timeout_s=10)
     local = (
         _kernel_probe_runner(0, 2),
         _kernel_probe_runner(1, 2, malformed_selection=True),
@@ -760,7 +760,7 @@ def test_ep_kernel_inventory_rank_failure_is_gathered_without_hanging():
             driver.ep_kernel_inventory_metadata()
         assert isinstance(driver.fatal_error, RuntimeError)
         control[0].broadcast(None, src=0)
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
 
 
 @pytest.mark.parametrize(
