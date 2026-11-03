@@ -47,6 +47,15 @@ behavior or tests, and whenever CI is repaired after such a change.
    check for an existing test of the same behavior and remove duplication.
 7. Report the base/head collection counts and the rationale for every retained or
    newly added test area before declaring deletion work complete.
+8. A test's verdict depends only on the code under test. Never decide pass/fail
+   by wall-clock time, speed ratios or latency budgets, by waiting a fixed time,
+   or by anything the runner provides (CPU speed or load, network or registry,
+   Docker configuration, execution order). Check the property with deterministic
+   quantities (event order, operation counts, an injected clock), keep timing as
+   a recorded diagnostic, use timeouts only to detect hangs, and pin external
+   inputs so they do not depend on the runner. When a test fails for a reason
+   other than the code, fix the test's design; "not caused by this change" is not
+   a resolution.
 
 ## Where things live
 
