@@ -764,6 +764,64 @@ def test_select_history_skips_invalid_newest_and_fails_if_none_valid(
     assert not failed_output.exists()
 
 
+def test_older_schema_history_starts_a_new_chain_that_the_next_run_continues(
+    tmp_path: Path,
+) -> None:
+    # A complete schema-1 series as the previous nightly wrote it.
+    older = b"".join(
+        series._canonical_bytes(line) + b"\n"
+        for line in (
+            {**series._header(), "schema_version": 1},
+            {"kind": "record", "schema_version": 1, "sequence": 1},
+            {
+                "kind": "trailer",
+                "record_count": 1,
+                "schema_version": 1,
+                "tip_sha256": "0" * 64,
+            },
+        )
+    )
+    candidates = tmp_path / "candidates"
+    (candidates / "000").mkdir(parents=True)
+    (candidates / "000" / "series.jsonl").write_bytes(older)
+    (candidates / "001").mkdir()  # an artifact without a usable series
+    history = tmp_path / "history.jsonl"
+    note = tmp_path / "history-reset.json"
+
+    def select() -> int:
+        return series.main(
+            [
+                "select-history",
+                "--candidates",
+                str(candidates),
+                "--output",
+                str(history),
+                "--reset-note",
+                str(note),
+            ]
+        )
+
+    assert select() == 0
+    assert series.load_series(history) == []
+    _write_report(tmp_path / "report.json", _report())
+    assert series.main([*_record_argv(tmp_path), "--reset-note", str(note)]) == 0
+    comparison = json.loads((tmp_path / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["history"] == "reset"
+    assert comparison["history_reset"] == {
+        "from_schema_versions": [1],
+        "superseded_candidates": 1,
+    }
+    started = (tmp_path / "series.jsonl").read_bytes()
+    assert len(series._load_series_bytes(started, label="new chain")) == 1
+
+    # The next run selects the new chain ahead of the older-schema one.
+    (candidates / "000" / "series.jsonl").write_bytes(started)
+    (candidates / "001" / "series.jsonl").write_bytes(older)
+    assert select() == 0
+    assert history.read_bytes() == started
+    assert not note.exists()
+
+
 def test_empty_candidate_root_creates_a_valid_genesis(tmp_path: Path) -> None:
     candidates = tmp_path / "candidates"
     candidates.mkdir()

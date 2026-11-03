@@ -4301,12 +4301,22 @@ def evaluate_gate(
             type(record.get("schema_version")) is int
             and record["schema_version"] == SCHEMA_VERSION
             and record.get("kind") == "resources"
-            and record.get("capture") is None
+            and record.get("capture") in (None, "final")
             and "error" in record
             and record.get("error") is None
             and _resource_payload_shape_valid(record.get("payload"))
             for record in resources
         )
+    )
+    # The explicit capture taken after traffic completes is the evidence
+    # tail: resource evidence that stopped early or a sidecar cut short lacks
+    # it.  Only order is judged, never how late the capture ran.
+    resource_tail_covers_traffic = (
+        sum(record.get("capture") == "final" for record in resources) == 1
+        and resources[-1].get("capture") == "final"
+        and record_fetch_precedes_observation(resources[-1])
+        and type(traffic_completed_ns) is int
+        and traffic_completed_ns <= resources[-1]["fetch_started_ns"]
     )
     checks = {
         "formal_configuration_frozen": (
@@ -4448,6 +4458,7 @@ def evaluate_gate(
         "resource_evidence_complete": (
             resource_evidence_schema_valid
             and resource_periodic_schedule_ok
+            and resource_tail_covers_traffic
         ),
         "clean_source": not environment.get(
             "source_dirty",
@@ -4922,6 +4933,21 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 "payload": final_endpoints,
             }
         )
+        # Likewise one explicit resource capture after traffic completes, so
+        # the evidence tail is proven by order rather than sampler timing.
+        final_resource_fetch_started_ns = time.monotonic_ns()
+        final_resources = await fetch_resources()
+        sinks["resources"].write(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "resources",
+                "capture": "final",
+                "fetch_started_ns": final_resource_fetch_started_ns,
+                "observed_ns": time.monotonic_ns(),
+                "error": None,
+                "payload": final_resources,
+            }
+        )
         churn_pod_records = [
             {
                 "schema_version": SCHEMA_VERSION,
@@ -4996,6 +5022,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
     # in-process evaluation and the independent artifact replay see identical
     # raw rows.
     endpoints = _load_jsonl(paths["endpointslices"])
+    resources = _load_jsonl(paths["resources"])
     source_end = source_environment(args)
     environment = dict(source_start)
     environment.update(

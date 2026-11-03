@@ -3,9 +3,10 @@
 
 Timings compare the indexed queue with the legacy list and are diagnostics.
 The ``work`` section is deterministic: at two queue sizes it counts the
-queue's store primitives (one unit per call and one per item iterated) and the
-hashes and comparisons of request IDs and priority keys, so the growth of work
-per operation can be checked without a clock.
+queue's store primitives (one unit per call and one per item iterated), the
+elements the priority list shifts or copies, and the hashes and comparisons of
+request IDs and priority keys, so the growth of work per operation can be
+checked without a clock.
 
 Run:
     uv run python verification/l1/performance/scheduler_queue_bench.py --requests 100000 --repeats 5
@@ -22,8 +23,9 @@ from collections import OrderedDict
 from kairyu.engine.core.scheduler import _IndexedWaitingQueue
 
 WORK_UNIT = (
-    "waiting-store primitives (1 per call, 1 per item iterated) plus "
-    "request-ID and priority-key hashes and comparisons"
+    "waiting-store primitives (1 per call, 1 per item iterated), elements "
+    "shifted or copied in the priority list, plus request-ID and "
+    "priority-key hashes and comparisons"
 )
 # One cancellation per ten queued requests, as in the timed workload.
 WORK_REMOVAL_DIVISOR = 10
@@ -33,8 +35,8 @@ class _WorkCounter:
     count = 0
 
 
-def _tick() -> None:
-    _WorkCounter.count += 1
+def _tick(units: int = 1) -> None:
+    _WorkCounter.count += units
 
 
 class _CountedId(str):
@@ -200,6 +202,123 @@ class _CountingOrderedDict(OrderedDict):
         return _CountingView(OrderedDict.items(self))
 
 
+class _CountingList(list):
+    """Priority store that counts each call and every element it shifts or
+    copies.
+
+    ``heapq`` operates on the list directly and shifts nothing, so a heap pays
+    only its counted comparisons.  A positional insert or removal pays for the
+    elements behind it, which exposes a sorted-list queue's linear moves.
+    """
+
+    def _position(self, index: int, *, end_allowed: bool) -> int:
+        size = list.__len__(self)
+        if index < 0:
+            index += size
+        return max(0, min(index, size if end_allowed else size - 1))
+
+    def _shifted_by_slice(self, key: slice, written: int) -> int:
+        size = list.__len__(self)
+        start, stop, step = key.indices(size)
+        if step != 1:
+            return size + written
+        return written + size - max(start, stop)
+
+    def __len__(self) -> int:
+        _tick()
+        return list.__len__(self)
+
+    def __iter__(self):
+        for item in list.__iter__(self):
+            _tick()
+            yield item
+
+    def __reversed__(self):
+        for item in list.__reversed__(self):
+            _tick()
+            yield item
+
+    def __contains__(self, item: object) -> bool:
+        _tick(1 + list.__len__(self))
+        return list.__contains__(self, item)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            items = list.__getitem__(self, key)
+            _tick(1 + len(items))
+            return items
+        _tick()
+        return list.__getitem__(self, key)
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, slice):
+            value = list(value)
+            _tick(1 + self._shifted_by_slice(key, len(value)))
+        else:
+            _tick()
+        list.__setitem__(self, key, value)
+
+    def __delitem__(self, key) -> None:
+        if isinstance(key, slice):
+            _tick(1 + self._shifted_by_slice(key, 0))
+        else:
+            position = self._position(key, end_allowed=False)
+            _tick(list.__len__(self) - position)
+        list.__delitem__(self, key)
+
+    def __iadd__(self, other):
+        other = list(other)
+        _tick(1 + len(other))
+        return list.__iadd__(self, other)
+
+    def append(self, item) -> None:
+        _tick()
+        list.append(self, item)
+
+    def extend(self, items) -> None:
+        items = list(items)
+        _tick(1 + len(items))
+        list.extend(self, items)
+
+    def insert(self, index: int, item) -> None:
+        position = self._position(index, end_allowed=True)
+        _tick(1 + list.__len__(self) - position)
+        list.insert(self, index, item)
+
+    def pop(self, index: int = -1):
+        position = self._position(index, end_allowed=False)
+        _tick(list.__len__(self) - position)
+        return list.pop(self, index)
+
+    def remove(self, item) -> None:
+        _tick(1 + list.__len__(self))
+        list.remove(self, item)
+
+    def index(self, item, *args) -> int:
+        _tick(1 + list.__len__(self))
+        return list.index(self, item, *args)
+
+    def count(self, item) -> int:
+        _tick(1 + list.__len__(self))
+        return list.count(self, item)
+
+    def clear(self) -> None:
+        _tick(1 + list.__len__(self))
+        list.clear(self)
+
+    def copy(self) -> list:
+        _tick(1 + list.__len__(self))
+        return list.copy(self)
+
+    def sort(self, *args, **kwargs) -> None:
+        _tick(1 + list.__len__(self))
+        list.sort(self, *args, **kwargs)
+
+    def reverse(self) -> None:
+        _tick(1 + list.__len__(self))
+        list.reverse(self)
+
+
 def _timed(fn) -> float:
     start = time.perf_counter()
     fn()
@@ -347,10 +466,16 @@ def _work_priority_drain(size: int) -> tuple[int, int]:
         for index in range(size)
     ]
     waiting = _IndexedWaitingQueue(priority_age_s=10.0)
+    # Instrument this instance's priority store before any request enters it.
+    store = _CountingList()
+    waiting._heap = store
     _WorkCounter.count = 0
     waiting.extend(requests)
     while waiting:
         waiting.popleft()
+    if waiting._heap is not store:
+        # Work on a replacement store would go uncounted.
+        raise AssertionError("priority queue replaced its instrumented store")
     return size, _WorkCounter.count
 
 

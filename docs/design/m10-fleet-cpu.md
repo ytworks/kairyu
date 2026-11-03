@@ -516,6 +516,19 @@ online learning or the M4 request-family bandit.
   observer, one-second raw causality bracket, 10 ms placement bound, 99% pacing
   requirement, 50 requests/s, retry prohibition, churn schedule, exact-200
   checks, and raw artifact replay remain unchanged.
+
+  **CI-determinism amendment (2026-11-03):** the evidence tail is no longer
+  judged by whether the last periodic slot or observation reached traffic
+  completion, because how late a sampler runs depends on the runner. After
+  traffic and placement collection, F1a takes one explicit `capture: "final"`
+  resource fetch, as it does for EndpointSlices. Replay requires exactly one
+  such row, as the last resource row, with
+  `traffic_completed_ns <= fetch_started_ns <= observed_ns`; the first periodic
+  fetch must still start no later than traffic start, and deadlines and skips
+  replay as above. Resource evidence that stops early or a sidecar cut short
+  therefore fails `resource_evidence_complete` by order alone. Why: a CI
+  verdict must depend only on the code under test without dropping A23's
+  tail requirement.
 - **A24**: F1a control-plane observation no longer creates a fresh `kubectl`
   process for each read. One lifecycle-owned `kubectl proxy` and one persistent
   HTTP client carry every EndpointSlice, Pod LIST, and kubelet resource read;

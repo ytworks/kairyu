@@ -11,10 +11,17 @@ shape).  The trailing-median comparison of the eight speed ratios is a report
 that never changes the exit status: a ratio at least 15% below its median is
 listed under `declines`.  When history cannot be fetched or selected, the run
 is a warm-up: `cpu_perf_series.py warmup` validates the report and writes only
-`comparison.json` (`history: unavailable`), so the next run continues the
-previous chain.  Series and report schema version 2 (method
-`issue-377-nightly-cpu-perf-v2`) start a new chain; version 1 artifacts are not
-history candidates.  Sections below that call a decline "binding" or a
+`comparison.json` (`history: unavailable`), retained as
+`nightly-cpu-perf-warmup-<run>-<attempt>`.  That name never matches a history
+candidate, so the next run continues the previous chain.  Series and report
+schema version 2 (method `issue-377-nightly-cpu-perf-v2`) start a new chain
+explicitly: when no candidate holds a valid version-2 series but at least one
+holds a complete series of an older schema, `select-history` writes an empty
+history and a reset note, and `record` starts the version-2 chain with
+`history: reset` and `history_reset` (the older schema versions and candidate
+count) in its comparison.  Corrupt candidates are still skipped, and a
+candidate set with neither a valid nor an older-schema series still fails
+closed into a warm-up.  Sections below that call a decline "binding" or a
 recovery transport failure "hard" describe the superseded version-1 policy.
 
 ## Decision

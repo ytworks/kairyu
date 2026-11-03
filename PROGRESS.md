@@ -116,6 +116,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-11-03 — [amendment] Review fixes to the deterministic CI gates
+- What: scheduler priority work also counts elements the priority list shifts or copies; sampler work also counts active-index upkeep (tensor sorts, copies, allocations; position/ref-count map writes); the nightly series explicitly starts a version-2 chain when only older-schema history exists, and warm-ups are retained under their own artifact name; F1a takes one final resource capture after traffic and requires it as the last row (m10 A23 amendment).
+- Why: owner review of PR #667: a sorted-list priority queue and a per-step index rebuild passed the gate, the nightly could stay in warm-up forever after the schema change, and a truncated resource sidecar was judged complete.
+- Refs: PR #667; `docs/design/m10-fleet-cpu.md` A23; `docs/design/issue-377-nightly-cpu-perf.md`
+
 ### 2026-11-03 — [design] CI verdicts depend only on the code
 - What: every CI pass/fail is decided by the code alone: timing became diagnostics (cpu-microbench and nightly perf judge operation counts; kind F1a/F1b/F1c, async smoke and F2b judge order, fencing tokens or a virtual clock; ~190 pytest waits rewritten to events, fake clocks or hang bounds); runner inputs pinned (umask 022, uv 0.11.31, single-platform postgres digest, images loaded from archives); networked setup separated from tests; the CPU suite runs on four workers to meet the five-minute target. CLAUDE.md test policy rule 8.
 - Why: owner principle after PR #667's CI failed on a wall-clock ratio and a runner image-store change ("not caused by this PR" is not a resolution).

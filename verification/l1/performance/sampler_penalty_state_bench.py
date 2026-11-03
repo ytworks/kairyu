@@ -6,7 +6,12 @@ rebuild and are diagnostics.  The ``work`` section is deterministic: at two
 history lengths it counts how much of the caller-supplied output history the
 incremental path reads per step (one unit per call and one per token read)
 plus every hash, comparison, or integer conversion of a history token, for
-unchanged history and for one appended token per step.
+unchanged history and for one appended token per step.  It also counts the
+upkeep of the state's own active-token index: every element a tensor sort,
+copy, or allocation produces during the step, and every entry written,
+removed, or iterated in the state's position and reference-count maps.
+Applying the penalties to the active tokens is the path's purpose and is
+proportional to them by design, so those gathers and writes are not counted.
 
 Examples:
     uv run python verification/l1/performance/sampler_penalty_state_bench.py --device cpu
@@ -23,13 +28,17 @@ import time
 from collections.abc import Callable, Sequence
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling
 
 WORK_UNIT = (
     "output-history reads (1 per call, 1 per token read) plus hashes, "
-    "comparisons, and integer conversions of history tokens"
+    "comparisons, and integer conversions of history tokens, plus "
+    "active-index upkeep (elements produced by tensor sorts, copies, and "
+    "allocations; position and reference-count map entries written, "
+    "removed, or iterated)"
 )
 PROMPT_LENGTH = 4_096
 
@@ -82,6 +91,118 @@ class _CountedToken(int):
     def __index__(self) -> int:
         _tick()
         return int.__index__(self)
+
+
+# Tensor operations that sort, copy, or allocate: an index kept across steps
+# needs them only when it grows, never once per step.
+_INDEX_UPKEEP_OPS = frozenset(
+    packet
+    for name in (
+        "_to_copy",
+        "_unique",
+        "_unique2",
+        "argsort",
+        "cat",
+        "clone",
+        "copy_",
+        "empty",
+        "empty_like",
+        "empty_strided",
+        "full",
+        "full_like",
+        "msort",
+        "new_empty",
+        "new_empty_strided",
+        "new_full",
+        "new_zeros",
+        "resize_",
+        "sort",
+        "stack",
+        "unique_consecutive",
+        "unique_dim",
+        "zeros",
+        "zeros_like",
+    )
+    if (packet := getattr(torch.ops.aten, name, None)) is not None
+)
+
+
+class _CountingIndexUpkeep(TorchDispatchMode):
+    """Count the elements produced by index-upkeep tensor operations."""
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        result = func(*args, **(kwargs or {}))
+        if func.overloadpacket in _INDEX_UPKEEP_OPS:
+            outputs = result if isinstance(result, (tuple, list)) else (result,)
+            _tick(
+                sum(
+                    output.numel()
+                    for output in outputs
+                    if isinstance(output, torch.Tensor)
+                )
+            )
+        return result
+
+
+class _CountingMap(dict):
+    """Index map that counts entries written, removed, or iterated."""
+
+    def __setitem__(self, key, value) -> None:
+        _tick()
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key) -> None:
+        _tick()
+        dict.__delitem__(self, key)
+
+    def __iter__(self):
+        for key in dict.__iter__(self):
+            _tick()
+            yield key
+
+    def pop(self, key, *default):
+        _tick()
+        return dict.pop(self, key, *default)
+
+    def popitem(self):
+        _tick()
+        return dict.popitem(self)
+
+    def setdefault(self, key, default=None):
+        _tick()
+        return dict.setdefault(self, key, default)
+
+    def update(self, *args, **kwargs) -> None:
+        entries = dict(*args, **kwargs)
+        _tick(1 + len(entries))
+        dict.update(self, entries)
+
+    def clear(self) -> None:
+        _tick(1 + dict.__len__(self))
+        dict.clear(self)
+
+    def copy(self) -> dict:
+        _tick(1 + dict.__len__(self))
+        return dict.copy(self)
+
+    def keys(self):
+        _tick(1 + dict.__len__(self))
+        return dict.keys(self)
+
+    def values(self):
+        _tick(1 + dict.__len__(self))
+        return dict.values(self)
+
+    def items(self):
+        _tick(1 + dict.__len__(self))
+        return dict.items(self)
+
+
+_COUNTED_MAPS = (
+    "_cpu_output_positions",
+    "_cpu_output_ref_counts",
+    "_cpu_repetition_positions",
+)
 
 
 class _CountingHistory(Sequence):
@@ -756,15 +877,32 @@ def _work_history(
         ]
 
     def apply(state, sampler: Sampler, history, pending) -> None:
-        sampler._apply_incremental_penalties(
-            state,
-            logits.clone(),
-            sampling,
-            prompt,
-            history,
-            pending,
-            history_epoch=0,
-        )
+        row = logits.clone()
+        with _CountingIndexUpkeep():
+            sampler._apply_incremental_penalties(
+                state,
+                row,
+                sampling,
+                prompt,
+                history,
+                pending,
+                history_epoch=0,
+            )
+
+    def instrument(state):
+        # The first call built the penalty state; count its maps from here on.
+        (penalties,) = state.penalty_states.values()
+        for name in _COUNTED_MAPS:
+            setattr(penalties, name, _CountingMap(getattr(penalties, name)))
+        return penalties
+
+    def require_instrumented(state, penalties) -> None:
+        # Upkeep on a replacement state or map would go uncounted.
+        if tuple(state.penalty_states.values()) != (penalties,) or not all(
+            type(getattr(penalties, name)) is _CountingMap
+            for name in _COUNTED_MAPS
+        ):
+            raise AssertionError("sampler replaced its instrumented penalty state")
 
     # Unchanged history: the first call builds the state from the full
     # history once; every later step must not read it again.
@@ -776,10 +914,12 @@ def _work_history(
     state = sampler._state_for("work-steady", sampling)
     history = _CountingHistory(base_tokens())
     apply(state, sampler, history, pending)
+    penalties = instrument(state)
     _WorkCounter.count = 0
     for _ in range(steps):
         apply(state, sampler, history, pending)
     steady = _WorkCounter.count
+    require_instrumented(state, penalties)
 
     # One committed token per step while the pending window advances.
     extra_tokens = tuple(
@@ -798,11 +938,14 @@ def _work_history(
     tokens = base_tokens()
     history = _CountingHistory(tokens)
     apply(state, sampler, history, windows[0])
+    penalties = instrument(state)
     _WorkCounter.count = 0
     for index in range(steps):
         tokens.append(_CountedToken(extra_tokens[index]))
         apply(state, sampler, history, windows[index + 1])
-    return steady, _WorkCounter.count
+    appended = _WorkCounter.count
+    require_instrumented(state, penalties)
+    return steady, appended
 
 
 def _work(

@@ -114,6 +114,9 @@ def test_recovery_includes_failed_runs_and_fails_closed() -> None:
             "${{ runner.temp }}/kairyu-nightly-cpu-perf/downloads"
         ),
         "HISTORY": "${{ runner.temp }}/kairyu-nightly-cpu-perf/history.jsonl",
+        "RESET_NOTE": (
+            "${{ runner.temp }}/kairyu-nightly-cpu-perf/history-reset.json"
+        ),
     }
     assert "GH_TOKEN" not in job.get("env", {})
     assert "--paginate" in command
@@ -134,6 +137,7 @@ def test_recovery_includes_failed_runs_and_fails_closed() -> None:
     assert "uv run --frozen python -" in command
     assert "scripts/cpu_perf_series.py validate" in command
     assert "scripts/cpu_perf_series.py select-history" in command
+    assert '--reset-note "$RESET_NOTE"' in command
     assert "series tip does not match Actions provenance" in command
     for identity in (
         "EXPECTED_REPOSITORY",
@@ -157,6 +161,7 @@ def test_artifacts_are_uploaded_before_the_gate_verdict_is_enforced() -> None:
         job, "Report a warm-up run when history is unavailable"
     )
     upload = _named_step(job, "Retain nightly report, series, and comparison")
+    warmup_upload = _named_step(job, "Retain the warm-up report and comparison")
     enforce = _named_step(job, "Enforce the retained nightly verdict")
 
     assert comparison["if"] == (
@@ -172,30 +177,44 @@ def test_artifacts_are_uploaded_before_the_gate_verdict_is_enforced() -> None:
         "--run-id",
         "--run-attempt",
         "--sha",
+        "--reset-note",
     ):
         assert argument in comparison["run"]
     assert warmup["if"] == "always() && steps.recovery.outcome != 'success'"
     assert warmup["continue-on-error"] == "true"
     assert "scripts/cpu_perf_series.py warmup" in warmup["run"]
 
-    assert upload["if"] == "always()"
-    assert upload["uses"] == (
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    assert upload["if"] == "always() && steps.recovery.outcome == 'success'"
+    assert warmup_upload["if"] == (
+        "always() && steps.recovery.outcome != 'success'"
     )
+    for step in (upload, warmup_upload):
+        assert step["uses"] == (
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+        )
+        assert step["with"]["retention-days"] == "90"
+        assert step["with"]["if-no-files-found"] == "error"
     assert upload["with"]["name"] == (
         "nightly-cpu-perf-${{ github.run_id }}-${{ github.run_attempt }}"
     )
-    assert upload["with"]["retention-days"] == "90"
-    assert upload["with"]["if-no-files-found"] == "error"
+    # A warm-up's own name never matches a history candidate's name.
+    assert warmup_upload["with"]["name"] == (
+        "nightly-cpu-perf-warmup-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
     paths = upload["with"]["path"]
     assert paths.count("report.json") == 1
     assert paths.count("series.jsonl") == 1
     assert paths.count("comparison.json") == 1
+    warmup_paths = warmup_upload["with"]["path"]
+    assert warmup_paths.count("report.json") == 1
+    assert "series.jsonl" not in warmup_paths
+    assert warmup_paths.count("comparison.json") == 1
 
     assert enforce["if"] == "always()"
     assert steps.index(comparison) < steps.index(upload)
-    assert steps.index(warmup) < steps.index(upload)
+    assert steps.index(warmup) < steps.index(warmup_upload)
     assert steps.index(upload) < steps.index(enforce)
+    assert steps.index(warmup_upload) < steps.index(enforce)
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,8 @@
 The verdict is the CPU report's deterministic gate (operation counts and fixed
 workload shape).  The speed trend against trailing medians is a report that
 never changes the exit status, and a run without fetchable history is a
-warm-up.
+warm-up.  When the newest history was written by an older series schema, the
+run explicitly starts a new chain and says so in its comparison.
 """
 
 from __future__ import annotations
@@ -925,6 +926,74 @@ def _load_series_bytes(data: bytes, *, label: str) -> list[dict[str, Any]]:
     return validated
 
 
+def _superseded_schema(data: bytes) -> int | None:
+    """Schema version of a complete, canonical series of an older schema.
+
+    Such a series was written under an earlier reader contract; it cannot be
+    continued, only replaced by a new chain.  Anything else returns None.
+    """
+    if len(data) > MAX_SERIES_BYTES or not data.endswith(b"\n"):
+        return None
+    lines = data[:-1].split(b"\n")
+    if len(lines) < 2 or any(not line for line in lines):
+        return None
+    try:
+        values = [_strict_json(line, label="older series") for line in lines]
+        if any(
+            line != _canonical_bytes(value)
+            for line, value in zip(lines, values, strict=True)
+        ):
+            return None
+    except SeriesError:
+        return None
+    header, *records, trailer = values
+    version = header.get("schema_version") if isinstance(header, dict) else None
+    if type(version) is not int or not 1 <= version < SERIES_SCHEMA_VERSION:
+        return None
+
+    def same_version(value: object) -> bool:
+        return isinstance(value, dict) and type(
+            value.get("schema_version")
+        ) is int and value["schema_version"] == version
+
+    if (
+        header != {**_header(), "schema_version": version}
+        or not same_version(trailer)
+        or set(trailer)
+        != {"kind", "record_count", "schema_version", "tip_sha256"}
+        or trailer["kind"] != "trailer"
+        or type(trailer["record_count"]) is not int
+        or trailer["record_count"] != len(records)
+        or not all(
+            same_version(record) and record.get("kind") == "record"
+            for record in records
+        )
+    ):
+        return None
+    return version
+
+
+def _history_reset_note(path: Path) -> dict[str, Any]:
+    data = _read_limited(path, limit=64 * 1024, label="history reset note")
+    note = _strict_json(data.rstrip(b"\n"), label="history reset note")
+    versions = note.get("from_schema_versions") if isinstance(note, dict) else None
+    if (
+        not isinstance(note, dict)
+        or set(note) != {"from_schema_versions", "superseded_candidates"}
+        or not isinstance(versions, list)
+        or not versions
+        or versions != sorted(set(versions))
+        or not all(
+            type(version) is int and 1 <= version < SERIES_SCHEMA_VERSION
+            for version in versions
+        )
+        or type(note["superseded_candidates"]) is not int
+        or note["superseded_candidates"] < len(versions)
+    ):
+        raise _fail("history reset note has an invalid schema")
+    return note
+
+
 def load_series(path: Path) -> list[dict[str, Any]]:
     data = _read_limited(path, limit=MAX_SERIES_BYTES, label="series")
     return _load_series_bytes(data, label="series")
@@ -1020,6 +1089,7 @@ def _record(
     run_id: str,
     run_attempt: int,
     sha: str,
+    reset_note_path: Path | None = None,
 ) -> int:
     roles = {
         "comparison": comparison_path,
@@ -1027,6 +1097,8 @@ def _record(
         "report": report_path,
         "series": series_path,
     }
+    if reset_note_path is not None:
+        roles["reset note"] = reset_note_path
     resolved: dict[Path, str] = {}
     for role, path in roles.items():
         try:
@@ -1049,6 +1121,13 @@ def _record(
     if not history_path.exists():
         raise _fail("history does not exist; run select-history first")
     records = load_series(history_path)
+    reset_note = (
+        _history_reset_note(reset_note_path)
+        if reset_note_path is not None and reset_note_path.exists()
+        else None
+    )
+    if reset_note is not None and records:
+        raise _fail("a history reset must start from an empty history")
     identity = (repository, run_id, run_attempt)
     if any(
         (item["run"]["repository"], item["run"]["run_id"], item["run"]["run_attempt"])
@@ -1106,7 +1185,7 @@ def _record(
         "decline_boundary_inclusive": True,
         "decline_fraction": float(DECLINE_FRACTION),
         "declines": declines,
-        "history": "available",
+        "history": "available" if reset_note is None else "reset",
         "history_record_count": len(records),
         "maximum_window": WINDOW_SIZE,
         "metrics": metric_comparisons,
@@ -1119,6 +1198,8 @@ def _record(
         "trend": "report-only",
         "window_size": len(window),
     }
+    if reset_note is not None:
+        comparison["history_reset"] = reset_note
     updated = [*records, current]
     rendered_series = _render_series(updated)
     if len(rendered_series) > MAX_SERIES_BYTES:
@@ -1181,7 +1262,19 @@ def _warmup(
     return 0 if source_gate_passed else 1
 
 
-def _select_history(*, candidates: Path, output: Path) -> int:
+def _select_history(
+    *,
+    candidates: Path,
+    output: Path,
+    reset_note: Path | None = None,
+) -> int:
+    if reset_note is not None:
+        try:
+            reset_note.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise _fail("cannot clear the history reset note") from error
     if not candidates.exists():
         raise _fail("candidate root does not exist")
     if candidates.is_symlink() or not candidates.is_dir():
@@ -1194,6 +1287,7 @@ def _select_history(*, candidates: Path, output: Path) -> int:
         _atomic_write(output, _render_series([]))
         print(json.dumps({"record_count": 0, "selected": None, "valid": True}))
         return 0
+    superseded: list[int] = []
     for child in children:
         candidate = child / "series.jsonl"
         if (
@@ -1210,13 +1304,46 @@ def _select_history(*, candidates: Path, output: Path) -> int:
                 limit=MAX_SERIES_BYTES,
                 label=f"history candidate {child.name}",
             )
-            records = _load_series_bytes(data, label=f"history candidate {child.name}")
         except SeriesError as error:
             print(f"skipping invalid history candidate {child.name}: {error}", file=sys.stderr)
+            continue
+        try:
+            records = _load_series_bytes(data, label=f"history candidate {child.name}")
+        except SeriesError as error:
+            version = _superseded_schema(data)
+            if version is not None:
+                superseded.append(version)
+                print(
+                    f"history candidate {child.name} has superseded schema {version}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"skipping invalid history candidate {child.name}: {error}",
+                    file=sys.stderr,
+                )
             continue
         _atomic_write(output, data)
         summary = _tip_summary(records)
         summary["selected"] = child.name
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    if superseded:
+        # No current-schema chain exists, only chains an older reader wrote:
+        # start a new chain explicitly instead of warming up forever.
+        note = {
+            "from_schema_versions": sorted(set(superseded)),
+            "superseded_candidates": len(superseded),
+        }
+        _atomic_write(output, _render_series([]))
+        if reset_note is not None:
+            _atomic_write(reset_note, _render_comparison(note))
+        summary = {
+            "history_reset": note,
+            "record_count": 0,
+            "selected": None,
+            "valid": True,
+        }
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
     raise _fail("candidate root is non-empty but contains no valid history")
@@ -1235,6 +1362,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     select.add_argument("--candidates", type=Path, required=True)
     select.add_argument("--output", type=Path, required=True)
+    select.add_argument(
+        "--reset-note",
+        type=Path,
+        help="written only when an older-schema history is replaced",
+    )
 
     record = commands.add_parser(
         "record",
@@ -1248,6 +1380,11 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--run-id", required=True)
     record.add_argument("--run-attempt", type=int, required=True)
     record.add_argument("--sha", required=True)
+    record.add_argument(
+        "--reset-note",
+        type=Path,
+        help="select-history's reset note; used when the file exists",
+    )
 
     warmup = commands.add_parser(
         "warmup",
@@ -1270,7 +1407,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(_tip_summary(records), indent=2, sort_keys=True))
             return 0
         if args.command == "select-history":
-            return _select_history(candidates=args.candidates, output=args.output)
+            return _select_history(
+                candidates=args.candidates,
+                output=args.output,
+                reset_note=args.reset_note,
+            )
         if args.command == "record":
             return _record(
                 report_path=args.report,
@@ -1281,6 +1422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 run_attempt=args.run_attempt,
                 sha=args.sha,
+                reset_note_path=args.reset_note,
             )
         if args.command == "warmup":
             return _warmup(
