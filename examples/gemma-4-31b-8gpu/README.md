@@ -90,10 +90,10 @@ sends `reasoning.effort: none`, which vLLM renders with thinking off. The
 filter also turns Open WebUI's chat body into a strict Responses body (as in
 the other examples).
 
-> **Open decision.** Kairyu's `/v1/responses` currently answers
-> `reasoning.effort: none` with 400 (`responses_protocol.py`), so the `none`
-> choice fails until that is decided; chat-completions callers turn thinking
-> off with `chat_template_kwargs: {"enable_thinking": false}`.
+Kairyu's `/v1/responses` passes `reasoning.effort: none` to an engine or
+pool model as thinking off (m11 D4 Responses thinking-off amendment,
+2026-11-03); chat-completions callers turn thinking off with
+`chat_template_kwargs: {"enable_thinking": false}`.
 
 Kairyu sends each request to vLLM in its caller's API (`upstream_chat_models`,
 `upstream_responses_models`, `upstream_messages_models`). vLLM renders the

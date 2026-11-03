@@ -3,6 +3,12 @@
 Status: **Plan approved 2026-11-03 (owner), including the verification plan.**
 Based on `main` only.
 
+Amendment (2026-11-03, owner decision after the CPU implementation): Kairyu's
+`/v1/responses` rejected `reasoning.effort: none`, so the Chat UI's thinking-off
+choice could not work; Responses now passes `none` to an engine or pool model as
+thinking off, as Messages has since 2026-10-19 (m11 D4 Responses thinking-off
+amendment).
+
 ## Request
 
 - A new example: Gemma 4 **31B dense** (owner's choice) for chat, EmbeddingGemma 2

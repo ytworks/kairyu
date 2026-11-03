@@ -425,12 +425,6 @@ def _validate_reasoning(reasoning: dict | None) -> None:
                 param=f"reasoning.{key}",
                 code="invalid_value",
             )
-    if reasoning.get("effort") == "none":
-        raise _unsupported(
-            "reasoning.effort",
-            "reasoning.effort='none' is not supported: disabling thinking is "
-            "model-template specific",
-        )
     if reasoning.get("context") not in (None, "auto"):
         raise _unsupported("reasoning.context", "only reasoning.context='auto' is supported")
     if reasoning.get("mode") not in (None, "standard"):

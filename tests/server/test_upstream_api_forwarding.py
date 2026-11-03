@@ -592,6 +592,34 @@ async def test_messages_thinking_disabled_turns_a_pool_models_thinking_off(
     assert "output_config" not in body
 
 
+@pytest.mark.parametrize(
+    ("responses", "expected", "field", "off"),
+    [
+        (True, "/v1/responses", "reasoning", {"effort": "none"}),
+        (False, "/v1/chat/completions", "reasoning_effort", "none"),
+    ],
+)
+async def test_responses_effort_none_turns_a_direct_models_thinking_off(
+    upstream, responses, expected, field, off
+):
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=responses)))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "remote",
+                "input": "Hi",
+                "max_output_tokens": 64,
+                "reasoning": {"effort": "none"},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    assert path == expected
+    assert body[field] == off
+
+
 async def test_an_assistant_prefill_continues_on_responses_not_messages(upstream):
     backend = OpenAICompatBackend(
         base_url="http://vllm.test/v1",

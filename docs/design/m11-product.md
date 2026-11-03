@@ -509,7 +509,8 @@ streams buffer", "no reasoning output", and "comment keep-alives".
   - tools: `tool_choice` `allowed_tools` or hosted tools; custom, built-in,
     and hosted tool types
   - input items: `item_reference` and other unsupported item types
-  - reasoning: `reasoning.effort=none`, non-default `reasoning.context`/`mode`
+  - reasoning: non-default `reasoning.context`/`mode` (`reasoning.effort=none`
+    is accepted since the Responses thinking-off amendment, 2026-11-03)
   - media: `file_id` images, `input_file`/`input_audio`, images in tool
     output, and images beside tool-call history on a model outside
     `upstream_chat_models` (an upstream-rendered model receives them with the
@@ -669,6 +670,20 @@ Tests: the `kairyu` and `omitted` cases of
 `test_vllm_templated_completion_with_thinking_off_is_all_public`, and the
 non-string `display`/`type` cases of `test_error_envelope_matrix`; `disabled`
 left `test_compatible_thinking_modes_are_accepted_as_noops`.
+
+*Responses thinking-off amendment (2026-11-03, owner decision).*
+`/v1/responses` accepts `reasoning.effort: "none"`: for an engine or pool model
+it becomes the internal effort `none` of the Messages amendment above and
+reaches L1 on that model's wire (Responses `reasoning.effort: "none"`, chat
+`reasoning_effort: "none"`, Messages `thinking: {"type": "disabled"}`); an AUTO
+model keeps its stage policy, so it is a no-op there, as on Messages. The
+public Chat parser still rejects `none`. Why: the 2026-10-05 rejection predates
+any thinking-off path ("disabling thinking is model-template specific"); since
+the Messages amendment the L1 renders thinking off from its own template, so the
+only reason left was the earlier amendment's scope. The Gemma 4 example's Chat
+UI (Responses) needs it for its thinking-off choice, and any Responses client
+that sends OpenAI's `none` got a 400. Test:
+`test_responses_effort_none_turns_a_direct_models_thinking_off`.
 
 ### D5 — Vision wire format
 

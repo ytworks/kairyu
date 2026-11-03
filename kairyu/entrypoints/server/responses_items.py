@@ -584,7 +584,9 @@ def _to_chat_request(
     compaction_codec: _CompactionCodec,
     owner: str,
     replay_reasoning: bool = True,
+    direct: bool = True,
 ) -> ChatCompletionRequest:
+    """The chat request for one Responses request; ``direct`` is a non-AUTO model."""
     messages = _items_to_messages(
         items,
         compaction_codec=compaction_codec,
@@ -609,9 +611,9 @@ def _to_chat_request(
     if request.top_p is not None:
         values["top_p"] = request.top_p
     reasoning_effort = _reasoning_effort(request.reasoning)
-    if reasoning_effort is not None:
+    if reasoning_effort not in (None, "none"):
         values["reasoning_effort"] = reasoning_effort
-    return ChatCompletionRequest(
+    chat_request = ChatCompletionRequest(
         model=request.model,
         messages=messages,
         # Omitted means the remaining context, exactly like Chat Completions
@@ -626,3 +628,8 @@ def _to_chat_request(
         priority=request.priority,
         **values,
     )
+    if reasoning_effort == "none" and direct:
+        # Thinking off is internal: the public Chat parser keeps rejecting
+        # "none"; an AUTO model keeps its stage policy, as on Messages.
+        chat_request = chat_request.model_copy(update={"reasoning_effort": "none"})
+    return chat_request
