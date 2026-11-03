@@ -7,11 +7,14 @@ history lengths it counts how much of the caller-supplied output history the
 incremental path reads per step (one unit per call and one per token read)
 plus every hash, comparison, or integer conversion of a history token, for
 unchanged history and for one appended token per step.  It also counts the
-upkeep of the state's own active-token index: every element a tensor sort,
-copy, or allocation produces during the step, and every entry written,
+upkeep of the state's own active-token index: every element produced by any
+tensor operation during the step (views excepted), every element converted
+between tensors and Python data in either direction, and every entry written,
 removed, or iterated in the state's position and reference-count maps.
 Applying the penalties to the active tokens is the path's purpose and is
-proportional to them by design, so those gathers and writes are not counted.
+proportional to them by design, so only those operations are exempt: the
+gathers, comparisons, arithmetic, and scatters that compute floating-point or
+boolean penalty values.
 
 Examples:
     uv run python verification/l1/performance/sampler_penalty_state_bench.py --device cpu
@@ -28,6 +31,7 @@ import time
 from collections.abc import Callable, Sequence
 
 import torch
+from torch.overrides import TorchFunctionMode
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from kairyu.engine.core.sampler import Sampler
@@ -36,9 +40,10 @@ from kairyu.engine.core.sampling_types import EngineSampling
 WORK_UNIT = (
     "output-history reads (1 per call, 1 per token read) plus hashes, "
     "comparisons, and integer conversions of history tokens, plus "
-    "active-index upkeep (elements produced by tensor sorts, copies, and "
-    "allocations; position and reference-count map entries written, "
-    "removed, or iterated)"
+    "active-index upkeep (elements produced by every non-view tensor "
+    "operation except the floating-point/boolean penalty application, "
+    "elements converted between tensors and Python data, and position and "
+    "reference-count map entries written, removed, or iterated)"
 )
 PROMPT_LENGTH = 4_096
 
@@ -93,55 +98,81 @@ class _CountedToken(int):
         return int.__index__(self)
 
 
-# Tensor operations that sort, copy, or allocate: an index kept across steps
-# needs them only when it grows, never once per step.
-_INDEX_UPKEEP_OPS = frozenset(
-    packet
+# The penalty application: gathers, comparisons, arithmetic, and scatters of
+# penalty values over the active tokens.  It is exempt only while it computes
+# floating-point or boolean values; on index tensors it is upkeep.
+_PENALTY_APPLICATION_OPS = frozenset(
+    getattr(torch.ops.aten, name)
     for name in (
-        "_to_copy",
-        "_unique",
-        "_unique2",
-        "argsort",
-        "cat",
-        "clone",
-        "copy_",
-        "empty",
-        "empty_like",
-        "empty_strided",
-        "full",
-        "full_like",
-        "msort",
-        "new_empty",
-        "new_empty_strided",
-        "new_full",
-        "new_zeros",
-        "resize_",
-        "sort",
-        "stack",
-        "unique_consecutive",
-        "unique_dim",
-        "zeros",
-        "zeros_like",
+        "add",
+        "add_",
+        "div",
+        "div_",
+        "gt",
+        "index",
+        "index_put_",
+        "lt",
+        "mul",
+        "mul_",
+        "sub",
+        "sub_",
+        "where",
     )
-    if (packet := getattr(torch.ops.aten, name, None)) is not None
+)
+# Tensors built from Python data are fresh aliases, not views of an input.
+_CONSTRUCTION_OPS = frozenset(
+    getattr(torch.ops.aten, name)
+    for name in ("lift", "lift_fresh", "lift_fresh_copy")
+)
+# Tensor-to-Python conversions; each converts every element it reads.
+_MATERIALIZATIONS = frozenset(
+    (
+        "__array__",
+        "__float__",
+        "__index__",
+        "__int__",
+        "item",
+        "numpy",
+        "tolist",
+        "unbind",
+    )
 )
 
 
 class _CountingIndexUpkeep(TorchDispatchMode):
-    """Count the elements produced by index-upkeep tensor operations."""
+    """Count the elements every tensor operation produces, except views and
+    the penalty application."""
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         result = func(*args, **(kwargs or {}))
-        if func.overloadpacket in _INDEX_UPKEEP_OPS:
-            outputs = result if isinstance(result, (tuple, list)) else (result,)
-            _tick(
-                sum(
-                    output.numel()
-                    for output in outputs
-                    if isinstance(output, torch.Tensor)
-                )
+        outputs = tuple(
+            output
+            for output in (
+                result if isinstance(result, (tuple, list)) else (result,)
             )
+            if isinstance(output, torch.Tensor)
+        )
+        packet = func.overloadpacket
+        if func.is_view and packet not in _CONSTRUCTION_OPS:
+            return result
+        if packet in _PENALTY_APPLICATION_OPS and all(
+            output.is_floating_point() or output.dtype == torch.bool
+            for output in outputs
+        ):
+            return result
+        _tick(sum(output.numel() for output in outputs))
         return result
+
+
+class _CountingMaterialization(TorchFunctionMode):
+    """Count the elements converted from tensors to Python data."""
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        if getattr(func, "__name__", None) in _MATERIALIZATIONS and args:
+            source = args[0]
+            if isinstance(source, torch.Tensor):
+                _tick(source.numel())
+        return func(*args, **(kwargs or {}))
 
 
 class _CountingMap(dict):
@@ -878,7 +909,7 @@ def _work_history(
 
     def apply(state, sampler: Sampler, history, pending) -> None:
         row = logits.clone()
-        with _CountingIndexUpkeep():
+        with _CountingMaterialization(), _CountingIndexUpkeep():
             sampler._apply_incremental_penalties(
                 state,
                 row,
