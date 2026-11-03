@@ -1,0 +1,61 @@
+# Gemma 4 31B example: serve an edited chat checkpoint
+
+Status: **Plan approved 2026-11-04 (owner), including the verification plan.**
+Based on `main` only. Part of the owner's weight-space programming (WSP)
+benchmark; the benchmark itself is built in kairyu-bench (plan
+`docs/superpowers/plans/2026-11-04-wsp-benchmark.md` there).
+
+## Request
+
+- A common benchmark that measures, in 10, 30 and 60 minutes of GPU time, what
+  an edit of a model's weights gained and lost. Time reference (owner): Gemma 4
+  31B on eight GPUs, i.e. this example's layout (four TP2 chat replicas, MTP 4,
+  the example's vLLM v0.33.0 overlay, official sampling, thinking on).
+- An edited Gemma 4 31B checkpoint must therefore start in exactly that layout.
+  Owner decision (2026-11-04): add one setting to `gemma-4-31b-8gpu` that
+  replaces the chat checkpoint's location.
+
+## Facts
+
+1. The chat replicas load `/models/gemma-4-31b-it`, the pinned download inside
+   the example's model volume (`compose.yaml` `x-gemma`). `run.sh up` downloads
+   or checks it against `example.json` `model.tree_sha256` and refuses anything
+   else (`control.py` `_MODEL_PROGRAM`, `_ensure_models`).
+2. vLLM serves any complete Hugging Face checkpoint directory; the served name,
+   Kairyu's pool (`kairyu.yaml`) and the Chat UI only know `gemma-4-31b`.
+3. Speculative decoding verifies every drafted token, so the official MTP
+   assistant keeps the edited model's output distribution (only its speed can
+   change).
+4. Precedent pair on this host: `chinhnc/Quyet-1.0-Large` is Gemma-4-31B-it
+   with a merged rank-16 LoRA, attested at tree
+   `8f287d92…fb332a05` under the Quyet example's model volume.
+
+## Change (example-owned; `kairyu/` unchanged)
+
+- `CHAT_CHECKPOINT_DIR=<absolute directory under /mnt/nvme>`: when set, the four
+  chat replicas load that directory instead of the pinned checkpoint. It must
+  hold a complete checkpoint (`config.json`, safetensors, tokenizer, chat
+  template, `generation_config.json`; the served sampling defaults come from
+  it). The MTP assistant, EmbeddingGemma 2, the served name, the layout and all
+  L1 flags stay as they are.
+- Identity: the pinned hash check is skipped for that directory only; `run.sh up`
+  computes its tree hash with the attestation's algorithm, writes
+  `model-volumes/gemma-4-31b-8gpu/chat-checkpoint.json` (path, tree hash, files)
+  and prints the hash. Unset, the example behaves exactly as today.
+- Mechanics: every chat replica mounts its checkpoint read-only at
+  `/checkpoint`; the source defaults to the pinned directory.
+- Docs: README section; FN-D9 Gemma amendment; PROGRESS entry.
+- Tests: none added. The mount and the record are validated by `run.sh up`
+  (absolute NVMe path, directory with `config.json` and safetensors); the
+  end-to-end check is the GPU step below.
+
+## Verification (GPU, after review)
+
+1. `run.sh up` with `CHAT_CHECKPOINT_DIR` pointing at a directory that holds the
+   official non-weight files and Quyet-1.0-Large's safetensors (hard links on
+   the same NVMe): every chat replica becomes healthy, the record's file hashes
+   for the two safetensors equal Quyet's attestation, and one chat request is
+   answered. The WSP benchmark's KL diagnostic against the official run is
+   non-zero (the edited weights are served).
+2. `run.sh up` without the setting: the pinned checkpoint is checked and served
+   again (the official record), `serving` gate passes.
