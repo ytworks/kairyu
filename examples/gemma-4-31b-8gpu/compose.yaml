@@ -1,11 +1,12 @@
 name: kairyu-gemma-4-31b-8gpu
 
-# Gemma 4 31B chat replicas and EmbeddingGemma 2 embedding replicas on stock
-# vLLM, behind one Kairyu L3 endpoint, plus the Chat UI and its Docling.
-# Layout: PROVISIONAL until the replica search (MEASUREMENTS.md): seven TP1
-# chat replicas on GPUs 0-6 and two embedding replicas sharing GPU 7. The
-# search replaces the services below with the measured layout; control.py
-# refuses a compose file that disagrees with example.json's allocation.
+# Gemma 4 31B chat replicas and EmbeddingGemma 2 embedding replicas on vLLM
+# (pinned release + this example's SM120 overlay), behind one Kairyu L3
+# endpoint, plus the Chat UI and its Docling.
+# Layout (replica search 2026-11-04, MEASUREMENTS.md): four TP2 chat replicas
+# on GPUs 0-1, 2-3, 4-5 and 6-7 with the MTP assistant, and two embedding
+# replicas sharing GPUs 1 and 7. control.py refuses a compose file that
+# disagrees with example.json's allocation.
 x-vllm-env: &vllm-env
   HF_HOME: /models/.cache
   HF_HUB_OFFLINE: '1'
@@ -42,7 +43,10 @@ x-gemma: &gemma
     - --dtype
     - bfloat16
     - --tensor-parallel-size
-    - '1'
+    - '2'
+    # vLLM's custom all-reduce fails CUDA-graph capture on these PCIe SM120
+    # GPUs ('invalid argument'); NCCL carries tensor-parallel all-reduce.
+    - --disable-custom-all-reduce
     - --gpu-memory-utilization
     - ${CHAT_GPU_MEMORY_UTILIZATION}
     - --enable-prefix-caching
@@ -51,6 +55,11 @@ x-gemma: &gemma
     - --max-num-batched-tokens
     - '8192'
     - --async-scheduling
+    # The checkpoint's MTP assistant drafts four tokens (replica search step 2:
+    # +9-104 % output at c1-c32, MEASUREMENTS.md); verification keeps the
+    # target model's distribution.
+    - --speculative-config
+    - '{"model":"/models/gemma-4-31b-it-assistant","num_speculative_tokens":4}'
     - --enable-auto-tool-choice
     - --tool-call-parser
     - gemma4
@@ -105,42 +114,27 @@ services:
     <<: *gemma
     cpuset: ${GEMMA_0_CPUSET}
     volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['0'], capabilities: [gpu]}]}}}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['0', '1'], capabilities: [gpu]}]}}}
   gemma-1:
     <<: *gemma
     cpuset: ${GEMMA_1_CPUSET}
     volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['1'], capabilities: [gpu]}]}}}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['2', '3'], capabilities: [gpu]}]}}}
   gemma-2:
     <<: *gemma
     cpuset: ${GEMMA_2_CPUSET}
     volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['2'], capabilities: [gpu]}]}}}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['4', '5'], capabilities: [gpu]}]}}}
   gemma-3:
     <<: *gemma
     cpuset: ${GEMMA_3_CPUSET}
     volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['3'], capabilities: [gpu]}]}}}
-  gemma-4:
-    <<: *gemma
-    cpuset: ${GEMMA_4_CPUSET}
-    volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['4'], capabilities: [gpu]}]}}}
-  gemma-5:
-    <<: *gemma
-    cpuset: ${GEMMA_5_CPUSET}
-    volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['5'], capabilities: [gpu]}]}}}
-  gemma-6:
-    <<: *gemma
-    cpuset: ${GEMMA_6_CPUSET}
-    volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['6'], capabilities: [gpu]}]}}}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['6', '7'], capabilities: [gpu]}]}}}
   embed-0:
     <<: *embed
     cpuset: ${EMBED_0_CPUSET}
     volumes: [*models, *cache]
-    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['7'], capabilities: [gpu]}]}}}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['1'], capabilities: [gpu]}]}}}
   embed-1:
     <<: *embed
     cpuset: ${EMBED_1_CPUSET}
@@ -169,9 +163,6 @@ services:
       gemma-1: {condition: service_healthy}
       gemma-2: {condition: service_healthy}
       gemma-3: {condition: service_healthy}
-      gemma-4: {condition: service_healthy}
-      gemma-5: {condition: service_healthy}
-      gemma-6: {condition: service_healthy}
       embed-0: {condition: service_healthy}
       embed-1: {condition: service_healthy}
     ports:

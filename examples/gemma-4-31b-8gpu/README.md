@@ -12,10 +12,12 @@ Open WebUI (:3020, sign-in) -> Kairyu (:8020) -> pool gemma-4-31b       -> vLLM 
    +-> knowledge-base embeddings: Kairyu /v1/embeddings (embeddinggemma-2)
 ```
 
-> **Not GPU-verified yet.** The layout in `compose.yaml` / `kairyu.yaml`
-> (seven TP1 chat replicas on GPUs 0-6, two embedding replicas sharing GPU 7)
-> is provisional until the replica search below; `MEASUREMENTS.md` records
-> the search and the gates.
+Layout, chosen by the replica search below (`MEASUREMENTS.md`): four TP2
+chat replicas (GPUs 0-1, 2-3, 4-5, 6-7), each drafting four tokens with the
+checkpoint's MTP assistant and holding 2.89 full 262,144-token contexts, and
+two EmbeddingGemma 2 replicas sharing GPUs 1 and 7. One GPU cannot hold a
+262,144-token context, so there are no TP1 replicas. `MEASUREMENTS.md`
+records the search and the gates.
 
 ## Start
 
@@ -155,8 +157,8 @@ host; the committed configuration is restored afterwards):
    throughput for Open WebUI's batches and its query latency, and the chat
    rows with and without embedding load where embeddings share a chat GPU.
 4. `./tune.sh layout --load <layouts>`: the surviving full layouts (for
-   example seven TP1 chat replicas with a dedicated embedding GPU, eight TP1
-   with shared embeddings, four TP2) under three knowledge-base ingestions.
+   example four TP2 chat replicas with shared embedding GPUs, three TP2 with
+   two dedicated embedding GPUs) under three knowledge-base ingestions.
 5. The layout with the highest c32 / c64 aggregate output throughput wins;
    within 5 %, the faster c1. At least two embedding replicas always, so one
    failure does not stop knowledge bases. The result goes into

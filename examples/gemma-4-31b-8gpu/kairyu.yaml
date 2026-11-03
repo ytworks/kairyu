@@ -2,16 +2,15 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
-  # 7 chat replicas x 64 vLLM sequences, plus the Chat UI's embedding batches.
+  # Above 4 chat replicas x 64 vLLM sequences plus the Chat UI's embedding batches.
   max_concurrency: 512
   # A bounded queue wait fails a stuck request fast instead of parking it
   # (issue #495 rationale, shared with the other examples).
   admission_wait_timeout_s: 600
   max_chat_body_bytes: 100663296
 
-# Layout: PROVISIONAL until the replica search (MEASUREMENTS.md). Seven TP1
-# chat replicas on GPUs 0-6 and two embedding replicas on GPU 7; the search
-# replaces this file with the measured layout (example.json allocation).
+# Layout (replica search 2026-11-04, MEASUREMENTS.md): four TP2 chat
+# replicas and two embedding replicas (example.json allocation).
 pools:
   gemma-4-31b:
     replicas:
@@ -48,15 +47,6 @@ pools:
       - backend: openai
         health_url: http://gemma-3:8000/health
         options: {<<: *gemma, base_url: http://gemma-3:8000/v1}
-      - backend: openai
-        health_url: http://gemma-4:8000/health
-        options: {<<: *gemma, base_url: http://gemma-4:8000/v1}
-      - backend: openai
-        health_url: http://gemma-5:8000/health
-        options: {<<: *gemma, base_url: http://gemma-5:8000/v1}
-      - backend: openai
-        health_url: http://gemma-6:8000/health
-        options: {<<: *gemma, base_url: http://gemma-6:8000/v1}
     unhealthy_after: 1
     # A request whose prompt prefix is warm on a replica goes there only
     # while that replica is idle; with one request in flight the valve

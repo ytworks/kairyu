@@ -660,8 +660,12 @@ UI's knowledge bases embed through it with EmbeddingGemma 2's query and document
 instructions; `run.sh up` fails closed on any other retrieval configuration. The
 replica counts are not assumed: a measured search (`tune.py`) fixes them, under
 the conditions that every chat replica holds one 262,144-token request and that
-at least two embedding replicas exist. The committed layout (seven TP1 chat
-replicas, two embedding replicas on GPU 7) is provisional until that search.
+at least two embedding replicas exist. Search result (2026-11-04): one GPU
+cannot hold a 262,144-token context (TP1 excluded); the MTP assistant drafting
+four tokens is the only L1 option above the 5 % bar; four TP2 chat replicas
+with the two embedding replicas sharing GPUs 1 and 7 beat three TP2 replicas
+with dedicated embedding GPUs by 29-32 % at c32/c64 under knowledge-base
+ingestion, within the ingestion and query budgets.
 L1 uses the checkpoint's own chat template (Google's canonical Gemma 4 template)
 with thinking on by default; FP8 KV and third-party quantized checkpoints are
 excluded because they trade quality.

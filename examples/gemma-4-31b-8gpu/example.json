@@ -14,15 +14,15 @@
     "minimum_free_gib": 120
   },
   "allocation": {
-    "status": "provisional until the replica search (MEASUREMENTS.md)",
+    "status": "measured by the replica search, 2026-11-04 (MEASUREMENTS.md)",
     "gpu_ids": [0, 1, 2, 3, 4, 5, 6, 7],
     "chat": {
-      "tensor_parallel_size": 1,
-      "replica_gpu_ids": [[0], [1], [2], [3], [4], [5], [6]],
-      "gpu_memory_utilization": 0.92
+      "tensor_parallel_size": 2,
+      "replica_gpu_ids": [[0, 1], [2, 3], [4, 5], [6, 7]],
+      "gpu_memory_utilization": 0.86
     },
     "embedding": {
-      "replica_gpu_ids": [7, 7],
+      "replica_gpu_ids": [1, 7],
       "gpu_memory_utilization": 0.06
     }
   },
@@ -90,7 +90,8 @@
     "max_num_batched_tokens": 8192,
     "max_num_seqs": 64,
     "async_scheduling": true,
-    "mtp_speculative_tokens": 0,
+    "custom_all_reduce": false,
+    "mtp_speculative_tokens": 4,
     "images_per_prompt": 8
   },
   "webui": {
