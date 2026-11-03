@@ -1632,7 +1632,7 @@ class TestZmqTransport:
         with pytest.raises(error_type):
             subscriber.drain()
 
-    def test_pub_sub_round_trip_and_chaos_staleness(self):
+    def test_pub_sub_round_trip_and_chaos_staleness(self, tmp_path):
         zmq = pytest.importorskip("zmq")
         del zmq
         import time as _time
@@ -1641,7 +1641,9 @@ class TestZmqTransport:
             ZmqKvEventPublisher,
         )
 
-        endpoint = "tcp://127.0.0.1:29471"
+        # An IPC endpoint in the test's own directory: no TCP port, so the
+        # verdict cannot depend on which ports the runner has free.
+        endpoint = f"ipc://{tmp_path / 'kv-events.sock'}"
         clock = {"t": 0.0}
         index = KvEventIndex(staleness_s=0.5, now=lambda: clock["t"])
         publisher = ZmqKvEventPublisher(endpoint, replica_id="r1")
