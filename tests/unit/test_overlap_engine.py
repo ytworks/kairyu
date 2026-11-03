@@ -1,4 +1,4 @@
-import time
+import threading
 
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.overlap import OverlapEngineCore
@@ -14,16 +14,20 @@ class PositionRunner:
     position, never on previously committed outputs — exactly the property a
     real overlap runner has (it patches the last-token slot device-side)."""
 
-    def __init__(self, latency_s: float = 0.0, events: list | None = None) -> None:
-        self._latency_s = latency_s
+    def __init__(
+        self,
+        events: list | None = None,
+        hold_first_step: threading.Event | None = None,
+    ) -> None:
         self.events = events if events is not None else []
+        self._hold_first_step = hold_first_step
         self._step = 0
 
     def execute(self, scheduled, states) -> dict[str, int]:
         step = self._step
         self._step += 1
-        if self._latency_s:
-            time.sleep(self._latency_s)
+        if step == 0 and self._hold_first_step is not None:
+            self._hold_first_step.wait(timeout=10)  # hang bound only
         sampled = {
             chunk.request_id: (SampledToken(1000 + chunk.position),)
             for chunk in scheduled
@@ -81,9 +85,25 @@ def test_runner_receives_frozen_snapshot_not_live_state():
     assert all(t is RequestSnapshot for t in seen_types)
 
 
+class _SignallingEvents(list):
+    """Event log that signals when one entry is appended."""
+
+    def __init__(self, signal_on: str) -> None:
+        super().__init__()
+        self._signal_on = signal_on
+        self.signalled = threading.Event()
+
+    def append(self, item) -> None:
+        super().append(item)
+        if item == self._signal_on:
+            self.signalled.set()
+
+
 def test_next_step_is_scheduled_while_previous_executes():
-    events: list[str] = []
-    runner = PositionRunner(latency_s=0.02, events=events)
+    # Step 0 is held on the device until step 1 is planned; a serial loop
+    # never plans it, so step 0 is released only by the hang bound.
+    events = _SignallingEvents("scheduled:1")
+    runner = PositionRunner(events=events, hold_first_step=events.signalled)
     engine = _build(OverlapEngineCore, runner)
     engine.events = events
     for request in _requests(2):

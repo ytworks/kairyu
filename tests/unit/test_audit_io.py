@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import IO
@@ -29,6 +28,7 @@ class _WrappedFile:
         self._release_write = release_write
         self._fail_write = fail_write
         self.write_calls = 0
+        self.writes_in_progress = 0
 
     @property
     def closed(self) -> bool:
@@ -36,13 +36,17 @@ class _WrappedFile:
 
     def write(self, value: str) -> int:
         self.write_calls += 1
-        if self._write_started is not None:
-            self._write_started.set()
-        if self._release_write is not None:
-            assert self._release_write.wait(timeout=5)
-        if self._fail_write:
-            raise OSError("simulated disk failure")
-        return self._handle.write(value)
+        self.writes_in_progress += 1
+        try:
+            if self._write_started is not None:
+                self._write_started.set()
+            if self._release_write is not None:
+                assert self._release_write.wait(timeout=10)  # hang bound only
+            if self._fail_write:
+                raise OSError("simulated disk failure")
+            return self._handle.write(value)
+        finally:
+            self.writes_in_progress -= 1
 
     def flush(self) -> None:
         self._handle.flush()
@@ -84,24 +88,24 @@ class _OpenFile:
 def test_slow_filesystem_does_not_block_record_admission(tmp_path):
     write_started = threading.Event()
     release_write = threading.Event()
+    open_file = _OpenFile(
+        write_started=write_started,
+        release_write=release_write,
+    )
     writer = BoundedJsonlWriter(
         tmp_path / "audit.jsonl",
         max_pending=16,
         batch_size=4,
-        open_file=_OpenFile(
-            write_started=write_started,
-            release_write=release_write,
-        ),
+        open_file=open_file,
     )
 
     writer.append('{"record":0}')
-    assert write_started.wait(timeout=5)
-    started = time.perf_counter()
+    assert write_started.wait(timeout=10)
     for index in range(1, 9):
         writer.append(f'{{"record":{index}}}')
-    admission_seconds = time.perf_counter() - started
 
-    assert admission_seconds < 0.05
+    # Every append was admitted while the first write was still held.
+    assert open_file.handles[0].writes_in_progress == 1
     release_write.set()
     writer.close()
     assert (tmp_path / "audit.jsonl").read_text().splitlines() == [
@@ -112,23 +116,24 @@ def test_slow_filesystem_does_not_block_record_admission(tmp_path):
 def test_full_queue_fails_immediately_without_silent_drop(tmp_path):
     write_started = threading.Event()
     release_write = threading.Event()
+    open_file = _OpenFile(
+        write_started=write_started,
+        release_write=release_write,
+    )
     writer = BoundedJsonlWriter(
         tmp_path / "audit.jsonl",
         max_pending=1,
         batch_size=1,
-        open_file=_OpenFile(
-            write_started=write_started,
-            release_write=release_write,
-        ),
+        open_file=open_file,
     )
     writer.append('{"record":0}')
-    assert write_started.wait(timeout=5)
+    assert write_started.wait(timeout=10)
     writer.append('{"record":1}')
 
-    started = time.perf_counter()
     with pytest.raises(AuditQueueFull, match="queue is full"):
         writer.append('{"record":2}')
-    assert time.perf_counter() - started < 0.05
+    # The rejection did not wait for space: the first write is still held.
+    assert open_file.handles[0].writes_in_progress == 1
 
     release_write.set()
     writer.close()
@@ -153,7 +158,7 @@ def test_close_drains_batches_and_writer_can_restart(tmp_path):
         open_file=open_file,
     )
     writer.append('{"record":0}')
-    assert write_started.wait(timeout=5)
+    assert write_started.wait(timeout=10)
     for index in range(1, 9):
         writer.append(f'{{"record":{index}}}')
     release_write.set()

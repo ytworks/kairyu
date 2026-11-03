@@ -1,5 +1,5 @@
+import asyncio
 import threading
-import time
 from dataclasses import replace
 
 import pytest
@@ -103,13 +103,44 @@ async def test_moa_prompt_construction_runs_off_event_loop(monkeypatch):
     assert all(thread_id != event_loop_thread for thread_id in build_threads)
 
 
+class _HeldProposalsBackend(MockBackend):
+    """Holds the first ``held_calls`` calls until the test releases them."""
+
+    def __init__(self, held_calls: int) -> None:
+        super().__init__()
+        self._held_calls = held_calls
+        self._started = 0
+        self.order: list[str] = []
+        self.all_held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, request):
+        self._started += 1
+        call = self._started
+        self.order.append(f"start {call}")
+        if call <= self._held_calls:
+            if call == self._held_calls:
+                self.all_held.set()
+            await self.release.wait()
+        result = await super().generate(request)
+        self.order.append(f"finish {call}")
+        return result
+
+
 async def test_moa_proposals_run_concurrently():
-    latency = 0.05
-    backend = MockBackend(latency_s=latency)
-    start = time.perf_counter()
-    await run_moa(backend, "q", n_samples=4)
-    elapsed = time.perf_counter() - start
-    assert elapsed < latency * 4  # 4 proposals overlap + 1 synthesis call
+    backend = _HeldProposalsBackend(held_calls=4)
+    moa = asyncio.create_task(run_moa(backend, "q", n_samples=4))
+    try:
+        # Hang bound only: overlapping dispatch holds all four at once.
+        await asyncio.wait_for(backend.all_held.wait(), timeout=10)
+    except TimeoutError:
+        pass  # sequential dispatch never holds four; the order check reports it
+    finally:
+        backend.release.set()
+    await asyncio.wait_for(moa, timeout=10)
+    # Every proposal started before the first one finished; synthesis came last.
+    assert backend.order[:4] == ["start 1", "start 2", "start 3", "start 4"]
+    assert backend.order[-2:] == ["start 5", "finish 5"]
 
 
 async def test_moa_uses_separate_synthesizer_backend_when_given():

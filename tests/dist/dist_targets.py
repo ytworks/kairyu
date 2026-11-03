@@ -869,8 +869,10 @@ def control_idle_wait(
     from kairyu.engine.core.worker import serving_groups
 
     model_timeout_s = 0.1
-    control_timeout_s = 2.0
-    idle_s = 0.3
+    # Hang bound only: the receive must not fail while the sender idles.
+    control_timeout_s = 60.0
+    idle_s = 1.0
+    receiving = Path(out_dir, "rank1-receiving")
     init_distributed(rank, world_size, f"file://{init_file}", backend="gloo")
     groups = serving_groups(
         "gloo",
@@ -879,7 +881,15 @@ def control_idle_wait(
     )
     control = TorchDistCommunicator(group=groups.control)
     if rank == 0:
+        # The idle starts only after rank 1 is entering its receive, so that
+        # receive lasts at least idle_s (> model_timeout_s) by construction.
+        deadline = time.monotonic() + 60  # hang bound only
+        while not receiving.exists():
+            assert time.monotonic() < deadline, "rank 1 never reached its receive"
+            time.sleep(0.01)
         time.sleep(idle_s)
+    else:
+        receiving.touch()
     payload = control.broadcast({"after_idle": True} if rank == 0 else None, src=0)
     dist.destroy_process_group(groups.model)
     dist.destroy_process_group(groups.startup_control)

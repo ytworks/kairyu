@@ -19,10 +19,12 @@ class _SlowFile:
         handle: IO[str],
         write_started: threading.Event,
         release_write: threading.Event,
+        write_finished: threading.Event,
     ) -> None:
         self._handle = handle
         self._write_started = write_started
         self._release_write = release_write
+        self._write_finished = write_finished
 
     @property
     def closed(self) -> bool:
@@ -30,8 +32,11 @@ class _SlowFile:
 
     def write(self, value: str) -> int:
         self._write_started.set()
-        assert self._release_write.wait(timeout=5)
-        return self._handle.write(value)
+        try:
+            assert self._release_write.wait(timeout=10)  # hang bound only
+            return self._handle.write(value)
+        finally:
+            self._write_finished.set()
 
     def flush(self) -> None:
         self._handle.flush()
@@ -83,6 +88,7 @@ def test_usage_ledger_defers_json_encoding_to_writer_thread(
 async def test_slow_ledger_filesystem_does_not_delay_stream_completion(tmp_path):
     write_started = threading.Event()
     release_write = threading.Event()
+    write_finished = threading.Event()
 
     def slow_open(path: Path, mode: str, *, encoding: str) -> IO[str]:
         handle = open(path, mode, encoding=encoding)  # noqa: SIM115
@@ -90,6 +96,7 @@ async def test_slow_ledger_filesystem_does_not_delay_stream_completion(tmp_path)
             handle,
             write_started,
             release_write,
+            write_finished,
         )
 
     app = create_legacy_app({"m": MockBackend()})
@@ -111,12 +118,14 @@ async def test_slow_ledger_filesystem_does_not_delay_stream_completion(tmp_path)
                         "stream": True,
                     },
                 ),
-                timeout=1,
+                timeout=10,  # hang bound only
             )
 
         assert response.status_code == 200
         assert "data: [DONE]" in response.text
-        assert await asyncio.to_thread(write_started.wait, 1)
+        # The stream completed while the ledger write could not finish.
+        assert not write_finished.is_set()
+        assert await asyncio.to_thread(write_started.wait, 10)
     finally:
         release_write.set()
         await asyncio.to_thread(ledger.close)

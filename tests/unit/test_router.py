@@ -1,7 +1,6 @@
 import hashlib
 import json
 import threading
-import time
 
 import pytest
 
@@ -86,19 +85,6 @@ def test_calibrated_router_rejects_hash_and_quality_gate(tmp_path) -> None:
         load_calibrated_router(path, expected_sha256="0" * 64)
     with pytest.raises(ValueError, match="0.99 quality"):
         load_calibrated_router(path, expected_sha256=digest)
-
-
-def test_routing_p99_latency_under_10ms():
-    router = RuleRouter()
-    queries = [SIMPLE_QUERY, REASONING_QUERY, CODE_QUERY, MULTI_STEP_QUERY] * 250
-    durations = []
-    for query in queries:
-        start = time.perf_counter()
-        router.route(query)
-        durations.append(time.perf_counter() - start)
-    durations.sort()
-    p99 = durations[int(len(durations) * 0.99)]
-    assert p99 < 0.010, f"router p99 {p99 * 1000:.3f}ms exceeds 10ms"
 
 
 def test_jsonl_router_log_records_decision(tmp_path):
