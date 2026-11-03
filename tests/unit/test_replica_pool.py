@@ -26,11 +26,44 @@ from kairyu.orchestration.router import JsonlRouterLog
 from kairyu.sampling_params import SamplingParams
 
 
+class HeldBackend(MockBackend):
+    """MockBackend whose calls wait at a gate; the gate starts open.
+
+    A test closes ``gate`` to keep calls in flight and counts arrivals with
+    ``started`` instead of sleeping for a fixed time.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.gate.set()
+        self.started = 0
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.started += 1
+        await self.gate.wait()
+        return await super().generate(request)
+
+
+async def until(predicate) -> None:
+    """Yield to the event loop until ``predicate()`` holds.
+
+    The bound only detects a hang; the awaited state is reached within a few
+    loop iterations.
+    """
+
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
 class FlakyBackend:
     """MockBackend wrapper whose calls can be toggled to fail; counts shutdowns."""
 
-    def __init__(self, latency_s: float = 0.0) -> None:
-        self._inner = MockBackend(latency_s=latency_s)
+    def __init__(self) -> None:
+        self._inner = HeldBackend()
         self.failing = False
         self.client_failing = False  # raises a 4xx-style client error
         self.shutdown_count = 0
@@ -39,6 +72,14 @@ class FlakyBackend:
     @property
     def prompts_seen(self) -> tuple[str, ...]:
         return self._inner.prompts_seen
+
+    @property
+    def gate(self) -> asyncio.Event:
+        return self._inner.gate
+
+    @property
+    def started(self) -> int:
+        return self._inner.started
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         if self.client_failing:
@@ -885,7 +926,7 @@ async def test_cancelled_remove_finishes_detached_backend_shutdown() -> None:
     backend = BlockingShutdownBackend()
     pool = ReplicaPool({"detached": backend})
     task = asyncio.create_task(pool.remove_replica("detached"))
-    await asyncio.wait_for(backend.shutdown_started.wait(), timeout=1)
+    await asyncio.wait_for(backend.shutdown_started.wait(), timeout=10)
 
     task.cancel()
     await asyncio.sleep(0)
@@ -996,33 +1037,44 @@ async def test_client_errors_do_not_eject_the_replica():
 
 
 async def test_sessionless_goes_to_least_outstanding_with_lowest_index_ties():
-    backends = [MockBackend(latency_s=0.05) for _ in range(2)]
+    backends = [HeldBackend() for _ in range(2)]
+    for backend in backends:
+        backend.gate.clear()
     pool = ReplicaPool(backends)
     # All idle: first sessionless request must pick the lowest index.
     task = asyncio.ensure_future(pool.generate(make_request("first")))
-    await asyncio.sleep(0.01)
+    await until(lambda: sum(backend.started for backend in backends) == 1)
     assert backends[0].prompts_seen == ()  # still in flight; check dispatch below
     # While replica 0 is busy, the next sessionless request goes to replica 1.
-    await pool.generate(make_request("second"))
-    await task
+    second = asyncio.ensure_future(pool.generate(make_request("second")))
+    await until(lambda: sum(backend.started for backend in backends) == 2)
+    for backend in backends:
+        backend.gate.set()
+    await asyncio.gather(task, second)
     assert backends[0].prompts_seen == ("first",)
     assert backends[1].prompts_seen == ("second",)
 
 
 async def test_queue_depth_fallback_overflows_affine_replica():
-    backends = [FlakyBackend(latency_s=0.1) for _ in range(2)]
+    backends = [FlakyBackend() for _ in range(2)]
     pool = ReplicaPool(backends, queue_depth_threshold=0)
     session = "hot-session"
     fast_pool = ReplicaPool(backends)  # shares backends only to discover affinity
     affine = await place_session(fast_pool, backends, session)
     other = 1 - affine
+    dispatched = sum(backend.started for backend in backends)
 
+    backends[affine].gate.clear()  # the occupying call stays in flight
     in_flight = asyncio.ensure_future(
         pool.generate(make_request("occupy", session_id=session))
     )
-    await asyncio.sleep(0.02)  # let it dispatch to the affine replica
-    await pool.generate(make_request("overflow", session_id=session))
-    await in_flight
+    await until(lambda: sum(b.started for b in backends) == dispatched + 1)
+    overflow = asyncio.ensure_future(
+        pool.generate(make_request("overflow", session_id=session))
+    )
+    await until(lambda: sum(b.started for b in backends) == dispatched + 2)
+    backends[affine].gate.set()
+    await asyncio.gather(in_flight, overflow)
     assert any("occupy" in p for p in backends[affine].prompts_seen)
     assert any("overflow" in p for p in backends[other].prompts_seen)
 
@@ -1163,7 +1215,7 @@ async def test_late_inflight_success_cannot_silently_restore_ejected_replica(
                 pass
 
     successful = asyncio.create_task(invoke("late-success"))
-    await asyncio.wait_for(backend.success_started.wait(), timeout=1)
+    await asyncio.wait_for(backend.success_started.wait(), timeout=10)
     with pytest.raises(RuntimeError, match="ordered failure"):
         await invoke("failure")
     assert pool.eligible_ids == ()
@@ -1277,17 +1329,19 @@ async def test_pool_shutdown_drains_owned_router_log(tmp_path):
 
 
 async def test_outstanding_accounting_under_concurrent_load():
-    backends = [MockBackend(latency_s=0.05) for _ in range(2)]
+    backends = [HeldBackend() for _ in range(2)]
+    for backend in backends:
+        backend.gate.clear()
     pool = ReplicaPool(backends)
     requests = [make_request(f"load-{i}") for i in range(8)]
 
-    async def snapshot_later() -> tuple[int, ...]:
-        await asyncio.sleep(0.02)  # all 8 dispatched, none finished
-        return pool.outstanding
-
-    mid_flight, *_ = await asyncio.gather(
-        snapshot_later(), *(pool.generate(r) for r in requests)
-    )
+    calls = [asyncio.ensure_future(pool.generate(r)) for r in requests]
+    # all 8 dispatched, none finished
+    await until(lambda: sum(backend.started for backend in backends) == 8)
+    mid_flight = pool.outstanding
+    for backend in backends:
+        backend.gate.set()
+    await asyncio.gather(*calls)
     assert sum(mid_flight) == 8
     assert mid_flight == (4, 4)  # least-outstanding spreads evenly
     assert pool.outstanding == (0, 0)  # decremented on completion
@@ -1361,14 +1415,18 @@ async def test_remove_replica_closes_backend_exactly_once():
 
 
 async def test_forced_remove_closes_inflight_backend_immediately():
-    backend = FlakyBackend(latency_s=0.1)
+    backend = FlakyBackend()
+    backend.gate.clear()  # the request stays in flight until released
     pool = ReplicaPool({"busy": backend})
     task = asyncio.create_task(pool.generate(make_request("busy")))
-    await asyncio.sleep(0.01)
+    await until(lambda: backend.started == 1)
 
-    await pool.remove_replica("busy", force=True)
+    # The removal completes while the request is still in flight.
+    await asyncio.wait_for(pool.remove_replica("busy", force=True), timeout=10)
 
     assert backend.shutdown_count == 1
+    assert not task.done()
+    backend.gate.set()
     await task
 
 

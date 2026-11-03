@@ -94,9 +94,13 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
 
 
 class IntentBackend:
-    def __init__(self, *, latency_s: float = 0.0) -> None:
+    def __init__(self, *, overlapping_calls: int = 1) -> None:
         self.requests = []
-        self.latency_s = latency_s
+        # Calls wait until this many have arrived, so concurrent calls are all
+        # in flight together by construction rather than by a delay.
+        self._overlapping_calls = overlapping_calls
+        self._arrived = 0
+        self._all_arrived = asyncio.Event()
 
     def _result(self, request):
         if "[verifier]" in request.prompt:
@@ -134,8 +138,11 @@ class IntentBackend:
         )
 
     async def generate(self, request):
-        if self.latency_s:
-            await asyncio.sleep(self.latency_s)
+        self._arrived += 1
+        if self._arrived >= self._overlapping_calls:
+            self._all_arrived.set()
+        # The bound only detects a hang (e.g. calls that never overlap).
+        await asyncio.wait_for(self._all_arrived.wait(), timeout=10)
         self.requests.append(request)
         return self._result(request)
 
@@ -412,7 +419,7 @@ def test_orchestration_request_rejects_non_boolean_parallel_tool_calls(value):
 
 
 async def test_concurrent_calls_do_not_mix_request_intent():
-    backend = IntentBackend(latency_s=0.01)
+    backend = IntentBackend(overlapping_calls=2)
     orchestrator = Orchestrator({"tier1": backend})
     first = _call("first", n=2, temperature=0.1)
     second = _call("second", n=3, temperature=1.7)

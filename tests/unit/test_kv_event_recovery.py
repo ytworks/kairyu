@@ -45,7 +45,7 @@ def _subscriber_with_messages(
 
 
 def test_delayed_sequence_zero_cannot_retrust_same_epoch_gap() -> None:
-    index = KvEventIndex()
+    index = KvEventIndex(now=lambda: 0.0)  # freshness never decides the verdict
 
     assert index.apply_sequenced("r1", "epoch-a", 2, _stored("late")) == "gap"
     assert index.apply_sequenced("r1", "epoch-a", 0, _stored("first")) == "applied"
@@ -92,7 +92,7 @@ def test_exact_membership_scoring_releases_lock_and_revalidates_feed() -> None:
     class BlockingSet(set[str]):
         def __contains__(self, value: object) -> bool:
             scoring.set()
-            assert resume.wait(timeout=2)
+            assert resume.wait(timeout=20)
             return super().__contains__(value)
 
     with index._lock:
@@ -103,7 +103,7 @@ def test_exact_membership_scoring_releases_lock_and_revalidates_feed() -> None:
         target=lambda: result.append(index.route_overlaps(("r1",), ("h0",)))
     )
     route_thread.start()
-    assert scoring.wait(timeout=1)
+    assert scoring.wait(timeout=10)
 
     changed = threading.Event()
 
@@ -114,11 +114,11 @@ def test_exact_membership_scoring_releases_lock_and_revalidates_feed() -> None:
     mutation_thread = threading.Thread(target=mark_gap)
     mutation_thread.start()
     try:
-        assert changed.wait(timeout=1), "membership scoring retained the index lock"
+        assert changed.wait(timeout=10), "membership scoring retained the index lock"
     finally:
         resume.set()
-        route_thread.join(timeout=2)
-        mutation_thread.join(timeout=2)
+        route_thread.join(timeout=20)
+        mutation_thread.join(timeout=20)
 
     assert not route_thread.is_alive()
     assert not mutation_thread.is_alive()
@@ -309,7 +309,7 @@ def test_subscriber_rejects_non_owner_thread_before_touching_socket() -> None:
 
     worker = threading.Thread(target=pause_from_non_owner)
     worker.start()
-    worker.join(timeout=1)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert len(errors) == 1
@@ -360,7 +360,32 @@ def test_publisher_closes_partially_created_sockets_on_startup_failure(
         )
 
     assert len(context.sockets) == 2
-    assert all(socket.closed.wait(timeout=1) for socket in context.sockets)
+    assert all(socket.closed.wait(timeout=10) for socket in context.sockets)
+
+
+class _WriterContentionLock:
+    """Index lock wrapper that records when the writer finds the lock held."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.writer_blocked = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if threading.current_thread().name == "writer" and blocking:
+            if self._inner.acquire(blocking=False):
+                return True
+            self.writer_blocked.set()
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
 
 
 def test_atomic_view_cannot_mix_sequence_metadata_and_hashes() -> None:
@@ -371,16 +396,18 @@ def test_atomic_view_cannot_mix_sequence_metadata_and_hashes() -> None:
     def now() -> float:
         if block_reader["enabled"] and threading.current_thread().name == "reader":
             reader_entered_now.set()
-            assert release_reader.wait(timeout=1)
+            assert release_reader.wait(timeout=20)
         return 1.0
 
     index = KvEventIndex(now=now)
     assert index.apply_sequenced("r1", "epoch-a", 0, _stored("h0")) == "applied"
+    lock = _WriterContentionLock(index._lock)
+    index._lock = lock
     block_reader["enabled"] = True
     observed: list[object] = []
     reader_errors: list[BaseException] = []
     writer_errors: list[BaseException] = []
-    writer_started = threading.Event()
+    writer_done = threading.Event()
 
     def read_view() -> None:
         try:
@@ -389,21 +416,30 @@ def test_atomic_view_cannot_mix_sequence_metadata_and_hashes() -> None:
             reader_errors.append(error)
 
     def apply_next() -> None:
-        writer_started.set()
         try:
             index.apply_sequenced("r1", "epoch-a", 1, _stored("h1"))
         except BaseException as error:
             writer_errors.append(error)
+        finally:
+            writer_done.set()
 
     reader = threading.Thread(target=read_view, name="reader")
     writer = threading.Thread(target=apply_next, name="writer")
     reader.start()
-    assert reader_entered_now.wait(timeout=1)
+    assert reader_entered_now.wait(timeout=10)
     writer.start()
-    assert writer_started.wait(timeout=1)
+    # Release the reader only once the writer is blocked on the index lock
+    # (an atomic view) or has already applied its delta (a view that let it
+    # in); either way the reader's view is decided by the code, not by timing.
+    for _ in range(1000):  # hang bound only: 1000 x 10 ms
+        if lock.writer_blocked.is_set() or writer_done.is_set():
+            break
+        writer_done.wait(timeout=0.01)
+    else:
+        raise AssertionError("writer neither blocked nor finished (hang)")
     release_reader.set()
-    reader.join(timeout=1)
-    writer.join(timeout=1)
+    reader.join(timeout=10)
+    writer.join(timeout=10)
 
     assert not reader.is_alive()
     assert not writer.is_alive()

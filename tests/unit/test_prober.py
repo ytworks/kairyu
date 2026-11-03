@@ -191,7 +191,7 @@ async def test_check_once_bounds_concurrent_probe_requests():
     )
     check = asyncio.create_task(prober.check_once())
     try:
-        await asyncio.wait_for(first_wave_started.wait(), timeout=0.2)
+        await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         assert check.done() is False
         assert 1 < peak <= max_concurrency
     finally:
@@ -258,7 +258,7 @@ async def test_removed_probe_result_cannot_validate_a_later_same_id_generation()
         max_concurrency=2,
     )
     check = asyncio.create_task(prober.check_once())
-    await asyncio.wait_for(old_started.wait(), timeout=0.2)
+    await asyncio.wait_for(old_started.wait(), timeout=10)
 
     await pool.remove_replica("same")
     pool.add_replica("same", MockBackend(), health_url="http://new/readyz")
@@ -337,7 +337,7 @@ async def test_run_checks_immediately_and_closes_client_when_cancelled():
     prober.check_once = record_tick  # type: ignore[method-assign]
     task = asyncio.create_task(prober.run())
     try:
-        await asyncio.wait_for(checked.wait(), timeout=0.2)
+        await asyncio.wait_for(checked.wait(), timeout=10)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -366,7 +366,7 @@ async def test_run_does_not_close_externally_owned_shared_client():
     prober.check_once = record_tick  # type: ignore[method-assign]
     task = asyncio.create_task(prober.run())
     try:
-        await asyncio.wait_for(checked.wait(), timeout=0.2)
+        await asyncio.wait_for(checked.wait(), timeout=10)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

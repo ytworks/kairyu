@@ -204,16 +204,18 @@ class TestDynamicMembership:
         class SlowBackend(MockBackend):
             def __init__(self):
                 super().__init__()
+                self.started = asyncio.Event()
                 self.release = asyncio.Event()
 
             async def generate(self, request):
+                self.started.set()
                 await self.release.wait()
                 return GenerationResult(request_id="req", prompt="p", completions=(), finished=True)
 
         slow = SlowBackend()
         pool = ReplicaPool({"s": slow})
         task = asyncio.create_task(pool.generate(_request()))
-        await asyncio.sleep(0.01)
+        await asyncio.wait_for(slow.started.wait(), timeout=10)  # now in flight
         with pytest.raises(RuntimeError, match="in-flight"):
             await pool.remove_replica("s")
         await pool.remove_replica("s", force=True)

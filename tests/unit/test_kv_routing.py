@@ -1492,7 +1492,7 @@ class TestKvEventIndex:
     def test_all_blocks_cleared_is_handled(self, clear_event):
         # M4: vLLM emits AllBlocksCleared on a cache reset; it must clear the
         # replica's blocks, not crash the subscriber.
-        index = KvEventIndex()
+        index = KvEventIndex(now=lambda: 0.0)  # freshness never decides the verdict
         index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1", "h2"]})
         index.apply("r1", clear_event)
         assert index.overlap("r1", ["h1", "h2"]) == 0
@@ -1646,12 +1646,22 @@ class TestZmqTransport:
         index = KvEventIndex(staleness_s=0.5, now=lambda: clock["t"])
         publisher = ZmqKvEventPublisher(endpoint, replica_id="r1")
         subscriber = ZmqKvEventSubscriber([endpoint], index)
-        _time.sleep(0.2)  # PUB/SUB slow-joiner
+
+        def poll_until(predicate, what: str) -> None:
+            # The deadline only detects a hang; it never decides a verdict.
+            deadline = _time.monotonic() + 10
+            while not predicate():
+                assert _time.monotonic() < deadline, f"{what} (hang)"
+                _time.sleep(0.01)
+
+        # PUB/SUB slow joiner: publish only once the subscriber has observably
+        # received a frame (the publisher's periodic heartbeat).
+        poll_until(lambda: subscriber.drain() > 0, "subscriber never joined")
         publisher({"type": "BlockStored", "block_hashes": ["h1"]})
-        deadline = _time.monotonic() + 2
-        while index.overlap("r1", ["h1"]) != 1 and _time.monotonic() < deadline:
-            subscriber.drain()
-            _time.sleep(0.01)
+        poll_until(
+            lambda: subscriber.drain() >= 0 and index.overlap("r1", ["h1"]) == 1,
+            "published delta never became routable",
+        )
         assert index.overlap("r1", ["h1"]) == 1
         # chaos: kill the publisher; staleness must flip to fallback
         publisher.close()
