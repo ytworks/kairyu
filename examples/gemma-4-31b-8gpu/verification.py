@@ -2342,11 +2342,13 @@ def office(run_dir: Path) -> int:
     """Word, Excel and PowerPoint in the Chat UI: read each attachment, then edit it to a new file.
 
     Chromium attaches each fixture with the clip, asks about its key fact, then
-    asks for an edit that the code interpreter must run; every result the
-    reply links is saved and checked. A reply without a link is the model not
-    calling the download tool at its official sampling: recorded as a model
-    miss, not judged, but at least one format must offer its link. Last, an
-    image attached to that chat (after its tool calls) must be answered.
+    asks for an edit. Every result is saved from the chat's Files panel (the
+    code interpreter's file browser) and checked, whatever the reply says; a
+    result the reply also delivers must be the same file. A reply that
+    delivers nothing is the model not calling the download tool at its
+    official sampling: recorded as a model miss, but at least one format must
+    be delivered. Last, an image attached to that chat (after its tool calls)
+    must be answered.
     """
     fixtures = run_dir / "fixtures"
     results = run_dir / "results"
@@ -2370,19 +2372,28 @@ def office(run_dir: Path) -> int:
     line = _docling_python(_OFFICE_CHECK, results, "/work")
     checks = json.loads(line.split("OFFICE-CHECK ", 1)[1])
     misses = _model_misses(browser.stdout)
-    missed = {OFFICE_CASES[format_]["result"] for format_ in misses}
+    # A delivered copy must be the very file the code interpreter wrote.
+    delivered = {
+        case["result"]: (results / case["result"]).exists()
+        and (results / f"{case['result']}.delivered").read_bytes()
+        == (results / case["result"]).read_bytes()
+        for case in OFFICE_CASES.values()
+        if (results / f"{case['result']}.delivered").exists()
+    }
     report = {
         "browser_exit": browser.returncode,
         "checks": checks,
+        "delivered_equals_workspace": delivered,
         "model_misses": misses,
         "kairyu": {"before": before, "after": after},
     }
     passed = (
         browser.returncode == 0
-        and len(missed) < len(checks)
-        # Every linked result has the edit; every other one is a recorded miss.
-        and all(row.get("passed") or name in missed for name, row in checks.items())
-        and not any(checks[name].get("exists") for name in missed)
+        # Every edit is checked on the code interpreter's own file.
+        and all(row.get("passed") for row in checks.values())
+        and bool(delivered)
+        and all(delivered.values())
+        and len(delivered) + len(misses) == len(OFFICE_CASES)
         and after["/v1/responses"] > before["/v1/responses"]
         and after["/v1/chat/completions"] == before["/v1/chat/completions"]
     )

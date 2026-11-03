@@ -63,16 +63,22 @@ EMBED_UTIL = 0.06
 
 # Chat flag -> value (None removes the flag, True adds a bare flag).
 DRAFTER = "/models/" + control.SPEC["drafter"]["slug"]
+# Step 2's reference is the L1 without the MTP assistant, whatever the
+# committed command keeps; each other step-2 candidate is that reference with
+# one change. "committed" is the served command (what step 2 kept), used by
+# the layout and embedding steps.
+REFERENCE: dict[str, object] = {"--speculative-config": None}
 CANDIDATES: dict[str, dict[str, object]] = {
-    "baseline": {},
+    "committed": {},
+    "baseline": dict(REFERENCE),
     # Run-to-run variation of a single trial, measured like every candidate.
-    "baseline-repeat": {},
+    "baseline-repeat": dict(REFERENCE),
     "mtp-4": {"--speculative-config": json.dumps({"model": DRAFTER, "num_speculative_tokens": 4})},
     "mtp-8": {"--speculative-config": json.dumps({"model": DRAFTER, "num_speculative_tokens": 8})},
-    "no-async-scheduling": {"--async-scheduling": None},
-    "batch-4k": {"--max-num-batched-tokens": "4096"},
-    "batch-16k": {"--max-num-batched-tokens": "16384"},
-    "seqs-128": {"--max-num-seqs": "128"},
+    "no-async-scheduling": {**REFERENCE, "--async-scheduling": None},
+    "batch-4k": {**REFERENCE, "--max-num-batched-tokens": "4096"},
+    "batch-16k": {**REFERENCE, "--max-num-batched-tokens": "16384"},
+    "seqs-128": {**REFERENCE, "--max-num-seqs": "128"},
 }
 BARE_FLAGS = {"--enable-prefix-caching", "--async-scheduling", "--enable-auto-tool-choice"}
 
@@ -465,7 +471,7 @@ def main() -> None:
     layout = sub.add_parser("layout", help="measure whole layouts")
     layout.add_argument("layouts", nargs="+", choices=list(LAYOUTS))
     layout.add_argument("--load", action="store_true", help="three ingestions during the rows")
-    layout.add_argument("--candidate", default="baseline", choices=list(CANDIDATES))
+    layout.add_argument("--candidate", default="committed", choices=list(CANDIDATES))
     l1 = sub.add_parser("l1", help="chat L1 options one at a time on one layout")
     l1.add_argument("candidates", nargs="+", choices=list(CANDIDATES))
     l1.add_argument("--layout", required=True, choices=list(LAYOUTS))
@@ -486,7 +492,7 @@ def main() -> None:
     elif args.action == "l1":
         jobs = [(args.layout, candidate) for candidate in args.candidates]
     else:
-        jobs = [(args.layout, "baseline")]
+        jobs = [(args.layout, "committed")]
     reports: list[dict] = []
     try:
         for layout_name, candidate in jobs:

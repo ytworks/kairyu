@@ -157,7 +157,9 @@ host; the committed configuration is restored afterwards):
    replica must hold at least one (the model's full context, as the 1017
    example serves its full context); a TP that cannot is excluded.
 2. `./tune.sh l1 --layout <layout> baseline baseline-repeat mtp-4 mtp-8 ...`:
-   L1 options one at a time; a change is kept only at 5 % or more.
+   L1 options one at a time against the reference L1 without the MTP
+   assistant (`baseline`); a change is kept only at 5 % or more. Steps 3 and
+   4 and `layout` use the committed command (`committed`).
 3. `./tune.sh embedding --layout <layout>`: one embedding replica's
    throughput for Open WebUI's batches and its query latency, and the chat
    rows with and without embedding load where embeddings share a chat GPU.
@@ -201,8 +203,9 @@ the Chat UI's APIs. Stop at the first failing gate.
   an image, a `#` knowledge answer citing the scan, only the chat model
   offered), `knowledge-serving` (c1/c8 while ingesting at least 95 % of the
   same run's unloaded rows), `office` (each docx / xlsx / pptx read and
-  edited by the code interpreter; every delivered result saved and checked,
-  at least one delivered), `file-download` (saved on a desktop, after a
+  edited by the code interpreter; every result saved from the chat's Files
+  panel and checked, a result the reply delivers must be the same file, at
+  least one delivered), `file-download` (saved on a desktop, after a
   reload and on an iPhone 13). A reply delivers a file when `provide_download`
   attached it (the file item above the text) or the text links it; the gate
   saves it as a user does, from the text link or from the file item's

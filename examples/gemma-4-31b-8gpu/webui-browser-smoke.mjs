@@ -8,13 +8,16 @@
  *
  * With WEBUI_SMOKE_MODE=office (run by `verify.sh office`), each Word, Excel
  * and PowerPoint fixture is attached with the clip, asked about, then edited
- * by the code interpreter; a result the reply delivers is saved into /results
- * for the gate to check. A reply delivers a file when the download tool
- * attached it (the file item above the text) or the text links it; it is
- * saved the way a user does: the text link if there is one, else the file
- * item and the link in its dialog. At its official sampling the model
- * sometimes answers without calling the download tool: such a format is
- * recorded as a model miss, and at least one format must be delivered.
+ * by the code interpreter. Every result is saved into /results from the
+ * chat's Files panel (the code interpreter's file browser at /mnt/uploads),
+ * so the gate checks each edit whatever the model replied; a result the reply
+ * also delivers is saved again from the reply as <result>.delivered for the
+ * gate to compare. A reply delivers a file when the download tool attached it
+ * (the file item above the text) or the text links it; it is saved the way a
+ * user does: the text link if there is one, else the file item and the link
+ * in its dialog. At its official sampling the model sometimes answers without
+ * calling the download tool: such a format is recorded as a model miss, and
+ * at least one format must be delivered.
  *
  * With WEBUI_SMOKE_MODE=download (run by `verify.sh file-download`), the
  * owner's request for an Excel template is asked on a desktop screen and on
@@ -261,6 +264,30 @@ async function askForFile(label) {
 	throw new Error(`${label}: three replies delivered no file`);
 }
 
+// Save a file the code interpreter wrote, from the chat's Files panel (its
+// Pyodide file browser, which opens at /mnt/uploads), as /results/<saveAs>.
+async function saveFromWorkspace(name, saveAs) {
+	const region = page.locator('[aria-label="Pyodide file browser"]');
+	if ((await region.count()) === 0) {
+		await page.locator('button[aria-label="Controls"]').first().click({ timeout: actionTimeoutMs });
+		await page.getByRole('button', { name: 'Files', exact: true }).first().click({ timeout: actionTimeoutMs });
+		await region.waitFor({ timeout: actionTimeoutMs });
+	}
+	await region.locator('button[aria-label="Refresh"]').click({ timeout: actionTimeoutMs });
+	// The listing re-renders after the refresh; poll for the file's row.
+	const row = region.getByText(name, { exact: true }).first();
+	for (let waited = 0; (await row.count()) === 0 && waited < actionTimeoutMs; waited += 500) {
+		await page.waitForTimeout(500);
+	}
+	invariant((await row.count()) > 0, `the code interpreter wrote no ${name}: ${(await region.innerText()).slice(0, 400)}`);
+	await row.click({ timeout: actionTimeoutMs });
+	const download = page.waitForEvent('download', { timeout: navigationTimeoutMs });
+	await region.locator('button[aria-label="Download"]').first().click({ timeout: actionTimeoutMs });
+	await (await download).saveAs(`/results/${saveAs}`);
+	console.log(JSON.stringify({ saved_from_workspace: saveAs }));
+	await page.locator('button[aria-label="Controls"]').first().click({ timeout: actionTimeoutMs });
+}
+
 // The last assistant message of the open chat.
 function lastReply() {
 	return page.locator('ul[role="log"] [role="listitem"]').last();
@@ -295,13 +322,13 @@ async function officeMain() {
 			await page.locator('#chat-input').fill(item.edit);
 			const { item: reply, text } = await sendAndRead();
 			console.log(JSON.stringify({ format, edit_answer: text.slice(0, 400) }));
-			invariant(/execute_code/.test(text), `${format}: the code interpreter did not run: ${text.slice(0, 400)}`);
-			if (!(await deliversFile(reply))) {
+			if (await deliversFile(reply)) {
+				await downloadFromReply(reply, `${item.result}.delivered`);
+			} else {
 				misses.push(format);
 				console.log(JSON.stringify({ model_miss: format }));
-				return;
 			}
-			await downloadFromReply(reply, item.result);
+			await saveFromWorkspace(item.result, item.result);
 		});
 	}
 	invariant(misses.length < Object.keys(officeCases).length, 'no format delivered its file');
