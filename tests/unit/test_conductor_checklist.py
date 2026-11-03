@@ -942,7 +942,7 @@ async def test_a_verdict_waits_for_an_ancestor_that_runs_beside_its_target_witho
     class SlowP(RoutedBackend):
         async def generate(self, request):
             if str(request.prompt).startswith("[p]"):
-                await asyncio.wait_for(a_done.wait(), timeout=5)
+                await asyncio.wait_for(a_done.wait(), timeout=10)
             result = await super().generate(request)
             if str(request.prompt).startswith("[a]"):
                 a_done.set()
@@ -988,7 +988,7 @@ async def test_a_verdict_waits_for_a_head_that_runs_beside_its_target_without_an
     class SlowHead(RoutedBackend):
         async def generate(self, request):
             if str(request.prompt).startswith("[head]"):
-                await asyncio.wait_for(a_done.wait(), timeout=5)
+                await asyncio.wait_for(a_done.wait(), timeout=10)
             result = await super().generate(request)
             if str(request.prompt).startswith("[a]"):
                 a_done.set()
@@ -1041,7 +1041,7 @@ async def test_a_verifier_judges_its_target_against_a_branch_running_beside_it()
             if str(request.prompt).startswith("[drafts]"):
                 drafts_started.set()
             else:
-                await asyncio.wait_for(drafts_started.wait(), timeout=5)
+                await asyncio.wait_for(drafts_started.wait(), timeout=10)
             return await super().generate(request)
 
     backend = Gated(

@@ -436,16 +436,13 @@ async def test_async_prepare_builds_request_sized_plan_off_event_loop(
     def gated_plan(*args):
         plan_threads.append(threading.get_ident())
         plan_started.set()
-        assert release_plan.wait(timeout=5)
+        assert release_plan.wait(timeout=10)
         return original(*args)
 
     monkeypatch.setattr(orchestrator, "_build_preparation_plan", gated_plan)
     preparation = asyncio.create_task(orchestrator.prepare_request(COMPLEX * 1000))
     try:
-        assert await asyncio.wait_for(
-            asyncio.to_thread(plan_started.wait, 1),
-            timeout=2,
-        )
+        assert await asyncio.to_thread(plan_started.wait, 10)
         assert not preparation.done()
         assert plan_threads != [event_loop_thread]
     finally:
@@ -1576,10 +1573,31 @@ async def test_multistage_stream_emits_periodic_keepalives(monkeypatch):
     import kairyu.orchestration.orchestrator as orch_mod
 
     monkeypatch.setattr(orch_mod, "_KEEPALIVE_INTERVAL_S", 0.01)
-    # backends with latency so the multi-agent run outlasts several keepalives
-    slow = {"tier1": MockBackend(latency_s=0.03), "tier2": MockBackend(latency_s=0.03)}
-    orchestrator = _orchestrator(engines=slow)
-    events = [event async for event in await orchestrator.run_chat(COMPLEX, stream=True)]
+    release = asyncio.Event()
+
+    class HeldBackend(MockBackend):
+        async def generate(self, request):
+            await release.wait()
+            return await super().generate(request)
+
+    # The stage stays in flight until the stream has emitted keep-alives, so
+    # the run outlasts several keep-alive intervals by construction.
+    held = {"tier1": HeldBackend(), "tier2": HeldBackend()}
+    orchestrator = _orchestrator(engines=held)
+    stream = await orchestrator.run_chat(COMPLEX, stream=True)
+    events = []
+
+    async def until_keepalives_while_held() -> None:
+        async for event in stream:
+            events.append(event)
+            if [e.kind for e in events].count("status") >= 3:
+                return
+
+    # The bound only detects a hang: keep-alives are due every 10 ms.
+    await asyncio.wait_for(until_keepalives_while_held(), timeout=10)
+    assert not any(e.kind in {"delta", "result"} for e in events)
+    release.set()
+    events.extend([event async for event in stream])
     kinds = [e.kind for e in events]
     assert kinds.count("status") >= 2  # routing + at least one "working" keepalive
     assert kinds[-1] == "result"
@@ -1844,6 +1862,7 @@ def _profiled_orchestrator(
     judge_prompt_prefix="",
     judge_prompt_suffix="",
     fallback="primary",
+    judge_timeout_s=10.0,
 ):
     # Issue #509 / DTO-D13: one served model, several role profiles selected
     # per request by an optional LLM judge. The primary profile is a single
@@ -1898,7 +1917,7 @@ def _profiled_orchestrator(
         profile_judge=(
             ProfileJudge(
                 worker="judge",
-                timeout_seconds=0.05,
+                timeout_seconds=judge_timeout_s,
                 prompt_prefix=judge_prompt_prefix,
                 prompt_suffix=judge_prompt_suffix,
                 choices=(
@@ -2183,18 +2202,24 @@ async def test_image_request_is_offered_only_image_capable_profiles():
 
 
 async def test_judge_failure_falls_back_to_configured_profile():
+    class SilentJudge(MockBackend):
+        async def generate(self, request):
+            await asyncio.Event().wait()  # never answers: the judge timeout fires
+
     tier1 = MockBackend()
     tier2 = MockBackend()
-    slow_judge = MockBackend(
-        responses={_JUDGE_PROMPT_MARKER: "GENERAL"},
-        latency_s=5.0,
+    slow_judge = SilentJudge(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(
+        tier1, tier2, slow_judge, fallback="ensemble", judge_timeout_s=0.05
     )
-    orchestrator = _profiled_orchestrator(tier1, tier2, slow_judge, fallback="ensemble")
-    call = await orchestrator.judge_role_profile(
-        OrchestrationRequest(
-            prompt="Implement a python function that reverses a list.",
-            sampling_params=SamplingParams(max_tokens=64),
-        )
+    call = await asyncio.wait_for(  # the bound only detects a missing judge timeout
+        orchestrator.judge_role_profile(
+            OrchestrationRequest(
+                prompt="Implement a python function that reverses a list.",
+                sampling_params=SamplingParams(max_tokens=64),
+            )
+        ),
+        timeout=10,
     )
     assert call.role_profile_judgment is None
     result = await orchestrator.run(call)
@@ -2306,6 +2331,7 @@ async def test_judge_and_non_thinking_final_disable_thinking_explicitly():
         },
         profile_judge=ProfileJudge(
             worker="judge",
+            timeout_seconds=10.0,
             choices=(
                 ProfileChoice("fast", "FAST", "trivial"),
                 ProfileChoice("primary", "SLOW", "rest"),

@@ -921,7 +921,7 @@ def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=120,  # hang bound only; the faked run takes a few seconds
     )
 
     assert result.returncode != 0

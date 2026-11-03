@@ -687,7 +687,7 @@ async def test_run_is_immediate_resilient_and_propagates_cancellation() -> None:
         event_sink=sink,
     )
     task = asyncio.create_task(reconciler.run(0.001))
-    await asyncio.wait_for(added.wait(), timeout=1)
+    await asyncio.wait_for(added.wait(), timeout=10)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -773,7 +773,7 @@ async def test_cancelled_endpoint_discovery_close_finishes_owned_client(
     )
 
     task = asyncio.create_task(source.aclose())
-    await asyncio.wait_for(client.started.wait(), timeout=1)
+    await asyncio.wait_for(client.started.wait(), timeout=10)
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()
@@ -812,7 +812,7 @@ async def test_cancelled_reconciler_close_finishes_sink_and_source() -> None:
     pool.add_replica("replica", _Backend())
 
     task = asyncio.create_task(reconciler.aclose())
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=10)
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()
@@ -863,7 +863,7 @@ async def test_cancelled_candidate_cleanup_finishes_before_propagating() -> None
     source.config = ReplicaConfig("http://new:8000/v1", "model")
 
     task = asyncio.create_task(reconciler.reconcile())
-    await asyncio.wait_for(candidate.started.wait(), timeout=1)
+    await asyncio.wait_for(candidate.started.wait(), timeout=10)
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()

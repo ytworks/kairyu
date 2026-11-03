@@ -169,7 +169,7 @@ def test_full_adapter_queue_answers_529(adapter, monkeypatch):
             target=lambda: first.append(client.post("/v1/systemone", json=payload))
         )
         thread.start()
-        assert model.running.wait(5)
+        assert model.running.wait(10)
         overloaded = client.post("/v1/systemone", json=payload)
         gate.set()
         thread.join(10)

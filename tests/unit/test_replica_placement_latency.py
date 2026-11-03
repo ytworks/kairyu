@@ -213,7 +213,7 @@ async def test_prompt_array_uses_unique_request_ids_under_concurrent_dispatch() 
             if len(self.active) == 2:
                 self.both_entered.set()
             try:
-                await asyncio.wait_for(self.both_entered.wait(), timeout=1)
+                await asyncio.wait_for(self.both_entered.wait(), timeout=10)
                 return await super().generate(request)
             finally:
                 self.active.remove(request.request_id)
