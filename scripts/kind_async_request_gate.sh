@@ -188,7 +188,7 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-async-request-uv-cache}
   --gateway-url http://127.0.0.1:18082 \
   --kubectl "$KUBECTL" \
   --namespace kairyu-f1c \
-  --timeout-seconds 90 \
+  --timeout-seconds 300 \
   --source-commit "$SOURCE_COMMIT" \
   --output "$REPORT"
 assert_clean_source

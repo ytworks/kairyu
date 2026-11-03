@@ -46,8 +46,13 @@ spec:
               value: /evidence/decisions.jsonl
             - name: F1C_LISTEN_PORT
               value: "8082"
-            - name: F1C_UPSTREAM_TIMEOUT_S
+            # Only a failed TCP connect fails over to the next gateway. The
+            # response wait is a hang bound, not a latency budget: a slow
+            # answer must never turn into a retry on another gateway.
+            - name: F1C_UPSTREAM_CONNECT_TIMEOUT_S
               value: "10"
+            - name: F1C_UPSTREAM_TIMEOUT_S
+              value: "60"
             - name: F1C_MAX_BODY_BYTES
               value: "67108864"
           ports:
@@ -68,8 +73,9 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 1
-            failureThreshold: 3
+            # A loaded node must not restart the LB mid-run.
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
               cpu: 100m

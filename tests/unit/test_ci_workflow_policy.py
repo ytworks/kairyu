@@ -66,26 +66,31 @@ def test_f1b_pull_requests_always_run_the_local_smoke_gate() -> None:
     assert step["run"] == 'bash scripts/kind_rollout_gate.sh "--${PROFILE}"'
 
 
-def test_f1b_rollout_freezes_each_image_before_kind_cluster_creation() -> None:
-    script = (_ROOT / "scripts" / "kind_rollout_gate.sh").read_text(
-        encoding="utf-8"
-    )
-    gateway_build = script.index('-t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"')
-    gateway_save = script.index(
-        '"$DOCKER" image save --output "$GATEWAY_IMAGE_ARCHIVE" "$GATEWAY_IMAGE"'
-    )
-    mock_build = script.index('-t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"')
-    mock_save = script.index(
-        '"$DOCKER" image save --output "$MOCK_IMAGE_ARCHIVE" "$MOCK_IMAGE"'
-    )
-    cluster_create = script.index('"$KIND" create cluster')
-    archive_load = script.index(
-        '"$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE"'
-    )
+def test_kind_gates_load_frozen_archives_identified_by_config_digest() -> None:
+    # F1c broke on a runner whose Docker used the containerd image store:
+    # ``kind load docker-image`` and Docker's image ID both depend on the
+    # store. Every kind gate freezes archives before the cluster exists, loads
+    # only those archives, and identifies images by the archive config digest.
+    for name in (
+        "kind_churn_gate.sh",
+        "kind_rollout_gate.sh",
+        "kind_gateway_gate.sh",
+    ):
+        script = (_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        gateway_build = script.index('-t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"')
+        gateway_save = script.index(
+            'save_image_archive "$GATEWAY_IMAGE" "$GATEWAY_IMAGE_ARCHIVE"'
+        )
+        mock_save = script.index(
+            'save_image_archive "$MOCK_IMAGE" "$MOCK_IMAGE_ARCHIVE"'
+        )
+        cluster_create = script.index('"$KIND" create cluster')
+        archive_load = script.index('"$KIND" load image-archive')
 
-    assert gateway_build < gateway_save < mock_build < mock_save < cluster_create
-    assert cluster_create < archive_load
-    assert '"$KIND" load docker-image' not in script
+        assert gateway_build < gateway_save < mock_save < cluster_create, name
+        assert cluster_create < archive_load, name
+        assert '"$KIND" load docker-image' not in script, name
+        assert "{{.Id}}" not in script, name
 
 
 def test_kind_ci_uses_one_verified_retried_tool_installer() -> None:

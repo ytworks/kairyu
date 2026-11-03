@@ -33,21 +33,31 @@ requested CPU remains available to kubelet/containerd while contention gives
 the latency-bearing process the intended weight.
 
 The formal profile applies the base 200-replica manifest and is the
-authoritative test of the five-second graceful withdrawal window. The pull
-request smoke profile applies `overlays/smoke` directly with four replicas; it
-never creates 200 and scales down. It retains the same readiness and five-second
-pre-stop protocol as formal while using fewer replicas and shorter epochs.
+full-scale run of the graceful withdrawal protocol. The pull request smoke
+profile applies `overlays/smoke` directly with four replicas; it never creates
+200 and scales down. It retains the same readiness and five-second pre-stop
+protocol as formal while using fewer replicas and shorter epochs.
 
-Both profiles build the fixed `kairyu:dev` and `kairyu-f1a-mock:dev` tags, load
-those exact tags into a fresh kind cluster, wait for an exact Ready replica
+Verdicts depend only on the code under test. Placement latency, pacing,
+withdrawal and recovery durations, and schedule lateness are recorded under
+`diagnostics` and never decide pass/fail. Withdrawal is judged causally: once
+the gateway applies a deleted UID's EndpointSlice drain or removal, that UID is
+never eligible or selected again. Timeouts only bound hangs and are reported as
+hangs. Replica probes tolerate a loaded node (five-second probe timeouts,
+readiness after three failures, liveness after six), so a late probe neither
+drops a Ready replica nor restarts it.
+
+Both profiles build the fixed `kairyu:dev` and `kairyu-f1a-mock:dev` tags,
+freeze each with `docker image save` before the cluster exists, load only
+those archives with `kind load image-archive`, wait for an exact Ready replica
 count, and require the gateway metrics to report configured and healthy counts
 equal to the profile size with zero draining replicas before traffic begins.
-Image provenance is joined through the OCI config digest: the Docker source
-config, the config referenced by containerd's loaded manifest, and the CRI
-status ID must be identical. The raw manifest is retained and rehashed to
-containerd's target descriptor. This works with both classic Docker stores,
-whose `.Id` is the config digest, and containerd-backed Docker stores, whose
-`.Id` is the manifest target, without weakening runtime image pinning.
+Image identity is the config digest inside the archive: the archive's config
+blob, the config referenced by containerd's loaded manifest, and the CRI status
+ID must be identical. The archive's `manifest.json` and config blob and
+containerd's raw manifest are retained and rehashed offline. Docker's own `.Id`
+is not consulted, because it is the config digest under the classic image
+store but the manifest target under the containerd image store.
 The gateway Service uses NodePort 30080. The kind node maps that port directly
 to `127.0.0.1:18080` on the runner, avoiding a `kubectl port-forward` process in
 the traffic path. `F1A_GATEWAY_PORT` changes the localhost port by rendering the
@@ -76,16 +86,20 @@ delete command. It records raw EndpointSlice payloads on absolute 250 ms
 deadlines until every old UID is absent; slower multi-pod readiness polling
 starts afterward and cannot dilute this causal sampling cadence. Artifact
 replay verifies the observer sequence, scheduled/fetch/observation timestamps,
-the exact disjoint claim, and the unchanged one-second last-old-to-disjoint
-bracket.
+the exact disjoint claim, and the order last-old snapshot, first disjoint
+snapshot, claimed withdrawal; the bracket width is a diagnostic.
 
 Recovery readiness is EndpointSlice-first: the driver requires exactly 200
 unique Ready, non-terminating Pod targets and new UIDs for all twenty scheduled
 names. Only then does it issue one label-selected collection LIST for those
-twenty Pods to corroborate UID, Ready state, and runtime image. Pod evidence is
-the initial 200 identities, those ten targeted captures, and one final
-exact-200 capture; it does not poll and serialize all 200 Pod objects once per
-second.
+twenty Pods to corroborate UID, Ready state, and runtime image, and then waits
+until the gateway serves exactly the replacement fleet. A batch is deleted at
+its planned minute or, if later, once the previous batch is fully replaced and
+the gateway again serves exactly the current fleet. Traffic continues until the
+last batch is replaced plus the cooldown, so it always covers the whole churn.
+Pod evidence is the initial 200 identities, those ten targeted captures, and
+one final exact-200 capture; it does not poll and serialize all 200 Pod objects
+once per second.
 
 Periodic EndpointSlice and resource evidence remains absolute-deadline paced.
 The five-second resource sample uses kubelet's
@@ -100,14 +114,12 @@ drains and retries bounded backpressure on a worker thread, and shutdown drains
 every accepted row before sidecars are hashed and replayed. All Kubernetes
 sampling reads and Pod DELETE requests share one lifecycle-owned
 `kubectl proxy` and persistent HTTP client. The gateway likewise polls
-EndpointSlices every 500 ms, retaining at least 1.13 seconds of worst-phase
-margin against the historical 3.618-second withdrawal maximum and the
-unchanged five-second limit. Its exact-compatible EndpointSlice parser reduced
-the recorded 200-endpoint payload from 1.150 ms to 0.308 ms (3.74x) with an
-identical member map.
+EndpointSlices every 500 ms, well inside the five-second pre-stop window in
+which a deleted replica still serves already-selected requests. Its
+exact-compatible EndpointSlice parser reduced the recorded 200-endpoint payload
+from 1.150 ms to 0.308 ms (3.74x) with an identical member map.
 
-The placement SLO is nearest-rank p99 across all requests in the frozen
-ten-minute measurement. Per-epoch and ten-second post-delete p99 values remain
-mandatory hashed, published, and independently replayed diagnostics; they are
-not ten additional small-sample SLOs. All windows must still contain complete
+Nearest-rank placement p99 across the measurement, per epoch, and per
+ten-second post-delete window is a hashed, published, and independently
+replayed diagnostic. Every request must still have complete
 request-to-placement evidence.

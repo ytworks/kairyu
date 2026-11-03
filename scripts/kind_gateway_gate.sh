@@ -7,7 +7,8 @@ usage() {
 usage: scripts/kind_gateway_gate.sh [--keep-cluster]
 
 Environment overrides:
-  KIND, KUBECTL, DOCKER, UV, GIT, TAR, TIMEOUT, CURL
+  KIND, KUBECTL, DOCKER, UV, GIT, TAR, TIMEOUT, CURL, JQ, SHA256SUM
+  TMPDIR (holds the clean source tree and the image archives)
   F1C_CLUSTER_NAME, F1C_RESULTS_DIR, F1C_REFUSE_EXISTING_CLUSTER
 
 This is the one binding CPU-only F1c integration test. It intentionally does not rerun
@@ -46,6 +47,9 @@ GIT=${GIT:-git}
 TAR=${TAR:-tar}
 TIMEOUT=${TIMEOUT:-timeout}
 CURL=${CURL:-curl}
+JQ=${JQ:-jq}
+SHA256SUM=${SHA256SUM:-sha256sum}
+SCRATCH_ROOT=${TMPDIR:-/tmp}
 
 CLUSTER_NAME=${F1C_CLUSTER_NAME:-kairyu-f1c}
 RESULTS_DIR=${F1C_RESULTS_DIR:-bench/results/f1c-three-gateway-live}
@@ -60,16 +64,19 @@ GATE_LOCK_DIR=/tmp/kairyu-f1c-kind-gate.lock
 
 GATEWAY_IMAGE=kairyu:dev
 MOCK_IMAGE=kairyu-f1a-mock:dev
-POSTGRES_IMAGE=postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
-# Classic Docker cannot hand a tag@digest reference directly to
-# ``kind load docker-image`` even though the pinned pull succeeded. Load and
-# inspect the same manifest through its local tag; the Pod spec and verifier
-# still bind the immutable digest above.
+# The linux/amd64 manifest of postgres:17.6-bookworm, not its multi-platform
+# index: a single-platform pin pulls and saves the same content under the
+# classic and the containerd Docker image stores. The config digest is the
+# image identity checked in the archive, in kind's CRI, and offline.
+POSTGRES_IMAGE=postgres:17.6-bookworm@sha256:45cd22f8d32e189d245403954882f88e7a8714301fda80dab6da90f1265b25a3
+POSTGRES_CONFIG_DIGEST=sha256:567d5d704a3e5a4864393b623a0d50eb1b5a4ad134cdac7cf19555cb2d8ffe9e
+# kind receives the pinned content from an archive under this local tag; the
+# Pod spec references the tag with imagePullPolicy Never, so the registry is
+# never consulted inside the cluster.
 POSTGRES_LOAD_IMAGE=postgres:17.6-bookworm
 GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
 POSTGRES_CRI_IMAGE_METADATA="${RESULTS_DIR}/postgres-cri-image.json"
-POSTGRES_DOCKER_IMAGE_METADATA="${RESULTS_DIR}/postgres-docker-image.json"
 
 run_bounded() {
   local duration=$1
@@ -78,7 +85,8 @@ run_bounded() {
 }
 
 for tool in \
-  "$KIND" "$KUBECTL" "$DOCKER" "$UV" "$GIT" "$TAR" "$TIMEOUT" "$CURL"; do
+  "$KIND" "$KUBECTL" "$DOCKER" "$UV" "$GIT" "$TAR" "$TIMEOUT" "$CURL" \
+  "$JQ" "$SHA256SUM"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required tool is unavailable: $tool" >&2
     exit 1
@@ -147,7 +155,7 @@ cleanup() {
   fi
   if [[ -n "$SOURCE_ARCHIVE_DIR" && -d "$SOURCE_ARCHIVE_DIR" ]]; then
     case "$SOURCE_ARCHIVE_DIR" in
-      /tmp/kairyu-f1c-source.*)
+      "${SCRATCH_ROOT}"/kairyu-f1c-source.*)
         if ! rm -rf -- "$SOURCE_ARCHIVE_DIR"; then
           echo "failed to remove source archive ${SOURCE_ARCHIVE_DIR}" >&2
           cleanup_failed=1
@@ -194,7 +202,14 @@ known_results=(
   gateway-cri-image.json
   mock-cri-image.json
   postgres-cri-image.json
+  # Remove evidence left by gate runs that compared Docker image IDs.
   postgres-docker-image.json
+  gateway-image-archive-manifest.json
+  gateway-image-archive-config.json
+  mock-image-archive-manifest.json
+  mock-image-archive-config.json
+  postgres-image-archive-manifest.json
+  postgres-image-archive-config.json
   store-identities.jsonl
   batch-http.jsonl
   batch-lifecycle.jsonl
@@ -253,13 +268,16 @@ assert_clean_source() {
 }
 assert_clean_source
 
-SOURCE_ARCHIVE_DIR=$(mktemp -d /tmp/kairyu-f1c-source.XXXXXX)
+SOURCE_ARCHIVE_DIR=$(mktemp -d "${SCRATCH_ROOT}/kairyu-f1c-source.XXXXXX")
 "$GIT" archive --format=tar "$SOURCE_COMMIT" |
   "$TAR" -xf - -C "$SOURCE_ARCHIVE_DIR"
 ARCHIVE_KIND_CONFIG="${SOURCE_ARCHIVE_DIR}/${KIND_CONFIG}"
 ARCHIVE_MANIFEST_DIR="${SOURCE_ARCHIVE_DIR}/${MANIFEST_DIR}"
 ARCHIVE_MOCK_DIR="${SOURCE_ARCHIVE_DIR}/deploy/kind/f1a/mock"
 ARCHIVE_DRIVER="${SOURCE_ARCHIVE_DIR}/verification/fleet/resilience/fleet_gateway_bench.py"
+GATEWAY_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/gateway-image.tar"
+MOCK_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/mock-image.tar"
+POSTGRES_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/postgres-image.tar"
 if [[ ! -f "$ARCHIVE_KIND_CONFIG" ||
       ! -f "${ARCHIVE_MANIFEST_DIR}/kustomization.yaml" ||
       ! -f "${ARCHIVE_MOCK_DIR}/Dockerfile" ||
@@ -271,46 +289,83 @@ fi
 "$KUBECTL" kustomize "$ARCHIVE_MANIFEST_DIR" \
   >"${RESULTS_DIR}/rendered-manifest.yaml"
 
+# kind receives each image only from a frozen archive. The archive's own
+# config blob is the image identity compared with kind's CRI; Docker's image
+# ID differs between the classic and containerd image stores.
+save_image_archive() {
+  local image_reference=$1
+  local archive=$2
+  local role=$3
+  local manifest_sidecar="${RESULTS_DIR}/${role}-image-archive-manifest.json"
+  local config_sidecar="${RESULTS_DIR}/${role}-image-archive-config.json"
+  local config_path
+  "$DOCKER" image save --output "$archive" "$image_reference"
+  "$TAR" -xOf "$archive" manifest.json >"$manifest_sidecar"
+  config_path=$(
+    "$JQ" -er \
+      'if length == 1 then .[0].Config else error("expected one image") end' \
+      "$manifest_sidecar"
+  )
+  "$TAR" -xOf "$archive" "$config_path" >"$config_sidecar"
+}
+archive_config_digest() {
+  local role=$1
+  local hex
+  hex=$(
+    "$SHA256SUM" "${RESULTS_DIR}/${role}-image-archive-config.json" |
+      awk '{print $1}'
+  )
+  printf 'sha256:%s\n' "$hex"
+}
+archive_revision() {
+  local role=$1
+  "$JQ" -r '.config.Labels["org.opencontainers.image.revision"] // ""' \
+    "${RESULTS_DIR}/${role}-image-archive-config.json"
+}
+
 "$DOCKER" build --ulimit nofile=65536:65536 \
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"
+save_image_archive "$GATEWAY_IMAGE" "$GATEWAY_IMAGE_ARCHIVE" gateway
 "$DOCKER" build --ulimit nofile=65536:65536 \
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"
-"$DOCKER" pull "$POSTGRES_IMAGE"
+save_image_archive "$MOCK_IMAGE" "$MOCK_IMAGE_ARCHIVE" mock
+# Registry access is setup, not part of the verdict: retry transient pulls.
+postgres_pulled=0
+for attempt in 1 2 3; do
+  if "$DOCKER" pull "$POSTGRES_IMAGE"; then
+    postgres_pulled=1
+    break
+  fi
+  echo "postgres pull attempt ${attempt}/3 failed" >&2
+  sleep $((attempt * 5))
+done
+if ((postgres_pulled == 0)); then
+  echo "could not pull the pinned PostgreSQL image ${POSTGRES_IMAGE}" >&2
+  exit 1
+fi
 "$DOCKER" image tag "$POSTGRES_IMAGE" "$POSTGRES_LOAD_IMAGE"
-"$DOCKER" image inspect "$POSTGRES_IMAGE" >"$POSTGRES_DOCKER_IMAGE_METADATA"
+save_image_archive "$POSTGRES_LOAD_IMAGE" "$POSTGRES_IMAGE_ARCHIVE" postgres
 assert_clean_source
 
-GATEWAY_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$GATEWAY_IMAGE"
-)
-MOCK_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
-)
-POSTGRES_IMAGE_CONFIG_ID=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$POSTGRES_IMAGE"
-)
-for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
-  image_revision=$(
-    "$DOCKER" image inspect \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      "$image"
-  )
+GATEWAY_IMAGE_CONFIG_DIGEST=$(archive_config_digest gateway)
+MOCK_IMAGE_CONFIG_DIGEST=$(archive_config_digest mock)
+POSTGRES_ARCHIVE_CONFIG_DIGEST=$(archive_config_digest postgres)
+for role in gateway mock; do
+  image_revision=$(archive_revision "$role")
   if [[ "$image_revision" != "$SOURCE_COMMIT" ]]; then
-    echo "image ${image} revision ${image_revision} != ${SOURCE_COMMIT}" >&2
+    echo "${role} image archive revision ${image_revision} != ${SOURCE_COMMIT}" >&2
     exit 1
   fi
 done
-for digest in \
-  "$GATEWAY_IMAGE_DIGEST" "$MOCK_IMAGE_DIGEST" "$POSTGRES_IMAGE_CONFIG_ID"; do
-  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "invalid runtime image digest: ${digest}" >&2
-    exit 1
-  fi
-done
+if [[ "$POSTGRES_ARCHIVE_CONFIG_DIGEST" != "$POSTGRES_CONFIG_DIGEST" ]]; then
+  echo "PostgreSQL archive config ${POSTGRES_ARCHIVE_CONFIG_DIGEST} is not" \
+    "the pinned ${POSTGRES_CONFIG_DIGEST}" >&2
+  exit 1
+fi
 
 while IFS= read -r existing; do
   if [[ "$existing" == "$CLUSTER_NAME" ]]; then
@@ -331,9 +386,15 @@ CLUSTER_MAY_EXIST=1
   --config "$ARCHIVE_KIND_CONFIG" \
   --wait 180s
 CLUSTER_CREATED=1
-"$KIND" load docker-image \
-  "$GATEWAY_IMAGE" "$MOCK_IMAGE" "$POSTGRES_LOAD_IMAGE" \
-  --name "$CLUSTER_NAME"
+# 600 s only detects a hung import; it is far above the expected duration.
+if ! run_bounded 600s "$KIND" load image-archive \
+  "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" "$POSTGRES_IMAGE_ARCHIVE" \
+  --name "$CLUSTER_NAME"; then
+  echo "retrying kind image archive import" >&2
+  run_bounded 600s "$KIND" load image-archive \
+    "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" "$POSTGRES_IMAGE_ARCHIVE" \
+    --name "$CLUSTER_NAME"
+fi
 kind_nodes=()
 while IFS= read -r kind_node; do
   kind_nodes+=("$kind_node")
@@ -361,10 +422,19 @@ cri_status_digest() {
 GATEWAY_CRI_STATUS_DIGEST=$(cri_status_digest "$GATEWAY_IMAGE")
 MOCK_CRI_STATUS_DIGEST=$(cri_status_digest "$MOCK_IMAGE")
 POSTGRES_CRI_STATUS_DIGEST=$(cri_status_digest "$POSTGRES_LOAD_IMAGE")
-if [[ "$GATEWAY_CRI_STATUS_DIGEST" != "$GATEWAY_IMAGE_DIGEST" ||
-      "$MOCK_CRI_STATUS_DIGEST" != "$MOCK_IMAGE_DIGEST" ||
-      "$POSTGRES_CRI_STATUS_DIGEST" != "$POSTGRES_IMAGE_CONFIG_ID" ]]; then
-  echo "kind CRI config ID does not match the clean-source Docker image" >&2
+for digest in \
+  "$GATEWAY_IMAGE_CONFIG_DIGEST" "$MOCK_IMAGE_CONFIG_DIGEST" \
+  "$POSTGRES_ARCHIVE_CONFIG_DIGEST" "$GATEWAY_CRI_STATUS_DIGEST" \
+  "$MOCK_CRI_STATUS_DIGEST" "$POSTGRES_CRI_STATUS_DIGEST"; do
+  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "invalid image config digest: ${digest}" >&2
+    exit 1
+  fi
+done
+if [[ "$GATEWAY_CRI_STATUS_DIGEST" != "$GATEWAY_IMAGE_CONFIG_DIGEST" ||
+      "$MOCK_CRI_STATUS_DIGEST" != "$MOCK_IMAGE_CONFIG_DIGEST" ||
+      "$POSTGRES_CRI_STATUS_DIGEST" != "$POSTGRES_ARCHIVE_CONFIG_DIGEST" ]]; then
+  echo "kind CRI config ID does not match the loaded image archive" >&2
   exit 1
 fi
 
@@ -389,7 +459,7 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 if ((lb_ready == 0)); then
-  echo "F1c load balancer did not become ready at ${GATEWAY_URL}" >&2
+  echo "hang: F1c load balancer ${GATEWAY_URL} not ready within the 120-poll bound" >&2
   exit 1
 fi
 
@@ -419,13 +489,16 @@ for gateway in ("a", "b", "c"):
   sleep 1
 done
 if ((membership_ready == 0)); then
-  echo "three gateway replica rings did not converge to ${REPLICA_COUNT}" >&2
+  echo "hang: three gateway replica rings did not converge to" \
+    "${REPLICA_COUNT} within the 180-poll bound" >&2
   exit 1
 fi
 
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1c-uv-cache}
 assert_clean_source
-if ! run_bounded 600s "$UV" run --frozen python "$ARCHIVE_DRIVER" \
+# 1200 s only detects a hung driver; each internal wait has its own hang bound.
+driver_status=0
+run_bounded 1200s "$UV" run --frozen python "$ARCHIVE_DRIVER" \
   --gateway-url "$GATEWAY_URL" \
   --kubectl "$KUBECTL" \
   --namespace "$NAMESPACE" \
@@ -435,14 +508,18 @@ if ! run_bounded 600s "$UV" run --frozen python "$ARCHIVE_DRIVER" \
   --results-dir "$RESULTS_DIR" \
   --source-commit "$SOURCE_COMMIT" \
   --source-clean \
-  --gateway-image-digest "$GATEWAY_IMAGE_DIGEST" \
-  --mock-image-digest "$MOCK_IMAGE_DIGEST" \
   --postgres-image "$POSTGRES_IMAGE" \
+  --postgres-config-digest "$POSTGRES_CONFIG_DIGEST" \
   --rendered-manifest "${RESULTS_DIR}/rendered-manifest.yaml" \
   --gateway-cri-image-metadata "$GATEWAY_CRI_IMAGE_METADATA" \
   --mock-cri-image-metadata "$MOCK_CRI_IMAGE_METADATA" \
-  --postgres-cri-image-metadata "$POSTGRES_CRI_IMAGE_METADATA" \
-  --postgres-docker-image-metadata "$POSTGRES_DOCKER_IMAGE_METADATA"; then
+  --postgres-cri-image-metadata "$POSTGRES_CRI_IMAGE_METADATA" ||
+  driver_status=$?
+if ((driver_status == 124 || driver_status == 137)); then
+  printf '%s\n' "hang: live F1c driver exceeded its 1200 s bound" \
+    >"${RESULTS_DIR}/failure.txt"
+  exit 1
+elif ((driver_status != 0)); then
   printf '%s\n' "live F1c driver failed" >"${RESULTS_DIR}/failure.txt"
   exit 1
 fi

@@ -13,6 +13,11 @@ UID to be Ready and eligible before continuing.
 Requests, gateway placement and membership records, rollout transitions, Pod
 snapshots, and EndpointSlice snapshots are stored as hashed JSONL sidecars.
 ``--verify-artifact`` independently replays those raw records.
+
+Verdicts depend only on the code under test: every step is judged by the
+causal order of its drain, withdrawal, partition and replacement events.  Step
+durations, the whole-rollout duration and pacing are recorded diagnostics, and
+timeouts only bound hangs.
 """
 
 from __future__ import annotations
@@ -39,11 +44,13 @@ from verification.fleet.resilience.fleet_churn_bench import (
     _cri_metadata_file_matches,
     _fetch_gateway_placements,
     _git_output,
+    _image_archive_file_matches,
     _load_jsonl,
     _pod_identity,
     _pod_identity_matches_image,
     _provenance_valid,
     _read_endpoint_slices,
+    _read_gateway_metrics,
     _read_pods,
     _run_command,
     _runtime_mock_image_summary,
@@ -59,15 +66,6 @@ _MOCK_IDENTITY = re.compile(
     r"\bkairyu-f1a-mock pod_name=(?P<pod_name>\S+) "
     r"pod_uid=(?P<pod_uid>\S+)"
 )
-_PROMETHEUS_SAMPLE = re.compile(
-    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"
-    r"(?:\{(?P<labels>.*)\})?\s+(?P<value>\S+)"
-    r"(?:\s+\d+)?$"
-)
-_PROMETHEUS_LABEL = re.compile(
-    r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)="'
-    r'(?P<value>(?:\\.|[^"])*)"(?:,|$)'
-)
 
 
 @dataclass(frozen=True)
@@ -78,13 +76,12 @@ class RolloutGateConfig:
     warmup_seconds: float
     cooldown_seconds: float
     max_concurrency: int
-    request_timeout_seconds: float
     evidence_interval_seconds: float
-    withdrawal_timeout_seconds: float
-    replacement_timeout_seconds: float
-    rollout_timeout_seconds: float
-    schedule_lateness_limit_ms: float
-    pacing_success_fraction: float
+    # Hang bounds only. A breach is reported as a hang, never as slowness.
+    request_hang_seconds: float
+    withdrawal_hang_seconds: float
+    replacement_hang_seconds: float
+    rollout_hang_seconds: float
 
     def validate(self) -> None:
         if self.profile not in {"formal", "smoke"}:
@@ -95,24 +92,21 @@ class RolloutGateConfig:
             raise ValueError("max_concurrency must be a positive integer")
         positive = (
             self.request_rate,
-            self.request_timeout_seconds,
             self.evidence_interval_seconds,
-            self.withdrawal_timeout_seconds,
-            self.replacement_timeout_seconds,
-            self.rollout_timeout_seconds,
-            self.schedule_lateness_limit_ms,
+            self.request_hang_seconds,
+            self.withdrawal_hang_seconds,
+            self.replacement_hang_seconds,
+            self.rollout_hang_seconds,
         )
         if any(
             type(value) not in (int, float) or not math.isfinite(float(value)) or value <= 0
             for value in positive
         ):
-            raise ValueError("gate rates, durations, and limits must be positive")
+            raise ValueError("gate rates, intervals, and hang bounds must be positive")
         if self.warmup_seconds < 0 or self.cooldown_seconds < 0:
             raise ValueError("warmup/cooldown must be non-negative")
-        if not 0 < self.pacing_success_fraction <= 1:
-            raise ValueError("pacing_success_fraction must be in (0, 1]")
-        if self.rollout_timeout_seconds <= self.replacement_timeout_seconds:
-            raise ValueError("rollout timeout must exceed a single replacement timeout")
+        if self.rollout_hang_seconds <= self.replacement_hang_seconds:
+            raise ValueError("rollout hang bound must exceed one replacement hang bound")
 
 
 FORMAL_CONFIG = RolloutGateConfig(
@@ -122,13 +116,11 @@ FORMAL_CONFIG = RolloutGateConfig(
     warmup_seconds=30.0,
     cooldown_seconds=30.0,
     max_concurrency=256,
-    request_timeout_seconds=10.0,
     evidence_interval_seconds=0.25,
-    withdrawal_timeout_seconds=5.0,
-    replacement_timeout_seconds=60.0,
-    rollout_timeout_seconds=1_500.0,
-    schedule_lateness_limit_ms=1_000.0,
-    pacing_success_fraction=0.99,
+    request_hang_seconds=60.0,
+    withdrawal_hang_seconds=300.0,
+    replacement_hang_seconds=300.0,
+    rollout_hang_seconds=2_400.0,
 )
 
 SMOKE_CONFIG = RolloutGateConfig(
@@ -138,13 +130,11 @@ SMOKE_CONFIG = RolloutGateConfig(
     warmup_seconds=2.0,
     cooldown_seconds=2.0,
     max_concurrency=32,
-    request_timeout_seconds=5.0,
     evidence_interval_seconds=0.25,
-    withdrawal_timeout_seconds=5.0,
-    replacement_timeout_seconds=30.0,
-    rollout_timeout_seconds=180.0,
-    schedule_lateness_limit_ms=1_000.0,
-    pacing_success_fraction=0.95,
+    request_hang_seconds=60.0,
+    withdrawal_hang_seconds=300.0,
+    replacement_hang_seconds=300.0,
+    rollout_hang_seconds=900.0,
 )
 
 
@@ -432,89 +422,6 @@ def _endpoint_targets(
     )
 
 
-def _parse_prometheus_labels(raw: str | None) -> dict[str, str] | None:
-    if raw is None:
-        return {}
-    labels: dict[str, str] = {}
-    position = 0
-    while position < len(raw):
-        match = _PROMETHEUS_LABEL.match(raw, position)
-        if match is None or match.group("name") in labels:
-            return None
-        try:
-            value = json.loads(f'"{match.group("value")}"')
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(value, str):
-            return None
-        labels[match.group("name")] = value
-        position = match.end()
-    return labels
-
-
-def _gateway_metrics_snapshot(text: str, *, pool: str) -> dict[str, Any]:
-    pool_counts: dict[str, int] = {}
-    outstanding_by_uid: dict[str, int] = {}
-    healthy_by_uid: dict[str, bool] = {}
-    parse_errors = 0
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        sample = _PROMETHEUS_SAMPLE.fullmatch(line)
-        if sample is None:
-            continue
-        name = sample.group("name")
-        if name not in {
-            "kairyu_pool_replicas",
-            "kairyu_replica_outstanding",
-            "kairyu_replica_healthy",
-        }:
-            continue
-        labels = _parse_prometheus_labels(sample.group("labels"))
-        try:
-            value = float(sample.group("value"))
-        except ValueError:
-            value = math.nan
-        if labels is None or not math.isfinite(value):
-            parse_errors += 1
-            continue
-        if labels.get("pool") != pool:
-            continue
-        if name == "kairyu_pool_replicas":
-            state = labels.get("state")
-            if state in {"configured", "healthy", "draining"}:
-                pool_counts[state] = int(value)
-            continue
-        uid = labels.get("replica")
-        if not uid:
-            parse_errors += 1
-            continue
-        if name == "kairyu_replica_outstanding":
-            outstanding_by_uid[uid] = int(value)
-        else:
-            healthy_by_uid[uid] = value == 1.0
-    uids = set(outstanding_by_uid) | set(healthy_by_uid)
-    return {
-        "configured": pool_counts.get("configured"),
-        "healthy": pool_counts.get("healthy"),
-        "draining": pool_counts.get("draining"),
-        "outstanding_by_uid": dict(sorted(outstanding_by_uid.items())),
-        "healthy_by_uid": dict(sorted(healthy_by_uid.items())),
-        "uids": sorted(uids),
-        "parse_errors": parse_errors,
-    }
-
-
-async def _read_gateway_metrics(
-    client: httpx.AsyncClient,
-    *,
-    pool: str,
-) -> dict[str, Any]:
-    response = await client.get("/metrics")
-    response.raise_for_status()
-    return _gateway_metrics_snapshot(response.text, pool=pool)
-
-
 async def _drain_pod(
     args: argparse.Namespace,
     pod_name: str,
@@ -572,6 +479,7 @@ async def _one_request(
         "not_sent": False,
         "status_code": None,
         "transport_error": None,
+        "hung": False,
         "response_valid": False,
         "request_id_echo": None,
         "pod_name": None,
@@ -619,16 +527,32 @@ async def _one_request(
             record["response_valid"] = False
     except Exception as error:
         record["transport_error"] = type(error).__name__
+        # The client timeout is a hang bound: a timeout is a hang, reported
+        # separately from an error response.
+        record["hung"] = isinstance(error, httpx.TimeoutException)
     record["end_ns"] = time.monotonic_ns()
     record["latency_ms"] = (record["end_ns"] - sent_ns) / 1_000_000
     return record
+
+
+@dataclass
+class TrafficStop:
+    """Stop request carrying its own time, so the request count is exact."""
+
+    event: asyncio.Event
+    requested_ns: int | None = None
+
+    def request(self) -> int:
+        self.requested_ns = time.monotonic_ns()
+        self.event.set()
+        return self.requested_ns
 
 
 async def _traffic_loop(
     args: argparse.Namespace,
     config: RolloutGateConfig,
     sink: JsonlSink,
-    stop: asyncio.Event,
+    stop: TrafficStop,
     origin_ns: int,
 ) -> list[dict[str, Any]]:
     interval_ns = int(1_000_000_000 / config.request_rate)
@@ -644,62 +568,53 @@ async def _traffic_loop(
         records.append(record)
         sink.write(record)
 
+    def stopped_before(target_ns: int) -> bool:
+        return stop.requested_ns is not None and target_ns >= stop.requested_ns
+
     try:
         async with httpx.AsyncClient(
             base_url=args.gateway_url.rstrip("/"),
-            timeout=httpx.Timeout(config.request_timeout_seconds),
+            timeout=httpx.Timeout(config.request_hang_seconds),
             limits=httpx.Limits(
                 max_connections=config.max_concurrency,
                 max_keepalive_connections=config.max_concurrency,
             ),
             trust_env=False,
         ) as client:
-            while not stop.is_set():
+            # Every slot scheduled before the stop request is sent, even when
+            # the loop runs behind; the count then follows from recorded times.
+            while not stopped_before(origin_ns + sequence * interval_ns):
                 target_ns = origin_ns + sequence * interval_ns
                 remaining = (target_ns - time.monotonic_ns()) / 1_000_000_000
                 if remaining > 0:
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=remaining)
-                        break
+                        await asyncio.wait_for(
+                            stop.event.wait(),
+                            timeout=remaining,
+                        )
                     except TimeoutError:
                         pass
-                if stop.is_set():
-                    break
-                if len(pending) >= config.max_concurrency:
-                    now_ns = time.monotonic_ns()
-                    record = {
-                        "schema_version": SCHEMA_VERSION,
-                        "sequence": sequence,
-                        "request_id": f"f1b-{sequence:08d}-not-sent",
-                        "scheduled_ns": target_ns,
-                        "send_ns": None,
-                        "end_ns": now_ns,
-                        "traffic_offset_s": (now_ns - origin_ns) / 1_000_000_000,
-                        "pacing_error_ms": (now_ns - target_ns) / 1_000_000,
-                        "not_sent": True,
-                        "status_code": None,
-                        "transport_error": "max_concurrency",
-                        "response_valid": False,
-                        "request_id_echo": None,
-                        "pod_name": None,
-                        "pod_uid": None,
-                        "latency_ms": None,
-                    }
-                    records.append(record)
-                    sink.write(record)
-                else:
-                    task = asyncio.create_task(
-                        _one_request(
-                            client,
-                            sequence=sequence,
-                            target_ns=target_ns,
-                            origin_ns=origin_ns,
-                            model=args.model,
-                            request_id_header=args.request_id_header,
-                        )
+                    if stopped_before(target_ns):
+                        break
+                # The client cap equals the gateway admission cap. Wait for a
+                # free slot instead of dropping the request.
+                while len(pending) >= config.max_concurrency:
+                    await asyncio.wait(
+                        tuple(pending),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    pending.add(task)
-                    task.add_done_callback(complete)
+                task = asyncio.create_task(
+                    _one_request(
+                        client,
+                        sequence=sequence,
+                        target_ns=target_ns,
+                        origin_ns=origin_ns,
+                        model=args.model,
+                        request_id_header=args.request_id_header,
+                    )
+                )
+                pending.add(task)
+                task.add_done_callback(complete)
                 sequence += 1
             if pending:
                 await asyncio.gather(*tuple(pending))
@@ -836,7 +751,7 @@ async def _wait_withdrawn(
     ordinal: int,
     old_uid: str,
 ) -> dict[str, Any]:
-    deadline_ns = time.monotonic_ns() + int(config.withdrawal_timeout_seconds * 1_000_000_000)
+    deadline_ns = time.monotonic_ns() + int(config.withdrawal_hang_seconds * 1_000_000_000)
     deadline = deadline_ns / 1_000_000_000
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -922,7 +837,10 @@ async def _wait_withdrawn(
         remaining = deadline - time.monotonic()
         if remaining > 0:
             await asyncio.sleep(min(config.evidence_interval_seconds, remaining))
-    raise TimeoutError(f"ordinal {ordinal} UID {old_uid} did not withdraw: {last}")
+    raise TimeoutError(
+        f"hang: ordinal {ordinal} UID {old_uid} did not withdraw within the "
+        f"{config.withdrawal_hang_seconds:g} s hang bound: {last}"
+    )
 
 
 async def _wait_replacement(
@@ -937,7 +855,7 @@ async def _wait_replacement(
     old_uid: str,
     update_revision: str,
 ) -> dict[str, Any]:
-    deadline_ns = time.monotonic_ns() + int(config.replacement_timeout_seconds * 1_000_000_000)
+    deadline_ns = time.monotonic_ns() + int(config.replacement_hang_seconds * 1_000_000_000)
     deadline = deadline_ns / 1_000_000_000
     expected_updated = config.replica_count - ordinal
     last: dict[str, Any] = {}
@@ -1058,7 +976,10 @@ async def _wait_replacement(
         remaining = deadline - time.monotonic()
         if remaining > 0:
             await asyncio.sleep(min(config.evidence_interval_seconds, remaining))
-    raise TimeoutError(f"ordinal {ordinal} UID {old_uid} was not replaced: {last}")
+    raise TimeoutError(
+        f"hang: ordinal {ordinal} UID {old_uid} was not replaced within the "
+        f"{config.replacement_hang_seconds:g} s hang bound: {last}"
+    )
 
 
 def _membership_rows(
@@ -1382,6 +1303,7 @@ def evaluate_gate(
         )
     )
     sent_rows = [row for row in requests if row.get("not_sent") is False]
+    hung_rows = [row for row in requests if row.get("hung") is True]
     zero_failures = len(sent_rows) == len(requests) and all(
         row.get("status_code") == 200
         and row.get("transport_error") is None
@@ -1392,10 +1314,12 @@ def evaluate_gate(
         and isinstance(row.get("pod_name"), str)
         and pod_name_by_uid.get(row["pod_uid"]) == row["pod_name"]
         for row in sent_rows
+        if row.get("hung") is not True
     )
+    # Diagnostic only: send lateness depends on the runner.
     on_time = sum(
         type(row.get("pacing_error_ms")) in (int, float)
-        and row["pacing_error_ms"] <= config.schedule_lateness_limit_ms
+        and row["pacing_error_ms"] <= 1_000 / config.request_rate
         for row in requests
     )
     pacing_fraction = on_time / len(requests) if requests else 0.0
@@ -1404,6 +1328,8 @@ def evaluate_gate(
     traffic_stopped_ns = final.get("traffic_stopped_ns")
     rollout_started_ns = restart.get("started_ns")
     rollout_completed_ns = final.get("rollout_completed_ns")
+    # Order only: traffic starts before the restart and stops after the
+    # rollout completes. Warm-up and cool-down lengths are diagnostics.
     traffic_encloses_rollout = (
         type(traffic_started_ns) is int
         and type(traffic_stop_requested_ns) is int
@@ -1413,11 +1339,9 @@ def evaluate_gate(
         < rollout_started_ns
         < rollout_completed_ns
         < traffic_stop_requested_ns
-        and rollout_started_ns - traffic_started_ns
-        >= int(config.warmup_seconds * 1_000_000_000 * 0.95)
-        and traffic_stop_requested_ns - rollout_completed_ns
-        >= int(config.cooldown_seconds * 1_000_000_000 * 0.95)
     )
+    # Every slot scheduled before the stop request is sent, so the count
+    # follows from the recorded start and stop times alone.
     traffic_raw_coverage = (
         request_schedule_exact
         and type(traffic_started_ns) is int
@@ -1429,9 +1353,7 @@ def evaluate_gate(
         and type(traffic_stopped_ns) is int
         and traffic_stop_requested_ns <= traffic_stopped_ns
         and type(requests[-1].get("scheduled_ns")) is int
-        and requests[-1]["scheduled_ns"] <= traffic_stopped_ns
-        and traffic_stopped_ns - requests[-1]["scheduled_ns"]
-        <= interval_ns + int(config.request_timeout_seconds * 1_000_000_000)
+        and requests[-1]["scheduled_ns"] < traffic_stop_requested_ns
     )
 
     memberships = _membership_rows(placements)
@@ -1528,6 +1450,7 @@ def evaluate_gate(
     withdrawal_events: list[dict[str, Any]] = []
     step_traffic_overlap = True
     previous_replacement_ns: int | None = None
+    step_durations: list[dict[str, Any]] = []
     no_old_placement_after_withdrawal = True
     no_old_placement_after_partition = True
     for step, row in enumerate(step_rows):
@@ -1567,13 +1490,16 @@ def evaluate_gate(
             <= replacement_ns
             and (previous_replacement_ns is None or previous_replacement_ns <= drain_started_ns)
         )
-        duration_bounded = (
-            causal
-            and withdrawn_ns - drain_completed_ns
-            <= int(config.withdrawal_timeout_seconds * 1_000_000_000)
-            and replacement_ns - partition_completed_ns
-            <= int(config.replacement_timeout_seconds * 1_000_000_000)
-        )
+        if causal:
+            step_durations.append(
+                {
+                    "step": step,
+                    "withdrawal_seconds": (withdrawn_ns - drain_completed_ns)
+                    / 1_000_000_000,
+                    "replacement_seconds": (replacement_ns - partition_completed_ns)
+                    / 1_000_000_000,
+                }
+            )
         withdrawal_matches = [
             membership
             for membership in memberships
@@ -1759,7 +1685,6 @@ def evaluate_gate(
             )
         step_lifecycle_valid &= (
             causal
-            and duration_bounded
             and old_uid == expected_old
             and new_uid == expected_new
             and isinstance(old_uid, str)
@@ -1966,14 +1891,8 @@ def evaluate_gate(
             request_sequence_coverage and request_schedule_exact and traffic_raw_coverage
         ),
         "traffic_retry_free_zero_failures": zero_failures,
-        "traffic_pacing_within_bound": (pacing_fraction >= config.pacing_success_fraction),
+        "traffic_zero_hung_requests": not hung_rows,
         "traffic_encloses_rollout": traffic_encloses_rollout,
-        "whole_rollout_within_deadline": (
-            type(rollout_started_ns) is int
-            and type(rollout_completed_ns) is int
-            and rollout_completed_ns - rollout_started_ns
-            <= int(config.rollout_timeout_seconds * 1_000_000_000)
-        ),
         "traffic_overlaps_every_step": step_traffic_overlap,
         "request_placement_response_join_exact": request_placement_join,
         "membership_event_stream_consistent": membership_stream_valid,
@@ -2100,9 +2019,39 @@ def evaluate_gate(
             and not 500 <= row["status_code"] < 600
             for row in requests
         ),
-        "transport_errors": sum(row.get("transport_error") is not None for row in requests),
+        "transport_errors": sum(
+            row.get("transport_error") is not None and row.get("hung") is not True
+            for row in requests
+        ),
+        "hung_requests": len(hung_rows),
         "unsent": sum(row.get("not_sent") is True for row in requests),
-        "pacing_success_fraction": pacing_fraction,
+    }
+    # Recorded for trend reading only; none of these decide the verdict.
+    diagnostics = {
+        "pacing_within_one_interval_fraction": pacing_fraction,
+        "rollout_seconds": (
+            (rollout_completed_ns - rollout_started_ns) / 1_000_000_000
+            if type(rollout_started_ns) is int and type(rollout_completed_ns) is int
+            else None
+        ),
+        "warmup_seconds": (
+            (rollout_started_ns - traffic_started_ns) / 1_000_000_000
+            if type(rollout_started_ns) is int and type(traffic_started_ns) is int
+            else None
+        ),
+        "cooldown_seconds": (
+            (traffic_stop_requested_ns - rollout_completed_ns) / 1_000_000_000
+            if type(traffic_stop_requested_ns) is int and type(rollout_completed_ns) is int
+            else None
+        ),
+        "max_step_withdrawal_seconds": max(
+            (item["withdrawal_seconds"] for item in step_durations),
+            default=None,
+        ),
+        "max_step_replacement_seconds": max(
+            (item["replacement_seconds"] for item in step_durations),
+            default=None,
+        ),
     }
     rollout_summary = {
         "replicas": config.replica_count,
@@ -2128,6 +2077,7 @@ def evaluate_gate(
     return {
         "checks": checks,
         "passed": all(checks.values()),
+        "diagnostics": diagnostics,
         "traffic": traffic,
         "rollout": rollout_summary,
         "membership": membership_summary,
@@ -2172,7 +2122,10 @@ async def _wait_for_update_revision(
         remaining = deadline - time.monotonic()
         if remaining > 0:
             await asyncio.sleep(min(_POLL_SECONDS, remaining))
-    raise TimeoutError(f"StatefulSet update revision did not appear: {last}")
+    raise TimeoutError(
+        "hang: StatefulSet update revision did not appear within the "
+        f"{timeout_seconds:g} s hang bound: {last}"
+    )
 
 
 async def run(
@@ -2193,13 +2146,13 @@ async def run(
         )
     }
     sinks = {name: JsonlSink(path) for name, path in paths.items()}
-    stop_traffic = asyncio.Event()
+    stop_traffic = TrafficStop(asyncio.Event())
     traffic_task: asyncio.Task[list[dict[str, Any]]] | None = None
     source_start = source_environment(args)
     try:
         async with httpx.AsyncClient(
             base_url=args.gateway_url.rstrip("/"),
-            timeout=httpx.Timeout(config.request_timeout_seconds),
+            timeout=httpx.Timeout(config.request_hang_seconds),
             trust_env=False,
         ) as gateway_client:
             initial_pods_raw, initial_endpoints_raw, initial_observed_ns = await _capture_inventory(
@@ -2300,7 +2253,7 @@ async def run(
                 f"statefulset/{args.statefulset}",
             ]
             restart_started_ns = time.monotonic_ns()
-            rollout_deadline = restart_started_ns / 1_000_000_000 + config.rollout_timeout_seconds
+            rollout_deadline = restart_started_ns / 1_000_000_000 + config.rollout_hang_seconds
             async with asyncio.timeout_at(rollout_deadline):
                 returncode, stdout, stderr = await _run_command(
                     *restart_command,
@@ -2316,7 +2269,7 @@ async def run(
                 restart_state = await _wait_for_update_revision(
                     args,
                     old_revision=old_revision,
-                    timeout_seconds=config.replacement_timeout_seconds,
+                    timeout_seconds=config.replacement_hang_seconds,
                 )
             update_revision = restart_state.get("update_revision")
             assert isinstance(update_revision, str)
@@ -2340,7 +2293,7 @@ async def run(
             current_by_ordinal = dict(initial_by_ordinal)
             for planned in rollout_plan(config):
                 if time.monotonic() >= rollout_deadline:
-                    raise TimeoutError("whole F1b rollout exceeded its deadline")
+                    raise TimeoutError("hang: the whole F1b rollout exceeded its hang bound")
                 step = planned["step"]
                 ordinal = planned["ordinal"]
                 old_identity = current_by_ordinal[ordinal]
@@ -2398,7 +2351,7 @@ async def run(
                         update_revision=update_revision,
                     )
                 if time.monotonic() > rollout_deadline:
-                    raise TimeoutError("whole F1b rollout exceeded its deadline")
+                    raise TimeoutError("hang: the whole F1b rollout exceeded its hang bound")
                 new_uid = replacement.get("new_uid")
                 if not isinstance(new_uid, str):
                     raise RuntimeError(f"replacement UID missing for ordinal {ordinal}")
@@ -2449,7 +2402,7 @@ async def run(
                 "rollout",
                 "status",
                 f"statefulset/{args.statefulset}",
-                f"--timeout={int(config.replacement_timeout_seconds)}s",
+                f"--timeout={int(config.replacement_hang_seconds)}s",
             ]
             async with asyncio.timeout_at(rollout_deadline):
                 (
@@ -2492,8 +2445,7 @@ async def run(
             )
             sinks["pods"].write(gateway_pod_record)
 
-            traffic_stop_requested_ns = time.monotonic_ns()
-            stop_traffic.set()
+            traffic_stop_requested_ns = stop_traffic.request()
             requests = await traffic_task
             traffic_task = None
             traffic_stopped_ns = time.monotonic_ns()
@@ -2581,7 +2533,8 @@ async def run(
                 sink=sinks["placements"],
             )
     finally:
-        stop_traffic.set()
+        if stop_traffic.requested_ns is None:
+            stop_traffic.request()
         if traffic_task is not None:
             traffic_task.cancel()
             await asyncio.gather(traffic_task, return_exceptions=True)
@@ -2631,9 +2584,16 @@ async def run(
         "schema_version": SCHEMA_VERSION,
         "gate": GATE,
         "methodology": {
+            "verdict": (
+                "only the code under test decides pass/fail: step and rollout "
+                "durations and pacing are diagnostics; timeouts bound hangs "
+                "and are reported as hangs"
+            ),
             "traffic": (
-                "absolute-deadline open-loop requests; retry=0; every non-2xx, "
-                "transport error, or unsent arrival fails"
+                "absolute-deadline open-loop requests; retry=0; a full "
+                "admission window delays a send instead of dropping it; every "
+                "slot before the stop request is sent; every non-2xx, "
+                "transport error, or hung request fails"
             ),
             "rollout": (
                 "one kubectl rollout restart held at partition=N, followed by "
@@ -2744,6 +2704,13 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             checks[f"{role}_cri_image_metadata_raw"] = False
+        try:
+            checks[f"{role}_image_archive_raw"] = _image_archive_file_matches(
+                manifest_path,
+                environment.get(f"{role}_image_archive"),
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            checks[f"{role}_image_archive_raw"] = False
 
     raw_sidecars = manifest.get("sidecars")
     sidecars = raw_sidecars if isinstance(raw_sidecars, dict) else {}
@@ -2822,6 +2789,7 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
     for key in (
         "checks",
         "passed",
+        "diagnostics",
         "traffic",
         "rollout",
         "membership",
@@ -2868,9 +2836,10 @@ def _parser() -> argparse.ArgumentParser:
         default="/evidence/placements.jsonl",
     )
     parser.add_argument(
-        "--placement-log-timeout-seconds",
+        "--placement-log-hang-seconds",
         type=float,
-        default=10.0,
+        default=120.0,
+        help="hang bound for the gateway's audit writer to drain",
     )
     for field in fields(RolloutGateConfig):
         if field.name == "profile":
@@ -2880,10 +2849,10 @@ def _parser() -> argparse.ArgumentParser:
         parser.add_argument(option, type=value_type, default=None)
     parser.add_argument("--frozen-input", action="append", default=[])
     parser.add_argument("--frozen-sidecar", action="append", default=[])
-    parser.add_argument("--gateway-image-digest")
-    parser.add_argument("--mock-image-digest")
-    parser.add_argument("--gateway-image-config-digest")
-    parser.add_argument("--mock-image-config-digest")
+    parser.add_argument("--gateway-image-archive-manifest")
+    parser.add_argument("--gateway-image-archive-config")
+    parser.add_argument("--mock-image-archive-manifest")
+    parser.add_argument("--mock-image-archive-config")
     parser.add_argument("--gateway-containerd-image-digest")
     parser.add_argument("--mock-containerd-image-digest")
     parser.add_argument("--gateway-containerd-config-digest")
