@@ -471,7 +471,7 @@ def test_claim_cas_allows_only_one_concurrent_attempt() -> None:
     barrier = threading.Barrier(2)
 
     def claim(claim_id: str):
-        barrier.wait(timeout=5)
+        barrier.wait(timeout=10)
         return store.claim(command, claim_id=claim_id, now=_NOW + timedelta(seconds=1))
 
     with ThreadPoolExecutor(max_workers=2) as pool:

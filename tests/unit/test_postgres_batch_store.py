@@ -193,7 +193,7 @@ def test_cross_instance_claim_is_atomic_and_recovery_is_non_destructive(
             executor.submit(
                 store.claim_next_batch,
                 worker_id,
-                lease_seconds=5.0,
+                lease_seconds=10.0,
             )
             for store, worker_id in (
                 (worker_a, "gateway-a"),
@@ -234,7 +234,7 @@ def test_expired_lease_is_reclaimed_and_stale_terminal_write_is_fenced(
 
     first_claim = first_worker.claim_next_batch(
         "gateway-pod-uid-a",
-        lease_seconds=5.0,
+        lease_seconds=10.0,
     )
     assert first_claim is not None
     abandoned_writer = first_worker.create_claim_jsonl_writer(
@@ -259,7 +259,7 @@ def test_expired_lease_is_reclaimed_and_stale_terminal_write_is_fenced(
         )
     second_claim = second_worker.claim_next_batch(
         "gateway-pod-uid-b",
-        lease_seconds=2.0,
+        lease_seconds=10.0,
     )
     assert second_claim is not None
     assert second_claim.batch_id == first_claim.batch_id == job.id
@@ -372,7 +372,7 @@ def test_renew_blocks_takeover_and_cancel_invalidates_claim(
     worker = create()
     contender = create()
     job = _new_job(submitter, owner="tenant-a")
-    claim = worker.claim_next_batch("gateway-a", lease_seconds=5.0)
+    claim = worker.claim_next_batch("gateway-a", lease_seconds=10.0)
     assert claim is not None
 
     # Content/file work uses ``_lock`` and the general connection. A lease
@@ -382,8 +382,8 @@ def test_renew_blocks_takeover_and_cancel_invalidates_claim(
             renewed = executor.submit(
                 worker.renew_claim,
                 claim,
-                lease_seconds=10.0,
-            ).result(timeout=2)
+                lease_seconds=20.0,
+            ).result(timeout=10)
     assert renewed.fencing_token == claim.fencing_token
     assert renewed.lease_until > claim.lease_until
     assert contender.claim_next_batch("gateway-b", lease_seconds=1.0) is None

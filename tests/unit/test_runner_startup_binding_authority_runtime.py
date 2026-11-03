@@ -156,7 +156,13 @@ async def test_authority_runtime_assembles_authenticated_app_and_closes_once(
         nonlocal closes
         closes += 1
 
-    config = _config(tmp_path)
+    # Budgets are hang bounds here: none of these requests may time out.
+    config = _config(
+        tmp_path,
+        request_timeout_s=15.0,
+        backend_timeout_s=10.0,
+        authorization_client_timeout_s=20.0,
+    )
     runtime = build_runner_cache_placement_binding_authority_runtime(
         config,
         reauthorize=reauthorize,

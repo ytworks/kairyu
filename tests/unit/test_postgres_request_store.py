@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import uuid
@@ -1428,18 +1429,31 @@ def test_postgres_retention_rejects_non_boolean_dry_run(store_factory) -> None:
         )
 
 
+class _HeldBackend(MockBackend):
+    """Holds inference until the test releases it."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.release = asyncio.Event()
+
+    async def generate(self, request):
+        await self.release.wait()
+        return await super().generate(request)
+
+
 async def test_async_worker_renews_and_publishes_through_postgres(store_factory) -> None:
     create, _store_id = store_factory
     store = create()
-    # Inference outlasts the lease, so the result publishes only if renewals
-    # land. A 0.15 s lease left a slow CI runner's renewal round trip no
-    # margin (the lease expired and the request stayed RUNNING); 1 s keeps
-    # the renewal cadence at lease / 3 with room for a slow PostgreSQL.
-    backend = MockBackend(responses={"hello": "postgres result"}, latency_s=1.5)
+    # Inference is held until a lease renewal has landed in PostgreSQL, so the
+    # result publishes after a renewal instead of after a fixed delay. The
+    # lease still expires on the database clock and the worker renews on its
+    # own loop clock at lease / 3; a 3 s lease leaves 2 s for one renewal
+    # round trip (neither clock has an injection point).
+    backend = _HeldBackend(responses={"hello": "postgres result"})
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
-        lease_seconds=1.0,
+        lease_seconds=3.0,
         legacy_chat_models={"m"},
     )
     request = store.submit(
@@ -1451,7 +1465,20 @@ async def test_async_worker_renews_and_publishes_through_postgres(store_factory)
         )
     )
 
-    assert await worker.process_next() is True
+    processing = asyncio.create_task(worker.process_next())
+
+    async def renewed() -> None:
+        while True:
+            audit = await asyncio.to_thread(store.export_claim_audit, request.id)
+            if any(row["event"] == "renew" for row in audit):
+                return
+            assert not processing.done(), processing
+            await asyncio.sleep(0.01)
+
+    # Hang bound: the first renewal is due one third of a lease after the claim.
+    await asyncio.wait_for(renewed(), timeout=10)
+    backend.release.set()
+    assert await asyncio.wait_for(processing, timeout=10) is True
     completed = store.get(request.id)
     assert completed.state is AsyncRequestState.SUCCEEDED
     assert completed.result is not None

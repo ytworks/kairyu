@@ -177,8 +177,14 @@ async def test_runtime_assembles_authenticated_app_and_closes_resources(
             "/v1/prestage/records", headers={"Authorization": f"Bearer {_TOKEN}"}
         )
         config.cache_root.chmod(0o777)
-        await asyncio.sleep(0.51)
-        unsafe = await client.get("/readyz")
+
+        async def readiness_after_unsafe_root() -> httpx.Response:
+            # Readiness answers from a short cache; poll until it rechecks.
+            while (response := await client.get("/readyz")).status_code == 200:
+                await asyncio.sleep(0.05)
+            return response
+
+        unsafe = await asyncio.wait_for(readiness_after_unsafe_root(), timeout=10)
         config.cache_root.chmod(0o700)
 
     assert health.json() == {"status": "ok", "node_id": "gpu-node-00"}

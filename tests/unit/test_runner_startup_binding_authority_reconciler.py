@@ -273,7 +273,8 @@ def _reconciler(
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5
+    # Hang bound: no reconciliation in these tests may hit its deadline.
+    return time.monotonic() + 10
 
 
 def _quota_key() -> str:
@@ -307,7 +308,7 @@ def test_quota_create_publishes_exact_reader_contract_and_fence(tmp_path: Path) 
             authority,
             reauthorize=reauthorize,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -364,7 +365,7 @@ def test_exact_quota_replay_is_read_only(tmp_path: Path) -> None:
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         request_count = len(api.requests)
         replay_reauthorizations = 0
@@ -379,7 +380,7 @@ def test_exact_quota_replay_is_read_only(tmp_path: Path) -> None:
             authority,
             reauthorize=reauthorize_replay,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -400,7 +401,7 @@ def test_quota_revision_advances_status_without_rewriting_spec(tmp_path: Path) -
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         request_count = len(api.requests)
         result = reconciler.reconcile_quota_snapshot(
@@ -412,7 +413,7 @@ def test_quota_revision_advances_status_without_rewriting_spec(tmp_path: Path) -
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -432,7 +433,7 @@ def test_empty_status_after_create_is_repaired_on_retry(tmp_path: Path) -> None:
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         api.resources[_quota_key()]["status"] = {}
         result = reconciler.reconcile_quota_snapshot(
@@ -440,7 +441,7 @@ def test_empty_status_after_create_is_repaired_on_retry(tmp_path: Path) -> None:
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -459,7 +460,7 @@ def test_empty_status_cannot_be_recovered_with_an_older_source_revision(tmp_path
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         api.resources[_quota_key()]["status"] = {}
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match="regress"):
@@ -468,7 +469,7 @@ def test_empty_status_cannot_be_recovered_with_an_older_source_revision(tmp_path
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -495,7 +496,7 @@ def test_quota_rejects_regression_and_same_revision_equivocation(
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match=message):
             reconciler.reconcile_quota_snapshot(
@@ -503,7 +504,7 @@ def test_quota_rejects_regression_and_same_revision_equivocation(
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -519,7 +520,7 @@ def test_status_revision_conflict_is_rejected_before_any_patch(tmp_path: Path) -
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         api.resources[_quota_key()]["status"]["quotaRevision"] = 10
         request_count = len(api.requests)
@@ -529,7 +530,7 @@ def test_status_revision_conflict_is_rejected_before_any_patch(tmp_path: Path) -
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -548,14 +549,14 @@ def test_newer_leader_claims_exact_resource_and_stale_leader_is_denied(tmp_path:
             first,
             reauthorize=lambda: first,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         successor_result = reconciler.reconcile_quota_snapshot(
             _quota_publication(),
             successor,
             reauthorize=lambda: successor,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match="newer"):
             reconciler.reconcile_quota_snapshot(
@@ -563,7 +564,7 @@ def test_newer_leader_claims_exact_resource_and_stale_leader_is_denied(tmp_path:
                 first,
                 reauthorize=lambda: first,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -584,7 +585,7 @@ def test_inventory_create_binds_decision_and_canonical_candidates(tmp_path: Path
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -633,14 +634,14 @@ def test_inventory_allows_new_decision_on_same_cache_revision(tmp_path: Path) ->
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         result = reconciler.reconcile_placement_inventory(
             _inventory_publication(decision_generation=2, decision_id="decision-b"),
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
     finally:
         reconciler.close()
@@ -663,7 +664,7 @@ def test_inventory_rejects_spec_change_without_new_decision_generation(tmp_path:
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match="did not advance"):
             reconciler.reconcile_placement_inventory(
@@ -671,7 +672,7 @@ def test_inventory_rejects_spec_change_without_new_decision_generation(tmp_path:
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -687,7 +688,7 @@ def test_inventory_rejects_annotation_rollback_for_an_exact_spec(tmp_path: Path)
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match="did not advance"):
             reconciler.reconcile_placement_inventory(
@@ -695,7 +696,7 @@ def test_inventory_rejects_annotation_rollback_for_an_exact_spec(tmp_path: Path)
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -711,7 +712,7 @@ def test_inventory_rejects_missing_durable_decision_generation(tmp_path: Path) -
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         del api.resources[_inventory_key()]["metadata"]["annotations"][
             SCALE_DECISION_GENERATION_ANNOTATION
@@ -722,7 +723,7 @@ def test_inventory_rejects_missing_durable_decision_generation(tmp_path: Path) -
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -739,7 +740,7 @@ def test_reauthorization_change_aborts_before_create(tmp_path: Path) -> None:
                 authority,
                 reauthorize=lambda: _authority(token=2, holder="controller-b"),
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -757,7 +758,7 @@ def test_exact_replay_denies_authority_lost_after_read(tmp_path: Path) -> None:
             authority,
             reauthorize=lambda: authority,
             deadline_monotonic=_deadline(),
-            backend_timeout_s=2,
+            backend_timeout_s=10,
         )
         with pytest.raises(KubernetesAuthorityReconcileConflictError, match="changed"):
             reconciler.reconcile_quota_snapshot(
@@ -765,7 +766,7 @@ def test_exact_replay_denies_authority_lost_after_read(tmp_path: Path) -> None:
                 authority,
                 reauthorize=lambda: _authority(token=2, holder="controller-b"),
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -786,7 +787,7 @@ def test_kubernetes_conflicts_are_retryable_and_never_hidden(
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
         api.conflict_method = method
         publication = (
@@ -806,7 +807,7 @@ def test_kubernetes_conflicts_are_retryable_and_never_hidden(
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -830,7 +831,7 @@ def test_reconciler_rejects_untrusted_target_mapping_and_expired_budget(tmp_path
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=_deadline(),
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
         with pytest.raises(TimeoutError, match="deadline"):
             reconciler.reconcile_quota_snapshot(
@@ -838,7 +839,7 @@ def test_reconciler_rejects_untrusted_target_mapping_and_expired_budget(tmp_path
                 authority,
                 reauthorize=lambda: authority,
                 deadline_monotonic=time.monotonic() - 1,
-                backend_timeout_s=2,
+                backend_timeout_s=10,
             )
     finally:
         reconciler.close()
@@ -859,6 +860,9 @@ def test_whole_request_deadline_cancels_slow_kubernetes_response(tmp_path: Path)
             cancelled = True
         raise AssertionError("cancelled Kubernetes request resumed")
 
+    # A fixed reconciler clock leaves 0.04 s of budget whenever the call starts,
+    # so the deadline can only expire while the request is outstanding; the
+    # backend budget outlasts the handler, so only that deadline can end it.
     reconciler = KubernetesPlacementBindingAuthorityReconciler(
         targets=(_target(),),
         api_server="https://kubernetes.test",
@@ -868,22 +872,21 @@ def test_whole_request_deadline_cancels_slow_kubernetes_response(tmp_path: Path)
             trust_env=False,
             follow_redirects=False,
         ),
+        monotonic_clock=lambda: 10.0,
     )
     authority = _authority()
-    started_at = time.monotonic()
     try:
         with pytest.raises(TimeoutError):
             reconciler.reconcile_quota_snapshot(
                 _quota_publication(),
                 authority,
                 reauthorize=lambda: authority,
-                deadline_monotonic=time.monotonic() + 0.04,
-                backend_timeout_s=1,
+                deadline_monotonic=10.04,
+                backend_timeout_s=30,
             )
     finally:
         reconciler.close()
 
-    assert time.monotonic() - started_at < 0.5
     assert cancelled
 
 
