@@ -210,3 +210,16 @@ the new attribution (same verdicts). Model misses observed at the official
 sampling: the ~250K long-context reasoning loop (2 of 4 samples); one pptx
 edit and four Excel requests (of nine) that delivered no file; three Excel
 replies that attached the file without repeating its link.
+
+Review fixes (2026-11-04, `fddb411e`): `office` no longer exempts a format
+whose reply delivered nothing. Every result is saved from the chat's Files
+panel (Open WebUI's Pyodide file browser at `/mnt/uploads`) and checked; a
+result the reply also delivers must be byte-identical to it. `tune.py`
+builds the step-2 candidates from a reference without the MTP assistant and
+uses the committed command (`committed`) for the layout and embedding steps;
+the step-2 runs above were measured before MTP 4 was committed, so their
+`baseline` had no MTP and their results stand.
+
+| Gate | Run | Result |
+|---|---|---|
+| `office` | `20261103T230124Z-office` | PASS: docx, xlsx and pptx each saved from the Files panel with the requested edit (replace and append with sentence and table kept; `=SUM(B2:B7)` total row; "まとめ" slide with three bullets, titles kept); all three replies also delivered their file, byte-identical to the panel's copy; no model miss; an image after the tool calls answered; 32 Responses and 12 embedding requests, no Chat Completions |
