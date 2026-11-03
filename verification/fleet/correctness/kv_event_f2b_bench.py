@@ -9,12 +9,19 @@ binding evidence for the real ten-minute Kubernetes envelope; this gate adds
 only the distinct KV-event transport, stale fallback, replay, and routing
 claims.
 
+Every freshness decision runs on a bench-owned virtual clock passed to the
+production ``KvEventIndex`` through its ``now`` injection point.  Heartbeat
+ticks, churn operations, the stream fault, and routes form one frozen logical
+timeline executed in order.  Each virtual heartbeat tick waits for the physical
+feed's next heartbeat (an event, not a number of seconds); a wall-clock
+deadline only reports a hang.  Verdicts therefore use virtual time and event
+order (``virtual_ns`` and ``order``) and cannot change with host speed, load,
+or event-loop stalls.  Wall-clock fields (``wall_*_ns`` and the product's
+emission, receipt, apply, and replay stamps) are recorded diagnostics.
+
 Raw JSONL is authoritative.  ``--verify-artifact`` rehashes it, reconstructs
 the frozen schedule and causal joins, and recomputes every gate instead of
-trusting the manifest's metrics or pass bit.  Wall-clock deadline observations
-are preserved as diagnostics because host scheduling jitter is not a product
-correctness verdict; topology, causal ordering, lease safety, replay, routing,
-and final-state invariants remain binding.
+trusting the manifest's metrics or pass bit.
 """
 
 from __future__ import annotations
@@ -32,7 +39,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -55,7 +62,7 @@ from kairyu.orchestration.prefix_index import (
 from kairyu.orchestration.replica import ReplicaPool
 from verification.fleet.resilience.fleet_churn_bench import FORMAL_CONFIG, churn_plan
 
-SCHEMA_VERSION = "kairyu.f2b.kv-event-chaos.v2"
+SCHEMA_VERSION = "kairyu.f2b.kv-event-chaos.v3"
 RAW_NAME = "kv-event-f2b-raw.jsonl"
 MANIFEST_NAME = "kv-event-f2b-manifest.json"
 GATE = "G5-F2b"
@@ -90,6 +97,13 @@ _SOURCE_PATHS = (
 )
 _HEX_SHA256 = frozenset("0123456789abcdef")
 _NS_PER_SECOND = 1_000_000_000
+# A route decision trails its absolute tick by one virtual millisecond, so it
+# never ties a heartbeat tick, a churn operation, or the stream fault.
+_ROUTE_OFFSET_NS = 1_000_000
+# Waiting for another component's signal is bounded only to report a hang.
+_HANG_TIMEOUT_SECONDS = 60.0
+# Execution priority of logical steps that share one virtual instant.
+_TICK, _CHURN, _CHAOS, _ROUTE = range(4)
 _GITHUB_CONTEXT_NAMES = (
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
@@ -438,14 +452,40 @@ def _git_is_ancestor(commit: str) -> bool:
     return completed.returncode == 0
 
 
+def _gate_input_paths() -> tuple[str, ...]:
+    """Declared gate inputs plus every repository file this process imported."""
+
+    loaded: set[str] = set()
+    for module in tuple(sys.modules.values()):
+        module_file = getattr(module, "__file__", None)
+        if not isinstance(module_file, str):
+            continue
+        resolved = Path(module_file).resolve()
+        if not resolved.is_relative_to(_REPO_ROOT):
+            continue
+        relative = resolved.relative_to(_REPO_ROOT)
+        # Hidden directories hold environments (for example ``.venv``) and
+        # agent worktrees, not first-party gate code.
+        if relative.parts[0].startswith("."):
+            continue
+        loaded.add(relative.as_posix())
+    return tuple(sorted(loaded | set(_SOURCE_PATHS)))
+
+
 def _git_clean_at_start() -> bool:
-    lines = _git_output("status", "--porcelain", "--untracked-files=all").splitlines()
-    relevant = [
-        line
-        for line in lines
-        if not (line.startswith("?? .claude/worktrees/") or line == "?? .claude/worktrees")
-    ]
-    return not relevant
+    """Whether every gate input is tracked and unmodified.
+
+    Files the gate neither declares nor imports (scratch output, other
+    worktrees, logs) are not inputs and cannot change this verdict.
+    """
+
+    return not _git_output(
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        *_gate_input_paths(),
+    )
 
 
 def _frozen_source_snapshot() -> dict[str, object]:
@@ -704,61 +744,164 @@ def _kill_by_action(
 def _binding_recovery(
     grouped: Mapping[str, list[dict[str, object]]],
 ) -> dict[str, object]:
-    resume = _kill_by_action(grouped).get("resume", {})
-    resume_ns = resume.get("observed_ns")
+    resume_order = _kill_by_action(grouped).get("resume", {}).get("order")
     candidates = [
         row
         for row in grouped.get("replay", [])
-        if type(resume_ns) is int
-        and type(row.get("requested_ns")) is int
-        and int(row["requested_ns"]) >= int(resume_ns)
+        if type(resume_order) is int
+        and type(row.get("order")) is int
+        and int(row["order"]) > int(resume_order)
     ]
     return candidates[0] if len(candidates) == 1 else {}
 
 
+def _ordered(earlier: Mapping[str, object], later: Mapping[str, object]) -> bool:
+    """Whether ``earlier`` precedes ``later`` in event order and virtual time."""
+
+    return (
+        type(earlier.get("order")) is int
+        and type(later.get("order")) is int
+        and type(earlier.get("virtual_ns")) is int
+        and type(later.get("virtual_ns")) is int
+        and int(earlier["order"]) < int(later["order"])
+        and int(earlier["virtual_ns"]) <= int(later["virtual_ns"])
+    )
+
+
+def _ordered_times(rows: Sequence[Mapping[str, object]]) -> list[tuple[int, int]]:
+    return sorted(
+        (int(row["order"]), int(row["virtual_ns"]))
+        for row in rows
+        if type(row.get("order")) is int and type(row.get("virtual_ns")) is int
+    )
+
+
 def _trusted_wire_refreshes(
     grouped: Mapping[str, list[dict[str, object]]],
-) -> list[int]:
+) -> list[tuple[int, int]]:
     refreshes = [
-        int(row["applied_ns"])
+        row
         for row in grouped.get("heartbeat", [])
-        if row.get("result") in {"refreshed", "recovered"} and type(row.get("applied_ns")) is int
+        if row.get("result") in {"refreshed", "recovered"}
     ]
     refreshes.extend(
-        int(row["applied_ns"])
+        row
         for row in grouped.get("event_apply", [])
-        if row.get("result") == "applied"
-        and row.get("replayed") is False
-        and type(row.get("applied_ns")) is int
+        if row.get("result") == "applied" and row.get("replayed") is False
     )
-    return sorted(set(refreshes))
+    return _ordered_times(refreshes)
 
 
-def _latest_at_or_before(values: Sequence[int], timestamp: int) -> int | None:
+def _latest_before(values: Sequence[tuple[int, int]], order: int) -> int | None:
+    """Virtual time of the latest ``(order, virtual_ns)`` entry before ``order``."""
+
     latest = None
-    for value in values:
-        if value > timestamp:
+    for value_order, virtual_ns in values:
+        if value_order >= order:
             break
-        latest = value
+        latest = virtual_ns
     return latest
+
+
+def _measurement_origin_ns(config: WorkloadConfig) -> int:
+    return int(config.warmup_seconds * _NS_PER_SECOND)
+
+
+def _planned_churn(config: WorkloadConfig) -> list[dict[str, object]]:
+    """Every churn operation of the frozen plan at its virtual time."""
+
+    origin_ns = _measurement_origin_ns(config)
+    planned: list[dict[str, object]] = []
+    for epoch, plan_row in enumerate(compressed_churn_plan(config)):
+        ordinals = plan_row["ordinals"]
+        if not isinstance(ordinals, list):
+            raise RuntimeError("churn ordinals must be a list")
+        spacing_ns = int(config.churn_window_seconds * _NS_PER_SECOND / max(1, len(ordinals) - 1))
+        for batch_index, ordinal in enumerate(ordinals):
+            if type(ordinal) is not int:
+                raise RuntimeError("churn ordinal must be an integer")
+            planned.append(
+                {
+                    "epoch": epoch,
+                    "batch_index": batch_index,
+                    "ordinal": ordinal,
+                    "replica_id": _replica_id(ordinal),
+                    "scheduled_ns": (
+                        origin_ns
+                        + int(epoch * config.epoch_seconds * _NS_PER_SECOND)
+                        + batch_index * spacing_ns
+                    ),
+                }
+            )
+    return planned
+
+
+def _route_scheduled_ns(config: WorkloadConfig, sequence: int) -> int:
+    return _measurement_origin_ns(config) + sequence * int(_NS_PER_SECOND / config.route_rate)
+
+
+def _route_epoch(config: WorkloadConfig, sequence: int) -> int:
+    return min(
+        config.churn_epochs - 1,
+        int((sequence / config.route_rate) // config.epoch_seconds),
+    )
+
+
+def _chaos_scheduled_ns(config: WorkloadConfig) -> tuple[int, int]:
+    origin_ns = _measurement_origin_ns(config)
+    return (
+        origin_ns + int(config.kill_offset_seconds * _NS_PER_SECOND),
+        origin_ns + int(config.restore_offset_seconds * _NS_PER_SECOND),
+    )
+
+
+def logical_timeline(config: WorkloadConfig) -> list[tuple[int, int, int]]:
+    """Return the frozen ``(virtual_ns, priority, index)`` steps in run order."""
+
+    config.validate()
+    origin_ns = _measurement_origin_ns(config)
+    heartbeat_ns = int(config.heartbeat_seconds * _NS_PER_SECOND)
+    end_ns = (
+        origin_ns
+        + int(config.measurement_seconds * _NS_PER_SECOND)
+        + int(config.cooldown_seconds * _NS_PER_SECOND)
+    )
+    steps = [(tick * heartbeat_ns, _TICK, tick) for tick in range(end_ns // heartbeat_ns + 1)]
+    planned = _planned_churn(config)
+    steps.extend((int(row["scheduled_ns"]), _CHURN, index) for index, row in enumerate(planned))
+    pause_ns, resume_ns = _chaos_scheduled_ns(config)
+    steps.extend(((pause_ns, _CHAOS, 0), (resume_ns, _CHAOS, 1)))
+    steps.extend(
+        (_route_scheduled_ns(config, sequence) + _ROUTE_OFFSET_NS, _ROUTE, sequence)
+        for sequence in range(config.expected_measurement_routes)
+    )
+    steps.sort()
+    # Every route oracle assumes its epoch's exact target was already replaced.
+    first_churn = {int(row["epoch"]): int(row["scheduled_ns"]) for row in reversed(planned)}
+    for sequence in range(config.expected_measurement_routes):
+        route_ns = _route_scheduled_ns(config, sequence) + _ROUTE_OFFSET_NS
+        if route_ns <= first_churn[_route_epoch(config, sequence)]:
+            raise ValueError("a route precedes its epoch's first churn operation")
+    return steps
 
 
 def _route_facts(
     rows: list[dict[str, object]],
     config: WorkloadConfig,
 ) -> list[dict[str, object]]:
+    """Classify every route by event order and the virtual lease."""
+
     grouped = _rows_by_type(rows)
     kill = _kill_by_action(grouped)
     pause = kill.get("pause", {})
     resume = kill.get("resume", {})
     recovery = _binding_recovery(grouped)
-    pause_ns = pause.get("observed_ns")
-    resume_ns = resume.get("observed_ns")
-    recovery_ns = recovery.get("completed_ns")
+    pause_order = pause.get("order")
+    recovery_order = recovery.get("order")
     representative_id = representative_replica_id(config)
     refreshes = _trusted_wire_refreshes(grouped)
     pre_pause_refresh = (
-        _latest_at_or_before(refreshes, int(pause_ns)) if type(pause_ns) is int else None
+        _latest_before(refreshes, int(pause_order)) if type(pause_order) is int else None
     )
     stale_deadline_ns = (
         pre_pause_refresh + int(config.stale_after_seconds * _NS_PER_SECOND)
@@ -766,56 +909,53 @@ def _route_facts(
         else None
     )
     invalidations = [
-        int(row["observed_ns"])
+        int(row["virtual_ns"])
         for row in grouped.get("membership", [])
         if row.get("replica_id") == representative_id
         and row.get("reason") in {"manual_drain", "replica_removed"}
-        and type(row.get("observed_ns")) is int
-        and type(pause_ns) is int
-        and int(row["observed_ns"]) >= int(pause_ns)
+        and type(row.get("virtual_ns")) is int
+        and type(row.get("order")) is int
+        and type(pause_order) is int
+        and int(row["order"]) > int(pause_order)
     ]
     invalidations.extend(
-        int(row["received_ns"])
+        int(row["virtual_ns"])
         for row in grouped.get("event_receive", [])
-        if row.get("result") == "gap" and type(row.get("received_ns")) is int
+        if row.get("result") == "gap" and type(row.get("virtual_ns")) is int
     )
     first_invalidation_ns = min(invalidations, default=None)
     stale_boundary_candidates = [
         value for value in (stale_deadline_ns, first_invalidation_ns) if value is not None
     ]
     stale_boundary_ns = min(stale_boundary_candidates) if stale_boundary_candidates else None
-    logical_refreshes = sorted(
-        int(row["finished_ns"])
-        for row in grouped.get("logical_heartbeat", [])
-        if row.get("all_refreshed") is True and type(row.get("finished_ns")) is int
+    logical_refreshes = _ordered_times(
+        [row for row in grouped.get("logical_heartbeat", []) if row.get("all_refreshed") is True]
     )
     facts = []
     for row in sorted(
         grouped.get("route", []),
         key=lambda item: int(item.get("sequence", -1)),
     ):
-        selected_ns = row.get("selected_ns")
+        order = row.get("order")
+        virtual_ns = row.get("virtual_ns")
         sequence = row.get("sequence")
-        if type(selected_ns) is not int or type(sequence) is not int:
+        if type(order) is not int or type(virtual_ns) is not int or type(sequence) is not int:
             facts.append({"row": row, "phase": "invalid"})
             continue
-        if type(recovery_ns) is int and selected_ns >= int(recovery_ns):
+        if type(recovery_order) is int and order > int(recovery_order):
             phase = "restored"
         elif (
-            type(pause_ns) is int
-            and selected_ns >= int(pause_ns)
+            type(pause_order) is int
+            and order > int(pause_order)
             and stale_boundary_ns is not None
-            and selected_ns >= stale_boundary_ns
+            and virtual_ns >= stale_boundary_ns
         ):
             phase = "stale"
         else:
             phase = "fresh"
-        wire_refresh = _latest_at_or_before(refreshes, selected_ns)
-        logical_refresh = _latest_at_or_before(logical_refreshes, selected_ns)
-        epoch = min(
-            config.churn_epochs - 1,
-            int((sequence / config.route_rate) // config.epoch_seconds),
-        )
+        wire_refresh = _latest_before(refreshes, order)
+        logical_refresh = _latest_before(logical_refreshes, order)
+        epoch = _route_epoch(config, sequence)
         exact_target, approximate_target = _epoch_targets(config, epoch)
         facts.append(
             {
@@ -823,17 +963,17 @@ def _route_facts(
                 "phase": phase,
                 "epoch": epoch,
                 "wire_truth_age_ns": (
-                    selected_ns - wire_refresh if wire_refresh is not None else None
+                    virtual_ns - wire_refresh if wire_refresh is not None else None
                 ),
                 "logical_truth_age_ns": (
-                    selected_ns - logical_refresh if logical_refresh is not None else None
+                    virtual_ns - logical_refresh if logical_refresh is not None else None
                 ),
                 "expected_exact_replica": exact_target,
                 "expected_approximate_replica": approximate_target,
                 "stale_boundary_ns": stale_boundary_ns,
-                "pause_ns": pause_ns,
-                "resume_ns": resume_ns,
-                "recovery_ns": recovery_ns,
+                "pause_ns": pause.get("virtual_ns"),
+                "resume_ns": resume.get("virtual_ns"),
+                "recovery_ns": recovery.get("virtual_ns"),
             }
         )
     return facts
@@ -846,11 +986,11 @@ def _rebuild_authoritative_state(
     state = {_replica_id(ordinal): set() for ordinal in range(config.replicas)}
     logical = sorted(
         (row for row in rows if row.get("type") == "logical_apply"),
-        key=lambda row: int(row.get("applied_ns", -1)),
+        key=lambda row: int(row.get("order", -1)),
     )
     wire = sorted(
         (row for row in rows if row.get("type") == "event_emit"),
-        key=lambda row: int(row.get("emitted_ns", -1)),
+        key=lambda row: int(row.get("order", -1)),
     )
     try:
         for row in logical:
@@ -924,9 +1064,10 @@ def derive_metrics(
     route_facts = _route_facts(rows, config)
     binding_replay = _binding_recovery(grouped)
     kill = _kill_by_action(grouped)
-    pause_ns = kill.get("pause", {}).get("observed_ns")
-    resume_ns = kill.get("resume", {}).get("observed_ns")
+    pause = kill.get("pause", {})
+    resume = kill.get("resume", {})
 
+    # Wall-clock diagnostics: they describe host scheduling, never a verdict.
     live_wire_latencies = [
         int(row["applied_ns"]) - int(row["emitted_ns"])
         for row in applies
@@ -950,23 +1091,19 @@ def derive_metrics(
         and type(row.get("applied_ns")) is int
     ]
     logical_latencies = [
-        int(row["applied_ns"]) - int(row["emitted_ns"])
+        int(row["wall_applied_ns"]) - int(row["wall_started_ns"])
         for row in logical
-        if type(row.get("emitted_ns")) is int and type(row.get("applied_ns")) is int
+        if type(row.get("wall_started_ns")) is int and type(row.get("wall_applied_ns")) is int
     ]
-    selected_times = [
-        int(row["selected_ns"])
-        for row in sorted(routes, key=lambda item: int(item.get("sequence", -1)))
-        if type(row.get("selected_ns")) is int
-    ]
-    route_gaps = [
-        later - earlier for earlier, later in zip(selected_times, selected_times[1:], strict=False)
-    ]
-    lateness = [
-        int(row["selected_ns"]) - int(row["scheduled_ns"])
+    placement_latencies = [
+        int(row["placement_latency_ns"])
         for row in routes
-        if type(row.get("selected_ns")) is int and type(row.get("scheduled_ns")) is int
+        if type(row.get("placement_latency_ns")) is int
     ]
+    replay_completed_ns = binding_replay.get("completed_ns")
+    resume_wall_ns = resume.get("wall_observed_ns")
+
+    # Virtual-time results: fixed by the product and the frozen timeline.
     exact_ages = [
         max(
             int(fact["wire_truth_age_ns"]),
@@ -977,27 +1114,24 @@ def derive_metrics(
         and type(fact.get("wire_truth_age_ns")) is int
         and type(fact.get("logical_truth_age_ns")) is int
     ]
-    stale_approximate_selected = [
-        int(fact["row"]["selected_ns"])
+    stale_approximate_ns = [
+        int(fact["row"]["virtual_ns"])
         for fact in route_facts
         if fact.get("phase") == "stale"
         and fact.get("row", {}).get("reason") == "prefix_match"
         and fact.get("row", {}).get("mode") == "approximate"
-        and type(fact.get("row", {}).get("selected_ns")) is int
+        and type(fact.get("row", {}).get("virtual_ns")) is int
     ]
-    replay_completed_ns = binding_replay.get("completed_ns")
+    pause_ns = pause.get("virtual_ns")
+    resume_ns = resume.get("virtual_ns")
+    replay_ns = binding_replay.get("virtual_ns")
     recovery_snapshot = _snapshot_by_phase(grouped, "recovery")
-    action_lateness = [
-        int(row["observed_ns"]) - int(row["scheduled_ns"])
-        for row in kill.values()
-        if type(row.get("observed_ns")) is int and type(row.get("scheduled_ns")) is int
-    ]
     return {
         "logical_index": {
             "replicas": config.replicas,
             "in_process_feeds": config.replicas - 1,
             "apply_samples": len(logical_latencies),
-            "max_apply_ns": (max(logical_latencies) if logical_latencies else None),
+            "max_apply_wall_ns": (max(logical_latencies) if logical_latencies else None),
         },
         "representative_wire": {
             "physical_feeds": 1,
@@ -1005,30 +1139,35 @@ def derive_metrics(
             "received_events": len(grouped.get("event_receive", [])),
             "applied_events": len(applies),
             "live_apply_samples": len(live_wire_latencies),
-            "max_live_apply_ns": (max(live_wire_latencies) if live_wire_latencies else None),
-            "max_live_receive_ns": (max(receive_latencies) if receive_latencies else None),
+            "max_live_apply_wall_ns": (max(live_wire_latencies) if live_wire_latencies else None),
+            "max_live_receive_wall_ns": (max(receive_latencies) if receive_latencies else None),
             "heartbeat_samples": len(heartbeat_latencies),
-            "max_heartbeat_apply_ns": (max(heartbeat_latencies) if heartbeat_latencies else None),
+            "max_heartbeat_apply_wall_ns": (
+                max(heartbeat_latencies) if heartbeat_latencies else None
+            ),
         },
         "routes": {
             "total": len(routes),
             "fresh": sum(fact.get("phase") == "fresh" for fact in route_facts),
             "stale": sum(fact.get("phase") == "stale" for fact in route_facts),
             "restored": sum(fact.get("phase") == "restored" for fact in route_facts),
-            "max_exact_truth_age_ns": (max(exact_ages) if exact_ages else None),
-            "max_schedule_lateness_ns": (max(lateness) if lateness else None),
-            "max_actual_selected_gap_ns": (max(route_gaps) if route_gaps else None),
+            "max_exact_truth_age_virtual_ns": (max(exact_ages) if exact_ages else None),
+            "max_placement_wall_ns": (max(placement_latencies) if placement_latencies else None),
         },
         "chaos": {
-            "first_stale_approximate_route_after_pause_ns": (
-                min(stale_approximate_selected) - int(pause_ns)
-                if stale_approximate_selected and type(pause_ns) is int
+            "first_stale_approximate_route_after_pause_virtual_ns": (
+                min(stale_approximate_ns) - int(pause_ns)
+                if stale_approximate_ns and type(pause_ns) is int
                 else None
             ),
-            "max_action_lateness_ns": (max(action_lateness) if action_lateness else None),
-            "recovery_convergence_ns": (
-                int(replay_completed_ns) - int(resume_ns)
-                if type(replay_completed_ns) is int and type(resume_ns) is int
+            "recovery_convergence_virtual_ns": (
+                int(replay_ns) - int(resume_ns)
+                if type(replay_ns) is int and type(resume_ns) is int
+                else None
+            ),
+            "recovery_convergence_wall_ns": (
+                int(replay_completed_ns) - int(resume_wall_ns)
+                if type(replay_completed_ns) is int and type(resume_wall_ns) is int
                 else None
             ),
             "replay_mode": binding_replay.get("mode"),
@@ -1050,7 +1189,7 @@ def _evaluated_checks(
     schedules = grouped.get("schedule", [])
     emits = sorted(
         grouped.get("event_emit", []),
-        key=lambda row: int(row.get("enqueued_ns", -1)),
+        key=lambda row: int(row.get("order", -1)),
     )
     receives = grouped.get("event_receive", [])
     applies = grouped.get("event_apply", [])
@@ -1072,6 +1211,7 @@ def _evaluated_checks(
     representative_id = representative_replica_id(config)
     replica_ids = [_replica_id(ordinal) for ordinal in range(config.replicas)]
     origin_ns = run.get("measurement_origin_ns")
+    origin_is_frozen = type(origin_ns) is int and origin_ns == _measurement_origin_ns(config)
     interval_ns = int(_NS_PER_SECOND / config.route_rate)
 
     schedule_payloads = [
@@ -1094,27 +1234,23 @@ def _evaluated_checks(
             and row.get("event") == emit.get("event")
             and row.get("event_kind") == emit.get("event_kind")
             and row.get("emitted_ns") == emit.get("emitted_ns")
+            and type(row.get("emitted_ns")) is int
             and type(row.get("received_ns")) is int
             and type(row.get("applied_ns")) is int
-            and type(row.get("emitted_ns")) is int
-            and int(row["emitted_ns"]) <= int(row["received_ns"]) <= int(row["applied_ns"])
+            and _ordered(emit, row)
         )
 
     route_sequence_and_ticks = (
-        type(origin_ns) is int
+        origin_is_frozen
         and [row.get("sequence") for row in routes]
         == list(range(config.expected_measurement_routes))
         and all(
             row.get("scheduled_ns") == int(origin_ns) + sequence * interval_ns
-            and type(row.get("selected_ns")) is int
-            and int(row["selected_ns"]) >= int(row["scheduled_ns"])
-            and type(row.get("completed_ns")) is int
-            and int(row["completed_ns"]) >= int(row["selected_ns"])
+            and row.get("virtual_ns") == int(row["scheduled_ns"]) + _ROUTE_OFFSET_NS
             for sequence, row in enumerate(routes)
         )
         and all(
-            int(earlier["selected_ns"]) <= int(later["selected_ns"])
-            for earlier, later in zip(routes, routes[1:], strict=False)
+            _ordered(earlier, later) for earlier, later in zip(routes, routes[1:], strict=False)
         )
     )
     route_oracle_inputs = all(
@@ -1140,29 +1276,7 @@ def _evaluated_checks(
     stale_facts = [fact for fact in route_facts if fact.get("phase") == "stale"]
     restored_facts = [fact for fact in route_facts if fact.get("phase") == "restored"]
 
-    expected_churn = []
-    if type(origin_ns) is int:
-        for epoch, plan_row in enumerate(compressed_churn_plan(config)):
-            ordinals = plan_row["ordinals"]
-            if not isinstance(ordinals, list):
-                continue
-            spacing_ns = int(
-                config.churn_window_seconds * _NS_PER_SECOND / max(1, len(ordinals) - 1)
-            )
-            for batch_index, ordinal in enumerate(ordinals):
-                expected_churn.append(
-                    {
-                        "epoch": epoch,
-                        "batch_index": batch_index,
-                        "ordinal": ordinal,
-                        "replica_id": (_replica_id(ordinal) if type(ordinal) is int else None),
-                        "scheduled_ns": (
-                            int(origin_ns)
-                            + int(epoch * config.epoch_seconds * _NS_PER_SECOND)
-                            + batch_index * spacing_ns
-                        ),
-                    }
-                )
+    expected_churn = _planned_churn(config) if origin_is_frozen else []
     churn_rows = sorted(
         grouped.get("churn", []),
         key=lambda row: (
@@ -1170,16 +1284,20 @@ def _evaluated_checks(
             int(row.get("batch_index", -1)),
         ),
     )
-    churn_shape = len(churn_rows) == len(expected_churn) and all(
-        all(row.get(key) == expected.get(key) for key in expected)
-        and isinstance(row.get("old_generation"), str)
-        and isinstance(row.get("new_generation"), str)
-        and row.get("old_generation") != row.get("new_generation")
-        and type(row.get("started_ns")) is int
-        and type(row.get("completed_ns")) is int
-        and int(row["started_ns"]) >= int(row["scheduled_ns"])
-        and int(row["completed_ns"]) >= int(row["started_ns"])
-        for row, expected in zip(churn_rows, expected_churn, strict=True)
+    churn_shape = (
+        bool(expected_churn)
+        and len(churn_rows) == len(expected_churn)
+        and all(
+            all(row.get(key) == expected.get(key) for key in expected)
+            and isinstance(row.get("old_generation"), str)
+            and isinstance(row.get("new_generation"), str)
+            and row.get("old_generation") != row.get("new_generation")
+            and row.get("virtual_ns") == row.get("scheduled_ns")
+            and type(row.get("started_order")) is int
+            and type(row.get("completed_order")) is int
+            and int(row["started_order"]) < int(row["completed_order"])
+            for row, expected in zip(churn_rows, expected_churn, strict=True)
+        )
     )
     membership = grouped.get("membership", [])
     membership_join = churn_shape
@@ -1198,11 +1316,12 @@ def _evaluated_checks(
                 or joined[1].get("replica_generation") != churn.get("old_generation")
                 or joined[2].get("replica_generation") != churn.get("new_generation")
                 or any(
-                    type(row.get("observed_ns")) is not int
+                    type(row.get("order")) is not int
+                    or row.get("virtual_ns") != churn.get("virtual_ns")
                     or not (
-                        int(churn["started_ns"])
-                        <= int(row["observed_ns"])
-                        <= int(churn["completed_ns"])
+                        int(churn["started_order"])
+                        < int(row["order"])
+                        < int(churn["completed_order"])
                     )
                     for row in joined
                 )
@@ -1211,10 +1330,10 @@ def _evaluated_checks(
                 break
     epoch_route_overlap = churn_shape and all(
         any(
-            type(route.get("selected_ns")) is int
-            and int(epoch_churn[0]["started_ns"])
-            <= int(route["selected_ns"])
-            <= int(epoch_churn[-1]["completed_ns"])
+            type(route.get("order")) is int
+            and int(epoch_churn[0]["started_order"])
+            < int(route["order"])
+            < int(epoch_churn[-1]["completed_order"])
             for route in routes
         )
         for epoch in range(config.churn_epochs)
@@ -1251,7 +1370,7 @@ def _evaluated_checks(
     logical_shape = True
     for row in sorted(
         logical,
-        key=lambda item: int(item.get("applied_ns", -1)),
+        key=lambda item: int(item.get("order", -1)),
     ):
         replica_id = row.get("replica_id")
         generation = row.get("replica_generation")
@@ -1283,7 +1402,7 @@ def _evaluated_checks(
     for heartbeat in logical_heartbeats:
         heartbeat_ids = heartbeat.get("replica_ids")
         high_water = heartbeat.get("stream_high_water")
-        finished_ns = heartbeat.get("finished_ns")
+        heartbeat_order = heartbeat.get("order")
         if (
             not isinstance(heartbeat_ids, list)
             or len(heartbeat_ids) != config.replicas - 1
@@ -1292,7 +1411,7 @@ def _evaluated_checks(
             or heartbeat.get("all_refreshed") is not True
             or not isinstance(high_water, dict)
             or set(high_water) != set(heartbeat_ids)
-            or type(finished_ns) is not int
+            or type(heartbeat_order) is not int
         ):
             logical_shape = False
             break
@@ -1301,12 +1420,12 @@ def _evaluated_checks(
                 row
                 for row in logical
                 if row.get("replica_id") == replica_id
-                and type(row.get("applied_ns")) is int
-                and int(row["applied_ns"]) <= int(finished_ns)
+                and type(row.get("order")) is int
+                and int(row["order"]) < int(heartbeat_order)
             ]
             latest = max(
                 candidates,
-                key=lambda item: int(item["applied_ns"]),
+                key=lambda item: int(item["order"]),
                 default=None,
             )
             recorded = high_water.get(replica_id)
@@ -1350,19 +1469,12 @@ def _evaluated_checks(
     resume = kill.get("resume", {})
     kill_schedule = (
         len(grouped.get("kill", [])) == 2
-        and type(origin_ns) is int
+        and origin_is_frozen
         and pause.get("fault") == "subscriber_live_socket_close"
         and resume.get("fault") == "subscriber_live_socket_reconnect"
-        and pause.get("scheduled_ns")
-        == int(origin_ns) + int(config.kill_offset_seconds * _NS_PER_SECOND)
-        and resume.get("scheduled_ns")
-        == int(origin_ns) + int(config.restore_offset_seconds * _NS_PER_SECOND)
-        and all(
-            type(row.get("requested_ns")) is int
-            and type(row.get("observed_ns")) is int
-            and int(row["scheduled_ns"]) <= int(row["requested_ns"]) <= int(row["observed_ns"])
-            for row in (pause, resume)
-        )
+        and (pause.get("scheduled_ns"), resume.get("scheduled_ns")) == _chaos_scheduled_ns(config)
+        and all(row.get("virtual_ns") == row.get("scheduled_ns") for row in (pause, resume))
+        and _ordered(pause, resume)
     )
     process = grouped.get("process_identity", [])
     stable_fields = (
@@ -1407,19 +1519,18 @@ def _evaluated_checks(
         and rotation.get("replica_id") == representative_id
         and rotation.get("epoch") == representative_churn[0].get("epoch")
         and rotation.get("ordinal") == representative_churn[0].get("ordinal")
-        and type(rotation.get("observed_ns")) is int
-        and int(representative_churn[0]["started_ns"])
-        <= int(rotation["observed_ns"])
-        <= int(representative_churn[0]["completed_ns"])
+        and type(rotation.get("order")) is int
+        and int(representative_churn[0]["started_order"])
+        < int(rotation["order"])
+        < int(representative_churn[0]["completed_order"])
         and all(
             [row.get("sequence") for row in stream_rows] == list(range(len(stream_rows)))
             and len({row.get("replica_generation") for row in stream_rows}) == 1
             and all(
                 row.get("replica_id") == representative_id
                 and isinstance(row.get("event"), dict)
-                and type(row.get("enqueued_ns")) is int
+                and type(row.get("order")) is int
                 and type(row.get("emitted_ns")) is int
-                and int(row["enqueued_ns"]) <= int(row["emitted_ns"])
                 for row in stream_rows
             )
             for stream_rows in emits_by_epoch.values()
@@ -1443,19 +1554,15 @@ def _evaluated_checks(
         key=lambda row: int(row.get("sequence", -1)),
     )
     replay_sequences = [row.get("sequence") for row in replayed_applies]
-    replay_requested_ns = binding_replay.get("requested_ns")
     replay_response_ns = binding_replay.get("response_received_ns")
     replay_completed_ns = binding_replay.get("completed_ns")
     replay_causality = (
-        type(replay_requested_ns) is int
-        and type(replay_response_ns) is int
+        type(replay_response_ns) is int
         and type(replay_completed_ns) is int
-        and int(replay_requested_ns) <= int(replay_response_ns) <= int(replay_completed_ns)
         and all(
-            type(row.get("received_ns")) is int
-            and type(row.get("applied_ns")) is int
-            and int(row["received_ns"]) == int(replay_response_ns)
-            and int(replay_response_ns) <= int(row["applied_ns"]) <= int(replay_completed_ns)
+            row.get("received_ns") == replay_response_ns
+            and row.get("virtual_ns") == binding_replay.get("virtual_ns")
+            and _ordered(row, binding_replay)
             for row in replayed_applies
         )
     )
@@ -1516,9 +1623,9 @@ def _evaluated_checks(
         and recovery_snapshot.get("stream_epoch") == final_stream_epoch
         and recovery_snapshot.get("high_sequence") == high_sequence
         and recovery_snapshot.get("replay_completed_ns") == replay_completed_ns
-        and type(recovery_snapshot.get("observed_ns")) is int
-        and type(replay_completed_ns) is int
-        and int(replay_completed_ns) <= int(recovery_snapshot["observed_ns"])
+        and recovery_snapshot.get("replay_order") == binding_replay.get("order")
+        and recovery_snapshot.get("virtual_ns") == binding_replay.get("virtual_ns")
+        and _ordered(binding_replay, recovery_snapshot)
         and recovery_view.get("replica_id") == representative_id
         and recovery_view.get("stream_epoch") == final_stream_epoch
         and recovery_view.get("last_sequence") == high_sequence
@@ -1533,15 +1640,11 @@ def _evaluated_checks(
     transport_summaries = grouped.get("transport_summary", [])
     transport_summary = transport_summaries[0] if len(transport_summaries) == 1 else {}
 
-    logical_max = metric["logical_index"]["max_apply_ns"]
-    wire_max = metric["representative_wire"]["max_live_apply_ns"]
-    heartbeat_max = metric["representative_wire"]["max_heartbeat_apply_ns"]
-    exact_age_max = metric["routes"]["max_exact_truth_age_ns"]
-    route_lateness_max = metric["routes"]["max_schedule_lateness_ns"]
-    route_gap_max = metric["routes"]["max_actual_selected_gap_ns"]
-    fallback_after_pause_ns = metric["chaos"]["first_stale_approximate_route_after_pause_ns"]
-    action_lateness_max = metric["chaos"]["max_action_lateness_ns"]
-    recovery_ns = metric["chaos"]["recovery_convergence_ns"]
+    logical_max = metric["logical_index"]["max_apply_wall_ns"]
+    wire_max = metric["representative_wire"]["max_live_apply_wall_ns"]
+    heartbeat_max = metric["representative_wire"]["max_heartbeat_apply_wall_ns"]
+    exact_age_max = metric["routes"]["max_exact_truth_age_virtual_ns"]
+    recovery_wall_ns = metric["chaos"]["recovery_convergence_wall_ns"]
     return {
         "topology_is_exactly_200_logical_199_in_process_1_physical": (
             recorded_topology == expected_topology
@@ -1583,18 +1686,9 @@ def _evaluated_checks(
             and type(heartbeat_max) is int
             and 0 <= int(heartbeat_max) < freshness_ns
         ),
-        "kill_and_restore_follow_the_frozen_actual_time_schedule": (kill_schedule),
-        "pause_and_resume_action_lateness_is_strictly_below_500ms": (
-            type(action_lateness_max) is int and 0 <= int(action_lateness_max) < freshness_ns
-        ),
+        "kill_and_restore_follow_the_frozen_virtual_schedule": (kill_schedule),
         "pool_router_index_publisher_and_subscriber_never_restart": (process_stable),
         "route_ticks_are_absolute_complete_and_monotonic": (route_sequence_and_ticks),
-        "max_route_schedule_lateness_is_strictly_below_500ms": (
-            type(route_lateness_max) is int and 0 <= int(route_lateness_max) < freshness_ns
-        ),
-        "max_actual_selected_route_gap_is_strictly_below_500ms": (
-            type(route_gap_max) is int and 0 <= int(route_gap_max) < freshness_ns
-        ),
         "route_oracle_inputs_recompute_from_the_frozen_trace": (route_oracle_inputs),
         "fresh_routes_use_the_exact_oracle": (
             bool(fresh_facts)
@@ -1605,7 +1699,7 @@ def _evaluated_checks(
                 for fact in fresh_facts
             )
         ),
-        "every_route_after_actual_lease_expiry_uses_approximate_oracle": (
+        "every_route_after_virtual_lease_expiry_uses_approximate_oracle": (
             bool(stale_facts)
             and all(
                 fact["row"].get("reason") == "prefix_match"
@@ -1614,10 +1708,6 @@ def _evaluated_checks(
                 and fact["row"].get("selected_replica") != fact.get("expected_exact_replica")
                 for fact in stale_facts
             )
-        ),
-        "first_stale_approximate_route_after_pause_is_strictly_below_500ms": (
-            type(fallback_after_pause_ns) is int
-            and 0 <= int(fallback_after_pause_ns) < freshness_ns
         ),
         "restored_routes_use_the_exact_oracle": (
             bool(restored_facts)
@@ -1646,14 +1736,7 @@ def _evaluated_checks(
         "recovery_snapshot_rebuilds_rotated_epoch_at_replay_completion": (recovery_state_converged),
         "final_state_rebuilds_the_authoritative_200_replica_digest": (final_state_converged),
         "restore_recovery_completes_strictly_below_500ms": (
-            type(recovery_ns) is int and 0 <= int(recovery_ns) < freshness_ns
-        ),
-        "recovery_snapshot_observed_strictly_below_500ms_after_replay": (
-            type(replay_completed_ns) is int
-            and type(recovery_snapshot.get("observed_ns")) is int
-            and 0
-            <= int(recovery_snapshot["observed_ns"]) - int(replay_completed_ns)
-            < freshness_ns
+            type(recovery_wall_ns) is int and 0 <= int(recovery_wall_ns) < freshness_ns
         ),
         "publisher_reports_no_unjournaled_live_drop": (
             transport_summary.get("publisher_dropped_live_events") == 0
@@ -1665,15 +1748,11 @@ def _evaluated_checks(
     }
 
 
+# Wall-clock observations: recorded for analysis, never part of pass/fail.
 _DIAGNOSTIC_CHECK_NAMES = (
     "logical_index_apply_freshness_is_strictly_below_500ms",
     "representative_wire_live_freshness_is_strictly_below_500ms",
-    "pause_and_resume_action_lateness_is_strictly_below_500ms",
-    "max_route_schedule_lateness_is_strictly_below_500ms",
-    "max_actual_selected_route_gap_is_strictly_below_500ms",
-    "first_stale_approximate_route_after_pause_is_strictly_below_500ms",
     "restore_recovery_completes_strictly_below_500ms",
-    "recovery_snapshot_observed_strictly_below_500ms_after_replay",
 )
 
 
@@ -1951,16 +2030,50 @@ class _MockReplica:
         return None
 
 
-async def _wait_until_ns(target_ns: int) -> None:
-    while True:
-        remaining_ns = target_ns - time.perf_counter_ns()
-        if remaining_ns <= 0:
-            return
-        await asyncio.sleep(min(0.01, remaining_ns / _NS_PER_SECOND))
+class _VirtualClock:
+    """Bench-owned time and event order behind every binding decision.
+
+    ``KvEventIndex`` reads :meth:`now` through its production clock injection
+    point.  Only the frozen timeline advances it, so an OS or event-loop stall
+    cannot age a lease or move a route across a churn or fault boundary.
+    """
+
+    def __init__(self) -> None:
+        self._now_ns = 0
+        self._order = 0
+
+    @property
+    def now_ns(self) -> int:
+        return self._now_ns
+
+    def now(self) -> float:
+        return self._now_ns / _NS_PER_SECOND
+
+    def advance_to(self, target_ns: int) -> None:
+        if target_ns < self._now_ns:
+            raise RuntimeError("the logical timeline must not move backwards")
+        self._now_ns = target_ns
+
+    def stamp(self) -> dict[str, int]:
+        """Return the current virtual time and the next global event order."""
+
+        self._order += 1
+        return {"virtual_ns": self._now_ns, "order": self._order}
+
+
+async def _await_signal(condition: Callable[[], bool], what: str) -> None:
+    """Wait for another component's signal; the deadline only reports a hang."""
+
+    deadline = time.monotonic() + _HANG_TIMEOUT_SECONDS
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"hang: {what} not observed within {_HANG_TIMEOUT_SECONDS:g} s")
+        await asyncio.sleep(0.001)
 
 
 def _membership_snapshot_row(
     pool: ReplicaPool,
+    clock: _VirtualClock,
     *,
     phase: str,
     epoch: int | None,
@@ -1970,7 +2083,7 @@ def _membership_snapshot_row(
         "type": "fleet_snapshot",
         "phase": phase,
         "epoch": epoch,
-        "observed_ns": time.perf_counter_ns(),
+        **clock.stamp(),
         "replica_ids": list(replica_ids),
         "healthy_ids": list(healthy_ids),
         "eligible_ids": list(eligible_ids),
@@ -2005,6 +2118,11 @@ async def _collect_raw_rows(
     config.validate()
     topology = topology_descriptor(config)
     schedule = compressed_churn_plan(config)
+    timeline = logical_timeline(config)
+    planned_churn = _planned_churn(config)
+    last_batch_index = {int(row["epoch"]): int(row["batch_index"]) for row in planned_churn}
+    pause_scheduled_ns, resume_scheduled_ns = _chaos_scheduled_ns(config)
+    clock = _VirtualClock()
     rows: list[dict[str, object]] = [
         {
             "type": "run",
@@ -2015,13 +2133,13 @@ async def _collect_raw_rows(
             "source": source,
             "environment": environment,
             "reused_evidence": reused_evidence_descriptor(),
-            "measurement_origin_ns": None,
+            "measurement_origin_ns": _measurement_origin_ns(config),
         }
     ]
     rows.extend({"type": "schedule", **item} for item in schedule)
 
     representative_id = str(topology["representative_replica_id"])
-    exact_index = KvEventIndex(staleness_s=config.stale_after_seconds)
+    exact_index = KvEventIndex(staleness_s=config.stale_after_seconds, now=clock.now)
     approximate_index = PrefixIndex()
     current_epoch = {"value": 0}
     routing_index = KvRoutingIndex(
@@ -2044,7 +2162,8 @@ async def _collect_raw_rows(
                 "epoch": active_churn.get("epoch"),
                 "ordinal": active_churn.get("ordinal"),
                 "scheduled_ns": active_churn.get("scheduled_ns"),
-                "observed_ns": time.perf_counter_ns(),
+                **clock.stamp(),
+                "wall_ns": time.monotonic_ns(),
                 **event,
             }
         )
@@ -2055,11 +2174,11 @@ async def _collect_raw_rows(
         prefix_index=routing_index,
         membership_event_sink=membership_sink,
     )
-    membership_lock = asyncio.Lock()
     authoritative: dict[str, set[str]] = {replica_id: set() for replica_id in pool.replica_ids}
     logical_streams: dict[str, tuple[str, str, int]] = {}
     wire_events: dict[tuple[str, int], dict[str, object]] = {}
     delivery_records: list[dict[str, object]] = []
+    wire_refreshes = {"count": 0}
 
     def on_delivery(delivery: dict[str, object]) -> None:
         emission = wire_events.get(
@@ -2081,8 +2200,14 @@ async def _collect_raw_rows(
             {
                 **delivery,
                 "replica_generation": generation,
+                **clock.stamp(),
             }
         )
+        if delivery.get("event_kind") == "heartbeat" and delivery.get("result") in {
+            "refreshed",
+            "recovered",
+        }:
+            wire_refreshes["count"] += 1
 
     with tempfile.TemporaryDirectory(prefix="kairyu-f2b-") as temporary:
         transport = os.environ.get("F2B_ZMQ_TRANSPORT", "ipc")
@@ -2111,6 +2236,26 @@ async def _collect_raw_rows(
             replay_timeout_s=config.route_timeout_seconds,
             on_delivery=on_delivery,
         )
+        wire_connected = {"value": True}
+        # Virtual time and order of each subscriber recovery, index-aligned
+        # with ``subscriber.recovery_history``.
+        recovery_marks: list[dict[str, int]] = []
+        resume_order: dict[str, int | None] = {"value": None}
+        recovered = {"value": False}
+
+        def drain_wire(max_events: int = 10_000) -> None:
+            subscriber.drain(max_events=max_events)
+            while len(recovery_marks) < len(subscriber.recovery_history):
+                recovery_marks.append(clock.stamp())
+
+        def wire_matches_publisher() -> bool:
+            drain_wire()
+            view = exact_index.view(representative_id)
+            return (
+                view.stream_epoch == publisher.stream_epoch
+                and view.last_sequence == publisher.high_sequence
+                and exact_index.all_live((representative_id,))
+            )
 
         def wire_publish(
             event: dict[str, object],
@@ -2118,7 +2263,7 @@ async def _collect_raw_rows(
             epoch: int | None,
             purpose: str,
         ) -> int:
-            enqueued_ns = time.perf_counter_ns()
+            wall_ns = time.monotonic_ns()
             wire_sink(event)
             sequence = publisher.high_sequence
             stream_epoch = publisher.stream_epoch
@@ -2138,7 +2283,8 @@ async def _collect_raw_rows(
                 "purpose": purpose,
                 "event_kind": event["type"],
                 "event": json.loads(json.dumps(event)),
-                "enqueued_ns": enqueued_ns,
+                **clock.stamp(),
+                "wall_ns": wall_ns,
                 "emitted_ns": None,
             }
             _apply_hash_event(authoritative[representative_id], event)
@@ -2159,7 +2305,7 @@ async def _collect_raw_rows(
             else:
                 stream_epoch = previous[1]
                 sequence = previous[2] + 1
-            emitted_ns = time.perf_counter_ns()
+            wall_started_ns = time.monotonic_ns()
             result = exact_index.apply_sequenced(
                 replica_id,
                 stream_epoch,
@@ -2171,7 +2317,7 @@ async def _collect_raw_rows(
                 stream_epoch,
                 sequence,
             )
-            applied_ns = time.perf_counter_ns()
+            wall_applied_ns = time.monotonic_ns()
             if result != "applied" or not synchronized:
                 raise RuntimeError(
                     f"logical KV feed failed to synchronize {replica_id!r}: "
@@ -2197,8 +2343,9 @@ async def _collect_raw_rows(
                     "purpose": purpose,
                     "event_kind": event["type"],
                     "event": json.loads(json.dumps(event)),
-                    "emitted_ns": emitted_ns,
-                    "applied_ns": applied_ns,
+                    **clock.stamp(),
+                    "wall_started_ns": wall_started_ns,
+                    "wall_applied_ns": wall_applied_ns,
                 }
             )
 
@@ -2206,7 +2353,7 @@ async def _collect_raw_rows(
             return {
                 "type": "process_identity",
                 "phase": phase,
-                "observed_ns": time.perf_counter_ns(),
+                **clock.stamp(),
                 "pid": os.getpid(),
                 "pool_id": id(pool),
                 "routing_id": id(routing_index),
@@ -2217,8 +2364,307 @@ async def _collect_raw_rows(
                 "subscriber_socket_id": id(subscriber._socket),
             }
 
+        def record_recovery() -> None:
+            binding = [
+                index
+                for index, mark in enumerate(recovery_marks)
+                if resume_order["value"] is not None and mark["order"] > resume_order["value"]
+            ]
+            if len(binding) != 1:
+                raise RuntimeError("stream restore must produce exactly one binding replay")
+            if not exact_index.all_live((representative_id,)):
+                raise RuntimeError("representative stream did not recover")
+            mark = recovery_marks[binding[0]]
+            recovery = subscriber.recovery_history[binding[0]]
+            recovery_view = exact_index.view(representative_id)
+            recovery_authoritative = list(publisher.authoritative_hashes())
+            recovery_index = list(recovery_view.block_hashes)
+            recovery_view_payload = asdict(recovery_view)
+            recovery_view_payload["block_hashes"] = recovery_index
+            rows.append(
+                {
+                    "type": "state_snapshot",
+                    "phase": "recovery",
+                    "replica_id": representative_id,
+                    "replica_generation": pool.entry_generation(representative_id),
+                    "stream_epoch": publisher.stream_epoch,
+                    "high_sequence": publisher.high_sequence,
+                    "replay_completed_ns": recovery["completed_ns"],
+                    "replay_order": mark["order"],
+                    **clock.stamp(),
+                    "index_view": recovery_view_payload,
+                    "authoritative_hashes": recovery_authoritative,
+                    "index_hashes": recovery_index,
+                    "authoritative_digest": _sha256_json(recovery_authoritative),
+                    "index_digest": _sha256_json(recovery_index),
+                }
+            )
+            rows.append(
+                {
+                    "type": "stream",
+                    "action": "recovered",
+                    **clock.stamp(),
+                    "stream_epoch": publisher.stream_epoch,
+                    "high_sequence": publisher.high_sequence,
+                }
+            )
+            rows.append(identity_row("restored"))
+            recovered["value"] = True
+
+        async def heartbeat_tick(tick: int) -> None:
+            wall_started_ns = time.monotonic_ns()
+            if wire_connected["value"]:
+                # The physical feed refreshes its lease at this virtual tick
+                # only once its own heartbeat arrives; wait for that event.
+                refreshes_before = wire_refreshes["count"]
+
+                def wire_refreshed() -> bool:
+                    drain_wire()
+                    return wire_refreshes["count"] > refreshes_before
+
+                await _await_signal(
+                    wire_refreshed,
+                    f"representative heartbeat for virtual tick {tick}",
+                )
+                if resume_order["value"] is not None and not recovered["value"]:
+                    record_recovery()
+            replica_ids = [
+                replica_id for replica_id in pool.replica_ids if replica_id != representative_id
+            ]
+            high_water = {
+                replica_id: {
+                    "stream_epoch": logical_streams[replica_id][1],
+                    "high_sequence": logical_streams[replica_id][2],
+                }
+                for replica_id in replica_ids
+            }
+            refreshed = [
+                replica_id
+                for replica_id in replica_ids
+                if exact_index.heartbeat(
+                    replica_id,
+                    stream_epoch=str(high_water[replica_id]["stream_epoch"]),
+                    high_sequence=int(high_water[replica_id]["high_sequence"]),
+                )
+            ]
+            rows.append(
+                {
+                    "type": "logical_heartbeat",
+                    "sequence": tick,
+                    **clock.stamp(),
+                    "wall_started_ns": wall_started_ns,
+                    "wall_finished_ns": time.monotonic_ns(),
+                    "replica_ids": replica_ids,
+                    "replica_count": len(replica_ids),
+                    "stream_high_water": high_water,
+                    "all_refreshed": refreshed == replica_ids,
+                }
+            )
+
+        async def churn(operation: Mapping[str, object]) -> None:
+            nonlocal wire_sink
+            epoch = int(operation["epoch"])
+            batch_index = int(operation["batch_index"])
+            ordinal = int(operation["ordinal"])
+            scheduled_ns = int(operation["scheduled_ns"])
+            exact_target, approximate_target = _epoch_targets(config, epoch)
+            if batch_index == 0:
+                current_epoch["value"] = epoch
+                prompt = _epoch_prompt(epoch)
+                approximate_index.observe(approximate_target, prompt)
+                rows.append(
+                    {
+                        "type": "prefix_seed",
+                        "epoch": epoch,
+                        "replica_id": approximate_target,
+                        **clock.stamp(),
+                        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                        "prefix_fingerprint": (prefix_root_fingerprint(prompt)),
+                    }
+                )
+                rows.append(_membership_snapshot_row(pool, clock, phase="epoch_start", epoch=epoch))
+            stored = {
+                "type": "BlockStored",
+                "block_hashes": list(_epoch_block_hashes(epoch)),
+            }
+            replica_id = _replica_id(ordinal)
+            active_churn.update(
+                {
+                    "epoch": epoch,
+                    "ordinal": ordinal,
+                    "scheduled_ns": scheduled_ns,
+                }
+            )
+            started = clock.stamp()
+            wall_started_ns = time.monotonic_ns()
+            old_generation = pool.entry_generation(replica_id)
+            pool.drain(replica_id)
+            await pool.remove_replica(replica_id)
+            authoritative[replica_id].clear()
+            if replica_id == representative_id:
+                previous_stream_epoch = publisher.stream_epoch
+                next_stream_epoch = publisher.rotate_epoch()
+                wire_sink = publisher.event_sink()
+                rows.append(
+                    {
+                        "type": "stream",
+                        "action": "rotate",
+                        "epoch": epoch,
+                        "ordinal": ordinal,
+                        "replica_id": replica_id,
+                        **clock.stamp(),
+                        "previous_stream_epoch": (previous_stream_epoch),
+                        "stream_epoch": next_stream_epoch,
+                    }
+                )
+            pool.add_replica(
+                replica_id,
+                _MockReplica(replica_id, observations),
+            )
+            if replica_id == representative_id:
+                wire_publish(clear, epoch=epoch, purpose="replacement_clear")
+            else:
+                direct_apply(replica_id, clear, epoch=epoch, purpose="replacement_clear")
+            new_generation = pool.entry_generation(replica_id)
+            if replica_id == exact_target:
+                if replica_id == representative_id:
+                    wire_publish(stored, epoch=epoch, purpose="replacement_exact_seed")
+                else:
+                    direct_apply(
+                        replica_id,
+                        stored,
+                        epoch=epoch,
+                        purpose="replacement_exact_seed",
+                    )
+            if replica_id == representative_id and wire_connected["value"]:
+                await _await_signal(
+                    wire_matches_publisher,
+                    "representative replacement delivery",
+                )
+            completed = clock.stamp()
+            rows.append(
+                {
+                    "type": "churn",
+                    "epoch": epoch,
+                    "batch_index": batch_index,
+                    "ordinal": ordinal,
+                    "replica_id": replica_id,
+                    "scheduled_ns": scheduled_ns,
+                    "virtual_ns": started["virtual_ns"],
+                    "started_order": started["order"],
+                    "completed_order": completed["order"],
+                    "wall_started_ns": wall_started_ns,
+                    "wall_completed_ns": time.monotonic_ns(),
+                    "old_generation": old_generation,
+                    "new_generation": new_generation,
+                }
+            )
+            active_churn.clear()
+            if batch_index == last_batch_index[epoch]:
+                rows.append(_membership_snapshot_row(pool, clock, phase="epoch_end", epoch=epoch))
+
+        async def stream_chaos(action: int) -> None:
+            if action == 0:
+                old_socket_id = id(subscriber._socket)
+                wall_requested_ns = time.monotonic_ns()
+                subscriber.pause()
+                wire_connected["value"] = False
+                rows.append(
+                    {
+                        "type": "kill",
+                        "action": "pause",
+                        "fault": "subscriber_live_socket_close",
+                        "scheduled_ns": pause_scheduled_ns,
+                        **clock.stamp(),
+                        "wall_requested_ns": wall_requested_ns,
+                        "wall_observed_ns": time.monotonic_ns(),
+                        "subscriber_socket_id": old_socket_id,
+                    }
+                )
+                rows.append(identity_row("outage"))
+                return
+            # Virtual outages take no wall time.  Reconnect only after the
+            # publisher has handed every outage event to PUB, so those events
+            # are lost with the closed socket as in a real outage and restore
+            # must use replay, whatever the publisher thread's scheduling.
+            await _await_signal(
+                lambda: publisher._queue.unfinished_tasks == 0,
+                "publisher hand-off of outage events",
+            )
+            wall_requested_ns = time.monotonic_ns()
+            subscriber.resume()
+            wire_connected["value"] = True
+            stamp = clock.stamp()
+            resume_order["value"] = stamp["order"]
+            rows.append(
+                {
+                    "type": "kill",
+                    "action": "resume",
+                    "fault": "subscriber_live_socket_reconnect",
+                    "scheduled_ns": resume_scheduled_ns,
+                    **stamp,
+                    "wall_requested_ns": wall_requested_ns,
+                    "wall_observed_ns": time.monotonic_ns(),
+                    "subscriber_socket_id": id(subscriber._socket),
+                }
+            )
+
+        async def route(sequence: int) -> None:
+            scheduled_ns = _route_scheduled_ns(config, sequence)
+            epoch = _route_epoch(config, sequence)
+            prompt = _epoch_prompt(epoch)
+            exact_target, approximate_target = _epoch_targets(config, epoch)
+            session_id = _session_for_approximate(epoch, exact_target, approximate_target)
+            request_id = f"f2b-route-{sequence:05d}"
+            current_epoch["value"] = epoch
+            decision = clock.stamp()
+            request = GenerationRequest(
+                request_id=request_id,
+                prompt=prompt,
+                sampling_params=SamplingParams(max_tokens=1),
+                cache_hint=CacheHint(
+                    session_id=session_id,
+                    prefix_fingerprint=prefix_root_fingerprint(prompt),
+                ),
+                placement_started_ns=time.perf_counter_ns(),
+            )
+            await pool.generate(request)
+            wall_completed_ns = time.perf_counter_ns()
+            placement = placement_log.records.pop(request_id)
+            backend_replica = observations.pop(request_id)
+            selected_replica = str(placement["replica_id"])
+            if backend_replica != selected_replica:
+                raise RuntimeError("ReplicaPool log and mock backend disagree")
+            reason = str(placement["reason"])
+            representative_view = exact_index.view(representative_id)
+            rows.append(
+                {
+                    "type": "route",
+                    "sequence": sequence,
+                    "epoch": epoch,
+                    "scheduled_ns": scheduled_ns,
+                    **decision,
+                    "wall_selected_ns": placement["selected_at_ns"],
+                    "wall_completed_ns": wall_completed_ns,
+                    "placement_latency_ns": placement["placement_latency_ns"],
+                    "request_id": request_id,
+                    "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                    "prefix_fingerprint": (prefix_root_fingerprint(prompt)),
+                    "session_id": session_id,
+                    "selected_replica": selected_replica,
+                    "backend_replica": backend_replica,
+                    "reason": reason,
+                    "mode": ("exact" if reason == "kv_event_match" else "approximate"),
+                    "expected_exact_replica": exact_target,
+                    "expected_approximate_replica": (approximate_target),
+                    "pool_size": placement["pool_size"],
+                    "eligible_size": placement["eligible_size"],
+                    "representative_view": asdict(representative_view),
+                }
+            )
+
+        clear = {"type": "AllBlocksCleared", "block_hashes": []}
         try:
-            clear = {"type": "AllBlocksCleared", "block_hashes": []}
             for replica_id in pool.replica_ids:
                 if replica_id == representative_id:
                     wire_publish(clear, epoch=None, purpose="initialization")
@@ -2230,374 +2676,43 @@ async def _collect_raw_rows(
                         purpose="initialization",
                     )
 
-            ready_deadline_ns = time.perf_counter_ns() + int(
-                config.route_timeout_seconds * _NS_PER_SECOND
-            )
-            while not exact_index.all_live((representative_id,)):
-                subscriber.drain()
-                if time.perf_counter_ns() >= ready_deadline_ns:
-                    raise RuntimeError("representative ZMQ feed did not cross its ready barrier")
-                await asyncio.sleep(0.005)
+            def representative_ready() -> bool:
+                drain_wire()
+                return exact_index.all_live((representative_id,))
+
+            await _await_signal(representative_ready, "representative ZMQ ready barrier")
             rows.append(
                 {
                     "type": "stream",
                     "action": "ready",
-                    "observed_ns": time.perf_counter_ns(),
+                    **clock.stamp(),
                     "stream_epoch": publisher.stream_epoch,
                     "high_sequence": publisher.high_sequence,
                 }
             )
             rows.append(identity_row("ready"))
-            rows.append(_membership_snapshot_row(pool, phase="initial", epoch=None))
+            rows.append(_membership_snapshot_row(pool, clock, phase="initial", epoch=None))
             # The synchronized ready barrier proves the SUB connection is
-            # established; emit one no-op cache baseline so the live-wire
-            # freshness gate never depends on PUB/SUB slow-joiner luck.
+            # established; emit one no-op cache baseline so live-wire delivery
+            # never depends on PUB/SUB slow-joiner luck.
             wire_publish(clear, epoch=None, purpose="wire_live_probe")
+            await _await_signal(wire_matches_publisher, "representative live probe delivery")
 
-            stop_maintenance = asyncio.Event()
-
-            async def maintain_feeds() -> None:
-                heartbeat_index = 0
-                next_tick_ns = time.perf_counter_ns()
-                while not stop_maintenance.is_set():
-                    await _wait_until_ns(next_tick_ns)
-                    started_ns = time.perf_counter_ns()
-                    async with membership_lock:
-                        subscriber.drain(max_events=10_000)
-                        replica_ids = [
-                            replica_id
-                            for replica_id in pool.replica_ids
-                            if replica_id != representative_id
-                        ]
-                        high_water = {
-                            replica_id: {
-                                "stream_epoch": logical_streams[replica_id][1],
-                                "high_sequence": logical_streams[replica_id][2],
-                            }
-                            for replica_id in replica_ids
-                        }
-                        refreshed = []
-                        for replica_id in replica_ids:
-                            stream = high_water[replica_id]
-                            if exact_index.heartbeat(
-                                replica_id,
-                                stream_epoch=str(stream["stream_epoch"]),
-                                high_sequence=int(stream["high_sequence"]),
-                            ):
-                                refreshed.append(replica_id)
-                        finished_ns = time.perf_counter_ns()
-                        rows.append(
-                            {
-                                "type": "logical_heartbeat",
-                                "sequence": heartbeat_index,
-                                "scheduled_ns": next_tick_ns,
-                                "started_ns": started_ns,
-                                "finished_ns": finished_ns,
-                                "replica_ids": replica_ids,
-                                "replica_count": len(replica_ids),
-                                "stream_high_water": high_water,
-                                "all_refreshed": refreshed == replica_ids,
-                            }
-                        )
-                    heartbeat_index += 1
-                    next_tick_ns += int(config.heartbeat_seconds * _NS_PER_SECOND)
-
-            maintenance_task = asyncio.create_task(maintain_feeds())
-            await _wait_until_ns(
-                time.perf_counter_ns() + int(config.warmup_seconds * _NS_PER_SECOND)
-            )
-            measurement_origin_ns = time.perf_counter_ns()
-            rows[0]["measurement_origin_ns"] = measurement_origin_ns
-            epoch_mutated = [asyncio.Event() for _ in range(config.churn_epochs)]
-
-            async def execute_churn() -> None:
-                nonlocal wire_sink
-                for epoch, plan_row in enumerate(schedule):
-                    current_epoch["value"] = epoch
-                    epoch_origin_ns = measurement_origin_ns + int(
-                        epoch * config.epoch_seconds * _NS_PER_SECOND
-                    )
-                    await _wait_until_ns(epoch_origin_ns)
-                    exact_target, approximate_target = _epoch_targets(config, epoch)
-                    prompt = _epoch_prompt(epoch)
-                    approximate_index.observe(approximate_target, prompt)
-                    rows.append(
-                        {
-                            "type": "prefix_seed",
-                            "epoch": epoch,
-                            "replica_id": approximate_target,
-                            "observed_ns": time.perf_counter_ns(),
-                            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                            "prefix_fingerprint": (prefix_root_fingerprint(prompt)),
-                        }
-                    )
-                    stored = {
-                        "type": "BlockStored",
-                        "block_hashes": list(_epoch_block_hashes(epoch)),
-                    }
-                    rows.append(_membership_snapshot_row(pool, phase="epoch_start", epoch=epoch))
-                    ordinals = plan_row["ordinals"]
-                    if not isinstance(ordinals, list):
-                        raise RuntimeError("churn ordinals must be a list")
-                    spacing_ns = int(
-                        config.churn_window_seconds * _NS_PER_SECOND / max(1, len(ordinals) - 1)
-                    )
-                    for batch_index, ordinal in enumerate(ordinals):
-                        if type(ordinal) is not int:
-                            raise RuntimeError("churn ordinal must be an integer")
-                        scheduled_ns = epoch_origin_ns + (batch_index * spacing_ns)
-                        await _wait_until_ns(scheduled_ns)
-                        replica_id = _replica_id(ordinal)
-                        async with membership_lock:
-                            active_churn.update(
-                                {
-                                    "epoch": epoch,
-                                    "ordinal": ordinal,
-                                    "scheduled_ns": scheduled_ns,
-                                }
-                            )
-                            started_ns = time.perf_counter_ns()
-                            old_generation = pool.entry_generation(replica_id)
-                            pool.drain(replica_id)
-                            await pool.remove_replica(replica_id)
-                            authoritative[replica_id].clear()
-                            if replica_id == representative_id:
-                                previous_stream_epoch = publisher.stream_epoch
-                                next_stream_epoch = publisher.rotate_epoch()
-                                wire_sink = publisher.event_sink()
-                                rows.append(
-                                    {
-                                        "type": "stream",
-                                        "action": "rotate",
-                                        "epoch": epoch,
-                                        "ordinal": ordinal,
-                                        "replica_id": replica_id,
-                                        "observed_ns": time.perf_counter_ns(),
-                                        "previous_stream_epoch": (previous_stream_epoch),
-                                        "stream_epoch": next_stream_epoch,
-                                    }
-                                )
-                            pool.add_replica(
-                                replica_id,
-                                _MockReplica(replica_id, observations),
-                            )
-                            if replica_id == representative_id:
-                                wire_publish(
-                                    clear,
-                                    epoch=epoch,
-                                    purpose="replacement_clear",
-                                )
-                            else:
-                                direct_apply(
-                                    replica_id,
-                                    clear,
-                                    epoch=epoch,
-                                    purpose="replacement_clear",
-                                )
-                            new_generation = pool.entry_generation(replica_id)
-                            if replica_id == exact_target:
-                                if replica_id == representative_id:
-                                    wire_publish(
-                                        stored,
-                                        epoch=epoch,
-                                        purpose="replacement_exact_seed",
-                                    )
-                                else:
-                                    direct_apply(
-                                        replica_id,
-                                        stored,
-                                        epoch=epoch,
-                                        purpose="replacement_exact_seed",
-                                    )
-                            completed_ns = time.perf_counter_ns()
-                            rows.append(
-                                {
-                                    "type": "churn",
-                                    "epoch": epoch,
-                                    "batch_index": batch_index,
-                                    "ordinal": ordinal,
-                                    "replica_id": replica_id,
-                                    "scheduled_ns": scheduled_ns,
-                                    "started_ns": started_ns,
-                                    "completed_ns": completed_ns,
-                                    "old_generation": old_generation,
-                                    "new_generation": new_generation,
-                                }
-                            )
-                            if batch_index == 0:
-                                epoch_mutated[epoch].set()
-                            active_churn.clear()
-                    rows.append(_membership_snapshot_row(pool, phase="epoch_end", epoch=epoch))
-
-            async def route_requests() -> None:
-                interval_ns = int(_NS_PER_SECOND / config.route_rate)
-                for sequence in range(config.expected_measurement_routes):
-                    scheduled_ns = measurement_origin_ns + (sequence * interval_ns)
-                    epoch = min(
-                        config.churn_epochs - 1,
-                        int((sequence / config.route_rate) // config.epoch_seconds),
-                    )
-                    await _wait_until_ns(scheduled_ns + 1_000_000)
-                    # The first ordinal is the exact target.  Join the request
-                    # to that real pool replacement instead of assuming a
-                    # fixed 5 ms scheduler margin; remaining churn still
-                    # overlaps route traffic.
-                    await epoch_mutated[epoch].wait()
-                    prompt = _epoch_prompt(epoch)
-                    exact_target, approximate_target = _epoch_targets(config, epoch)
-                    session_id = _session_for_approximate(epoch, exact_target, approximate_target)
-                    request_id = f"f2b-route-{sequence:05d}"
-                    request = GenerationRequest(
-                        request_id=request_id,
-                        prompt=prompt,
-                        sampling_params=SamplingParams(max_tokens=1),
-                        cache_hint=CacheHint(
-                            session_id=session_id,
-                            prefix_fingerprint=prefix_root_fingerprint(prompt),
-                        ),
-                        placement_started_ns=time.perf_counter_ns(),
-                    )
-                    async with membership_lock:
-                        current_epoch["value"] = epoch
-                        await pool.generate(request)
-                        completed_ns = time.perf_counter_ns()
-                        placement = placement_log.records.pop(request_id)
-                        backend_replica = observations.pop(request_id)
-                        selected_replica = str(placement["replica_id"])
-                        if backend_replica != selected_replica:
-                            raise RuntimeError("ReplicaPool log and mock backend disagree")
-                        reason = str(placement["reason"])
-                        representative_view = exact_index.view(representative_id)
-                    rows.append(
-                        {
-                            "type": "route",
-                            "sequence": sequence,
-                            "epoch": epoch,
-                            "scheduled_ns": scheduled_ns,
-                            "selected_ns": placement["selected_at_ns"],
-                            "completed_ns": completed_ns,
-                            "request_id": request_id,
-                            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                            "prefix_fingerprint": (prefix_root_fingerprint(prompt)),
-                            "session_id": session_id,
-                            "selected_replica": selected_replica,
-                            "backend_replica": backend_replica,
-                            "reason": reason,
-                            "mode": ("exact" if reason == "kv_event_match" else "approximate"),
-                            "expected_exact_replica": exact_target,
-                            "expected_approximate_replica": (approximate_target),
-                            "pool_size": placement["pool_size"],
-                            "eligible_size": placement["eligible_size"],
-                            "representative_view": asdict(representative_view),
-                        }
-                    )
-                if placement_log.records or observations:
-                    raise RuntimeError("undrained placement observations")
-
-            async def stream_chaos() -> None:
-                kill_scheduled_ns = measurement_origin_ns + int(
-                    config.kill_offset_seconds * _NS_PER_SECOND
-                )
-                await _wait_until_ns(kill_scheduled_ns)
-                old_socket_id = id(subscriber._socket)
-                requested_ns = time.perf_counter_ns()
-                subscriber.pause()
-                observed_ns = time.perf_counter_ns()
-                rows.append(
-                    {
-                        "type": "kill",
-                        "action": "pause",
-                        "fault": "subscriber_live_socket_close",
-                        "scheduled_ns": kill_scheduled_ns,
-                        "requested_ns": requested_ns,
-                        "observed_ns": observed_ns,
-                        "subscriber_socket_id": old_socket_id,
-                    }
-                )
-                rows.append(identity_row("outage"))
-
-                restore_scheduled_ns = measurement_origin_ns + int(
-                    config.restore_offset_seconds * _NS_PER_SECOND
-                )
-                await _wait_until_ns(restore_scheduled_ns)
-                requested_ns = time.perf_counter_ns()
-                subscriber.resume()
-                observed_ns = time.perf_counter_ns()
-                rows.append(
-                    {
-                        "type": "kill",
-                        "action": "resume",
-                        "fault": "subscriber_live_socket_reconnect",
-                        "scheduled_ns": restore_scheduled_ns,
-                        "requested_ns": requested_ns,
-                        "observed_ns": observed_ns,
-                        "subscriber_socket_id": id(subscriber._socket),
-                    }
-                )
-                recovery_deadline_ns = observed_ns + int(
-                    config.route_timeout_seconds * _NS_PER_SECOND
-                )
-                while not exact_index.all_live((representative_id,)):
-                    if time.perf_counter_ns() >= recovery_deadline_ns:
-                        raise RuntimeError("representative stream did not recover")
-                    await asyncio.sleep(0.005)
-                binding_recoveries = [
-                    recovery
-                    for recovery in subscriber.recovery_history
-                    if type(recovery.get("requested_ns")) is int
-                    and int(recovery["requested_ns"]) >= observed_ns
-                ]
-                if len(binding_recoveries) != 1:
-                    raise RuntimeError("stream restore must produce exactly one binding replay")
-                binding_recovery = binding_recoveries[0]
-                async with membership_lock:
-                    recovery_generation = pool.entry_generation(representative_id)
-                    recovery_view = exact_index.view(representative_id)
-                    recovery_epoch = publisher.stream_epoch
-                    recovery_high_sequence = publisher.high_sequence
-                    recovery_authoritative = list(publisher.authoritative_hashes())
-                    recovery_index = list(recovery_view.block_hashes)
-                    recovery_view_payload = asdict(recovery_view)
-                    recovery_view_payload["block_hashes"] = recovery_index
-                    rows.append(
-                        {
-                            "type": "state_snapshot",
-                            "phase": "recovery",
-                            "replica_id": representative_id,
-                            "replica_generation": recovery_generation,
-                            "stream_epoch": recovery_epoch,
-                            "high_sequence": recovery_high_sequence,
-                            "replay_completed_ns": binding_recovery["completed_ns"],
-                            "observed_ns": time.perf_counter_ns(),
-                            "index_view": recovery_view_payload,
-                            "authoritative_hashes": recovery_authoritative,
-                            "index_hashes": recovery_index,
-                            "authoritative_digest": _sha256_json(recovery_authoritative),
-                            "index_digest": _sha256_json(recovery_index),
-                        }
-                    )
-                rows.append(
-                    {
-                        "type": "stream",
-                        "action": "recovered",
-                        "observed_ns": time.perf_counter_ns(),
-                        "stream_epoch": publisher.stream_epoch,
-                        "high_sequence": publisher.high_sequence,
-                    }
-                )
-                rows.append(identity_row("restored"))
-
-            await asyncio.gather(
-                execute_churn(),
-                route_requests(),
-                stream_chaos(),
-            )
-            await _wait_until_ns(
-                time.perf_counter_ns() + int(config.cooldown_seconds * _NS_PER_SECOND)
-            )
-            stop_maintenance.set()
-            await maintenance_task
-            subscriber.drain(max_events=100_000)
+            for virtual_ns, priority, index in timeline:
+                clock.advance_to(virtual_ns)
+                if priority == _TICK:
+                    await heartbeat_tick(index)
+                elif priority == _CHURN:
+                    await churn(planned_churn[index])
+                elif priority == _CHAOS:
+                    await stream_chaos(index)
+                else:
+                    await route(index)
+            if placement_log.records or observations:
+                raise RuntimeError("undrained placement observations")
+            if not recovered["value"]:
+                raise RuntimeError("representative stream never recovered after resume")
+            drain_wire(max_events=100_000)
 
             for delivery in delivery_records:
                 event_kind = delivery.get("event_kind")
@@ -2639,7 +2754,7 @@ async def _collect_raw_rows(
             rows.extend(
                 sorted(
                     wire_events.values(),
-                    key=lambda row: int(row["enqueued_ns"]),
+                    key=lambda row: int(row["order"]),
                 )
             )
 
@@ -2659,14 +2774,18 @@ async def _collect_raw_rows(
                 {
                     "type": "state_snapshot",
                     "phase": "final",
-                    "observed_ns": time.perf_counter_ns(),
+                    **clock.stamp(),
                     "authoritative_hashes_by_replica": final_authoritative,
                     "index_hashes_by_replica": final_index,
                     "authoritative_digest": _sha256_json(final_authoritative),
                     "index_digest": _sha256_json(final_index),
                 }
             )
-            for recovery in subscriber.recovery_history:
+            for recovery, mark in zip(
+                subscriber.recovery_history,
+                recovery_marks,
+                strict=True,
+            ):
                 recovery_epoch = recovery.get("stream_epoch")
                 recovery_generations = {
                     row.get("replica_generation")
@@ -2681,6 +2800,7 @@ async def _collect_raw_rows(
                     {
                         "type": "replay",
                         **recovery,
+                        **mark,
                         "replica_generation": recovery_generation,
                     }
                 )
@@ -2694,7 +2814,7 @@ async def _collect_raw_rows(
                     "recovery_count": len(subscriber.recovery_history),
                 }
             )
-            rows.append(_membership_snapshot_row(pool, phase="final", epoch=None))
+            rows.append(_membership_snapshot_row(pool, clock, phase="final", epoch=None))
         finally:
             subscriber.close()
             publisher.close()

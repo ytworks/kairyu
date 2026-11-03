@@ -212,21 +212,40 @@ def _git_is_ancestor(commit: str) -> bool:
     return completed.returncode == 0
 
 
+def _gate_input_paths() -> tuple[str, ...]:
+    """Declared gate inputs plus every repository file this process imported."""
+
+    loaded: set[str] = set()
+    for module in tuple(sys.modules.values()):
+        module_file = getattr(module, "__file__", None)
+        if not isinstance(module_file, str):
+            continue
+        resolved = Path(module_file).resolve()
+        if not resolved.is_relative_to(_REPO_ROOT):
+            continue
+        relative = resolved.relative_to(_REPO_ROOT)
+        # Hidden directories hold environments (for example ``.venv``) and
+        # agent worktrees, not first-party gate code.
+        if relative.parts[0].startswith("."):
+            continue
+        loaded.add(relative.as_posix())
+    return tuple(sorted(loaded | set(_SOURCE_PATHS)))
+
+
 def _git_clean_at_start() -> bool:
-    lines = _git_output(
-        "status", "--porcelain", "--untracked-files=all"
-    ).splitlines()
-    # Codex owns this persistent control directory.  It is not product source
-    # and must neither invalidate evidence nor be staged/deleted by the gate.
-    relevant = [
-        line
-        for line in lines
-        if not (
-            line.startswith("?? .claude/worktrees/")
-            or line == "?? .claude/worktrees"
-        )
-    ]
-    return not relevant
+    """Whether every gate input is tracked and unmodified.
+
+    Files the gate neither declares nor imports (scratch output, other
+    worktrees, logs) are not inputs and cannot change this verdict.
+    """
+
+    return not _git_output(
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        *_gate_input_paths(),
+    )
 
 
 def _frozen_source_snapshot() -> dict[str, object]:
