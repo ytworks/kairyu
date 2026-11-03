@@ -446,6 +446,30 @@ def wait_placements(path: Path, offset: int, expected: int, settle_s: float = 15
     return rows
 
 
+def own_placements(
+    path: Path, offset: int, request_ids: set[str], settle_s: float = 15.0
+) -> list[dict]:
+    """Placements of these requests only.
+
+    Other clients share the pool while a row runs (the Chat UI's background
+    title and follow-up tasks after a chat), so a row is judged on the
+    placements of the requests it sent, matched by ``X-Request-ID``.
+    """
+    deadline = time.monotonic() + settle_s
+    rows = [row for row in placement_rows(path, offset) if row.get("request_id") in request_ids]
+    while len(rows) < len(request_ids) and time.monotonic() < deadline:
+        time.sleep(0.5)
+        rows = [
+            row for row in placement_rows(path, offset) if row.get("request_id") in request_ids
+        ]
+    return rows
+
+
+def row_request_ids(row_dir: Path) -> set[str]:
+    samples = json.loads((row_dir / "row.json").read_text())["samples"]
+    return {sample["request_id"] for sample in samples if sample.get("request_id")}
+
+
 def log_offset(path: Path) -> int:
     return path.stat().st_size if path.exists() else 0
 
@@ -627,7 +651,9 @@ def serving(
                 out=rows_dir / f"capped-c{level}",
             )
         spread = spread_report(
-            wait_placements(CHAT_PLACEMENT_LOG, offset, requests),
+            own_placements(
+                CHAT_PLACEMENT_LOG, offset, row_request_ids(rows_dir / f"capped-c{level}")
+            ),
             replicas=CHAT_REPLICAS,
             expected=requests,
             gated=level >= int(gate["min_concurrency"]),
