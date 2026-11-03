@@ -109,12 +109,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated; the eight-GPU one's Chat UI also serves Japanese knowledge bases (Docling OCR, bge-m3, multilingual reranker; GPU-verified 2026-10-21, PR #661) and Word / Excel / PowerPoint read and edit through its default-on browser code interpreter (GPU-verified 2026-10-22, PR #662), delivered as download links in the reply (PR #664)
 
-- Gemma 4 31B + EmbeddingGemma 2 example `gemma-4-31b-8gpu` (FN-D9 Gemma amendment, 2026-11-03): CPU implementation, the upstream embedding replica pools (m5 D4 / m11 D4 A20 / m7 D4) and Responses `reasoning.effort: none` (m11 D4 amendment) done; replica search and GPU gates pending (after review)
+- Gemma 4 31B + EmbeddingGemma 2 example `gemma-4-31b-8gpu` (FN-D9 Gemma amendment, PR #667): GPU-verified 2026-11-04. The replica search chose 4 x TP2 chat replicas with MTP 4 (one GPU cannot hold a 262,144-token context) and 2 EmbeddingGemma 2 replicas sharing GPUs 1 and 7; serving c1/c8/c32/c64 68 / 385 / 589 / 651 tok/s; all 17 gates pass under the owner's gate amendments (official sampling only, model misses recorded); EmbeddingGemma 2 runs on the example's one-edit SM120 overlay; remaining: merge after CI
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-11-04 — [progress] Gemma 4 31B example GPU-verified; gate amendments
+- What: replica search: TP1 excluded (26.5 of 33.3 GiB KV for one 262,144-token request); of eight L1 candidates only MTP 4 clears 5 %; under ingestion 4 x TP2 with the embedding replicas sharing GPUs 1 and 7 beats 3 x TP2 with dedicated GPUs by 29-32 % at c32/c64. EmbeddingGemma 2 needs a one-edit SM120 overlay (Triton encoder tiles); chat runs with custom all-reduce off. All 17 gates pass (serving 68 / 385 / 503 / 589 / 651 tok/s at c1-c64, 16 per replica at c8+).
+- Why: owner decisions during the gates: official sampling only; a gate failing on the model's own behaviour is excessive, so the ~250K answer and file replies that deliver nothing are recorded, not judged; a file the tool attached counts as delivered.
+- Refs: PR #667; FN-D9 Gemma amendment (GPU finding, gate amendments); `examples/gemma-4-31b-8gpu/MEASUREMENTS.md`
 
 ### 2026-11-03 — [amendment] Review fixes to the deterministic CI gates
 - What: scheduler priority work also counts elements the priority list shifts or copies; sampler work also counts active-index upkeep (tensor sorts, copies, allocations; position/ref-count map writes); the nightly series explicitly starts a version-2 chain when only older-schema history exists, and warm-ups are retained under their own artifact name; F1a takes one final resource capture after traffic and requires it as the last row (m10 A23 amendment).

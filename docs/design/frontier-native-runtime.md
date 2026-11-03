@@ -646,7 +646,8 @@ a link that works on a phone, after a reload and from another device.
 
 Status: accepted by the owner (plan
 `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`, including the
-verification plan); CPU implementation done; GPU verification pending.
+verification plan); CPU implementation done; GPU-verified 2026-11-04 (replica
+search and all 17 gates, the example's `MEASUREMENTS.md`).
 
 `examples/gemma-4-31b-8gpu` adds a fifth model family at the owner's request:
 `google/gemma-4-31B-it` (31B dense, official BF16, the owner's choice of size)
@@ -680,4 +681,14 @@ overlay only if needed"), the example owns a one-edit overlay
 heads on GPUs with less than 160 KiB of shared memory per block; the build
 fails if the patched source or the vLLM version differs. Chat replicas use the
 unified Triton kernel and run the same overlay image unchanged.
+
+Gate amendments (2026-11-04, owner decisions): gates run the model's official
+sampling only. `long-context` judges the key at 32K and 128K and, at ~250K,
+that the request is accepted with its server-reported token count and ends
+normally (Gemma 4's reasoning copied the one-word haystack until the output
+cap in 2 of 4 samples). `office` and `file-download` count a reply as
+delivering a file when `provide_download` attached it or its text links it,
+save it as a user does, and record a reply that delivers nothing as a model
+miss; `file-download` asks again in a new chat, at most three times per
+device. With these, all 17 gates pass.
 

@@ -1,7 +1,8 @@
 # Measurements: Gemma 4 31B + EmbeddingGemma 2 on eight RTX PRO 6000 GPUs
 
-Nothing is measured yet: the GPU stage follows the review of the CPU
-implementation (plan `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`).
+GPU-verified 2026-11-04: the replica search chose four TP2 chat replicas with
+the MTP assistant and two embedding replicas sharing GPUs 1 and 7, and all 17
+gates pass (plan `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`).
 
 ## Images and checkpoints
 
@@ -156,3 +157,56 @@ directly answered correctly. Thinking off answered correctly (182 s, first
 request), and with temperature 0 both thinking on (179 tokens) and thinking
 off returned the key. KV capacity, Kairyu forwarding and the replica are not
 involved; the verdict depended on sampling chance.
+
+Owner decision (2026-11-04): gates use the official sampling only, and judging
+the ~250K answer was an excessive test. The gate now judges the key at 32K and
+128K, and at ~250K that the request is accepted with the server's prompt-token
+count at the target and ends normally.
+
+| Gate | Run | Result |
+|---|---|---|
+| `long-context` | `20261103T215321Z-long-context` | PASS: 32,786 / 131,090 / 250,018 prompt tokens, each ending with `stop`; keys correct at 32K and 128K (5.9 / 42.0 s); the ~250K request ended normally in 165.3 s (its reply was the key, not judged) |
+| `embeddings` | `20261103T215656Z-embeddings` | PASS: Kairyu equals L1 (min cosine 1.0000), exact upstream usage (2,062 tokens); 8 concurrent batches on both replicas; with one replica stopped, 1 of 70 requests failed before ejection, all later ones succeeded and `/readyz` stayed 200; after its restart the replica rejoined and 8 batches spread over both again |
+| `restart` | `20261103T215806Z-restart` | PASS: every service restarted, ready after 131.7 s, `run.sh up` checks all match |
+| `api-equivalence` | `20261103T220018Z-api-equivalence` | PASS: 8 cases (text, stream, effort, tools, image, image-tools, cap, Open WebUI) with no L1/L3 difference; L1 received 20 Responses and 2 Chat requests, no Messages |
+| `docling` | `20261103T220041Z-docling` | PASS: a 3-page Japanese scan OCRed in 12.0 s (4.0 s/page) with the key on every page; the text-layer PDF in 4.0 s with no missing line |
+| `knowledge` | `20261103T220128Z-knowledge` | PASS: 20-page scan ingested in 67.0 s (distractors 22.6 s), 13,298 OCR characters with the key; query 3.89 s, key chunk rank 1 (reranker 0.993, next 0.487); 46 embedding requests through Kairyu on both replicas, the query embedded by the pool |
+| `chat-ui` | `20261103T220306Z-chat-ui` | PASS in Chromium, signed in: only the chat model offered; 323, then 324 in the same chat; Red for the PNG; a `#` knowledge-base answer citing the scan (20.7 s); 13 Responses and 3 embedding requests, no Chat Completions |
+| `knowledge-serving` | `20261103T220338Z-knowledge-serving` | FAIL in the gate, not the product: the unloaded c1 reference row (64/64 requests succeeded) counted 65 placements because a request it did not send (the Chat UI had just finished the chat-ui gate's chats) landed in the pool log. Fixed in `c8d6f56b`: rows are judged on their own requests' placements (`X-Request-ID`); replayed, the row has its 64 and the earlier serving rows keep their verdicts |
+| `knowledge-serving` | `20261103T220935Z-knowledge-serving` | PASS: with three ingestion streams keeping Docling at its 4-CPU cap for the whole 292.5 s window (8 ingestions, no error, no stuck worker), c1 66.3 tok/s = 98.3 % and c8 382.9 tok/s = 100.9 % of the same run's unloaded rows (67.5 / 379.5); TTFT p50 unchanged (1.38 / 1.42 s) |
+| `office` | `20261103T222216Z-office` | **FAIL** (model, official sampling): docx edited and saved from the link (replace, append, sentence and table kept); xlsx total row `=SUM(B2:B7)` saved from the link; pptx: the code interpreter ran and the reply said the file could be downloaded, but the model never called `provide_download`, so the reply had no link |
+
+Owner decision (2026-11-04): a reply that says a file is ready without calling
+`provide_download` is the model's miss at its official sampling, recorded and
+not judged. `office` now requires every format to be read and edited by the
+code interpreter, every linked result to be correct and at least one link;
+`file-download` asks in up to three new chats per device until a reply links
+the file.
+
+| Gate | Run | Result |
+|---|---|---|
+| `office` | `20261103T222708Z-office` | PASS, no model miss: docx (replace, append, sentence and table kept), xlsx (`=SUM(B2:B7)` total row, rows kept) and pptx (titles kept, "まとめ" slide with three bullets added) each read, edited by the code interpreter in 17-21 s and saved from the reply's link; an image in that chat after the tool calls answered Red; 32 Responses and 11 embedding requests, no Chat Completions |
+| `file-download` | `20261103T222900Z-file-download` | FAIL in the gate, not the product: the first desktop reply wrote `{provide_download(...)}` as text (model miss, recorded), the second linked `business_plan_format.xlsx` (4 sheets, 222 filled cells), saved as desktop.xlsx; after the reload Open WebUI's "what's new" dialog covered the link and the click timed out. Fixed in `29638c81`: the reload step closes the notices as every new chat does |
+| `file-download` | `20261103T223114Z-file-download` | FAIL in the gate: the three desktop replies were counted as having no link. Two of them had called `provide_download`, which attached the stored file to the reply (file item above the text), without repeating the link in the text; the third called no tool. |
+
+Owner decision (2026-11-04): a reply delivers a file when the tool attached it
+or its text links it; the gate saves it as a user does, from the text link or
+from the file item's dialog (`a784eb84`). Checked first on that run's second
+reply: the same 8,766-byte workbook saved by click on a desktop and by tap on
+an iPhone 13.
+
+| Gate | Run | Result |
+|---|---|---|
+| `file-download` | `20261103T223719Z-file-download` | PASS: desktop, first reply delivered `Annual_Business_Plan_Template.xlsx` (attached file, saved from its dialog: 4 sheets, 289 filled cells); after a reload the same link saved the same file (same SHA-256); iPhone 13: two replies delivered no file (model misses, recorded), the third linked it and a tap saved it (4 sheets, 277 filled cells); 21 Responses requests, no Chat Completions |
+
+All 17 gates pass on `a784eb84` (2026-11-04): `l1`, `serving`, `completed`,
+`tool-calling`, `vision`, `reasoning`, `cancellation`, `long-context`,
+`embeddings`, `restart`, `api-equivalence`, `docling`, `knowledge`,
+`chat-ui`, `knowledge-serving`, `office`, `file-download`. Gates passed before
+a later gate-only fix were not re-run: each fix changed only the gate that
+failed (`long-context`, the serving rows' placement attribution, the office
+and download delivery check), and the earlier serving rows were replayed with
+the new attribution (same verdicts). Model misses observed at the official
+sampling: the ~250K long-context reasoning loop (2 of 4 samples); one pptx
+edit and four Excel requests (of nine) that delivered no file; three Excel
+replies that attached the file without repeating its link.

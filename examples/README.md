@@ -14,7 +14,7 @@
 | [`deepseek-v4.1-flash-6gpu`](deepseek-v4.1-flash-6gpu/README.md) | DeepSeek-V4.1-Flash, one DP6/EP6 replica (GPU 0-5) | the `deepseek-v4.1-flash-8gpu` L2/L3 structure on six GPUs; GPUs 6-7 unused |
 | [`deepseek-v4.1-flash-1017-6gpu`](deepseek-v4.1-flash-1017-6gpu/README.md) | DeepSeek-V4.1-Flash-1017, one DP6/EP6 replica (GPU 0-5) | the V4.1 L2/L3 structure; vLLM v0.32.0 + SM120 overlay with the 1017 encoder rule; text + image, OpenAI tools, default thinking high |
 | [`deepseek-v4.1-flash-1017-8gpu`](deepseek-v4.1-flash-1017-8gpu/README.md) | DeepSeek-V4.1-Flash-1017, one TP8/EP8 replica (GPU 0-7) | the V4.1 L2/L3 structure; vLLM v0.32.0 + SM120 overlay with the 1017 encoder rule; TP8 measured faster than DP8 at c1/c8 |
-| [`gemma-4-31b-8gpu`](gemma-4-31b-8gpu/README.md) | Gemma 4 31B chat replicas + EmbeddingGemma 2 embedding replicas (layout provisional until its replica search; GPU verification pending) | text + image, OpenAI tools, thinking on/off; two Kairyu replica pools (chat and `/v1/embeddings`); the 1017 Chat UI features with knowledge bases embedded through Kairyu; Chat UI with sign-in |
+| [`gemma-4-31b-8gpu`](gemma-4-31b-8gpu/README.md) | Gemma 4 31B TP2 x 4 replicas with MTP + EmbeddingGemma 2 x 2 replicas sharing GPUs 1 and 7 (chosen by its replica search; GPU-verified 2026-11-04) | text + image, OpenAI tools, thinking on/off; two Kairyu replica pools (chat and `/v1/embeddings`); the 1017 Chat UI features with knowledge bases embedded through Kairyu; Chat UI with sign-in |
 
 All of them use Kairyu as L3, vLLM as L1 and Open WebUI as the public chat
 surface, except `quyet-1.0-large-1gpu`, a System One decision model with no
