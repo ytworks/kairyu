@@ -207,6 +207,7 @@ def startup(chat: int) -> dict:
 
 
 def rows(run_dir: Path, name: str, levels: list[int], requests: int) -> list[dict]:
+    run_dir.mkdir(parents=True, exist_ok=True)
     measured = []
     for level in levels:
         dataset = run_dir / f"c{level}.json"
@@ -228,58 +229,173 @@ def rows(run_dir: Path, name: str, levels: list[int], requests: int) -> list[dic
 
 
 class IngestionLoad:
-    """Three knowledge-base ingestions of scanned PDFs through the Chat UI (Docling + Kairyu)."""
+    """Knowledge-base ingestions through the Chat UI for as long as the rows run.
 
-    def __init__(self, run_dir: Path, streams: int = 3, documents: int = 12) -> None:
+    A renderer keeps fresh 20-page scans ready (Open WebUI refuses content it
+    already holds) and ``streams`` workers ingest them without end, so Docling
+    and the embedding replicas stay loaded through every row. Meanwhile a probe
+    asks the knowledge gate's question of a reference knowledge base every
+    ``query_interval_s``: retrieval embeds the query through Kairyu, searches
+    and reranks. ``result()`` passes only when ingestion covered the measured
+    window, nothing failed, and every ingestion and query stayed within the
+    knowledge budgets of ``example.json``.
+    """
+
+    def __init__(self, run_dir: Path, streams: int = 3, query_interval_s: float = 20.0) -> None:
+        knowledge = control.SPEC["verification"]["knowledge"]
         self.run_dir = run_dir
         self.streams = streams
-        self.documents = documents
+        self.query_interval_s = query_interval_s
+        self.ingestion_budget_s = float(knowledge["ingestion_seconds"])
+        self.query_budget_s = float(knowledge["query_seconds"])
+        self.minimum_coverage = float(knowledge["docling_busy_share"])
         self.errors: list[str] = []
-        self.done: list[float] = []
+        self.ingestions: list[tuple[float, float]] = []
+        self.queries: list[float] = []
+        self.window: list[float] = []
+        self._active: dict[int, float] = {}
+        self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._workers: list[threading.Thread] = []
+        self._threads: list[threading.Thread] = []
+
+    def _knowledge_base(self, name: str) -> str:
+        return verification._webui_request(
+            "POST", "/api/v1/knowledge/create", self.token,
+            payload={"name": f"{name}-{self.run_dir.name}", "description": "tune load"},
+        )["id"]
+
+    def _render(self, pending) -> None:
+        import queue
+
+        index = 0
+        while not self._stop.is_set():
+            scan = self.run_dir / "load" / f"load-{index:04d}.pdf"
+            verification.scan_pdf(scan, 20, {13}, namespace=f"{self.run_dir.name}-{index}")
+            index += 1
+            while not self._stop.is_set():
+                try:
+                    pending.put(scan, timeout=1)
+                    break
+                except queue.Full:
+                    continue
+
+    def _ingest(self, pending) -> None:
+        import queue
+
+        worker = threading.get_ident()
+        while not self._stop.is_set():
+            try:
+                scan = pending.get(timeout=1)
+            except queue.Empty:
+                continue
+            started = time.monotonic()
+            with self._lock:
+                self._active[worker] = started
+            try:
+                verification._ingest(
+                    self.token, self.load_id, scan.name, scan.read_bytes(), "application/pdf"
+                )
+            except Exception as error:  # noqa: BLE001 - recorded, fails the layout
+                self.errors.append(f"ingestion: {error!r}")
+                self._stop.set()
+                return
+            finally:
+                with self._lock:
+                    self._active.pop(worker, None)
+            self.ingestions.append((started, time.monotonic()))
+
+    def _query(self) -> None:
+        while not self._stop.wait(self.query_interval_s):
+            started = time.monotonic()
+            try:
+                verification._webui_request(
+                    "POST", "/api/v1/retrieval/query/collection", self.token,
+                    payload={
+                        "collection_names": [self.reference_id],
+                        "query": verification.KNOWLEDGE_QUERY,
+                    },
+                )
+            except Exception as error:  # noqa: BLE001 - recorded, fails the layout
+                self.errors.append(f"query: {error!r}")
+                continue
+            self.queries.append(time.monotonic() - started)
 
     def __enter__(self) -> IngestionLoad:
         import queue
 
         self.token = verification._chat_ui_token()
-        self.knowledge_id = verification._webui_request(
-            "POST", "/api/v1/knowledge/create", self.token,
-            payload={"name": f"kairyu-tune-load-{self.run_dir.name}", "description": "tune load"},
-        )["id"]
-        pending: queue.Queue[Path] = queue.Queue()
-        for index in range(self.documents):
-            scan = self.run_dir / f"load-{index:02d}.pdf"
-            verification.scan_pdf(scan, 20, {13}, namespace=f"{self.run_dir.name}-{index}")
-            pending.put(scan)
-
-        def work() -> None:
-            while not self._stop.is_set():
-                try:
-                    scan = pending.get_nowait()
-                except queue.Empty:
-                    return
-                try:
-                    _, seconds = verification._ingest(
-                        self.token, self.knowledge_id, scan.name, scan.read_bytes(),
-                        "application/pdf",
-                    )
-                    self.done.append(seconds)
-                except Exception as error:  # noqa: BLE001 - recorded
-                    self.errors.append(repr(error))
-                    return
-
-        self._workers = [threading.Thread(target=work, daemon=True) for _ in range(self.streams)]
-        for worker in self._workers:
-            worker.start()
+        self.reference_id = self._knowledge_base("kairyu-tune-reference")
+        reference = self.run_dir / verification.KNOWLEDGE_SCAN
+        verification.scan_pdf(reference, 20, {13}, namespace=f"{self.run_dir.name}-reference")
+        verification._ingest(
+            self.token, self.reference_id, reference.name, reference.read_bytes(),
+            "application/pdf",
+        )
+        self.load_id = self._knowledge_base("kairyu-tune-load")
+        pending: queue.Queue[Path] = queue.Queue(maxsize=2 * self.streams)
+        self._threads = [threading.Thread(target=self._render, args=(pending,), daemon=True)]
+        self._threads += [
+            threading.Thread(target=self._ingest, args=(pending,), daemon=True)
+            for _ in range(self.streams)
+        ]
+        self._threads.append(threading.Thread(target=self._query, daemon=True))
+        for thread in self._threads:
+            thread.start()
         time.sleep(30)  # let Docling and the embedding replicas reach steady load
+        self.window.append(time.monotonic())
         return self
 
     def __exit__(self, *_: object) -> None:
+        self.window.append(time.monotonic())
+        with self._lock:
+            in_flight = list(self._active.values())
+        self._open = [(started, self.window[1]) for started in in_flight]
         self._stop.set()
-        for worker in self._workers:
-            worker.join(timeout=900)
-        verification._delete_knowledge(self.token, self.knowledge_id)
+        for thread in self._threads:
+            thread.join(timeout=2 * self.ingestion_budget_s)
+        self.stuck = sum(thread.is_alive() for thread in self._threads)
+        for knowledge_id in (self.load_id, self.reference_id):
+            verification._delete_knowledge(self.token, knowledge_id)
+
+    def result(self) -> dict:
+        """Coverage of the measured window by ingestions, failures and the budgets."""
+        start, end = self.window
+        intervals = sorted(
+            (max(first, start), min(last, end))
+            for first, last in [*self.ingestions, *self._open]
+            if last > start and first < end
+        )
+        covered, reach = 0.0, start
+        for first, last in intervals:
+            if last > reach:
+                covered += last - max(first, reach)
+                reach = last
+        coverage = covered / (end - start) if end > start else 0.0
+        longest_ingestion = max(
+            [last - first for first, last in self.ingestions]
+            + [end - first for first, _ in self._open],
+            default=0.0,
+        )
+        slowest_query = max(self.queries, default=None)
+        passed = (
+            not self.errors
+            and not self.stuck
+            and coverage >= self.minimum_coverage
+            and longest_ingestion <= self.ingestion_budget_s
+            and slowest_query is not None
+            and slowest_query <= self.query_budget_s
+        )
+        return {
+            "window_s": round(end - start, 1),
+            "coverage": round(coverage, 3),
+            "ingestions_completed": len(self.ingestions),
+            "longest_ingestion_s": round(longest_ingestion, 1),
+            "queries": len(self.queries),
+            "slowest_query_s": round(slowest_query, 2) if slowest_query is not None else None,
+            "errors": self.errors,
+            "threads_stuck": self.stuck,
+            "passed": passed,
+        }
 
 
 def embedding_bench(api: str, batch: int = 32, concurrency: int = 4, rounds: int = 32) -> dict:
@@ -399,10 +515,14 @@ def main() -> None:
                         )
                     report["embedding_load"] = {"batches": load.batches, "errors": load.errors}
                 elif args.action == "layout" and args.load:
+                    # Rows, then the embedding batches, all while the ingestions
+                    # run; the layout passes only within the knowledge budgets.
                     with IngestionLoad(row_dir) as load:
                         report["rows"] = rows(row_dir, layout_name, args.concurrency, args.requests)
-                    report["ingestion"] = {"seconds": load.done, "errors": load.errors}
-                    report["embedding_under_load"] = embedding_bench(api, rounds=8)
+                        report["embedding_under_load"] = embedding_bench(api, rounds=8)
+                    report["ingestion"] = load.result()
+                    if not report["ingestion"]["passed"]:
+                        raise RuntimeError(f"knowledge load failed: {report['ingestion']}")
                 else:
                     report["rows"] = rows(row_dir, candidate, args.concurrency, args.requests)
                 report["passed"] = True

@@ -1743,7 +1743,17 @@ class ReplicaPool:
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
+            # ``EmbeddingBackend.embed`` may fail before it returns an
+            # awaitable (FastEmbed raises while not ready); that counts toward
+            # ejection exactly like a failed await.
             work = entry.backend.embed(texts)
+        except (UpstreamClientError, EmbeddingCapacityError):
+            self._finish(entry)
+            raise
+        except Exception:
+            self._record_backend_failure(replica_id, entry)
+            self._finish(entry)
+            raise
         except BaseException:
             self._finish(entry)
             raise

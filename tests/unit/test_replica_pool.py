@@ -18,6 +18,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
     backend_supports_slo_defer,
 )
+from kairyu.engine.embedding import EmbeddingCapacityError, EmbeddingResult
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import TokensPrompt
 from kairyu.orchestration.replica import ReplicaPool
@@ -1383,3 +1384,48 @@ async def test_shutdown_attempts_every_unique_backend_and_aggregates_errors():
     assert shared.shutdown_count == 1
     assert failing.shutdown_count == 1
     assert len(caught.value.exceptions) == 1
+
+
+class _SyncEmbedding:
+    """An embedding member whose ``embed`` may fail before returning an awaitable."""
+
+    dimensions = 2
+    reports_exact_usage = True
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls = 0
+
+    def embed(self, texts: list[str]):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+        async def done() -> EmbeddingResult:
+            return EmbeddingResult(
+                vectors=tuple((1.0, 0.0) for _ in texts), prompt_tokens=1, usage_exact=True
+            )
+
+        return done()
+
+
+@pytest.mark.parametrize(
+    ("error", "ejected"),
+    [
+        (RuntimeError("embedding backend is not ready"), True),
+        (EmbeddingCapacityError("full"), False),
+    ],
+)
+async def test_a_synchronous_embed_failure_ejects_the_member(error, ejected) -> None:
+    failing, healthy = _SyncEmbedding(error), _SyncEmbedding()
+    pool = ReplicaPool([failing, healthy], unhealthy_after=1)
+
+    with pytest.raises(type(error)):
+        pool.embed(["a"])
+
+    assert pool.outstanding_by_id() == {"0": 0, "1": 0}
+    assert pool.eligible_ids == (("1",) if ejected else ("0", "1"))
+    if ejected:
+        # The next batch reaches the healthy member instead of failing again.
+        await pool.embed(["b"])
+        assert (failing.calls, healthy.calls) == (1, 1)
