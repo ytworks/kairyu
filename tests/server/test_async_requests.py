@@ -22,6 +22,30 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from tests.server._legacy_chat import create_legacy_app
 
+# Hang bound only: every awaited condition is expected within milliseconds.
+_HANG_S = 10.0
+
+
+class _StoreClock:
+    """Store time that moves only when the test advances it."""
+
+    def __init__(self) -> None:
+        self.now = datetime.now(UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+async def _until(condition) -> None:
+    """Poll ``condition``; the bound only turns a hang into a failure."""
+
+    async with asyncio.timeout(_HANG_S):
+        while not condition():
+            await asyncio.sleep(0.005)
+
 
 def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(
@@ -48,6 +72,7 @@ def _surface(
     async_request_body_limit=None,
     max_records_per_owner=64,
     request_retention_enabled=False,
+    store_clock=None,
 ):
     backend = backend or MockBackend(responses={"hello": "durable answer"})
     app = create_legacy_app(
@@ -57,7 +82,10 @@ def _surface(
         resolved_api_keys=resolved_keys,
         async_request_body_limit=async_request_body_limit,
     )
-    store = InMemoryRequestStore(max_records_per_owner=max_records_per_owner)
+    store = InMemoryRequestStore(
+        max_records_per_owner=max_records_per_owner,
+        clock=store_clock,
+    )
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
@@ -79,9 +107,7 @@ async def _wait_for_state(
     request_id: str,
     state: AsyncRequestState,
 ) -> None:
-    async with asyncio.timeout(1):
-        while store.get(request_id).state is not state:
-            await asyncio.sleep(0.005)
+    await _until(lambda: store.get(request_id).state is state)
 
 
 async def test_submit_replay_list_status_and_result_share_chat_dispatch() -> None:
@@ -218,12 +244,12 @@ async def test_running_cancel_aborts_local_backend_and_preserves_cancelled_state
         async with _client(app) as client:
             created = await client.post("/v1/async/chat/completions", json=_body())
             request_id = created.json()["request"]["id"]
-            await asyncio.wait_for(backend.started.wait(), timeout=1)
+            await asyncio.wait_for(backend.started.wait(), timeout=_HANG_S)
             await _wait_for_state(store, request_id, AsyncRequestState.RUNNING)
 
             cancelled = await client.post(f"/v1/requests/{request_id}/cancel")
             assert cancelled.json()["state"] == "cancelled"
-            await asyncio.wait_for(backend.cancelled.wait(), timeout=1)
+            await asyncio.wait_for(backend.cancelled.wait(), timeout=_HANG_S)
             await asyncio.sleep(0)
             assert store.get(request_id).state is AsyncRequestState.CANCELLED
     finally:
@@ -240,7 +266,7 @@ async def test_cancel_during_mark_running_cannot_escape_local_abort() -> None:
         def mark_running(self, claim):
             running = super().mark_running(claim)
             marked.set()
-            release_mark.wait(timeout=1)
+            assert release_mark.wait(timeout=_HANG_S)
             return running
 
     backend = _RecordingBackend()
@@ -249,10 +275,10 @@ async def test_cancel_during_mark_running_cannot_escape_local_abort() -> None:
     request = store.submit(
         AsyncRequestSubmission(endpoint="/v1/chat/completions", body=_body())
     )
-    claim = store.claim_next("worker", lease_seconds=1)
+    claim = store.claim_next("worker", lease_seconds=30)
     assert claim is not None
     processing = asyncio.create_task(worker.process(claim))
-    await asyncio.to_thread(marked.wait, 1)
+    assert await asyncio.to_thread(marked.wait, _HANG_S)
     store.cancel(request.id)
     worker.notify_cancel(request.id)
     release_mark.set()
@@ -263,17 +289,30 @@ async def test_cancel_during_mark_running_cannot_escape_local_abort() -> None:
 
 
 async def test_transient_renewal_error_does_not_abort_inference() -> None:
+    renewals: list[str] = []
+
     class FlakyRenewStore(InMemoryRequestStore):
         failures = 1
 
         def renew_claim(self, claim, *, lease_seconds):
             if self.failures:
                 self.failures -= 1
+                renewals.append("failed")
                 raise RuntimeError("connection reset")
-            return super().renew_claim(claim, lease_seconds=lease_seconds)
+            renewed = super().renew_claim(claim, lease_seconds=lease_seconds)
+            renewals.append("renewed")
+            return renewed
 
-    backend = MockBackend(responses={"hello": "done"}, latency_s=0.5)
-    store = FlakyRenewStore()
+    class RenewalSpanningBackend(MockBackend):
+        async def generate(self, request):
+            # Inference outlasts a failed renewal and the retry that follows it.
+            await _until(lambda: renewals[:2] == ["failed", "renewed"])
+            return await super().generate(request)
+
+    backend = RenewalSpanningBackend(responses={"hello": "done"})
+    # The store's clock stands still: only the worker's own lease deadline
+    # (local loop time) decides whether the retry is still in time.
+    store = FlakyRenewStore(clock=_StoreClock())
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
@@ -327,7 +366,7 @@ async def test_shutdown_requeues_active_inference_without_waiting_for_lease() ->
         AsyncRequestSubmission(endpoint="/v1/chat/completions", body=_body())
     )
     worker_task = asyncio.create_task(worker.run())
-    await asyncio.wait_for(backend.started.wait(), timeout=1)
+    await asyncio.wait_for(backend.started.wait(), timeout=_HANG_S)
     worker_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await worker_task
@@ -340,8 +379,30 @@ async def test_shutdown_requeues_active_inference_without_waiting_for_lease() ->
 
 
 async def test_heartbeat_keeps_long_inference_claim_alive() -> None:
-    backend = MockBackend(responses={"hello": "done"}, latency_s=0.25)
-    store = InMemoryRequestStore()
+    clock = _StoreClock()
+    granted: list[datetime] = []
+
+    class RenewalRecordingStore(InMemoryRequestStore):
+        def renew_claim(self, claim, *, lease_seconds):
+            renewed = super().renew_claim(claim, lease_seconds=lease_seconds)
+            granted.append(renewed.lease_until)
+            return renewed
+
+    class LongInferenceBackend(MockBackend):
+        async def generate(self, request):
+            # Inference outlives its first 0.15 s lease on the store's clock.
+            # Time moves in 0.1 s steps, each only after a renewal granted a
+            # lease beyond it, so only the heartbeat keeps the claim valid.
+            for _ in range(3):
+                target = clock.now + timedelta(seconds=0.1)
+                await _until(
+                    lambda target=target: any(until > target for until in granted)
+                )
+                clock.advance(0.1)
+            return await super().generate(request)
+
+    backend = LongInferenceBackend(responses={"hello": "done"})
+    store = RenewalRecordingStore(clock=clock)
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
@@ -362,24 +423,33 @@ async def test_heartbeat_keeps_long_inference_claim_alive() -> None:
 
 
 async def test_deadline_shortens_heartbeat_and_aborts_backend_promptly() -> None:
-    backend = _CancellableBackend()
-    store = InMemoryRequestStore()
+    clock = _StoreClock()
+
+    class DeadlinePassingBackend(_CancellableBackend):
+        async def generate(self, request):
+            clock.advance(1)  # the deadline passes while inference runs
+            return await super().generate(request)
+
+    backend = DeadlinePassingBackend()
+    store = InMemoryRequestStore(clock=clock)
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
-        lease_seconds=30,
+        lease_seconds=300,
         legacy_chat_models={"m"},
     )
     request = store.submit(
         AsyncRequestSubmission(
             endpoint="/v1/chat/completions",
             body=_body(),
-            deadline_at=datetime.now(UTC) + timedelta(seconds=0.12),
+            deadline_at=clock.now + timedelta(seconds=0.12),
         )
     )
 
-    async with asyncio.timeout(0.6):
-        await worker.process_next()
+    # The backend never returns, so only a renewal can end the inference. A
+    # deadline-paced heartbeat renews after 0.04 s; a lease-paced one would
+    # first renew after 100 s, so this hang bound separates the two.
+    await asyncio.wait_for(worker.process_next(), timeout=_HANG_S)
 
     assert backend.cancelled.is_set()
     assert store.get(request.id).state is AsyncRequestState.EXPIRED
@@ -418,16 +488,19 @@ async def test_shutdown_requeues_a_claim_returned_during_drain_without_dispatch(
     class DelayedClaimStore(InMemoryRequestStore):
         def claim_next(self, *args, **kwargs):
             claim_started.set()
-            release_claim.wait(timeout=1)
+            assert release_claim.wait(timeout=_HANG_S)
             return super().claim_next(*args, **kwargs)
 
     backend = _RecordingBackend()
-    store = DelayedClaimStore()
+    # The store's clock stands still, so the lease never lapses on its own:
+    # the request is claimable again only if the worker returned it. The
+    # lease also sets the shutdown drain bound, which only detects a hang.
+    store = DelayedClaimStore(clock=_StoreClock())
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
         max_concurrency=1,
-        lease_seconds=0.2,
+        lease_seconds=_HANG_S,
         legacy_chat_models={"m"},
     )
     request = store.submit(
@@ -437,7 +510,7 @@ async def test_shutdown_requeues_a_claim_returned_during_drain_without_dispatch(
         )
     )
     worker_task = asyncio.create_task(worker.run())
-    await asyncio.to_thread(claim_started.wait, 1)
+    assert await asyncio.to_thread(claim_started.wait, _HANG_S)
     worker_task.cancel()
     release_claim.set()
     with contextlib.suppress(asyncio.CancelledError):
@@ -615,7 +688,8 @@ async def test_worker_defers_blocked_tenant_without_starving_another() -> None:
     tenant_config = TenantConfig(
         limits={"tenant-a": TenantLimits(max_in_flight=1)}
     )
-    app, store, worker = _surface(tenant_config=tenant_config)
+    clock = _StoreClock()
+    app, store, worker = _surface(tenant_config=tenant_config, store_clock=clock)
     limiter = app.state.tenant_limiter
     held = limiter.acquire("tenant-a")
     assert held.admitted
@@ -639,7 +713,7 @@ async def test_worker_defers_blocked_tenant_without_starving_another() -> None:
     assert await worker.process_next() is True
     assert store.get(runnable.id).state is AsyncRequestState.SUCCEEDED
     held.release()
-    await asyncio.sleep(1.05)
+    clock.advance(1.05)  # past the in-flight rejection's 1 s retry hint
     assert await worker.process_next() is True
     assert store.get(blocked.id).state is AsyncRequestState.SUCCEEDED
 

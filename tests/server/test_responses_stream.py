@@ -22,6 +22,7 @@ from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
+from tests.server._sse_wire import HANG_S, SseWire
 
 _ADD = {
     "type": "function",
@@ -43,8 +44,8 @@ _THINKING_TEMPLATE = ChatTemplate(
 
 
 class ScriptedBackend(MockBackend):
-    """Streams cumulative text step by step: a float step is a pause and a
-    ``{"reasoning": ...}`` step sets backend-separated reasoning so far."""
+    """Streams cumulative text step by step: a callable step is an awaited
+    pause and a ``{"reasoning": ...}`` step sets backend-separated reasoning."""
 
     def __init__(self, *script, reasoning: str | None = None, finish: str = "stop"):
         super().__init__()
@@ -84,8 +85,8 @@ class ScriptedBackend(MockBackend):
         self.prompts.append(str(request.prompt))
         text, reasoning = "", None
         for step in self.script:
-            if isinstance(step, float):
-                await asyncio.sleep(step)
+            if callable(step):
+                await step()
                 continue
             if isinstance(step, dict):
                 reasoning = step["reasoning"]
@@ -191,14 +192,21 @@ def test_reasoning_is_split_without_effort_and_never_parsed_for_calls(
 
 
 def test_calls_stream_incrementally_beside_their_preamble(tmp_path):
+    async def until_arguments_committed() -> None:
+        # The model finishes the call only after its first fragment went out.
+        await wire.wait_until(
+            lambda events: "response.function_call_arguments.delta" in events
+        )
+
     backend = ScriptedBackend(
         "Let me add. ",
         '<tool_call>{"name":"add","arguments":{"a":',
-        0.05,
+        until_arguments_committed,
         '2,"b":3}}</tool_call>',
         _CALL,
     )
-    with TestClient(_app(tmp_path, backend)) as http:
+    wire = SseWire(_app(tmp_path, backend))
+    with TestClient(wire) as http:
         events, unary = _run(http, {"model": "m", "input": "add", "tools": [_ADD]})
 
     output = events[-1]["response"]["output"]
@@ -279,8 +287,17 @@ def test_unary_keeps_the_chat_downgrade_of_retroactively_invalid_calls(tmp_path)
 
 def test_heartbeats_are_data_events_carrying_the_streamed_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(responses_events, "_HEARTBEAT_SECONDS", 0.03)
-    backend = ScriptedBackend("<think>plan", 0.15, " more</think>Hello", 0.15, " world")
-    with TestClient(_app(tmp_path, backend)) as http:
+
+    async def until_heartbeat() -> None:
+        # Generation pauses until one more heartbeat reached the client.
+        sent = wire.events.count("response.in_progress")
+        await wire.wait_until(lambda events: events.count("response.in_progress") > sent)
+
+    backend = ScriptedBackend(
+        "<think>plan", until_heartbeat, " more</think>Hello", until_heartbeat, " world"
+    )
+    wire = SseWire(_app(tmp_path, backend))
+    with TestClient(wire) as http:
         response = http.post("/v1/responses", json={"model": "m", "input": "hi", "stream": True})
 
     assert not [line for line in response.text.splitlines() if line.startswith(":")]
@@ -296,21 +313,21 @@ def test_heartbeats_are_data_events_carrying_the_streamed_snapshot(tmp_path, mon
     assert node.snapshot["status"] == "completed"
 
 
-async def test_auto_relay_sends_data_heartbeats_while_only_status_comments_arrive(
-    monkeypatch,
-):
+async def test_auto_relay_sends_data_heartbeats_while_only_status_comments_arrive():
     # The orchestrator's ": status" comments keep the upstream busy but are
     # not data for Codex's idle timer, so the relay must still heartbeat.
-    monkeypatch.setattr(responses_events, "_HEARTBEAT_SECONDS", 0.03)
+    emitter = ResponseEmitter(ResponsesRequest(model="auto"), response_id="resp_x", created_at=0)
 
     async def upstream():
         for _ in range(10):
-            await asyncio.sleep(0.01)
+            # Each comment arrives a full heartbeat interval after the last data
+            # event (the emitter's data clock is set back instead of sleeping),
+            # and there is no idle gap in which the relay could heartbeat.
+            emitter.last_data_at -= responses_events._HEARTBEAT_SECONDS
             yield ": status working\n\n"
         yield 'data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}'
         yield "\n\ndata: [DONE]\n\n"
 
-    emitter = ResponseEmitter(ResponsesRequest(model="auto"), response_id="resp_x", created_at=0)
     frames = [
         frame if isinstance(frame, str) else frame.decode()
         async for frame in responses_auto._relay(
@@ -523,7 +540,9 @@ async def _disconnect_after_completed(app, body: dict) -> str:
         frames.append(message.get("body", b""))
         if b"event: response.completed" in frames[-1]:
             completed.set()
-            await asyncio.sleep(0.05)  # the disconnect lands mid-send
+            # The disconnect lands mid-send: this send only ends when the
+            # server cancels it (the bound only reports a server that never does).
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=HANG_S)
 
     scope = {
         "type": "http",

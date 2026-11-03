@@ -526,7 +526,7 @@ async def test_failed_first_sse_body_send_does_not_train_ttft_ema():
             body_send_attempts += 1
             raise asyncio.CancelledError
 
-    await asyncio.wait_for(app(_chat_scope(encoded), receive, send), timeout=2)
+    await asyncio.wait_for(app(_chat_scope(encoded), receive, send), timeout=10)
 
     snapshot = app.state.slo_admission.snapshot()
     assert body_send_attempts == 1

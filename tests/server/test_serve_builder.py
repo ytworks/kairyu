@@ -1184,11 +1184,11 @@ legacy_chat_models: [remote]
         assert (await client.get("/readyz")).status_code == 503
 
     async with app.router.lifespan_context(app):
-        await asyncio.wait_for(both_probed.wait(), timeout=1)
-        for _ in range(10):
-            if pool.healthy == (True, False):
-                break
-            await asyncio.sleep(0)
+        # Hang bound only: the probe results apply within milliseconds.
+        await asyncio.wait_for(both_probed.wait(), timeout=10)
+        async with asyncio.timeout(10):
+            while pool.healthy != (True, False):
+                await asyncio.sleep(0)
 
         async with _client(app) as client:
             ready = await client.get("/readyz")
@@ -1729,7 +1729,7 @@ async_requests:
             )
             assert oversized.status_code == 413
             request_id = submitted.json()["request"]["id"]
-            async with asyncio.timeout(1):
+            async with asyncio.timeout(10):  # hang bound only
                 while True:
                     status = await client.get(f"/v1/requests/{request_id}")
                     if status.json()["state"] == "succeeded":

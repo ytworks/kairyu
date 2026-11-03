@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -19,6 +18,7 @@ from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._fake_vllm import fake_vllm_backend
 from tests.server._legacy_chat import create_legacy_app
+from tests.server._sse_wire import SseWire, event_after
 
 
 def _app(tmp_path, backend=None, **kwargs):
@@ -27,6 +27,14 @@ def _app(tmp_path, backend=None, **kwargs):
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
         **kwargs,
     )
+
+
+def _wired_client(tmp_path, backend) -> TestClient:
+    """A client whose backend can wait for events the server already sent."""
+
+    wire = SseWire(_app(tmp_path, backend))
+    backend.wire = wire
+    return TestClient(wire)
 
 
 def _auto_app(tmp_path, backend=None):
@@ -405,12 +413,14 @@ def test_buffered_tool_stream_opens_immediately_and_pings(tmp_path, monkeypatch)
         "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
     )
 
-    class SlowToolBackend(ToolLoopBackend):
+    class HeldToolBackend(ToolLoopBackend):
         async def generate(self, request):
-            await asyncio.sleep(0.2)
+            # Generation finishes only after message_start and a ping reached
+            # the client while it was still running.
+            await self.wire.wait_until(event_after("message_start", "ping"))
             return await super().generate(request)
 
-    client = TestClient(_app(tmp_path, SlowToolBackend()))
+    client = _wired_client(tmp_path, HeldToolBackend())
     response = client.post(
         "/v1/messages",
         json=_body(
@@ -599,9 +609,9 @@ def test_usage_ledger_records_public_usage(tmp_path):
     response = client.post("/v1/messages", json=_body())
     assert response.status_code == 200
     usage = response.json()["usage"]
-    # The app's bounded async writer flushes in the background; poll briefly
-    # so the read side never races the accepted record.
-    deadline = time.monotonic() + 5.0
+    # The app's bounded async writer flushes in the background; poll so the
+    # read side never races the accepted record (the deadline is a hang bound).
+    deadline = time.monotonic() + 10.0
     while True:
         all_totals = UsageLedger(tmp_path / "usage.jsonl").totals()
         if "default" in all_totals or time.monotonic() > deadline:
@@ -776,6 +786,8 @@ def _blocks_from_events(events: list[tuple[str, dict]]) -> list[dict]:
 class StagedArgumentsBackend(MockBackend):
     """Pauses after a declared tool's argument object has started."""
 
+    wire: SseWire
+
     async def stream(self, request):
         prefix = '<tool_call>{"name":"add","arguments":{"a":1'
         yield GenerationResult(
@@ -788,7 +800,9 @@ class StagedArgumentsBackend(MockBackend):
             ),
             finished=False,
         )
-        await asyncio.sleep(0.2)
+        # Resume only once the first argument fragment, then a ping, reached
+        # the client while generation was still running.
+        await self.wire.wait_until(event_after("content_block_delta", "ping"))
         complete = prefix + ',"b":2}}</tool_call>'
         yield GenerationResult(
             request_id=request.request_id,
@@ -806,7 +820,9 @@ class StagedArgumentsBackend(MockBackend):
 
 
 class StagedParallelBackend(MockBackend):
-    """Emits one committed call, sleeps, then a second call."""
+    """Emits one committed call, pauses, then a second call."""
+
+    wire: SseWire
 
     async def stream(self, request):
         first = '<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>'
@@ -821,7 +837,9 @@ class StagedParallelBackend(MockBackend):
             ),
             finished=False,
         )
-        await asyncio.sleep(0.2)
+        # Resume only once the first call's block closed, then a ping, reached
+        # the client while generation was still running.
+        await self.wire.wait_until(event_after("content_block_stop", "ping"))
         yield GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
@@ -841,7 +859,7 @@ def test_tool_arguments_stream_before_generation_completes(tmp_path, monkeypatch
     monkeypatch.setattr(
         "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
     )
-    client = TestClient(_app(tmp_path, StagedArgumentsBackend()))
+    client = _wired_client(tmp_path, StagedArgumentsBackend())
     response = client.post(
         "/v1/messages",
         json=_body(
@@ -914,15 +932,14 @@ def test_tool_fragments_are_emitted_before_generation_completes(
     tmp_path, monkeypatch
 ):
     # The incrementality contract itself (#573): the first call's blocks are
-    # emitted while the model is still generating. Proven by body order: the
-    # idle pings generated during the inter-yield sleep must appear AFTER the
-    # first call's content_block_stop and BEFORE the second call's
-    # content_block_start (a buffered implementation would replay every block
-    # after the last ping instead).
+    # emitted while the model is still generating. The backend holds its second
+    # call until the first call's content_block_stop and an idle ping reached
+    # the client, so a buffered implementation (replaying every block after the
+    # pings) never resumes it. The body order shows the same contract.
     monkeypatch.setattr(
         "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
     )
-    client = TestClient(_app(tmp_path, StagedParallelBackend()))
+    client = _wired_client(tmp_path, StagedParallelBackend())
     response = client.post(
         "/v1/messages",
         json=_body(

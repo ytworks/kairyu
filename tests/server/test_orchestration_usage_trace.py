@@ -624,7 +624,7 @@ async def test_conductor_disconnect_finalizes_prefinal_and_partial_usage(tmp_pat
         "server": ("test", 80),
     }
 
-    await asyncio.wait_for(app(scope, receive, send), timeout=2)
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
     totals = await asyncio.to_thread(app.state.usage_ledger.totals)
     assert backend.cancelled is True
     assert len(backend.calls) == 4
@@ -693,9 +693,9 @@ async def test_conductor_disconnect_mid_prefinal_keeps_completed_call_usage(tmp_
     }
 
     request_task = asyncio.create_task(app(scope, receive, send))
-    await asyncio.wait_for(backend.second_started.wait(), timeout=1)
+    await asyncio.wait_for(backend.second_started.wait(), timeout=10)
     disconnect.set()
-    await asyncio.wait_for(request_task, timeout=2)
+    await asyncio.wait_for(request_task, timeout=10)
     totals = await asyncio.to_thread(app.state.usage_ledger.totals)
     assert backend.cancelled is True
     assert len(backend.calls) == 2
@@ -736,7 +736,7 @@ async def test_moa_cancellation_observer_keeps_completed_proposal_usage():
 
     assert (await anext(stream)).kind == "status"
     pending = asyncio.create_task(anext(stream))
-    await asyncio.wait_for(backend.blocked.wait(), timeout=1)
+    await asyncio.wait_for(backend.blocked.wait(), timeout=10)
     await asyncio.sleep(0)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
