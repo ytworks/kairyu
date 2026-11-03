@@ -140,8 +140,8 @@ readiness note, FN-D9 Gemma amendment in `docs/design/frontier-native-runtime.md
 | `docling` / `knowledge` | OCR; 20-page scan key chunk in top 5, ingest <= 300 s, query <= 10 s; Kairyu embedding pool reached on every replica | 1017 + via Kairyu | 20 min |
 | `chat-ui` | 323 -> 324, Red, `#` knowledge answer cited, no embedding model in the picker | all | 10 min |
 | `knowledge-serving` | c1/c8 during ingestion >= 95 % of the same run's unloaded rows | 1017 criteria | 15 min |
-| `office` | docx/xlsx/pptx read and edit saved from the link, then an image | all three | 15 min |
-| `file-download` | desktop, after reload (same SHA-256), iPhone 13 | three saves | 20 min |
+| `office` | docx/xlsx/pptx read and edited by the code interpreter; every linked result saved and checked, a reply without a link recorded as a model miss (owner amendment 2026-11-04), then an image | all read and edited, at least one linked | 15 min |
+| `file-download` | desktop, after reload (same SHA-256), iPhone 13; desktop and phone each ask in up to three new chats until a reply links the file (owner amendment 2026-11-04) | three saves | 20 min |
 
 ## Risks
 

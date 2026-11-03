@@ -200,7 +200,13 @@ the Chat UI's APIs. Stop at the first failing gate.
   the query the embedding pool), `chat-ui` (signed in: 323 then 324, Red for
   an image, a `#` knowledge answer citing the scan, only the chat model
   offered), `knowledge-serving` (c1/c8 while ingesting at least 95 % of the
-  same run's unloaded rows), `office`, `file-download`.
+  same run's unloaded rows), `office` (each docx / xlsx / pptx read and
+  edited by the code interpreter; every linked result saved and checked, at
+  least one linked), `file-download` (saved on a desktop, after a reload and
+  on an iPhone 13). A reply that offers no link is recorded as a model miss:
+  at its official sampling Gemma 4 sometimes answers that a file is ready
+  without calling `provide_download`; file-download asks again in a new chat,
+  at most three times.
 
 ## Primary references
 

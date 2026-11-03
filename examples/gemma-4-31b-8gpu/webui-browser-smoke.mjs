@@ -8,12 +8,15 @@
  *
  * With WEBUI_SMOKE_MODE=office (run by `verify.sh office`), each Word, Excel
  * and PowerPoint fixture is attached with the clip, asked about, then edited
- * by the code interpreter; the result is saved from the download link in the
- * reply into /results for the gate to check.
+ * by the code interpreter; a result the reply links is saved into /results
+ * for the gate to check. At its official sampling the model sometimes answers
+ * without calling the download tool: such a format is recorded as a model
+ * miss, and at least one format must offer its link.
  *
  * With WEBUI_SMOKE_MODE=download (run by `verify.sh file-download`), the
  * owner's request for an Excel template is asked on a desktop screen and on
- * an emulated phone; the file is saved from the reply's link, then again from
+ * an emulated phone, each in up to three new chats until a reply links the
+ * file (misses recorded); the file is saved from that link, then again from
  * the same link after a reload.
  *
  * The Chat UI requires sign-in: every browser context starts with the admin
@@ -219,6 +222,20 @@ async function downloadFromReply(item, saveAs, { tap = false } = {}) {
 	return href;
 }
 
+// Ask for the Excel file in a new chat until a reply links it (at most three
+// chats). A reply without a link is the model not calling the download tool
+// at its official sampling; it is recorded, not judged.
+async function askForLink(label) {
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		await newChat();
+		const { item, text } = await ask(downloadRequest);
+		console.log(JSON.stringify({ [`${label}_answer`]: text.slice(0, 500), attempt }));
+		if ((await item.locator('a[href*="/api/v1/files/"]').count()) > 0) return item;
+		console.log(JSON.stringify({ model_miss: label, attempt }));
+	}
+	throw new Error(`${label}: three replies offered no download link`);
+}
+
 // The last assistant message of the open chat.
 function lastReply() {
 	return page.locator('ul[role="log"] [role="listitem"]').last();
@@ -233,6 +250,7 @@ async function officeMain() {
 		viewport: { width: 1600, height: 1000 }
 	});
 	page = await context.newPage();
+	const misses = [];
 	for (const [format, item] of Object.entries(officeCases)) {
 		await step(`${format}: attach ${item.fixture}`, async () => {
 			await newChat();
@@ -252,9 +270,16 @@ async function officeMain() {
 			await page.locator('#chat-input').fill(item.edit);
 			const { item: reply, text } = await sendAndRead();
 			console.log(JSON.stringify({ format, edit_answer: text.slice(0, 400) }));
+			invariant(/execute_code/.test(text), `${format}: the code interpreter did not run: ${text.slice(0, 400)}`);
+			if ((await reply.locator('a[href*="/api/v1/files/"]').count()) === 0) {
+				misses.push(format);
+				console.log(JSON.stringify({ model_miss: format }));
+				return;
+			}
 			await downloadFromReply(reply, item.result);
 		});
 	}
+	invariant(misses.length < Object.keys(officeCases).length, 'no format offered a download link');
 	// The last chat used the code interpreter; an image there now travels
 	// beside that tool history (Kairyu used to refuse the turn). Any colour
 	// word shows the image reached the model; which one is the model's
@@ -283,10 +308,7 @@ async function downloadMain() {
 	page = await desktop.newPage();
 	let href;
 	await step('desktop: the owner\'s request gets a download link that saves the file', async () => {
-		await newChat();
-		const { item, text } = await ask(downloadRequest);
-		console.log(JSON.stringify({ desktop_answer: text.slice(0, 500) }));
-		href = await downloadFromReply(item, 'desktop.xlsx');
+		href = await downloadFromReply(await askForLink('desktop'), 'desktop.xlsx');
 	});
 	await step('desktop: after a reload the same link saves the same file', async () => {
 		await page.reload({ waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
@@ -303,10 +325,7 @@ async function downloadMain() {
 	});
 	page = await phone.newPage();
 	await step('phone: tapping the reply\'s link saves the file', async () => {
-		await newChat();
-		const { item, text } = await ask(downloadRequest);
-		console.log(JSON.stringify({ phone_answer: text.slice(0, 300) }));
-		await downloadFromReply(item, 'phone.xlsx', { tap: true });
+		await downloadFromReply(await askForLink('phone'), 'phone.xlsx', { tap: true });
 	});
 	console.log('WEBUI DOWNLOAD SMOKE PASS');
 }

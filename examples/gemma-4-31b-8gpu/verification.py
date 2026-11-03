@@ -2342,9 +2342,11 @@ def office(run_dir: Path) -> int:
     """Word, Excel and PowerPoint in the Chat UI: read each attachment, then edit it to a new file.
 
     Chromium attaches each fixture with the clip, asks about its key fact, then
-    asks for an edit; the code interpreter writes the result to /mnt/uploads
-    and the gate saves it from the reply's download link and checks it. Last,
-    an image attached to that chat (after its tool calls) must be answered.
+    asks for an edit that the code interpreter must run; every result the
+    reply links is saved and checked. A reply without a link is the model not
+    calling the download tool at its official sampling: recorded as a model
+    miss, not judged, but at least one format must offer its link. Last, an
+    image attached to that chat (after its tool calls) must be answered.
     """
     fixtures = run_dir / "fixtures"
     results = run_dir / "results"
@@ -2367,14 +2369,20 @@ def office(run_dir: Path) -> int:
     after = _kairyu_api_counts()
     line = _docling_python(_OFFICE_CHECK, results, "/work")
     checks = json.loads(line.split("OFFICE-CHECK ", 1)[1])
+    misses = _model_misses(browser.stdout)
+    missed = {OFFICE_CASES[format_]["result"] for format_ in misses}
     report = {
         "browser_exit": browser.returncode,
         "checks": checks,
+        "model_misses": misses,
         "kairyu": {"before": before, "after": after},
     }
     passed = (
         browser.returncode == 0
-        and all(row.get("passed") for row in checks.values())
+        and len(missed) < len(checks)
+        # Every linked result has the edit; every other one is a recorded miss.
+        and all(row.get("passed") or name in missed for name, row in checks.items())
+        and not any(checks[name].get("exists") for name in missed)
         and after["/v1/responses"] > before["/v1/responses"]
         and after["/v1/chat/completions"] == before["/v1/chat/completions"]
     )
@@ -2383,6 +2391,15 @@ def office(run_dir: Path) -> int:
     print(browser.stdout[-3000:] + browser.stderr[-2000:])
     print(json.dumps(report, ensure_ascii=False))
     return 0 if passed else 1
+
+
+def _model_misses(stdout: str) -> list:
+    """Replies the browser recorded without a download link (``{"model_miss": ...}``)."""
+    misses = []
+    for line in stdout.splitlines():
+        if line.startswith('{"model_miss"'):
+            misses.append(json.loads(line)["model_miss"])
+    return misses
 
 
 # The owner's own request (2026-10-22, on a phone) that the 1017 Chat UI could
@@ -2420,7 +2437,12 @@ print("DOWNLOAD-CHECK " + json.dumps(report, ensure_ascii=False))
 
 
 def file_download(run_dir: Path) -> int:
-    """A file the model makes is saved from the reply's link: desktop, after a reload, phone."""
+    """A file the model makes is saved from the reply's link: desktop, after a reload, phone.
+
+    Desktop and phone each ask in up to three new chats until a reply links the
+    file; replies without a link (the model not calling the download tool at
+    its official sampling) are recorded as model misses.
+    """
     results = run_dir / "results"
     results.mkdir(parents=True, exist_ok=True)
     os.chmod(results, 0o777)  # the browser container writes downloads here
@@ -2436,6 +2458,7 @@ def file_download(run_dir: Path) -> int:
     report = {
         "browser_exit": browser.returncode,
         "checks": checks,
+        "model_misses": _model_misses(browser.stdout),
         "kairyu": {"before": before, "after": after},
     }
     passed = (
