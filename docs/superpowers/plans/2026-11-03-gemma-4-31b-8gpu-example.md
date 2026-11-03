@@ -133,7 +133,7 @@ readiness note, FN-D9 Gemma amendment in `docs/design/frontier-native-runtime.md
 | `completed` | generic and coding, c1/8/32 | every reply has content | 30 min |
 | `tool-calling` | every chat replica | all pass | 10 min |
 | `vision` / `reasoning` / `cancellation` | colour, thinking on/off, disconnect | 1017 criteria | 20 min |
-| `long-context` | 32K / 128K / 256K retrieval | all three | 30 min |
+| `long-context` | 32K / 128K retrieval; ~250K accepted and ended normally (owner amendment 2026-11-04: official sampling only, the 250K answer is model accuracy) | all three | 30 min |
 | `embeddings` (new) | Kairyu = vLLM vectors; spread over M; one embedding replica stopped: at most one failed request before ejection, then all succeed, `/readyz` ready; restored after restart | all | 20 min |
 | `restart` | `run.sh up` Chat UI checks all match | ready | 20 min |
 | `api-equivalence` | every case incl. `image-tools` | L1 = L3 | 10 min |

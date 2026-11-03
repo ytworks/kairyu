@@ -163,6 +163,7 @@
       "max_tokens": 8192
     },
     "long_context_tokens": [32768, 131072, 250000],
+    "long_context_answer_tokens": [32768, 131072],
     "embeddings": {
       "texts": 64,
       "concurrency": 8,

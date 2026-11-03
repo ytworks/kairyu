@@ -133,4 +133,26 @@ saturate (step 3); real ingestion did not measurably slow chat (c1 67.3 vs
 
 ## Gates
 
-To be recorded per gate, with run ids.
+Layout and L1 as selected above (overlay image `sha256:af9e746b…`), every gate
+through Kairyu unless it says otherwise. Run ids are directories under
+`model-volumes/gemma-4-31b-8gpu/verification-results/`.
+
+| Gate | Run | Result |
+|---|---|---|
+| `l1` | `20261103T185141Z-l1` | PASS, 14 cases: each chat replica holds 2.89 x 262,144 tokens; checkpoint sampling defaults; thinking on/off render as the template defines; 48 + 48 exact `17 * 19` probes with finite log-probabilities; both embedding replicas vs sentence-transformers 6.1.0 min cosine 0.99997, unit norm; tool call, image (Red) and an embedding batch through Kairyu |
+| `serving` | `20261103T185214Z-serving` | PASS: 8K in, at most 256 out, 64 requests per row, all succeeded. Output tok/s 68.1 / 384.7 / 502.5 / 588.6 / 651.4 at c1/8/16/32/64; TTFT p50 1.38 / 1.42 / 2.65 / 5.22 / 12.9 s; placements 16/16/16/16 on the four replicas at c8-c64 (largest 1.0 x mean; c1 stays on the warm idle replica by design) |
+| `completed` | `20261103T185830Z-completed` | PASS: generic and coding tasks, 32 per row at c1/8/32, thinking on, every reply has visible content (192/192). Output tok/s generic 123.2 / 735.4 / 1,575.8, coding 136.9 / 911.5 / 1,949.8; request p50 7.5-12.3 s, p99 at most 23.1 s |
+| `tool-calling` | `20261103T191058Z-tool-calling` | PASS: 8 automatic tool calls, a tool-result turn and a streamed call (10/10 HTTP 200 with function calls); all four replicas placed tool requests |
+| `vision` | `20261103T191100Z-vision` | PASS: 6/6 answers "red" |
+| `reasoning` | `20261103T191103Z-reasoning` | PASS: default (thinking on) reasons (142 characters) and answers 323; `none` returns no reasoning and answers 323 in 0.09 s |
+| `cancellation` | `20261103T191104Z-cancellation` | PASS: after a disconnect mid-stream the L1 request is released in 0.81 s and a follow-up completes |
+| `long-context` | `20261103T191107Z-long-context` | **FAIL** at ~250K: 32K and 128K returned the key (8.9 / 61.2 s); at 250,018 prompt tokens the reply stopped at the 8,192-token output cap with no content: the reasoning copied the "filler" haystack (57,087 characters) |
+
+`long-context` diagnosis (same 250,018-token request, 2026-11-04): with
+thinking on at the checkpoint's sampling (temperature 1.0) the reasoning
+falls into copying the one-word haystack in 2 of 4 samples (the gate run and
+one of two replays through Kairyu); one replay and one request sent to vLLM
+directly answered correctly. Thinking off answered correctly (182 s, first
+request), and with temperature 0 both thinking on (179 tokens) and thinking
+off returned the key. KV capacity, Kairyu forwarding and the replica are not
+involved; the verdict depended on sampling chance.

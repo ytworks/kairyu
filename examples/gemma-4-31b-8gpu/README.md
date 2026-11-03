@@ -106,6 +106,11 @@ so stock vLLM v0.33.0 and v0.32.0 cannot start EmbeddingGemma 2 on these GPUs.
 The edit uses 64-row tiles there; the build fails if the patched source
 changes. Gemma 4 chat uses a different kernel and is unaffected.
 
+Known limit of the model at its official sampling: with thinking on, a
+prompt of about 250,000 tokens made of one repeated word made the reasoning
+copy the input until the output cap in 2 of 4 samples; at 32K and 128K it
+answered correctly (MEASUREMENTS.md, `long-context`).
+
 Kairyu sends each request to vLLM in its caller's API (`upstream_chat_models`,
 `upstream_responses_models`, `upstream_messages_models`). vLLM renders the
 checkpoint's own chat template (Google's canonical Gemma 4 template,
@@ -181,7 +186,8 @@ the Chat UI's APIs. Stop at the first failing gate.
   the mean at c ≥ 8.
 - `completed`, `tool-calling` (every chat replica places tool calls),
   `vision`, `reasoning` (default reasons, `none` does not; both answer 323),
-  `cancellation`, `long-context` (32K / 128K / 250K retrieval).
+  `cancellation`, `long-context` (32K / 128K retrieval; a ~250K request
+  accepted with its server-reported token count and ended normally).
 - `embeddings`: Kairyu's vectors equal the replica's (cosine ≥ 0.9999);
   concurrent batches reach every embedding replica; with one replica stopped
   at most one request fails before it is ejected, `/readyz` stays ready and
