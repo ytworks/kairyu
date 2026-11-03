@@ -182,6 +182,8 @@ TIMING_DIAGNOSTICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("router.p50_seconds", ("router_latency", "p50_seconds")),
     ("router.p99_seconds", ("router_latency", "p99_seconds")),
+    ("router.learned_p50_seconds", ("router_latency", "learned", "p50_seconds")),
+    ("router.learned_p99_seconds", ("router_latency", "learned", "p99_seconds")),
 )
 
 # Checks of the protected behaviour, as opposed to fixed workload and shape.

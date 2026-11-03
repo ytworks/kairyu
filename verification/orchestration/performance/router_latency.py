@@ -1,4 +1,4 @@
-"""Measure RuleRouter latency (p50/p99) and count its routing work.
+"""Measure RuleRouter and LearnedRouter latency (p50/p99) and count their routing work.
 
 Latency percentiles are diagnostics.  The verdict is deterministic: before
 and after the measured routes it routes the fixed queries once more and counts
@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import statistics
 import sys
 import time
 from collections.abc import Callable, Sequence
 
+from kairyu.orchestration.features import extract_features
+from kairyu.orchestration.learning.classifier import LearnedRouter, train_model
+from kairyu.orchestration.learning.dataset import LabeledExample
 from kairyu.orchestration.router import RuleRouter
 
 N_ROUTES = 10_000
@@ -94,16 +98,48 @@ def _count_work(fn: Callable[[], object]) -> int:
     return _WorkCounter.count
 
 
-def _route_queries(router: RuleRouter) -> int:
+def _route_queries(router: RuleRouter | LearnedRouter) -> int:
     queries = [_CountedQuery(query) for query in QUERIES]
     return _count_work(lambda: [router.route(query) for query in queries])
 
 
+def _learned_router() -> LearnedRouter:
+    """A LearnedRouter trained on a fixed synthetic set (seeded, deterministic)."""
+    rng = random.Random(7)
+    examples = []
+    for index in range(300):
+        kind = rng.choice(["short", "code", "multi"])
+        if kind == "short":
+            query, label = f"What is {index}?", "tier1"
+        elif kind == "code":
+            query, label = f"Fix bug {index}:\n```python\nx = {index}\n```\nwhy?", "tier2"
+        else:
+            query, label = (
+                f"First, research topic {index}. Then design. After that, build. "
+                "Finally verify.",
+                "multi_agent",
+            )
+        examples.append(
+            LabeledExample(
+                query_hash=str(index),
+                features=extract_features(query).as_dict(),
+                label=label,
+            )
+        )
+    return LearnedRouter(model=train_model(examples, epochs=50, seed=3), fallback=RuleRouter())
+
+
 def measure(routes: int) -> dict[str, object]:
+    """RuleRouter at the top level (as before) plus the LearnedRouter under ``learned``."""
+    rule = measure_router(RuleRouter(), routes)
+    learned = measure_router(_learned_router(), routes)
+    return {**rule, "learned": learned, "passed": bool(rule["passed"] and learned["passed"])}
+
+
+def measure_router(router: RuleRouter | LearnedRouter, routes: int) -> dict[str, object]:
     if routes < 1:
         raise ValueError("routes must be at least 1")
 
-    router = RuleRouter()
     first = _route_queries(router)
     durations = []
     for index in range(routes):
@@ -158,6 +194,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             f"work for {len(QUERIES)} routes: first={first} last={last}"
+        )
+        learned = result["learned"]
+        learned_first, learned_last = learned["work"]["routes_served"]["work"]
+        print(
+            f"learned router latency p50={float(learned['p50_seconds']) * 1e6:.1f}us "
+            f"p99={float(learned['p99_seconds']) * 1e6:.1f}us (diagnostic)"
+        )
+        print(
+            f"learned work for {len(QUERIES)} routes: "
+            f"first={learned_first} last={learned_last}"
         )
         verdict = "OK" if result["passed"] else "VIOLATED"
         print(
