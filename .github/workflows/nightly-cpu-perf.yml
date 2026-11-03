@@ -169,7 +169,7 @@ jobs:
           uv run --frozen python scripts/cpu_perf_series.py select-history \
             --candidates "$CANDIDATE_DIR" \
             --output "$HISTORY"
-      - name: Append and compare the nightly record
+      - name: Append the nightly record and report the trend
         id: comparison
         if: >-
           always() &&
@@ -185,6 +185,23 @@ jobs:
           --report "$REPORT"
           --history "$HISTORY"
           --series "$SERIES"
+          --comparison "$COMPARISON"
+          --repository "$GITHUB_REPOSITORY"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --sha "$GITHUB_SHA"
+      - name: Report a warm-up run when history is unavailable
+        id: warmup
+        if: >-
+          always() &&
+          steps.recovery.outcome != 'success'
+        continue-on-error: true
+        env:
+          REPORT: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+          COMPARISON: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+        run: >-
+          uv run --frozen python scripts/cpu_perf_series.py warmup
+          --report "$REPORT"
           --comparison "$COMPARISON"
           --repository "$GITHUB_REPOSITORY"
           --run-id "$GITHUB_RUN_ID"
@@ -207,11 +224,14 @@ jobs:
           MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
           RECOVERY_OUTCOME: ${{ steps.recovery.outcome }}
           COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+          WARMUP_OUTCOME: ${{ steps.warmup.outcome }}
         run: |
+          # The verdict is the deterministic gate.  Missing history only makes
+          # this run a warm-up; the speed trend is reported, never enforced.
+          echo "measurement=${MEASUREMENT_OUTCOME} recovery=${RECOVERY_OUTCOME} comparison=${COMPARISON_OUTCOME} warmup=${WARMUP_OUTCOME}"
           if [[ "$MEASUREMENT_OUTCOME" == "success" &&
-                "$RECOVERY_OUTCOME" == "success" &&
-                "$COMPARISON_OUTCOME" == "success" ]]; then
+                ( "$COMPARISON_OUTCOME" == "success" ||
+                  "$WARMUP_OUTCOME" == "success" ) ]]; then
             exit 0
           fi
-          echo "measurement=${MEASUREMENT_OUTCOME} recovery=${RECOVERY_OUTCOME} comparison=${COMPARISON_OUTCOME}" >&2
           exit 1

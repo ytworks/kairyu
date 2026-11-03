@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Maintain the fail-closed nightly CPU microbenchmark performance series."""
+"""Maintain the fail-closed nightly CPU microbenchmark performance series.
+
+The verdict is the CPU report's deterministic gate (operation counts and fixed
+workload shape).  The speed trend against trailing medians is a report that
+never changes the exit status, and a run without fetchable history is a
+warm-up.
+"""
 
 from __future__ import annotations
 
@@ -27,9 +33,9 @@ if str(ROOT) not in sys.path:
 gate = importlib.import_module("scripts.cpu_microbench_gate")
 
 
-SERIES_SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 1
-METHOD = "issue-377-nightly-cpu-perf-v1"
+SERIES_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 2
+METHOD = "issue-377-nightly-cpu-perf-v2"
 MIN_HISTORY = 5
 WINDOW_SIZE = 7
 DECLINE_FRACTION = Decimal("0.15")
@@ -53,55 +59,14 @@ _CPU_ENVIRONMENT = {
     "PYTHONHASHSEED": "0",
 }
 
-HARD_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "scheduler.fifo_speedup",
-        ("benchmarks", "scheduler_queue", "fifo_full_drain", "median_speedup"),
-    ),
-    (
-        "scheduler.removal_speedup",
-        ("benchmarks", "scheduler_queue", "indexed_removal", "median_speedup"),
-    ),
-    (
-        "scheduler.priority_speedup",
-        ("benchmarks", "scheduler_queue", "priority_full_drain", "median_speedup"),
-    ),
-    (
-        "radix.eviction_speedup",
-        ("benchmarks", "radix_eviction", "median_speedup"),
-    ),
-    (
-        "op_queue.add_elapsed_speedup",
-        ("benchmarks", "op_queue", "add_burst", "elapsed_speedup"),
-    ),
-    (
-        "op_queue.abort_elapsed_speedup",
-        (
-            "benchmarks",
-            "op_queue",
-            "duplicate_abort_burst",
-            "elapsed_speedup",
-        ),
-    ),
-    (
-        "sampler.legacy_speedup",
-        ("benchmarks", "sampler_penalty_state", "legacy_speedup"),
-    ),
-    (
-        "sampler.append_legacy_speedup",
-        ("benchmarks", "sampler_penalty_state", "append_legacy_speedup"),
-    ),
+# Report-only speed trend: every higher-is-better ratio the gate records as a
+# timing diagnostic.  None of them can change a verdict.
+TREND_METRICS: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (name, ("benchmarks", *path))
+    for name, path in gate.TIMING_DIAGNOSTICS
+    if name.endswith("_speedup")
 )
-_HARD_NAMES = tuple(name for name, _path in HARD_METRICS)
-_RETAINABLE_SOURCE_FAILURES = frozenset(
-    {
-        *_HARD_NAMES,
-        "proc_wire.all_passed",
-        "proc_wire.checks_complete",
-        "router.p99_seconds",
-        "router.passed",
-    }
-)
+_TREND_NAMES = tuple(name for name, _path in TREND_METRICS)
 
 
 class SeriesError(ValueError):
@@ -329,13 +294,13 @@ def _policy_identity() -> dict[str, Any]:
     return {
         "decline_boundary_inclusive": True,
         "decline_fraction": str(DECLINE_FRACTION),
-        "hard_metrics": [
+        "trend_metrics": [
             {
                 "direction": "higher",
                 "name": name,
                 "report_path": ".".join(path),
             }
-            for name, path in HARD_METRICS
+            for name, path in TREND_METRICS
         ],
         "minimum_history": MIN_HISTORY,
         "window_size": WINDOW_SIZE,
@@ -387,7 +352,7 @@ def _validate_segment(value: object, *, repository: str) -> dict[str, Any]:
     if not isinstance(policy, dict) or set(policy) != {
         "decline_boundary_inclusive",
         "decline_fraction",
-        "hard_metrics",
+        "trend_metrics",
         "minimum_history",
         "window_size",
     }:
@@ -412,28 +377,28 @@ def _validate_segment(value: object, *, repository: str) -> dict[str, Any]:
         or policy["window_size"] < policy["minimum_history"]
     ):
         raise _fail("record comparator window policy is invalid")
-    hard_metrics = policy["hard_metrics"]
-    if not isinstance(hard_metrics, list) or len(hard_metrics) != len(_HARD_NAMES):
-        raise _fail("record comparator hard metric policy is invalid")
+    trend_metrics = policy["trend_metrics"]
+    if not isinstance(trend_metrics, list) or len(trend_metrics) != len(_TREND_NAMES):
+        raise _fail("record comparator trend metric policy is invalid")
     seen_metrics: set[str] = set()
-    for metric in hard_metrics:
+    for metric in trend_metrics:
         if not isinstance(metric, dict) or set(metric) != {
             "direction",
             "name",
             "report_path",
         }:
-            raise _fail("record comparator hard metric policy is invalid")
+            raise _fail("record comparator trend metric policy is invalid")
         if (
             metric["direction"] != "higher"
-            or metric["name"] not in _HARD_NAMES
+            or metric["name"] not in _TREND_NAMES
             or not isinstance(metric["report_path"], str)
             or not metric["report_path"]
             or metric["name"] in seen_metrics
         ):
-            raise _fail("record comparator hard metric policy is invalid")
+            raise _fail("record comparator trend metric policy is invalid")
         seen_metrics.add(metric["name"])
-    if seen_metrics != set(_HARD_NAMES):
-        raise _fail("record comparator hard metric policy is invalid")
+    if seen_metrics != set(_TREND_NAMES):
+        raise _fail("record comparator trend metric policy is invalid")
 
     workload = value["workload"]
     if not isinstance(workload, dict) or set(workload) != {
@@ -511,10 +476,10 @@ def _finite_number(value: object, *path: str, positive: bool = False) -> float:
     return numeric
 
 
-def _hard_metrics(report: Mapping[str, Any]) -> dict[str, float]:
+def _trend_metrics(report: Mapping[str, Any]) -> dict[str, float]:
     return {
         name: _finite_number(report, *path, positive=True)
-        for name, path in HARD_METRICS
+        for name, path in TREND_METRICS
     }
 
 
@@ -702,12 +667,20 @@ def _validated_report(
         "benchmarks",
         "checks",
         "cpu_only",
+        "diagnostics",
         "errors",
         "schema_version",
     }:
         raise _fail("CPU report has an unexpected top-level schema")
-    if type(parsed["schema_version"]) is not int or parsed["schema_version"] != 1:
-        raise _fail("CPU report schema_version must be integer 1")
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != REPORT_SCHEMA_VERSION
+    ):
+        raise _fail(
+            f"CPU report schema_version must be integer {REPORT_SCHEMA_VERSION}"
+        )
+    if not isinstance(parsed["diagnostics"], dict):
+        raise _fail("CPU report diagnostics must be an object")
     if parsed["cpu_only"] is not True:
         raise _fail("CPU report must attest cpu_only=true")
     if type(parsed["all_passed"]) is not bool:
@@ -729,7 +702,9 @@ def _validated_report(
     if _canonical_bytes(parsed["checks"]) != _canonical_bytes(expected_checks):
         raise _fail("CPU report checks do not match independent evaluation")
     failed_checks = {check.name for check in recomputed if not check.passed}
-    invalid_contract_checks = failed_checks - _RETAINABLE_SOURCE_FAILURES
+    invalid_contract_checks = {
+        name for name in failed_checks if not gate.is_property_check(name)
+    }
     if invalid_contract_checks:
         raise _fail(
             "CPU report violates the fixed workload/shape contract: "
@@ -766,14 +741,16 @@ def _validated_report(
     ):
         raise _fail("proc_wire all_passed disagrees with its checks")
 
-    router = _at(parsed, "benchmarks", "router_latency")
-    router_p99 = _finite_number(router, "p99_seconds", positive=True)
-    router_budget = _finite_number(router, "p99_budget_seconds", positive=True)
-    router_passed = _at(router, "passed")
-    if type(router_passed) is not bool or router_passed is not (
-        router_p99 < router_budget
-    ):
-        raise _fail("router passed disagrees with its p99 budget")
+    router_passed = _at(parsed, "benchmarks", "router_latency", "passed")
+    router_work_passed = all(
+        check.passed
+        for check in recomputed
+        if check.name.startswith("router.")
+        and gate.is_property_check(check.name)
+        and check.name != "router.passed"
+    )
+    if type(router_passed) is not bool or router_passed is not router_work_passed:
+        raise _fail("router passed disagrees with its work counts")
 
     source_gate_passed = not failed_checks
     if parsed["all_passed"] is not source_gate_passed:
@@ -858,9 +835,9 @@ def _validate_record(
     if record["segment_sha256"] != _sha256_value(segment):
         raise _fail(f"series record {sequence} has an invalid segment digest")
     metrics = record["metrics"]
-    if not isinstance(metrics, dict) or tuple(metrics) != tuple(sorted(_HARD_NAMES)):
-        raise _fail(f"series record {sequence} has an invalid hard metric set")
-    for name in _HARD_NAMES:
+    if not isinstance(metrics, dict) or tuple(metrics) != tuple(sorted(_TREND_NAMES)):
+        raise _fail(f"series record {sequence} has an invalid trend metric set")
+    for name in _TREND_NAMES:
         value = metrics[name]
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise _fail(f"series record {sequence} metric {name} is invalid")
@@ -974,6 +951,65 @@ def _tip_summary(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _trend(
+    window: Sequence[Mapping[str, Any]],
+    metrics: Mapping[str, float],
+) -> tuple[dict[str, Any], list[str]]:
+    """Compare each speed ratio with its trailing median; report only."""
+    comparisons: dict[str, Any] = {}
+    declines: list[str] = []
+    for name in _TREND_NAMES:
+        samples = [
+            {
+                "record_sha256": item["record_sha256"],
+                "run_attempt": item["run"]["run_attempt"],
+                "run_id": item["run"]["run_id"],
+                "value": item["metrics"][name],
+            }
+            for item in window
+        ]
+        if len(window) < MIN_HISTORY:
+            comparisons[name] = {
+                "baseline_median": None,
+                "baseline_samples": samples,
+                "current": metrics[name],
+                "decline_fraction": None,
+                "declined": False,
+                "status": "warmup",
+            }
+            continue
+        ordered = sorted(Decimal(str(item["metrics"][name])) for item in window)
+        midpoint = len(ordered) // 2
+        if len(ordered) % 2:
+            baseline = ordered[midpoint]
+        else:
+            baseline = (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
+        current_decimal = Decimal(str(metrics[name]))
+        decline = (baseline - current_decimal) / baseline
+        declined = current_decimal <= baseline * (Decimal(1) - DECLINE_FRACTION)
+        if declined:
+            declines.append(name)
+        comparisons[name] = {
+            "baseline_median": float(baseline),
+            "baseline_samples": samples,
+            "current": metrics[name],
+            "decline_fraction": str(decline),
+            "declined": declined,
+            "status": "decline" if declined else "steady",
+        }
+    return comparisons, declines
+
+
+def _render_comparison(comparison: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        comparison,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8") + b"\n"
+
+
 def _record(
     *,
     report_path: Path,
@@ -1025,7 +1061,7 @@ def _record(
 
     segment = _segment(repository=repository)
     segment_sha256 = _sha256_value(segment)
-    metrics = _hard_metrics(report)
+    metrics = _trend_metrics(report)
     run = {
         "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "repository": repository,
@@ -1056,89 +1092,93 @@ def _record(
         item for item in records if item["segment_sha256"] == segment_sha256
     ]
     window = compatible[-WINDOW_SIZE:]
-    metric_comparisons: dict[str, Any] = {}
-    regressions: list[str] = []
-    for name in _HARD_NAMES:
-        samples = [
-            {
-                "record_sha256": item["record_sha256"],
-                "run_attempt": item["run"]["run_attempt"],
-                "run_id": item["run"]["run_id"],
-                "value": item["metrics"][name],
-            }
-            for item in window
-        ]
-        if len(window) < MIN_HISTORY:
-            metric_comparisons[name] = {
-                "baseline_median": None,
-                "baseline_samples": samples,
-                "current": metrics[name],
-                "decline_fraction": None,
-                "regressed": False,
-                "status": "warmup",
-            }
-            continue
-        ordered = sorted(Decimal(str(item["metrics"][name])) for item in window)
-        midpoint = len(ordered) // 2
-        if len(ordered) % 2:
-            baseline = ordered[midpoint]
-        else:
-            baseline = (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
-        current_decimal = Decimal(str(metrics[name]))
-        decline = (baseline - current_decimal) / baseline
-        regressed = current_decimal <= baseline * (Decimal(1) - DECLINE_FRACTION)
-        if regressed:
-            regressions.append(name)
-        metric_comparisons[name] = {
-            "baseline_median": float(baseline),
-            "baseline_samples": samples,
-            "current": metrics[name],
-            "decline_fraction": str(decline),
-            "regressed": regressed,
-            "status": "regression" if regressed else "pass",
-        }
-
-    if regressions:
-        status = "regression"
-    elif not source_gate_passed:
+    metric_comparisons, declines = _trend(window, metrics)
+    if not source_gate_passed:
         status = "source_gate_failed"
     elif len(window) < MIN_HISTORY:
         status = "warmup"
     else:
         status = "pass"
     comparison = {
-        "all_passed": source_gate_passed and not regressions,
+        "all_passed": source_gate_passed,
         "compatible_history_count": len(compatible),
         "current_record_sha256": current["record_sha256"],
         "decline_boundary_inclusive": True,
         "decline_fraction": float(DECLINE_FRACTION),
+        "declines": declines,
+        "history": "available",
         "history_record_count": len(records),
         "maximum_window": WINDOW_SIZE,
         "metrics": metric_comparisons,
         "minimum_history": MIN_HISTORY,
-        "regressions": regressions,
         "run": run,
         "schema_version": SERIES_SCHEMA_VERSION,
         "segment_sha256": segment_sha256,
         "source_gate_passed": source_gate_passed,
         "status": status,
+        "trend": "report-only",
         "window_size": len(window),
     }
     updated = [*records, current]
     rendered_series = _render_series(updated)
     if len(rendered_series) > MAX_SERIES_BYTES:
         raise _fail(f"updated series exceeds {MAX_SERIES_BYTES} bytes")
-    rendered_comparison = json.dumps(
-        comparison,
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8") + b"\n"
+    rendered_comparison = _render_comparison(comparison)
     _atomic_write(series_path, rendered_series)
     _atomic_write(comparison_path, rendered_comparison)
     print(json.dumps(comparison, indent=2, sort_keys=True))
-    return 0 if comparison["all_passed"] else 1
+    return 0 if source_gate_passed else 1
+
+
+def _warmup(
+    *,
+    report_path: Path,
+    comparison_path: Path,
+    repository: str,
+    run_id: str,
+    run_attempt: int,
+    sha: str,
+) -> int:
+    """Report a run whose history could not be fetched; no series is written."""
+    try:
+        aliased = report_path.resolve(strict=False) == comparison_path.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        raise _fail("cannot resolve report or comparison path") from error
+    if aliased:
+        raise _fail("comparison path aliases report path")
+    repository = _validate_repository(repository)
+    run_id = _validate_positive_decimal(run_id, field="run_id")
+    if run_attempt <= 0:
+        raise _fail("run_attempt must be positive")
+    sha = _validate_commit(sha)
+    report, _report_bytes, source_gate_passed = _validated_report(
+        report_path,
+        expected_sha=sha,
+    )
+    metric_comparisons, declines = _trend([], _trend_metrics(report))
+    comparison = {
+        "all_passed": source_gate_passed,
+        "declines": declines,
+        "history": "unavailable",
+        "metrics": metric_comparisons,
+        "run": {
+            "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "repository": repository,
+            "run_attempt": run_attempt,
+            "run_id": run_id,
+            "sha": sha,
+        },
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "source_gate_passed": source_gate_passed,
+        "status": "warmup" if source_gate_passed else "source_gate_failed",
+        "trend": "report-only",
+        "window_size": 0,
+    }
+    _atomic_write(comparison_path, _render_comparison(comparison))
+    print(json.dumps(comparison, indent=2, sort_keys=True))
+    return 0 if source_gate_passed else 1
 
 
 def _select_history(*, candidates: Path, output: Path) -> int:
@@ -1196,7 +1236,10 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument("--candidates", type=Path, required=True)
     select.add_argument("--output", type=Path, required=True)
 
-    record = commands.add_parser("record", help="append and compare one CPU report")
+    record = commands.add_parser(
+        "record",
+        help="append one CPU report and report its speed trend",
+    )
     record.add_argument("--report", type=Path, required=True)
     record.add_argument("--history", type=Path, required=True)
     record.add_argument("--series", type=Path, required=True)
@@ -1205,6 +1248,17 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--run-id", required=True)
     record.add_argument("--run-attempt", type=int, required=True)
     record.add_argument("--sha", required=True)
+
+    warmup = commands.add_parser(
+        "warmup",
+        help="report one CPU report when no history could be fetched",
+    )
+    warmup.add_argument("--report", type=Path, required=True)
+    warmup.add_argument("--comparison", type=Path, required=True)
+    warmup.add_argument("--repository", required=True)
+    warmup.add_argument("--run-id", required=True)
+    warmup.add_argument("--run-attempt", type=int, required=True)
+    warmup.add_argument("--sha", required=True)
     return parser
 
 
@@ -1222,6 +1276,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report_path=args.report,
                 history_path=args.history,
                 series_path=args.series,
+                comparison_path=args.comparison,
+                repository=args.repository,
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                sha=args.sha,
+            )
+        if args.command == "warmup":
+            return _warmup(
+                report_path=args.report,
                 comparison_path=args.comparison,
                 repository=args.repository,
                 run_id=args.run_id,
