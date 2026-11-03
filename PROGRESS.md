@@ -116,6 +116,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-11-03 — [design] CI verdicts depend only on the code
+- What: every CI pass/fail is decided by the code alone: timing became diagnostics (cpu-microbench and nightly perf judge operation counts; kind F1a/F1b/F1c, async smoke and F2b judge order, fencing tokens or a virtual clock; ~190 pytest waits rewritten to events, fake clocks or hang bounds); runner inputs pinned (umask 022, uv 0.11.31, single-platform postgres digest, images loaded from archives); networked setup separated from tests; the CPU suite runs on four workers to meet the five-minute target. CLAUDE.md test policy rule 8.
+- Why: owner principle after PR #667's CI failed on a wall-clock ratio and a runner image-store change ("not caused by this PR" is not a resolution).
+- Refs: PR #668; plan `docs/superpowers/plans/2026-11-03-ci-deterministic.md`; m10 A31 amendment; `docs/design/issue-377-nightly-cpu-perf.md`
 ### 2026-11-03 — [amendment] Responses accepts reasoning.effort none (thinking off)
 - What: `/v1/responses` turns an engine or pool model's thinking off on `reasoning.effort: "none"` (the internal `none` of the 2026-10-19 Messages amendment, sent on the model's wire); AUTO models keep their stage policy; the public Chat parser still rejects `none`.
 - Why: the 2026-10-05 rejection predates any thinking-off path; since 2026-10-19 the L1 renders thinking off from its own template. The Gemma 4 example's Chat UI needs it for its thinking-off choice (owner decision).
