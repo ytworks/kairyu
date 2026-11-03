@@ -361,11 +361,9 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
             report_path
         )
     }
-    assert (
-        cpu_microbench_gate.BENCHMARK_TIMEOUT_SECONDS
-        * len(cpu_microbench_gate.BENCHMARKS)
-        < int(job["timeout-minutes"]) * 60
-    )
+    # The gate's single hang bound ends before the job limit, so its report
+    # is still written and uploaded when a benchmark hangs.
+    assert cpu_microbench_gate.HANG_TIMEOUT_SECONDS < int(job["timeout-minutes"]) * 60
     setup_steps = [
         step
         for step in job["steps"]

@@ -1,22 +1,37 @@
 # Nightly CPU performance series (issue #377)
 
-Status: implemented
+Status: implemented; amended 2026-11-03
+
+## Amendment 2026-11-03: verdicts depend only on the code
+
+Plan: `docs/superpowers/plans/2026-11-03-ci-deterministic.md`.  The nightly
+verdict is the deterministic gate of `scripts/cpu_microbench_gate.py`
+(operation counts and their growth across sizes, plus fixed workload and
+shape).  The trailing-median comparison of the eight speed ratios is a report
+that never changes the exit status: a ratio at least 15% below its median is
+listed under `declines`.  When history cannot be fetched or selected, the run
+is a warm-up: `cpu_perf_series.py warmup` validates the report and writes only
+`comparison.json` (`history: unavailable`), so the next run continues the
+previous chain.  Series and report schema version 2 (method
+`issue-377-nightly-cpu-perf-v2`) start a new chain; version 1 artifacts are not
+history candidates.  Sections below that call a decline "binding" or a
+recovery transport failure "hard" describe the superseded version-1 policy.
 
 ## Decision
 
 Kairyu runs one main-branch CPU performance series nightly and on explicit
 manual dispatch.  The workflow reuses the six source-checkout measurements in
 `scripts/cpu_microbench_gate.py` from issue #378, then appends the validated
-report to a tamper-evident JSONL series and compares its hard-alert metrics
-with trailing medians.  This is a shared-runner smoke alarm.  It does not
-upgrade absolute CPU timings or ratios into formal benchmark evidence, and it
-does not replace reproduction on an owning benchmark.
+report to a tamper-evident JSONL series and reports its speed ratios against
+trailing medians.  It does not upgrade absolute CPU timings or ratios into
+formal benchmark evidence, and it does not replace reproduction on an owning
+benchmark.
 
-Pull requests retain the existing same-process, absolute-bound smoke gate in
-`ci.yml`.  They do not append to the nightly series.  Existing seven-day
-issue-#378 artifacts are not imported as history because they predate this
-series schema, runtime identity, and hash chain.  A new nightly segment must
-therefore complete its own five-record warmup.
+Pull requests run the same deterministic gate in `ci.yml`.  They do not
+append to the nightly series.  Existing seven-day issue-#378 artifacts are not
+imported as history because they predate this series schema, runtime
+identity, and hash chain.  A new nightly segment must therefore complete its
+own five-record warmup.
 
 ## Measurement and alert policy
 

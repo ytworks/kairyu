@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Long-context sampler penalty A/B benchmark for issue #216.
 
+Timings compare the incremental penalty state with the pre-#216 full-history
+rebuild and are diagnostics.  The ``work`` section is deterministic: at two
+history lengths it counts how much of the caller-supplied output history the
+incremental path reads per step (one unit per call and one per token read)
+plus every hash, comparison, or integer conversion of a history token, for
+unchanged history and for one appended token per step.
+
 Examples:
     uv run python verification/l1/performance/sampler_penalty_state_bench.py --device cpu
     uv run python verification/l1/performance/sampler_penalty_state_bench.py --device cuda:0 \
@@ -13,12 +20,96 @@ import argparse
 import json
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling
+
+WORK_UNIT = (
+    "output-history reads (1 per call, 1 per token read) plus hashes, "
+    "comparisons, and integer conversions of history tokens"
+)
+PROMPT_LENGTH = 4_096
+
+
+class _WorkCounter:
+    count = 0
+
+
+def _tick(units: int = 1) -> None:
+    _WorkCounter.count += units
+
+
+class _CountedToken(int):
+    """History token whose hashing, comparison, and conversion are counted."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        _tick()
+        return int.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        _tick()
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        _tick()
+        return int.__ne__(self, other)
+
+    def __lt__(self, other: int) -> bool:
+        _tick()
+        return int.__lt__(self, other)
+
+    def __le__(self, other: int) -> bool:
+        _tick()
+        return int.__le__(self, other)
+
+    def __gt__(self, other: int) -> bool:
+        _tick()
+        return int.__gt__(self, other)
+
+    def __ge__(self, other: int) -> bool:
+        _tick()
+        return int.__ge__(self, other)
+
+    def __int__(self) -> int:
+        _tick()
+        return int.__int__(self)
+
+    def __index__(self) -> int:
+        _tick()
+        return int.__index__(self)
+
+
+class _CountingHistory(Sequence):
+    """Caller-owned output history that counts every token read."""
+
+    __slots__ = ("_tokens",)
+
+    def __init__(self, tokens: list[_CountedToken]) -> None:
+        self._tokens = tokens
+
+    def __len__(self) -> int:
+        _tick()
+        return len(self._tokens)
+
+    def __getitem__(self, index):
+        _tick()
+        if isinstance(index, slice):
+            tokens = tuple(self._tokens[index])
+            _tick(len(tokens))
+            return tokens
+        _tick()
+        return self._tokens[index]
+
+    def __iter__(self):
+        _tick()
+        for token in self._tokens:
+            _tick()
+            yield token
 
 
 def _legacy_apply(
@@ -642,6 +733,124 @@ def _validate_duplicate_pending(device: torch.device) -> None:
             )
 
 
+def _work_history(
+    history_length: int,
+    vocab_size: int,
+    pending_depth: int,
+    steps: int,
+    sampling: EngineSampling,
+) -> tuple[int, int]:
+    """Count incremental work per step for unchanged and appended history."""
+    device = torch.device("cpu")
+    prompt = tuple(index % vocab_size for index in range(PROMPT_LENGTH))
+    logits = torch.randn(
+        vocab_size,
+        generator=torch.Generator(device=device).manual_seed(7),
+        device=device,
+    )
+
+    def base_tokens() -> list[_CountedToken]:
+        return [
+            _CountedToken((index * 17 + 11) % vocab_size)
+            for index in range(history_length)
+        ]
+
+    def apply(state, sampler: Sampler, history, pending) -> None:
+        sampler._apply_incremental_penalties(
+            state,
+            logits.clone(),
+            sampling,
+            prompt,
+            history,
+            pending,
+            history_epoch=0,
+        )
+
+    # Unchanged history: the first call builds the state from the full
+    # history once; every later step must not read it again.
+    pending = tuple(
+        torch.tensor((index * 31 + 19) % vocab_size, dtype=torch.long)
+        for index in range(pending_depth)
+    )
+    sampler = Sampler()
+    state = sampler._state_for("work-steady", sampling)
+    history = _CountingHistory(base_tokens())
+    apply(state, sampler, history, pending)
+    _WorkCounter.count = 0
+    for _ in range(steps):
+        apply(state, sampler, history, pending)
+    steady = _WorkCounter.count
+
+    # One committed token per step while the pending window advances.
+    extra_tokens = tuple(
+        (history_length * 17 + index * 37 + 23) % vocab_size
+        for index in range(steps + pending_depth)
+    )
+    pending_tokens = tuple(
+        torch.tensor(token, dtype=torch.long) for token in extra_tokens
+    )
+    windows = tuple(
+        pending_tokens[index : index + pending_depth]
+        for index in range(steps + 1)
+    )
+    sampler = Sampler()
+    state = sampler._state_for("work-append", sampling)
+    tokens = base_tokens()
+    history = _CountingHistory(tokens)
+    apply(state, sampler, history, windows[0])
+    _WorkCounter.count = 0
+    for index in range(steps):
+        tokens.append(_CountedToken(extra_tokens[index]))
+        apply(state, sampler, history, windows[index + 1])
+    return steady, _WorkCounter.count
+
+
+def _work(
+    sizes: tuple[int, ...],
+    vocab_size: int,
+    pending_depth: int,
+    steps: int,
+    sampling: EngineSampling,
+) -> dict[str, object]:
+    steady: list[int] = []
+    append: list[int] = []
+    for history_length in sizes:
+        steady_units, append_units = _work_history(
+            history_length,
+            vocab_size,
+            pending_depth,
+            steps,
+            sampling,
+        )
+        steady.append(steady_units)
+        append.append(append_units)
+    return {
+        "unit": WORK_UNIT,
+        "steady_state": {
+            "sizes": list(sizes),
+            "operations": [steps] * len(sizes),
+            "work": steady,
+        },
+        "append": {
+            "sizes": list(sizes),
+            "operations": [steps] * len(sizes),
+            "work": append,
+        },
+    }
+
+
+def _work_sizes(value: str) -> tuple[int, ...]:
+    try:
+        sizes = tuple(int(item) for item in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("work sizes must be integers") from error
+    if len(sizes) != 2 or not 1 <= sizes[0] < sizes[1]:
+        raise argparse.ArgumentTypeError(
+            "work sizes must be two increasing positive integers"
+        )
+    return sizes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu")
@@ -655,6 +864,15 @@ def main() -> None:
     )
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--work-sizes",
+        type=_work_sizes,
+        default=(4_096, 32_768),
+        help=(
+            "two output-history lengths for the deterministic CPU work "
+            "counts (one step per iteration)"
+        ),
+    )
     args = parser.parse_args()
     if min(
         args.vocab_size,
@@ -679,7 +897,7 @@ def main() -> None:
             frequency_penalty=0.7,
         )
     )
-    prompt = tuple(index % args.vocab_size for index in range(4_096))
+    prompt = tuple(index % args.vocab_size for index in range(PROMPT_LENGTH))
     outputs = tuple(
         (index * 17 + 11) % args.vocab_size
         for index in range(args.history_length)
@@ -823,6 +1041,13 @@ def main() -> None:
         "append_overlay_speedup": (
             append_measured["committed_plus_overlay"]
             / append_measured["incremental_effective_counts"]
+        ),
+        "work": _work(
+            args.work_sizes,
+            args.vocab_size,
+            args.pending_depth,
+            args.iterations,
+            sampling,
         ),
     }
     print(json.dumps(result, indent=2, sort_keys=True))
