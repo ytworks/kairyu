@@ -354,7 +354,7 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     report_path = "${{ runner.temp }}/kairyu-cpu-microbench/report.json"
     run_step = _named_step(
         job,
-        "Run variance-tolerant CPU microbenchmarks",
+        "Run the CPU microbenchmark gate (operation counts)",
     )
     assert run_step["env"] == {
         "KAIRYU_CPU_MICROBENCH_REPORT": (

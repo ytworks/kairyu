@@ -107,7 +107,7 @@ jobs:
             echo "UV_OFFLINE=1"
             echo "HF_HUB_OFFLINE=1"
           } >> "$GITHUB_ENV"
-      - name: Run variance-tolerant CPU microbenchmarks
+      - name: Run the CPU microbenchmark gate (operation counts)
         env:
           KAIRYU_CPU_MICROBENCH_REPORT: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
         run: >-
