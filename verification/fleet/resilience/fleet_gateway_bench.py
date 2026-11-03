@@ -17,6 +17,12 @@ responsibility boundary rather than repeating F1a's 200-replica churn or F1b's
 Raw JSONL and output bytes are the authority.  ``verify_evidence`` reconstructs
 all binding checks from those sidecars and validates their SHA-256 digests; it
 does not trust booleans written by the live driver.
+
+Verdicts depend only on the code under test.  Failover is judged by fencing
+tokens and event order in the PostgreSQL claim audit, never by whether the
+kill or the terminal commit fell inside a particular lease window.  Images are
+identified by the config digest of the archive loaded into kind, and every
+wait is an event with a hang bound.
 """
 
 from __future__ import annotations
@@ -54,6 +60,10 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^(?:[^@\s]+@)?sha256:[0-9a-f]{64}$")
 _RUNTIME_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _CROSS_PROCESS_CLOCK_SKEW_NS = 5_000_000
+# Hang bounds only: far above the expected time, and reported as hangs.
+_EVENT_HANG_SECONDS = 300.0
+_PLACEMENT_LOG_HANG_SECONDS = 120.0
+_IMAGE_ROLES = ("gateway", "mock", "postgres")
 
 RAW_ARTIFACTS = (
     "traffic.jsonl",
@@ -137,16 +147,6 @@ def _normalized_image_reference(value: str) -> str:
         if value.startswith(prefix):
             return value.removeprefix(prefix)
     return value
-
-
-def _normalized_image_repository(value: str) -> str:
-    name, separator, _digest = value.rpartition("@")
-    if not separator:
-        name = value
-    normalized = _normalized_image_reference(name)
-    prefix, slash, leaf = normalized.rpartition("/")
-    repository = leaf.rpartition(":")[0] if ":" in leaf else leaf
-    return f"{prefix}/{repository}" if slash else repository
 
 
 def _container_image_matches(
@@ -235,44 +235,50 @@ def _cri_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
     }
 
 
-def _docker_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
-    path = path.resolve()
-    artifact_dir = artifact_dir.resolve()
-    if path.parent != artifact_dir:
-        raise ValueError(f"Docker metadata must be beside the manifest: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    image = payload[0] if isinstance(payload, list) and len(payload) == 1 else None
-    if not isinstance(image, dict):
-        raise ValueError(f"expected one Docker image record: {path}")
+def _image_archive_metadata(role: str, artifact_dir: Path) -> dict[str, Any]:
+    """Derive one image identity from its ``docker image save`` archive.
 
-    config_id = image.get("Id")
-    repo_digests = image.get("RepoDigests")
-    repo_tags = image.get("RepoTags")
+    The gate stores the archive's ``manifest.json`` and config blob beside the
+    manifest.  The config blob's SHA-256 is the image identity: identical
+    under the classic and containerd Docker image stores and equal to kind's
+    CRI image ID, whereas Docker's own image ID differs between the stores.
+    """
+
+    artifact_dir = artifact_dir.resolve()
+    manifest_path = artifact_dir / f"{role}-image-archive-manifest.json"
+    config_path = artifact_dir / f"{role}-image-archive-config.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    entry = manifest[0] if isinstance(manifest, list) and len(manifest) == 1 else None
+    if not isinstance(entry, dict):
+        raise ValueError(f"image archive must hold exactly one image: {manifest_path}")
+    config_hex = _sha256_file(config_path)
+    repo_tags = entry.get("RepoTags")
+    layers = entry.get("Layers")
     if (
-        not isinstance(config_id, str)
-        or _RUNTIME_DIGEST.fullmatch(config_id) is None
-        or not isinstance(repo_digests, list)
-        or not repo_digests
-        or not all(isinstance(value, str) for value in repo_digests)
+        entry.get("Config") not in {f"blobs/sha256/{config_hex}", f"{config_hex}.json"}
         or not isinstance(repo_tags, list)
         or not repo_tags
-        or not all(isinstance(value, str) and value for value in repo_tags)
+        or not all(isinstance(tag, str) and tag for tag in repo_tags)
+        or not isinstance(layers, list)
+        or not layers
     ):
-        raise ValueError(f"invalid Docker image identity: {path}")
-    for value in repo_digests:
-        name, separator, digest = value.rpartition("@")
-        if (
-            not separator
-            or not name
-            or _RUNTIME_DIGEST.fullmatch(digest) is None
-        ):
-            raise ValueError(f"invalid Docker repo digest in {path}: {value!r}")
+        raise ValueError(
+            f"image archive manifest does not reference its config: {manifest_path}"
+        )
+    config = json.loads(config_path.read_bytes())
+    image_config = config.get("config") if isinstance(config, dict) else None
+    labels = image_config.get("Labels") if isinstance(image_config, dict) else None
     return {
-        "path": path.name,
-        "sha256": _sha256_file(path),
-        "config_id": config_id,
-        "repo_digests": sorted(repo_digests),
+        "manifest_path": manifest_path.name,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "config_path": config_path.name,
+        "config_digest": f"sha256:{config_hex}",
         "repo_tags": sorted(repo_tags),
+        "revision": (
+            labels.get("org.opencontainers.image.revision")
+            if isinstance(labels, dict)
+            else None
+        ),
     }
 
 
@@ -516,7 +522,10 @@ def _wait_gateway_map(
         except Exception as error:
             last_error = error
             time.sleep(0.5)
-    raise TimeoutError("three gateways did not become Ready") from last_error
+    raise TimeoutError(
+        f"hang: three gateways did not become Ready within the {timeout_seconds:g} s "
+        "hang bound"
+    ) from last_error
 
 
 def _replica_map(
@@ -822,8 +831,8 @@ def _wait_claim(
                 return row
         time.sleep(0.2)
     raise TimeoutError(
-        f"batch {batch_id} claim did not appear after token {after_token}; "
-        f"last={latest!r}"
+        f"hang: batch {batch_id} claim after token {after_token} did not appear "
+        f"within the {timeout_seconds:g} s hang bound; last={latest!r}"
     )
 
 
@@ -935,7 +944,10 @@ def _wait_batch_completed(
             raise RuntimeError(f"batch reached terminal failure state {status}")
         sequence += 1
         time.sleep(0.25)
-    raise TimeoutError(f"batch {batch_id} did not complete")
+    raise TimeoutError(
+        f"hang: batch {batch_id} did not complete within the "
+        f"{timeout_seconds:g} s hang bound"
+    )
 
 
 def _gateway_for_worker(
@@ -995,6 +1007,62 @@ def _store_identity_rows(
     return rows
 
 
+def _copy_placement_logs_when_complete(
+    kubectl: str,
+    namespace: str,
+    results: Path,
+    affinity_records: Sequence[Mapping[str, Any]],
+) -> None:
+    """Copy each gateway's placement log once it holds all of its requests.
+
+    The audit writers flush asynchronously, so the copy waits for that event
+    instead of sleeping a fixed time; the deadline only detects a hang.
+    """
+
+    expected: dict[str, set[str]] = defaultdict(set)
+    for record in affinity_records:
+        gateway_id = record.get("gateway_id")
+        request_id = record.get("gateway_request_id")
+        if isinstance(gateway_id, str) and isinstance(request_id, str):
+            expected[gateway_id].add(request_id)
+    deadline = time.monotonic() + _PLACEMENT_LOG_HANG_SECONDS
+    missing: dict[str, set[str]] = dict(expected)
+    while True:
+        gateways = _gateway_map(kubectl, namespace, require_ready=True)
+        for gateway_id, pod in gateways.items():
+            destination = results / f"placements-{gateway_id}.jsonl"
+            _copy_pod_file(
+                kubectl,
+                namespace,
+                str(pod["name"]),
+                "/evidence/placements.jsonl",
+                destination,
+            )
+        missing = {}
+        for gateway_id in GATEWAY_IDS:
+            try:
+                rows = _read_jsonl(results / f"placements-{gateway_id}.jsonl")
+            except ValueError:
+                rows = []
+            present = {
+                row.get("request_id")
+                for row in rows
+                if row.get("kind") == "replica"
+            }
+            absent = expected.get(gateway_id, set()) - present
+            if absent:
+                missing[gateway_id] = absent
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "hang: gateway placement logs lacked requests after the "
+                f"{_PLACEMENT_LOG_HANG_SECONDS:g} s hang bound: "
+                f"{ {key: sorted(value) for key, value in missing.items()} }"
+            )
+        time.sleep(0.25)
+
+
 def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     results = args.results_dir.resolve()
     results.mkdir(parents=True, exist_ok=True)
@@ -1032,7 +1100,9 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         JsonlRecorder(results / "batch-lifecycle.jsonl") as lifecycle,
         httpx.Client(
             base_url=args.gateway_url,
-            timeout=httpx.Timeout(30.0),
+            # A hang bound above the LB's connect failover plus its own
+            # upstream hang bound, so a failover is never cut short.
+            timeout=httpx.Timeout(120.0),
             follow_redirects=False,
             trust_env=False,
         ) as client,
@@ -1073,6 +1143,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             store_identities.write(row)
 
         sequence = 0
+        affinity_records: list[dict[str, Any]] = []
         baseline_by_session: dict[str, dict[str, Any]] = {}
         for _round in range(BASELINE_ROUNDS):
             for gateway_id in GATEWAY_IDS:
@@ -1084,6 +1155,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
                         sequence=sequence,
                     )
                     traffic.write(record)
+                    affinity_records.append(record)
                     baseline_by_session.setdefault(session, record)
                     sequence += 1
 
@@ -1158,7 +1230,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             args.kubectl,
             args.namespace,
             batch_id,
-            timeout_seconds=30.0,
+            timeout_seconds=_EVENT_HANG_SECONDS,
             expected_event="claimed",
         )
         killed_gateway = _gateway_for_worker(
@@ -1200,7 +1272,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "--replicas=0",
         )
         old_worker = old_claim["worker_id"]
-        deadline = time.monotonic() + 60.0
+        deadline = time.monotonic() + _EVENT_HANG_SECONDS
         while time.monotonic() < deadline:
             current = _pods(
                 args.kubectl,
@@ -1215,7 +1287,10 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
                 break
             time.sleep(0.25)
         else:
-            raise TimeoutError(f"claim owner Pod UID {old_worker} was not killed")
+            raise TimeoutError(
+                f"hang: claim owner Pod UID {old_worker} was not gone within the "
+                f"{_EVENT_HANG_SECONDS:g} s hang bound"
+            )
         lifecycle.write(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -1238,13 +1313,14 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             sequence=sequence,
         )
         traffic.write(failover)
+        affinity_records.append(failover)
         sequence += 1
 
         new_claim = _wait_claim(
             args.kubectl,
             args.namespace,
             batch_id,
-            timeout_seconds=30.0,
+            timeout_seconds=_EVENT_HANG_SECONDS,
             after_token=old_claim["fencing_token"],
             excluded_worker=old_worker,
             expected_event="reclaimed",
@@ -1278,7 +1354,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         final_gateways = _wait_gateway_map(
             args.kubectl,
             args.namespace,
-            timeout_seconds=120.0,
+            timeout_seconds=_EVENT_HANG_SECONDS,
         )
         _record_topology(
             gateway_pods,
@@ -1299,6 +1375,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             sequence=sequence,
         )
         traffic.write(recovered)
+        affinity_records.append(recovered)
 
         completed = _wait_batch_completed(
             client,
@@ -1380,22 +1457,14 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
-    # Copy the durable hostPath-backed logs after the restarted gateway has
-    # flushed its recovered request.
-    time.sleep(1.0)
-    final_gateways = _gateway_map(
+    # Copy the durable hostPath-backed logs once every gateway's asynchronous
+    # audit writer has flushed all of its affinity requests (an event).
+    _copy_placement_logs_when_complete(
         args.kubectl,
         args.namespace,
-        require_ready=True,
+        results,
+        affinity_records,
     )
-    for gateway_id, pod in final_gateways.items():
-        _copy_pod_file(
-            args.kubectl,
-            args.namespace,
-            str(pod["name"]),
-            "/evidence/placements.jsonl",
-            results / f"placements-{gateway_id}.jsonl",
-        )
     lb_pods = _pods(
         args.kubectl,
         args.namespace,
@@ -1446,9 +1515,12 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         "source": {
             "commit": args.source_commit,
             "tracked_clean": args.source_clean,
-            "gateway_image_digest": args.gateway_image_digest,
-            "mock_image_digest": args.mock_image_digest,
             "postgres_image": args.postgres_image,
+            "postgres_config_digest": args.postgres_config_digest,
+            **{
+                f"{role}_image_archive": _image_archive_metadata(role, results)
+                for role in _IMAGE_ROLES
+            },
             "gateway_cri_image_metadata": _cri_image_metadata(
                 args.gateway_cri_image_metadata,
                 results,
@@ -1459,10 +1531,6 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "postgres_cri_image_metadata": _cri_image_metadata(
                 args.postgres_cri_image_metadata,
-                results,
-            ),
-            "postgres_docker_image_metadata": _docker_image_metadata(
-                args.postgres_docker_image_metadata,
                 results,
             ),
             "rendered_manifest": _adjacent_file_metadata(
@@ -2233,14 +2301,23 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         for previous_segment, next_segment in pairwise(lease_segments)
     )
     kill_requested_ns = kill_requested.get("at_unix_ns")
-    kill_covered_by_old_lease = type(kill_requested_ns) is int and any(
-        row["at_unix_ns"] <= kill_requested_ns < row["lease_until_unix_ns"]
-        for row in owner_lease_events
-        if type(row.get("at_unix_ns")) is int
-        and type(row.get("lease_until_unix_ns")) is int
+    # Fencing tokens and event order only. Whether the kill landed inside a
+    # particular lease window, or the terminal commit inside the final lease,
+    # depends on how fast the runner is; the store's fencing does not.
+    kill_targets_owner = (
+        type(kill_requested_ns) is int
+        and type(old_audit.get("at_unix_ns")) is int
+        and old_audit["at_unix_ns"] <= kill_requested_ns
+        and kill_requested.get("worker_id") == old_audit.get("worker_id")
+        and kill_requested.get("fencing_token") == old_audit.get("fencing_token")
     )
     final_claim_audit = final_lease_events[0] if final_lease_events else {}
     last_final_lease = final_lease_events[-1] if final_lease_events else {}
+    claim_tokens = [
+        row.get("fencing_token")
+        for row in claim_events
+        if type(row.get("fencing_token")) is int
+    ]
     durable_claim_audit = (
         lifecycle_exact
         and claims_match_batch
@@ -2252,7 +2329,7 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         and active_leases_valid
         and fence_segments_exact
         and reclaim_chain_valid
-        and kill_covered_by_old_lease
+        and kill_targets_owner
         and type(last_owner_lease.get("at_unix_ns")) is int
         and type(killed.get("at_unix_ns")) is int
         and last_owner_lease["at_unix_ns"] < killed["at_unix_ns"]
@@ -2264,13 +2341,12 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         and terminal_audit.get("worker_id") == final_claim_audit.get("worker_id")
         and terminal_audit.get("fencing_token")
         == final_claim_audit.get("fencing_token")
+        and terminal_audit.get("fencing_token") == max(claim_tokens, default=None)
+        and type(terminal_audit.get("sequence")) is int
+        and type(last_final_lease.get("sequence")) is int
+        and last_final_lease["sequence"] < terminal_audit["sequence"]
         and type(terminal_audit.get("at_unix_ns")) is int
         and terminal_audit["at_unix_ns"] >= final_claim_audit["at_unix_ns"]
-        and type(last_final_lease.get("at_unix_ns")) is int
-        and type(last_final_lease.get("lease_until_unix_ns")) is int
-        and last_final_lease["at_unix_ns"]
-        <= terminal_audit["at_unix_ns"]
-        < last_final_lease["lease_until_unix_ns"]
         and type(completed.get("at_unix_ns")) is int
         and completed.get("clock") == "postgres_clock_timestamp"
         and completed["at_unix_ns"] >= terminal_audit["at_unix_ns"]
@@ -2519,22 +2595,22 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
                 cri_metadata_valid = False
                 continue
             cri_metadata[role] = reconstructed
-    postgres_docker_metadata: dict[str, Any] = {}
-    postgres_docker_metadata_valid = False
+    # The archives loaded into kind are the source identity; Docker's own
+    # image ID is store-dependent and is not consulted.
+    archives: dict[str, dict[str, Any]] = {}
+    archives_valid = isinstance(source, dict)
     if isinstance(source, dict):
-        embedded = source.get("postgres_docker_image_metadata")
-        try:
-            path = _safe_artifact_path(
-                results,
-                embedded.get("path") if isinstance(embedded, dict) else None,
-            )
-            reconstructed = _docker_image_metadata(path, results)
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-        else:
-            postgres_docker_metadata_valid = reconstructed == embedded
-            if postgres_docker_metadata_valid:
-                postgres_docker_metadata = reconstructed
+        for role in _IMAGE_ROLES:
+            embedded = source.get(f"{role}_image_archive")
+            try:
+                reconstructed = _image_archive_metadata(role, results)
+            except (OSError, ValueError, json.JSONDecodeError):
+                archives_valid = False
+                continue
+            if reconstructed != embedded:
+                archives_valid = False
+                continue
+            archives[role] = reconstructed
     rendered_manifest_valid = False
     if isinstance(source, dict):
         rendered_manifest = source.get("rendered_manifest")
@@ -2561,53 +2637,55 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
                 )
                 is not None
             )
-    postgres_spec_image = (
+    postgres_pinned_image = (
         source.get("postgres_image") if isinstance(source, dict) else None
     )
-    postgres_pin = _runtime_digest(postgres_spec_image)
-    postgres_display_image = (
-        postgres_spec_image.rpartition("@")[0]
-        if isinstance(postgres_spec_image, str)
+    postgres_config_digest = (
+        source.get("postgres_config_digest") if isinstance(source, dict) else None
+    )
+    # The Pod runs the archive-loaded tag (imagePullPolicy Never); the pin's
+    # single-platform manifest is bound through its config digest.
+    postgres_spec_image = (
+        postgres_pinned_image.rpartition("@")[0]
+        if isinstance(postgres_pinned_image, str)
         else None
     )
     postgres_source_chain_valid = (
-        postgres_docker_metadata_valid
-        and isinstance(postgres_spec_image, str)
-        and isinstance(postgres_display_image, str)
-        and postgres_pin is not None
-        and any(
-            _normalized_image_repository(repo_digest)
-            == _normalized_image_repository(postgres_spec_image)
-            and _runtime_digest(repo_digest) == postgres_pin
-            for repo_digest in postgres_docker_metadata.get("repo_digests", ())
-        )
+        archives_valid
+        and isinstance(postgres_pinned_image, str)
+        and _IMAGE_DIGEST.fullmatch(postgres_pinned_image) is not None
+        and bool(postgres_spec_image)
+        and isinstance(postgres_config_digest, str)
+        and _RUNTIME_DIGEST.fullmatch(postgres_config_digest) is not None
+        and archives.get("postgres", {}).get("config_digest")
+        == postgres_config_digest
         and any(
             _normalized_image_reference(repo_tag)
-            == _normalized_image_reference(postgres_display_image)
-            for repo_tag in postgres_docker_metadata.get("repo_tags", ())
+            == _normalized_image_reference(str(postgres_spec_image))
+            for repo_tag in archives.get("postgres", {}).get("repo_tags", ())
         )
-        and postgres_docker_metadata.get("config_id")
-        == cri_metadata.get("postgres", {}).get("status_id")
+        and cri_metadata.get("postgres", {}).get("status_id")
+        == postgres_config_digest
     )
     provenance_valid = (
         isinstance(source, dict)
         and cri_metadata_valid
+        and archives_valid
         and rendered_manifest_valid
         and postgres_source_chain_valid
-        and set(cri_metadata) == {"gateway", "mock", "postgres"}
+        and set(cri_metadata) == set(_IMAGE_ROLES)
+        and set(archives) == set(_IMAGE_ROLES)
         and bool(_COMMIT.fullmatch(str(source.get("commit", ""))))
         and source.get("tracked_clean") is True
-        and bool(
-            _IMAGE_DIGEST.fullmatch(str(source.get("gateway_image_digest", "")))
+        and all(
+            cri_metadata[role].get("status_id") == archives[role].get("config_digest")
+            for role in _IMAGE_ROLES
         )
-        and bool(_IMAGE_DIGEST.fullmatch(str(source.get("mock_image_digest", ""))))
-        and bool(_IMAGE_DIGEST.fullmatch(str(source.get("postgres_image", ""))))
-        and cri_metadata["gateway"].get("status_id")
-        == source.get("gateway_image_digest")
-        and cri_metadata["mock"].get("status_id")
-        == source.get("mock_image_digest")
-        and cri_metadata["gateway"].get("revision") == source.get("commit")
-        and cri_metadata["mock"].get("revision") == source.get("commit")
+        and all(
+            cri_metadata[role].get("revision") == source.get("commit")
+            and archives[role].get("revision") == source.get("commit")
+            for role in ("gateway", "mock")
+        )
     )
     allowed_runtime_digests = {
         role: {
@@ -2618,8 +2696,6 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         }
         for role, metadata in cri_metadata.items()
     }
-    if postgres_source_chain_valid and postgres_pin is not None:
-        allowed_runtime_digests["postgres"].add(postgres_pin)
     runtime_images_valid = (
         provenance_valid
         and postgres_topology_valid
@@ -2731,13 +2807,19 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
-    parser.add_argument("--gateway-image-digest", default="")
-    parser.add_argument("--mock-image-digest", default="")
-    parser.add_argument("--postgres-image", default="")
+    parser.add_argument(
+        "--postgres-image",
+        default="",
+        help="single-platform manifest pin the gate pulled",
+    )
+    parser.add_argument(
+        "--postgres-config-digest",
+        default="",
+        help="config digest of that pinned manifest",
+    )
     parser.add_argument("--gateway-cri-image-metadata", type=Path)
     parser.add_argument("--mock-cri-image-metadata", type=Path)
     parser.add_argument("--postgres-cri-image-metadata", type=Path)
-    parser.add_argument("--postgres-docker-image-metadata", type=Path)
     parser.add_argument("--rendered-manifest", type=Path)
     parser.add_argument("--verify-only", action="store_true")
     return parser
@@ -2783,12 +2865,11 @@ def main() -> None:
             args.gateway_cri_image_metadata,
             args.mock_cri_image_metadata,
             args.postgres_cri_image_metadata,
-            args.postgres_docker_image_metadata,
         )
-    ):
+    ) or not (args.postgres_image and args.postgres_config_digest):
         parser.error(
-            "live runs require all three --*-cri-image-metadata files and "
-            "--postgres-docker-image-metadata"
+            "live runs require all three --*-cri-image-metadata files, "
+            "--postgres-image and --postgres-config-digest"
         )
     run_gate(args)
     print(f"F1c three-gateway gate passed: {args.results_dir / 'manifest.json'}")

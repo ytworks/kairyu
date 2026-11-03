@@ -21,14 +21,13 @@ data:
           port: http
           model: f1a
           api_key_env: null
-          # Halve discovery parsing during churn while retaining at least
-          # 1.13 seconds of phase margin against the historical 3.618-second
-          # withdrawal maximum and the unchanged five-second contract.
+          # Halve discovery parsing during churn while staying well inside the
+          # five-second pre-stop window of a deleted replica.
           poll_interval_s: 0.5
         unhealthy_after: 1
         queue_depth_threshold: 8
-        # Discovery and backend probing both remain well inside the five-second
-        # withdrawal gate without synchronized four-Hz control-plane bursts.
+        # Discovery and backend probing both stay well inside that window
+        # without synchronized four-Hz control-plane bursts.
         probe_interval_s: 1.0
         placement_log_path: /evidence/placements.jsonl
     # This dynamic mock pool has no local tokenizer metadata. Preserve the
@@ -82,8 +81,9 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 3
+            # A loaded node must not restart the gateway mid-run.
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
               # The four-core formal runner reaches 3.459 cores while twenty

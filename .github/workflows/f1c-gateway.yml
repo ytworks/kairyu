@@ -27,7 +27,7 @@ jobs:
       group: f1c-three-gateway-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'manual' }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       F1C_RESULTS_DIR: bench/results/f1c-three-gateway-live
       ASYNC_REQUEST_RESULTS_DIR: bench/results/async-request-kind-live

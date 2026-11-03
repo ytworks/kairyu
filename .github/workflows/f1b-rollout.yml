@@ -38,7 +38,7 @@ jobs:
       group: f1b-zero-failure-rollout-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'formal' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       F1B_RESULTS_DIR: bench/results/f1b-zero-failure-rollout
       PROFILE: >-

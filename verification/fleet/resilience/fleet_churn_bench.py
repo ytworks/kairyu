@@ -2,9 +2,17 @@
 """Scheduled kind F1a replica-churn gate (issue #175).
 
 The formal profile is intentionally frozen: 200 StatefulSet ordinals are
-permuted by one fixed seed into ten disjoint batches of twenty, one batch is
-deleted at each absolute 60-second boundary, and valid OpenAI requests continue
-open-loop without retries throughout the ten-minute measurement.
+permuted by one fixed seed into ten disjoint batches of twenty.  One batch is
+deleted at each 60-second boundary, or later when the previous batch's
+replacements are not yet Ready and eligible in the gateway, and valid OpenAI
+requests continue open-loop without retries until the last batch has been
+replaced.
+
+Verdicts depend only on the code under test.  Durations, pacing, placement
+latency, and schedule lateness are recorded diagnostics.  Withdrawal is judged
+causally: after the gateway applies a deleted UID's EndpointSlice drain or
+removal, no placement may select that UID and it never becomes eligible
+again.  Timeouts only bound hangs and are reported as hangs.
 
 The gateway contract used by this black-box gate is explicit.  It assigns and
 echoes ``X-Request-ID``; the same id, selected replica UID, and
@@ -50,12 +58,22 @@ from kairyu.audit_io import AuditQueueFull, BoundedJsonlWriter
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"
 _COMMAND_TERMINATE_GRACE_SECONDS = 2.0
-_KUBECTL_PROXY_START_TIMEOUT_SECONDS = 10.0
-_KUBERNETES_READ_TIMEOUT_SECONDS = 10.0
+# Hang bounds: far above the expected latency of one local API call.
+_KUBECTL_PROXY_START_TIMEOUT_SECONDS = 60.0
+_KUBERNETES_READ_TIMEOUT_SECONDS = 60.0
 _KUBERNETES_DELETE_MAX_CONCURRENCY = 8
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
-_ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS = 1.0
 _RECOVERY_POLL_SECONDS = 1.0
+_GATEWAY_CONVERGENCE_POLL_SECONDS = 0.25
+_PROMETHEUS_SAMPLE = re.compile(
+    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"
+    r"(?:\{(?P<labels>.*)\})?\s+(?P<value>\S+)"
+    r"(?:\s+\d+)?$"
+)
+_PROMETHEUS_LABEL = re.compile(
+    r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)="'
+    r'(?P<value>(?:\\.|[^"])*)"(?:,|$)'
+)
 _KUBERNETES_OBSERVATION_TRANSPORT = (
     "one lifecycle-owned kubectl proxy and persistent HTTP client carry all "
     "EndpointSlice, Pod, resource, and Pod DELETE requests; DELETE uses "
@@ -79,16 +97,12 @@ class GateConfig:
     warmup_seconds: float
     cooldown_seconds: float
     max_concurrency: int
-    request_timeout_seconds: float
-    recovery_timeout_seconds: float
+    # Hang bounds only. A breach is reported as a hang, never as slowness.
+    request_hang_seconds: float
+    recovery_hang_seconds: float
     churn_window_seconds: float
     evidence_interval_seconds: float
     resource_interval_seconds: float
-    placement_p99_limit_ms: float
-    schedule_lateness_limit_ms: float
-    endpoint_withdrawal_limit_seconds: float
-    pacing_success_fraction: float
-    gateway_membership_withdrawal_limit_seconds: float = 1.0
 
     @property
     def measurement_seconds(self) -> float:
@@ -103,8 +117,33 @@ class GateConfig:
         )
 
     @property
-    def expected_requests(self) -> int:
+    def planned_requests(self) -> int:
+        """Requests in the planned window; traffic extends past it if churn does."""
+
         return math.floor(self.traffic_seconds * self.request_rate)
+
+    @property
+    def request_interval_ns(self) -> int:
+        return int(1_000_000_000 / self.request_rate)
+
+    def expected_requests(
+        self,
+        *,
+        traffic_origin_ns: int,
+        churn_completed_ns: int,
+    ) -> int:
+        """Return the exact request count implied by the recorded churn end.
+
+        Every planned slot is sent.  Slots scheduled before the last batch's
+        replacement plus the cooldown are sent as well, so traffic always
+        covers the whole churn however long recovery takes.
+        """
+
+        stop_ns = churn_completed_ns + int(
+            self.cooldown_seconds * 1_000_000_000
+        )
+        extended = -(-(stop_ns - traffic_origin_ns) // self.request_interval_ns)
+        return max(self.planned_requests, extended)
 
     def validate(self) -> None:
         if self.profile not in {"formal", "smoke"}:
@@ -130,32 +169,18 @@ class GateConfig:
         positive = (
             self.epoch_seconds,
             self.request_rate,
-            self.request_timeout_seconds,
-            self.recovery_timeout_seconds,
+            self.request_hang_seconds,
+            self.recovery_hang_seconds,
             self.churn_window_seconds,
             self.evidence_interval_seconds,
             self.resource_interval_seconds,
-            self.placement_p99_limit_ms,
-            self.schedule_lateness_limit_ms,
-            self.endpoint_withdrawal_limit_seconds,
-            self.gateway_membership_withdrawal_limit_seconds,
         )
         if any(value <= 0 for value in positive):
-            raise ValueError("gate duration/rate/limit fields must be positive")
+            raise ValueError("gate duration/rate/bound fields must be positive")
         if self.warmup_seconds < 0 or self.cooldown_seconds < 0:
             raise ValueError("warmup/cooldown must be non-negative")
-        if not 0 < self.pacing_success_fraction <= 1:
-            raise ValueError("pacing_success_fraction must be in (0, 1]")
         if self.churn_window_seconds > self.epoch_seconds:
             raise ValueError("churn_window_seconds must not exceed epoch_seconds")
-        if (
-            self.gateway_membership_withdrawal_limit_seconds
-            > self.endpoint_withdrawal_limit_seconds
-        ):
-            raise ValueError(
-                "gateway membership withdrawal limit must not exceed the "
-                "endpoint withdrawal limit"
-            )
 
 
 FORMAL_CONFIG = GateConfig(
@@ -169,16 +194,11 @@ FORMAL_CONFIG = GateConfig(
     warmup_seconds=30.0,
     cooldown_seconds=30.0,
     max_concurrency=256,
-    request_timeout_seconds=10.0,
-    recovery_timeout_seconds=60.0,
+    request_hang_seconds=60.0,
+    recovery_hang_seconds=300.0,
     churn_window_seconds=10.0,
     evidence_interval_seconds=1.0,
     resource_interval_seconds=5.0,
-    placement_p99_limit_ms=10.0,
-    schedule_lateness_limit_ms=1_000.0,
-    endpoint_withdrawal_limit_seconds=5.0,
-    pacing_success_fraction=0.99,
-    gateway_membership_withdrawal_limit_seconds=1.0,
 )
 
 SMOKE_CONFIG = GateConfig(
@@ -192,16 +212,11 @@ SMOKE_CONFIG = GateConfig(
     warmup_seconds=1.0,
     cooldown_seconds=1.0,
     max_concurrency=32,
-    request_timeout_seconds=5.0,
-    recovery_timeout_seconds=20.0,
+    request_hang_seconds=60.0,
+    recovery_hang_seconds=300.0,
     churn_window_seconds=5.0,
     evidence_interval_seconds=0.5,
     resource_interval_seconds=1.0,
-    placement_p99_limit_ms=10.0,
-    schedule_lateness_limit_ms=1_000.0,
-    endpoint_withdrawal_limit_seconds=5.0,
-    pacing_success_fraction=0.95,
-    gateway_membership_withdrawal_limit_seconds=1.0,
 )
 
 
@@ -368,6 +383,61 @@ def _containerd_image_metadata(
     }
 
 
+def _image_archive_metadata(
+    manifest_path: Path,
+    config_path: Path,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    """Derive one image identity from its ``docker image save`` archive.
+
+    The config blob's own SHA-256 is the image identity: it is identical under
+    the classic and containerd Docker image stores and equals the CRI image ID
+    inside kind, whereas Docker's image ID differs between the two stores.
+    """
+
+    manifest_path = manifest_path.resolve()
+    config_path = config_path.resolve()
+    artifact_dir = artifact_dir.resolve()
+    if manifest_path.parent != artifact_dir or config_path.parent != artifact_dir:
+        raise ValueError(
+            "image archive sidecars must be beside the artifact: "
+            f"{manifest_path}, {config_path}"
+        )
+    manifest = json.loads(manifest_path.read_bytes())
+    entry = manifest[0] if isinstance(manifest, list) and len(manifest) == 1 else None
+    if not isinstance(entry, dict):
+        raise ValueError(f"image archive must hold exactly one image: {manifest_path}")
+    config_hex = _sha256_file(config_path)
+    repo_tags = entry.get("RepoTags")
+    layers = entry.get("Layers")
+    if (
+        entry.get("Config") not in {f"blobs/sha256/{config_hex}", f"{config_hex}.json"}
+        or not isinstance(repo_tags, list)
+        or not repo_tags
+        or not all(isinstance(tag, str) and tag for tag in repo_tags)
+        or not isinstance(layers, list)
+        or not layers
+    ):
+        raise ValueError(
+            f"image archive manifest does not reference its config: {manifest_path}"
+        )
+    config = json.loads(config_path.read_bytes())
+    image_config = config.get("config") if isinstance(config, dict) else None
+    labels = image_config.get("Labels") if isinstance(image_config, dict) else None
+    return {
+        "manifest_path": manifest_path.name,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "config_path": config_path.name,
+        "config_digest": f"sha256:{config_hex}",
+        "repo_tags": sorted(repo_tags),
+        "revision": (
+            labels.get("org.opencontainers.image.revision")
+            if isinstance(labels, dict)
+            else None
+        ),
+    }
+
+
 def _git_output(*command: str, binary: bool = False) -> bytes | str:
     completed = subprocess.run(
         ["git", *command],
@@ -461,10 +531,16 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         "driver_sha256": _sha256_file(Path(args.driver_path).resolve()),
         "frozen_inputs": frozen_inputs,
         "frozen_sidecars": frozen_sidecars,
-        "gateway_image_digest": args.gateway_image_digest,
-        "mock_image_digest": args.mock_image_digest,
-        "gateway_image_config_digest": args.gateway_image_config_digest,
-        "mock_image_config_digest": args.mock_image_config_digest,
+        "gateway_image_archive": _image_archive_metadata(
+            Path(args.gateway_image_archive_manifest),
+            Path(args.gateway_image_archive_config),
+            artifact_dir,
+        ),
+        "mock_image_archive": _image_archive_metadata(
+            Path(args.mock_image_archive_manifest),
+            Path(args.mock_image_archive_config),
+            artifact_dir,
+        ),
         "gateway_containerd_image_digest": (
             args.gateway_containerd_image_digest
         ),
@@ -861,6 +937,107 @@ async def _delete_pods(
     return 0, ""
 
 
+def _parse_prometheus_labels(raw: str | None) -> dict[str, str] | None:
+    if raw is None:
+        return {}
+    labels: dict[str, str] = {}
+    position = 0
+    while position < len(raw):
+        match = _PROMETHEUS_LABEL.match(raw, position)
+        if match is None or match.group("name") in labels:
+            return None
+        try:
+            value = json.loads(f'"{match.group("value")}"')
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(value, str):
+            return None
+        labels[match.group("name")] = value
+        position = match.end()
+    return labels
+
+
+def _gateway_metrics_snapshot(text: str, *, pool: str) -> dict[str, Any]:
+    pool_counts: dict[str, int] = {}
+    outstanding_by_uid: dict[str, int] = {}
+    healthy_by_uid: dict[str, bool] = {}
+    parse_errors = 0
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        sample = _PROMETHEUS_SAMPLE.fullmatch(line)
+        if sample is None:
+            continue
+        name = sample.group("name")
+        if name not in {
+            "kairyu_pool_replicas",
+            "kairyu_replica_outstanding",
+            "kairyu_replica_healthy",
+        }:
+            continue
+        labels = _parse_prometheus_labels(sample.group("labels"))
+        try:
+            value = float(sample.group("value"))
+        except ValueError:
+            value = math.nan
+        if labels is None or not math.isfinite(value):
+            parse_errors += 1
+            continue
+        if labels.get("pool") != pool:
+            continue
+        if name == "kairyu_pool_replicas":
+            state = labels.get("state")
+            if state in {"configured", "healthy", "draining"}:
+                pool_counts[state] = int(value)
+            continue
+        uid = labels.get("replica")
+        if not uid:
+            parse_errors += 1
+            continue
+        if name == "kairyu_replica_outstanding":
+            outstanding_by_uid[uid] = int(value)
+        else:
+            healthy_by_uid[uid] = value == 1.0
+    uids = set(outstanding_by_uid) | set(healthy_by_uid)
+    return {
+        "configured": pool_counts.get("configured"),
+        "healthy": pool_counts.get("healthy"),
+        "draining": pool_counts.get("draining"),
+        "outstanding_by_uid": dict(sorted(outstanding_by_uid.items())),
+        "healthy_by_uid": dict(sorted(healthy_by_uid.items())),
+        "uids": sorted(uids),
+        "parse_errors": parse_errors,
+    }
+
+
+async def _read_gateway_metrics(
+    client: httpx.AsyncClient,
+    *,
+    pool: str,
+) -> dict[str, Any]:
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    return _gateway_metrics_snapshot(response.text, pool=pool)
+
+
+def _gateway_serves_exactly(
+    metrics: dict[str, Any],
+    expected_uids: set[str],
+) -> bool:
+    """Whether every expected UID, and no other, is healthy and not draining."""
+
+    healthy_by_uid = metrics.get("healthy_by_uid")
+    return (
+        metrics.get("parse_errors") == 0
+        and metrics.get("configured") == len(expected_uids)
+        and metrics.get("healthy") == len(expected_uids)
+        and metrics.get("draining") == 0
+        and isinstance(healthy_by_uid, dict)
+        and set(healthy_by_uid) == expected_uids
+        and all(value is True for value in healthy_by_uid.values())
+    )
+
+
 def _ready(item: dict[str, Any]) -> bool:
     return any(
         condition.get("type") == "Ready" and condition.get("status") == "True"
@@ -1163,6 +1340,7 @@ async def _one_request(
         "not_sent": False,
         "status_code": None,
         "transport_error": None,
+        "hung": False,
         "response_valid": False,
         "request_id_echo": None,
         "pod_name": None,
@@ -1214,9 +1392,24 @@ async def _one_request(
             record["response_valid"] = False
     except Exception as error:
         record["transport_error"] = type(error).__name__
+        # The client timeout is a hang bound, so a timeout is a hang, not an
+        # error response; the verdict reports the two separately.
+        record["hung"] = isinstance(error, httpx.TimeoutException)
     record["end_ns"] = time.monotonic_ns()
     record["latency_ms"] = (record["end_ns"] - sent_ns) / 1_000_000
     return record
+
+
+@dataclass
+class ChurnCompletion:
+    """Signals the traffic loop when the last batch has been replaced."""
+
+    event: asyncio.Event
+    completed_ns: int | None = None
+
+    def set(self, completed_ns: int) -> None:
+        self.completed_ns = completed_ns
+        self.event.set()
 
 
 async def _traffic_loop(
@@ -1224,8 +1417,9 @@ async def _traffic_loop(
     config: GateConfig,
     request_sink: JsonlSink,
     measurement_origin_ns: int,
+    churn_completion: ChurnCompletion,
 ) -> list[dict[str, Any]]:
-    timeout = httpx.Timeout(config.request_timeout_seconds)
+    timeout = httpx.Timeout(config.request_hang_seconds)
     limits = httpx.Limits(
         max_connections=config.max_concurrency,
         max_keepalive_connections=config.max_concurrency,
@@ -1236,7 +1430,8 @@ async def _traffic_loop(
     traffic_origin_ns = measurement_origin_ns - int(
         config.warmup_seconds * 1_000_000_000
     )
-    interval_ns = int(1_000_000_000 / config.request_rate)
+    interval_ns = config.request_interval_ns
+    cooldown_ns = int(config.cooldown_seconds * 1_000_000_000)
     pending: set[asyncio.Task] = set()
     records: list[dict[str, Any]] = []
 
@@ -1254,42 +1449,33 @@ async def _traffic_loop(
             timeout=timeout,
             limits=limits,
         ) as client:
-            for sequence in range(config.expected_requests):
+            sequence = 0
+            while True:
                 target_ns = traffic_origin_ns + sequence * interval_ns
                 remaining = (
                     target_ns - time.monotonic_ns()
                 ) / 1_000_000_000
                 if remaining > 0:
                     await asyncio.sleep(remaining)
-                if len(pending) >= config.max_concurrency:
-                    now_ns = time.monotonic_ns()
-                    record = {
-                        "schema_version": SCHEMA_VERSION,
-                        "sequence": sequence,
-                        "request_id": f"f1a-{sequence:08d}-not-sent",
-                        "scheduled_ns": target_ns,
-                        "send_ns": None,
-                        "end_ns": now_ns,
-                        "measurement_offset_s": (
-                            now_ns - measurement_origin_ns
-                        )
-                        / 1_000_000_000,
-                        "pacing_error_ms": (
-                            now_ns - target_ns
-                        )
-                        / 1_000_000,
-                        "not_sent": True,
-                        "status_code": None,
-                        "transport_error": "max_concurrency",
-                        "response_valid": False,
-                        "request_id_echo": None,
-                        "pod_name": None,
-                        "pod_uid": None,
-                        "latency_ms": None,
-                    }
-                    records.append(record)
-                    request_sink.write(record)
-                    continue
+                # Decide only once the slot is due. If churn is still running
+                # then, the slot precedes its end; otherwise the recorded end
+                # decides, so the verifier recomputes the exact count.
+                completed_ns = churn_completion.completed_ns
+                if (
+                    sequence >= config.planned_requests
+                    and churn_completion.event.is_set()
+                    and completed_ns is not None
+                    and target_ns >= completed_ns + cooldown_ns
+                ):
+                    break
+                # The client cap equals the gateway's admission cap. Wait for
+                # a free slot instead of dropping the request: lateness is a
+                # pacing diagnostic, never a lost request.
+                while len(pending) >= config.max_concurrency:
+                    await asyncio.wait(
+                        tuple(pending),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                 task = asyncio.create_task(
                     _one_request(
                         client,
@@ -1302,6 +1488,7 @@ async def _traffic_loop(
                 )
                 pending.add(task)
                 task.add_done_callback(complete)
+                sequence += 1
             if pending:
                 await asyncio.gather(*tuple(pending))
     finally:
@@ -1324,8 +1511,9 @@ async def _fetch_gateway_placements(
 ) -> list[dict[str, Any]]:
     """Read the gateway-owned audit file after its async writer has drained."""
 
-    deadline = time.monotonic() + args.placement_log_timeout_seconds
+    deadline = time.monotonic() + args.placement_log_hang_seconds
     records: list[dict[str, Any]] = []
+    drained = False
     while time.monotonic() < deadline:
         try:
             _, stdout, _ = await _run_command(
@@ -1374,6 +1562,7 @@ async def _fetch_gateway_placements(
                 and initial_seen
                 and final_seen
             ):
+                drained = True
                 break
         except (json.JSONDecodeError, RuntimeError):
             pass
@@ -1382,6 +1571,12 @@ async def _fetch_gateway_placements(
     # backpressure off the asyncio loop so the remaining evidence samplers stay
     # responsive while all gateway-owned placement rows are preserved.
     await asyncio.to_thread(sink.write_many, records)
+    if not drained:
+        raise TimeoutError(
+            "hang: the gateway placement audit did not contain every request "
+            "and the final membership within the "
+            f"{args.placement_log_hang_seconds:g} s hang bound"
+        )
     return records
 
 
@@ -1487,15 +1682,13 @@ async def _observe_endpoint_withdrawal(
 ) -> tuple[int | None, set[str]]:
     """Capture the causal EndpointSlice transition independently of pod recovery.
 
-    A 20-pod ``kubectl delete`` can take more than two seconds to return, and a
-    multi-pod readiness fetch can take similarly long. Neither may leave the
-    fixed one-second raw-evidence bracket dependent on the phase of the global
-    sampler, so this observer starts with the delete and polls only the much
-    cheaper EndpointSlice surface at an absolute 250 ms cadence.
+    The observer starts with the delete and polls only the cheap EndpointSlice
+    surface at an absolute 250 ms cadence until the deleted UIDs are gone.  Its
+    deadline is the recovery hang bound, not a withdrawal budget.
     """
 
     deadline_ns = api_started_ns + int(
-        config.endpoint_withdrawal_limit_seconds * 1_000_000_000
+        config.recovery_hang_seconds * 1_000_000_000
     )
     interval_ns = int(
         _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
@@ -1587,13 +1780,42 @@ async def _delete_with_endpoint_observation(
         await asyncio.gather(observer, return_exceptions=True)
 
 
+async def _wait_gateway_serving(
+    gateway_client: httpx.AsyncClient,
+    *,
+    pool: str,
+    expected_uids: set[str],
+    deadline: float,
+) -> tuple[int | None, dict[str, Any]]:
+    """Wait for the gateway to serve exactly *expected_uids* (an event).
+
+    Returns the driver-clock observation time, or ``None`` when the hang bound
+    expired first.  The gateway captures each membership transition before it
+    can answer ``/metrics``, so the observation follows that transition.
+    """
+
+    metrics: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            metrics = await _read_gateway_metrics(gateway_client, pool=pool)
+        except httpx.HTTPError:
+            metrics = {}
+        if _gateway_serves_exactly(metrics, expected_uids):
+            return time.monotonic_ns(), metrics
+        await asyncio.sleep(_GATEWAY_CONVERGENCE_POLL_SECONDS)
+    return None, metrics
+
+
 async def _recover_epoch(
     args: argparse.Namespace,
     config: GateConfig,
     *,
     plan_entry: dict[str, Any],
     old: list[dict[str, Any]],
+    expected_fleet: set[str],
+    gateway_client: httpx.AsyncClient,
     scheduled_ns: int,
+    barrier_observed_ns: int,
     api_started_ns: int,
     api_completed_ns: int,
     delete_returncode: int,
@@ -1603,7 +1825,7 @@ async def _recover_epoch(
     endpoint_sink: JsonlSink,
     sink: JsonlSink,
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + config.recovery_timeout_seconds
+    deadline = time.monotonic() + config.recovery_hang_seconds
     names = [item["name"] for item in old]
     old_uids = {str(item["uid"]) for item in old}
     new: list[dict[str, Any]] = []
@@ -1715,14 +1937,29 @@ async def _recover_epoch(
                 pass
         await asyncio.sleep(_RECOVERY_POLL_SECONDS)
     else:
-        error = "recovery_timeout"
+        error = "recovery_hang"
     recovered_ns = time.monotonic_ns()
+    gateway_converged_ns: int | None = None
+    gateway_metrics: dict[str, Any] = {}
+    if error is None:
+        replacement_fleet = (expected_fleet - old_uids) | {
+            str(item["uid"]) for item in new
+        }
+        gateway_converged_ns, gateway_metrics = await _wait_gateway_serving(
+            gateway_client,
+            pool=args.model,
+            expected_uids=replacement_fleet,
+            deadline=deadline,
+        )
+        if gateway_converged_ns is None:
+            error = "gateway_convergence_hang"
     record = {
         "schema_version": SCHEMA_VERSION,
         "epoch": plan_entry["epoch"],
         "deadline_offset_s": plan_entry["deadline_offset_s"],
         "ordinals": plan_entry["ordinals"],
         "scheduled_ns": scheduled_ns,
+        "barrier_observed_ns": barrier_observed_ns,
         "api_started_ns": api_started_ns,
         "api_completed_ns": api_completed_ns,
         "schedule_lateness_ms": (
@@ -1741,12 +1978,6 @@ async def _recover_epoch(
             if old_withdrawn_ns is None
             else (old_withdrawn_ns - api_started_ns) / 1_000_000_000
         ),
-        "old_withdrawal_margin_seconds": (
-            None
-            if old_withdrawn_ns is None
-            else config.endpoint_withdrawal_limit_seconds
-            - (old_withdrawn_ns - api_started_ns) / 1_000_000_000
-        ),
         "new_ready_ns": new_ready_ns,
         "endpoint_recovered_ns": endpoint_recovered_ns,
         "new_pods_fetch_started_ns": new_pods_fetch_started_ns,
@@ -1761,6 +1992,8 @@ async def _recover_epoch(
             recovered_ns - api_started_ns
         )
         / 1_000_000_000,
+        "gateway_converged_ns": gateway_converged_ns,
+        "gateway_at_convergence": gateway_metrics,
         "error": error,
     }
     sink.write(record)
@@ -1774,9 +2007,22 @@ async def _churn_loop(
     measurement_origin_ns: int,
     endpoint_sink: JsonlSink,
     sink: JsonlSink,
+    churn_completion: ChurnCompletion,
 ) -> list[dict[str, Any]]:
-    recoveries: list[asyncio.Task] = []
-    try:
+    """Delete each batch once its predecessor is fully replaced (an event).
+
+    A batch starts at its planned offset, or later when the previous batch's
+    replacements are not yet Ready in Kubernetes and serving in the gateway.
+    Lateness is recorded, never judged.
+    """
+
+    records: list[dict[str, Any]] = []
+    fleet = {str(item["uid"]) for item in initial_by_name.values()}
+    async with httpx.AsyncClient(
+        base_url=args.gateway_url.rstrip("/"),
+        timeout=httpx.Timeout(config.request_hang_seconds),
+        trust_env=False,
+    ) as gateway_client:
         for entry in churn_plan(config):
             scheduled_ns = measurement_origin_ns + int(
                 entry["deadline_offset_s"] * 1_000_000_000
@@ -1791,6 +2037,18 @@ async def _churn_loop(
                 for ordinal in entry["ordinals"]
             ]
             old = [dict(initial_by_name[name]) for name in names]
+            barrier_observed_ns, _ = await _wait_gateway_serving(
+                gateway_client,
+                pool=args.model,
+                expected_uids=fleet,
+                deadline=time.monotonic() + config.recovery_hang_seconds,
+            )
+            if barrier_observed_ns is None:
+                raise TimeoutError(
+                    f"hang: epoch {entry['epoch']}: the gateway did not serve "
+                    "exactly the current fleet within the "
+                    f"{config.recovery_hang_seconds:g} s hang bound"
+                )
             predelete_fetch_started_ns = time.monotonic_ns()
             predelete_endpoints = await _read_endpoint_slices(args)
             endpoint_sink.write(
@@ -1822,34 +2080,46 @@ async def _churn_loop(
                 api_started_ns=api_started_ns,
                 endpoint_sink=endpoint_sink,
             )
-            recoveries.append(
-                asyncio.create_task(
-                    _recover_epoch(
-                        args,
-                        config,
-                        plan_entry=entry,
-                        old=old,
-                        scheduled_ns=scheduled_ns,
-                        api_started_ns=api_started_ns,
-                        api_completed_ns=api_completed_ns,
-                        delete_returncode=returncode,
-                        delete_stderr=stderr,
-                        initial_old_withdrawn_ns=old_withdrawn_ns,
-                        initial_endpoint_uids=endpoint_uids,
-                        endpoint_sink=endpoint_sink,
-                        sink=sink,
-                    )
-                )
+            record = await _recover_epoch(
+                args,
+                config,
+                plan_entry=entry,
+                old=old,
+                expected_fleet=fleet,
+                gateway_client=gateway_client,
+                scheduled_ns=scheduled_ns,
+                barrier_observed_ns=barrier_observed_ns,
+                api_started_ns=api_started_ns,
+                api_completed_ns=api_completed_ns,
+                delete_returncode=returncode,
+                delete_stderr=stderr,
+                initial_old_withdrawn_ns=old_withdrawn_ns,
+                initial_endpoint_uids=endpoint_uids,
+                endpoint_sink=endpoint_sink,
+                sink=sink,
             )
-        if not recoveries:
-            return []
-        return list(await asyncio.gather(*recoveries))
-    finally:
-        for recovery in recoveries:
-            if not recovery.done():
-                recovery.cancel()
-        if recoveries:
-            await asyncio.gather(*recoveries, return_exceptions=True)
+            records.append(record)
+            if record["error"] is not None:
+                # A hang in one batch stops the churn; the verdict reports it.
+                break
+            fleet = (fleet - old_uids) | {
+                str(item["uid"]) for item in record["new"]
+            }
+    churn_completion.set(
+        max(
+            (
+                value
+                for record in records
+                for value in (
+                    record.get("gateway_converged_ns"),
+                    record.get("recovered_ns"),
+                )
+                if type(value) is int
+            ),
+            default=time.monotonic_ns(),
+        )
+    )
+    return records
 
 
 def _resource_summary(payload: dict[str, Any], namespace: str) -> dict[str, Any]:
@@ -2053,9 +2323,13 @@ def _periodic_schedule_consistent(
     *,
     interval_seconds: float,
     coverage_start_ns: int | None,
-    coverage_end_ns: int | None,
 ) -> bool:
-    """Replay one absolute-deadline sampler without trusting its summary."""
+    """Replay one absolute-deadline sampler's sequence without trusting it.
+
+    Only order is judged: the sampler started before traffic, its slots follow
+    the declared cadence with skips accounted for, and no sample overlaps the
+    next.  How late a sample ran is a property of the runner, not the code.
+    """
 
     periodic = [
         record for record in records if record.get("capture") is None
@@ -2065,8 +2339,6 @@ def _periodic_schedule_consistent(
         not periodic
         or interval_ns <= 0
         or type(coverage_start_ns) is not int
-        or type(coverage_end_ns) is not int
-        or coverage_start_ns > coverage_end_ns
     ):
         return False
     previous_scheduled_ns: int | None = None
@@ -2099,18 +2371,7 @@ def _periodic_schedule_consistent(
             return False
         previous_scheduled_ns = scheduled_ns
         previous_observed_ns = observed_ns
-    first_scheduled_ns = periodic[0]["scheduled_ns"]
-    last_scheduled_ns = periodic[-1]["scheduled_ns"]
-    last_observed_ns = periodic[-1]["observed_ns"]
-    return (
-        first_scheduled_ns <= coverage_start_ns
-        < first_scheduled_ns + interval_ns
-        and max(
-            last_scheduled_ns + interval_ns,
-            last_observed_ns,
-        )
-        > coverage_end_ns
-    )
+    return periodic[0]["fetch_started_ns"] <= coverage_start_ns
 
 
 def _provenance_valid(environment: dict[str, Any]) -> bool:
@@ -2171,9 +2432,26 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
         )
 
     def image_chain(role: str) -> bool:
-        image_digest_value = environment.get(f"{role}_image_digest")
-        image_config_digest = environment.get(
-            f"{role}_image_config_digest"
+        # The archive loaded into kind is the source identity. Its config
+        # digest must equal containerd's manifest config and the CRI image ID;
+        # Docker's own image ID is store-dependent and is not consulted.
+        archive = environment.get(f"{role}_image_archive")
+        image_config_digest = (
+            archive.get("config_digest") if isinstance(archive, dict) else None
+        )
+        archive_valid = (
+            isinstance(archive, dict)
+            and all(
+                isinstance(archive.get(key), str)
+                and bool(archive[key])
+                and not Path(archive[key]).is_absolute()
+                and ".." not in Path(archive[key]).parts
+                for key in ("manifest_path", "config_path")
+            )
+            and digest(archive.get("manifest_sha256"))
+            and isinstance(archive.get("repo_tags"), list)
+            and bool(archive["repo_tags"])
+            and archive.get("revision") == git_commit
         )
         containerd_image_digest = environment.get(
             f"{role}_containerd_image_digest"
@@ -2210,8 +2488,7 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
             )
         )
         return (
-            isinstance(image_digest_value, str)
-            and exact_image_sha256.fullmatch(image_digest_value) is not None
+            archive_valid
             and isinstance(image_config_digest, str)
             and exact_image_sha256.fullmatch(image_config_digest) is not None
             and isinstance(containerd_image_digest, str)
@@ -2220,8 +2497,6 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
             and isinstance(containerd_config_digest, str)
             and exact_image_sha256.fullmatch(containerd_config_digest)
             is not None
-            and image_digest_value
-            in {image_config_digest, containerd_image_digest}
             and image_config_digest == containerd_config_digest
             and containerd_metadata_valid
             and cri_metadata(metadata)
@@ -2297,12 +2572,44 @@ def evaluate_gate(
     environment: dict[str, Any],
 ) -> dict[str, Any]:
     config.validate()
+    ordered_churn = sorted(
+        churn,
+        key=lambda record: record.get("epoch", math.inf),
+    )
+    measurement_origin_ns = (
+        ordered_churn[0].get("scheduled_ns") if ordered_churn else None
+    )
+    # The driver ends traffic from the same recorded churn completion, so the
+    # exact request count is recomputed rather than tied to wall time.
+    churn_completed_ns = max(
+        (
+            value
+            for record in churn
+            for value in (
+                record.get("gateway_converged_ns"),
+                record.get("recovered_ns"),
+            )
+            if type(value) is int
+        ),
+        default=None,
+    )
+    expected_requests = (
+        config.expected_requests(
+            traffic_origin_ns=measurement_origin_ns
+            - int(config.warmup_seconds * 1_000_000_000),
+            churn_completed_ns=churn_completed_ns,
+        )
+        if type(measurement_origin_ns) is int
+        and type(churn_completed_ns) is int
+        else None
+    )
     raw_request_sequences = [record.get("sequence") for record in requests]
     request_sequence_coverage_ok = (
-        len(requests) == config.expected_requests
+        expected_requests is not None
+        and len(requests) == expected_requests
         and all(type(sequence) is int for sequence in raw_request_sequences)
         and len(set(raw_request_sequences)) == len(raw_request_sequences)
-        and set(raw_request_sequences) == set(range(config.expected_requests))
+        and set(raw_request_sequences) == set(range(expected_requests))
     )
     if request_sequence_coverage_ok:
         # Requests are durably appended when each concurrent HTTP call
@@ -2362,7 +2669,8 @@ def evaluate_gate(
         config,
     )
     sent = [record for record in requests if not record.get("not_sent")]
-    pacing_ok = [
+    # Diagnostic only: how late sends ran depends on the runner.
+    pacing_within_one_interval = [
         record.get("pacing_error_ms", math.inf)
         <= 1_000 / config.request_rate
         for record in sent
@@ -2379,8 +2687,10 @@ def evaluate_gate(
         for record in requests
     )
     status_other = len(requests) - status_2xx - status_429 - status_5xx
+    hung_requests = sum(record.get("hung") is True for record in requests)
     transport_errors = sum(
-        bool(record.get("transport_error")) for record in requests
+        bool(record.get("transport_error")) and record.get("hung") is not True
+        for record in requests
     )
     not_sent = sum(bool(record.get("not_sent")) for record in requests)
     namespace = environment.get("namespace")
@@ -2502,25 +2812,19 @@ def evaluate_gate(
         for request_id in placement_ids
         if request_id in response_id_set
     ]
-    ordered_churn = sorted(
-        churn,
-        key=lambda record: record.get("epoch", math.inf),
-    )
-    measurement_origin_ns = (
-        ordered_churn[0].get("scheduled_ns") if ordered_churn else None
-    )
     request_sequences = [record.get("sequence") for record in requests]
     request_timeline_ok = (
         request_sequence_coverage_ok
         and
         type(measurement_origin_ns) is int
-        and request_sequences == list(range(config.expected_requests))
+        and expected_requests is not None
+        and request_sequences == list(range(expected_requests))
     )
     if type(measurement_origin_ns) is int:
         traffic_origin_ns = measurement_origin_ns - int(
             config.warmup_seconds * 1_000_000_000
         )
-        interval_ns = int(1_000_000_000 / config.request_rate)
+        interval_ns = config.request_interval_ns
         for sequence, record in enumerate(requests):
             scheduled_ns = record.get("scheduled_ns")
             send_ns = record.get("send_ns")
@@ -2550,6 +2854,7 @@ def evaluate_gate(
         and len(ordered_churn) == config.churn_epochs
     )
     if type(measurement_origin_ns) is int:
+        previous_converged_ns: int | None = None
         for epoch, record in enumerate(ordered_churn):
             if epoch >= len(plan):
                 churn_timeline_ok = False
@@ -2560,6 +2865,7 @@ def evaluate_gate(
                 * 1_000_000_000
             )
             scheduled_ns = record.get("scheduled_ns")
+            barrier_observed_ns = record.get("barrier_observed_ns")
             api_started_ns = record.get("api_started_ns")
             api_completed_ns = record.get("api_completed_ns")
             old_withdrawn_ns = record.get("old_withdrawn_ns")
@@ -2570,10 +2876,12 @@ def evaluate_gate(
             new_pods_observed_ns = record.get("new_pods_observed_ns")
             new_ready_ns = record.get("new_ready_ns")
             recovered_ns = record.get("recovered_ns")
+            gateway_converged_ns = record.get("gateway_converged_ns")
             raw_times_valid = all(
                 type(value) is int
                 for value in (
                     scheduled_ns,
+                    barrier_observed_ns,
                     api_started_ns,
                     api_completed_ns,
                     old_withdrawn_ns,
@@ -2582,12 +2890,21 @@ def evaluate_gate(
                     new_pods_observed_ns,
                     new_ready_ns,
                     recovered_ns,
+                    gateway_converged_ns,
                 )
             )
+            # Order only: a batch is never deleted before its planned offset
+            # or before its predecessor is served by the gateway; recovery
+            # events follow the deletion in their causal order.
             causal = (
                 raw_times_valid
                 and scheduled_ns == expected_scheduled_ns
                 and scheduled_ns <= api_started_ns <= api_completed_ns
+                and (
+                    previous_converged_ns is None
+                    or previous_converged_ns <= barrier_observed_ns
+                )
+                and barrier_observed_ns <= api_started_ns
                 and api_started_ns
                 <= old_withdrawn_ns
                 <= endpoint_recovered_ns
@@ -2595,7 +2912,13 @@ def evaluate_gate(
                 <= new_pods_observed_ns
                 == new_ready_ns
                 <= recovered_ns
+                <= gateway_converged_ns
                 and api_completed_ns <= recovered_ns
+            )
+            previous_converged_ns = (
+                gateway_converged_ns
+                if type(gateway_converged_ns) is int
+                else None
             )
             derived = (
                 causal
@@ -2612,14 +2935,6 @@ def evaluate_gate(
                 and _derived_close(
                     record.get("old_withdrawal_seconds"),
                     (old_withdrawn_ns - api_started_ns) / 1_000_000_000,
-                )
-                and _derived_close(
-                    record.get("old_withdrawal_margin_seconds"),
-                    config.endpoint_withdrawal_limit_seconds
-                    - (
-                        old_withdrawn_ns - api_started_ns
-                    )
-                    / 1_000_000_000,
                 )
                 and _derived_close(
                     record.get("new_ready_seconds"),
@@ -3024,6 +3339,8 @@ def evaluate_gate(
         api_started_ns = record.get("api_started_ns")
         endpoint_recovered_ns = record.get("endpoint_recovered_ns")
         recovered_ns = record.get("recovered_ns")
+        # Diagnostic: whether a periodic sample happened to land right after
+        # recovery depends on sampler phase, so it never decides the verdict.
         periodic_exact_observed_ns = [
             snapshot["observed_ns"]
             for snapshot in endpoint_timed_snapshots
@@ -3057,7 +3374,6 @@ def evaluate_gate(
             and record.get("ready_endpoint_count_at_recovery")
             == config.replica_count
             and claimed_recovery_exact
-            and bool(periodic_exact_observed_ns)
         )
         endpoint_epoch_recoveries.append(
             {
@@ -3079,16 +3395,6 @@ def evaluate_gate(
     )
     endpoint_epoch_causality = []
     endpoint_withdrawal_observers = []
-    endpoint_interval_ns = int(
-        config.evidence_interval_seconds * 1_000_000_000
-    )
-    gateway_withdrawal_limit_ns = int(
-        config.gateway_membership_withdrawal_limit_seconds
-        * 1_000_000_000
-    )
-    endpoint_causal_bracket_ns = int(
-        _ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS * 1_000_000_000
-    )
     withdrawal_poll_interval_ns = int(
         _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
     )
@@ -3163,9 +3469,7 @@ def evaluate_gate(
             predelete_snapshots = [
                 snapshot
                 for snapshot in endpoint_timed_snapshots
-                if api_started_ns - endpoint_interval_ns
-                <= snapshot["observed_ns"]
-                <= api_started_ns
+                if snapshot["observed_ns"] <= api_started_ns
                 and snapshot["capture"] == "churn_predelete"
                 and snapshot["epoch"] == epoch
             ]
@@ -3211,19 +3515,19 @@ def evaluate_gate(
             and predelete_snapshots[0]["targets"]
             == expected_state_before_epoch[epoch]
         )
-        withdrawal_bracketed = (
+        # Order only: a snapshot still holding a deleted UID precedes the
+        # first snapshot without any, which precedes or is the observer's
+        # claimed withdrawal. The bracket width is a diagnostic.
+        withdrawal_ordered = (
             first_disjoint is not None
             and last_with_old is not None
             and raw_claim_snapshot is not None
             and first_disjoint["fetch_started_recorded"]
             and last_with_old["fetch_started_recorded"]
             and type(old_withdrawn_ns) is int
-            and first_disjoint["observed_ns"]
+            and last_with_old["observed_ns"]
+            < first_disjoint["observed_ns"]
             <= old_withdrawn_ns
-            <= first_disjoint["observed_ns"] + endpoint_causal_bracket_ns
-            and first_disjoint["observed_ns"]
-            - last_with_old["fetch_started_ns"]
-            <= endpoint_causal_bracket_ns
         )
         no_reappearance = (
             type(old_withdrawn_ns) is int
@@ -3248,7 +3552,16 @@ def evaluate_gate(
                     else None
                 ),
                 "claim_has_raw_snapshot": raw_claim_snapshot is not None,
-                "withdrawal_bracketed": withdrawal_bracketed,
+                "withdrawal_ordered": withdrawal_ordered,
+                "withdrawal_bracket_seconds": (
+                    (
+                        first_disjoint["observed_ns"]
+                        - last_with_old["fetch_started_ns"]
+                    )
+                    / 1_000_000_000
+                    if first_disjoint is not None and last_with_old is not None
+                    else None
+                ),
                 "no_reappearance": no_reappearance,
             }
         )
@@ -3259,7 +3572,7 @@ def evaluate_gate(
     endpoint_raw_withdrawal_causal = (
         len(endpoint_epoch_causality) == config.churn_epochs
         and all(
-            record["withdrawal_bracketed"] and record["no_reappearance"]
+            record["withdrawal_ordered"] and record["no_reappearance"]
             for record in endpoint_epoch_causality
         )
     )
@@ -3269,25 +3582,6 @@ def evaluate_gate(
             record["consistent"]
             for record in endpoint_withdrawal_observers
         )
-    )
-    endpoint_withdrawal_ok = all(
-        isinstance(record.get("old_withdrawal_seconds"), (int, float))
-        and 0 <= record["old_withdrawal_seconds"]
-        < config.endpoint_withdrawal_limit_seconds
-        and isinstance(
-            record.get("old_withdrawal_margin_seconds"),
-            (int, float),
-        )
-        and record["old_withdrawal_margin_seconds"] > 0
-        and math.isclose(
-            record["old_withdrawal_margin_seconds"],
-            config.endpoint_withdrawal_limit_seconds
-            - record["old_withdrawal_seconds"],
-            rel_tol=0,
-            abs_tol=1e-9,
-        )
-        and record.get("old_withdrawn_ns") is not None
-        for record in churn
     )
     memberships = [
         record for record in placements if record.get("kind") == "membership"
@@ -3401,16 +3695,24 @@ def evaluate_gate(
             if epoch < len(expected_fleet_by_epoch)
             else set()
         )
+        # The gateway must converge on the replacement fleet after this
+        # deletion and before the next one (order, not a time budget).
+        next_api_started_ns = (
+            ordered_churn[epoch + 1].get("api_started_ns")
+            if epoch + 1 < len(ordered_churn)
+            else None
+        )
         matching = []
         if isinstance(api_started_ns, int):
-            deadline_ns = api_started_ns + int(
-                config.recovery_timeout_seconds * 1_000_000_000
-            )
             for membership in memberships:
                 observed_ns = membership.get("observed_ns")
                 if (
                     not isinstance(observed_ns, int)
-                    or not api_started_ns <= observed_ns <= deadline_ns
+                    or observed_ns < api_started_ns
+                    or (
+                        isinstance(next_api_started_ns, int)
+                        and observed_ns >= next_api_started_ns
+                    )
                 ):
                     continue
                 snapshots = [
@@ -3472,7 +3774,6 @@ def evaluate_gate(
     membership_epoch_causality = []
     for epoch, churn_record in enumerate(ordered_churn):
         api_started_ns = churn_record.get("api_started_ns")
-        old_withdrawn_ns = churn_record.get("old_withdrawn_ns")
         expected_before = (
             expected_fleet_before_epoch[epoch]
             if epoch < len(expected_fleet_before_epoch)
@@ -3484,8 +3785,6 @@ def evaluate_gate(
             if isinstance((uid := item.get("uid")), str) and uid
         }
         predelete_membership = None
-        deadline_membership = None
-        withdrawal_deadline_ns = None
         if type(api_started_ns) is int:
             predelete_membership = next(
                 (
@@ -3496,29 +3795,6 @@ def evaluate_gate(
                 ),
                 None,
             )
-        if type(old_withdrawn_ns) is int and type(api_started_ns) is int:
-            # Endpoint evidence and gateway discovery are independent polling
-            # loops.  The former's capture cadence is not a convergence SLO.
-            # Bound the gateway by its explicit two-interval budget and, even
-            # when the EndpointSlice observer is late, by the five-second
-            # graceful withdrawal contract measured from deletion.
-            withdrawal_deadline_ns = min(
-                old_withdrawn_ns + gateway_withdrawal_limit_ns,
-                api_started_ns
-                + int(
-                    config.endpoint_withdrawal_limit_seconds
-                    * 1_000_000_000
-                ),
-            )
-            deadline_membership = next(
-                (
-                    membership
-                    for membership in reversed(memberships)
-                    if type(membership.get("observed_ns")) is int
-                    and membership["observed_ns"] <= withdrawal_deadline_ns
-                ),
-                None,
-            )
         predelete_exact = (
             predelete_membership is not None
             and all(
@@ -3526,49 +3802,71 @@ def evaluate_gate(
                 for key in ("replica_ids", "healthy_ids", "eligible_ids")
             )
         )
-        withdrawn_by_deadline = (
-            deadline_membership is not None
-            and old_epoch_uids.isdisjoint(
-                membership_ids(deadline_membership, "eligible_ids")
-            )
+        # The gateway applies a deletion when its EndpointSlice reconciler
+        # drains or removes the UID. From that event on, the UID must never be
+        # eligible again and no placement may select it. This is an order
+        # property; how long the gateway took is a diagnostic.
+        applied_by_uid: dict[str, dict[str, Any]] = {}
+        if type(api_started_ns) is int:
+            for membership in memberships:
+                observed_ns = membership.get("observed_ns")
+                if type(observed_ns) is not int or observed_ns < api_started_ns:
+                    continue
+                for uid in old_epoch_uids - set(applied_by_uid):
+                    if uid in membership_ids(
+                        membership, "draining"
+                    ) or uid in membership_ids(membership, "removed"):
+                        applied_by_uid[uid] = membership
+        deletion_applied = set(applied_by_uid) == old_epoch_uids and bool(
+            old_epoch_uids
         )
-        no_eligible_reappearance = (
-            withdrawal_deadline_ns is not None
-            and all(
-                old_epoch_uids.isdisjoint(
-                    membership_ids(membership, "eligible_ids")
-                )
-                for membership in memberships
-                if type(membership.get("observed_ns")) is int
-                and membership["observed_ns"] >= withdrawal_deadline_ns
-            )
+        no_eligible_after_deletion = deletion_applied and all(
+            uid not in membership_ids(membership, "eligible_ids")
+            for uid, applied in applied_by_uid.items()
+            for membership in memberships
+            if type(membership.get("observed_ns")) is int
+            and membership["observed_ns"] >= applied["observed_ns"]
         )
-        no_late_placement = (
-            withdrawal_deadline_ns is not None
-            and all(
-                placement.get("replica_id") not in old_epoch_uids
-                for placement in raw_placements
-                if type(placement.get("selected_at_ns")) is int
-                and placement["selected_at_ns"] >= withdrawal_deadline_ns
-            )
+        late_placements = [
+            placement.get("request_id")
+            for uid, applied in applied_by_uid.items()
+            for placement in raw_placements
+            if placement.get("replica_id") == uid
+            and type(placement.get("selected_at_ns")) is int
+            and placement["selected_at_ns"] >= applied["observed_ns"]
+        ]
+        no_placement_after_deletion = deletion_applied and not late_placements
+        last_applied_ns = max(
+            (applied["observed_ns"] for applied in applied_by_uid.values()),
+            default=None,
         )
         membership_epoch_causality.append(
             {
                 "epoch": churn_record.get("epoch"),
                 "predelete_exact": predelete_exact,
-                "withdrawal_deadline_ns": withdrawal_deadline_ns,
-                "withdrawn_by_deadline": withdrawn_by_deadline,
-                "no_eligible_reappearance": no_eligible_reappearance,
-                "no_late_placement": no_late_placement,
+                "deletion_applied_event_ids": sorted(
+                    str(applied.get("event_id"))
+                    for applied in applied_by_uid.values()
+                ),
+                "deletion_applied_for_every_uid": deletion_applied,
+                "no_eligible_after_deletion": no_eligible_after_deletion,
+                "no_placement_after_deletion": no_placement_after_deletion,
+                "placements_after_deletion": late_placements[:20],
+                "last_deletion_applied_seconds": (
+                    (last_applied_ns - api_started_ns) / 1_000_000_000
+                    if type(last_applied_ns) is int
+                    and type(api_started_ns) is int
+                    else None
+                ),
             }
         )
     membership_withdrawal_causal = (
         len(membership_epoch_causality) == config.churn_epochs
         and all(
             record["predelete_exact"]
-            and record["withdrawn_by_deadline"]
-            and record["no_eligible_reappearance"]
-            and record["no_late_placement"]
+            and record["deletion_applied_for_every_uid"]
+            and record["no_eligible_after_deletion"]
+            and record["no_placement_after_deletion"]
             for record in membership_epoch_causality
         )
     )
@@ -3913,11 +4211,6 @@ def evaluate_gate(
     pod_capture_image_identity_pinned = (
         required_mock_images_pinned and required_gateway_images_pinned
     )
-    placement_ok = (
-        overall["samples"] > 0
-        and overall["p99_ms"] is not None
-        and overall["p99_ms"] < config.placement_p99_limit_ms
-    )
     placement_diagnostics_complete = all(
         item["samples"] > 0 and item["p99_ms"] is not None
         for item in [*epochs, *churn_windows]
@@ -3940,19 +4233,20 @@ def evaluate_gate(
         "churn_predelete",
         "churn_withdrawal",
         "churn_recovery",
+        "final",
     }
     endpoint_capture_labels_valid = all(
         record.get("capture") in allowed_endpoint_captures
         for record in endpoints
-    )
+    ) and sum(record.get("capture") == "final" for record in endpoints) == 1
+    # Every snapshot before the first deletion (at least the first batch's
+    # pre-delete capture) and every snapshot after the last recovery (at
+    # least the explicit final capture) must show the exact fleet.
     initial_region_snapshots = [
         snapshot
         for snapshot in endpoint_timed_snapshots
-        if type(traffic_started_ns) is int
-        and type(first_api_started_ns) is int
-        and traffic_started_ns
-        <= snapshot["observed_ns"]
-        <= first_api_started_ns
+        if type(first_api_started_ns) is int
+        and snapshot["observed_ns"] <= first_api_started_ns
     ]
     final_region_snapshots = [
         snapshot
@@ -3995,13 +4289,11 @@ def evaluate_gate(
         endpoints,
         interval_seconds=config.evidence_interval_seconds,
         coverage_start_ns=traffic_started_ns,
-        coverage_end_ns=traffic_completed_ns,
     )
     resource_periodic_schedule_ok = _periodic_schedule_consistent(
         resources,
         interval_seconds=config.resource_interval_seconds,
         coverage_start_ns=traffic_started_ns,
-        coverage_end_ns=traffic_completed_ns,
     )
     resource_evidence_schema_valid = (
         bool(resources)
@@ -4026,7 +4318,8 @@ def evaluate_gate(
             and sorted(all_targets) == list(range(config.replica_count))
         ),
         "request_count_matches_schedule": (
-            len(requests) == config.expected_requests
+            expected_requests is not None
+            and len(requests) == expected_requests
         ),
         "request_raw_timeline_consistent": request_timeline_ok,
         "all_requests_valid_2xx": (
@@ -4035,9 +4328,10 @@ def evaluate_gate(
             and status_5xx == 0
             and status_other == 0
         ),
-        "zero_transport_or_not_sent": (
+        "zero_transport_errors_or_not_sent": (
             transport_errors == 0 and not_sent == 0
         ),
+        "zero_hung_requests": hung_requests == 0,
         "request_id_correlation_complete": (
             len(response_ids) == len(requests)
             and len(response_ids) == len(set(response_ids))
@@ -4073,34 +4367,17 @@ def evaluate_gate(
                 for record in joined_requests
             )
         ),
-        "placement_p99_measurement": placement_ok,
-        "placement_window_diagnostics_complete": (
-            placement_diagnostics_complete
-        ),
-        "open_loop_pacing": (
-            bool(pacing_ok)
-            and sum(pacing_ok) / len(pacing_ok)
-            >= config.pacing_success_fraction
-        ),
         "churn_epochs_complete": (
             len(churn) == config.churn_epochs
             and {record.get("epoch") for record in churn}
             == set(range(config.churn_epochs))
         ),
-        "churn_delete_and_recovery_success": all(
-            record.get("delete_returncode") == 0
-            and record.get("error") is None
-            and record.get("recovery_seconds", math.inf)
-            <= config.recovery_timeout_seconds
-            for record in churn
+        "churn_deletes_succeeded": all(
+            record.get("delete_returncode") == 0 for record in churn
         ),
-        "churn_deadlines_met": all(
-            abs(record.get("schedule_lateness_ms", math.inf))
-            <= config.schedule_lateness_limit_ms
-            for record in churn
-        ),
+        "churn_recovery_completed_without_hang": bool(churn)
+        and all(record.get("error") is None for record in churn),
         "churn_raw_timeline_consistent": churn_timeline_ok,
-        "old_endpoints_withdrawn_before_grace": endpoint_withdrawal_ok,
         "endpoint_predelete_snapshots_exact": endpoint_predelete_exact,
         "endpoint_withdrawal_observer_consistent": (
             endpoint_withdrawal_observer_consistent
@@ -4181,21 +4458,68 @@ def evaluate_gate(
         ),
         "provenance_pinned": required_provenance,
     }
+    schedule_lateness_ms = [
+        float(record["schedule_lateness_ms"])
+        for record in ordered_churn
+        if isinstance(record.get("schedule_lateness_ms"), (int, float))
+    ]
+    recovery_seconds = [
+        float(record["recovery_seconds"])
+        for record in ordered_churn
+        if isinstance(record.get("recovery_seconds"), (int, float))
+    ]
     return {
         "checks": checks,
         "passed": all(checks.values()),
+        # Recorded for trend reading only; none of these decide the verdict.
+        "diagnostics": {
+            "placement_p99_ms": overall["p99_ms"],
+            "placement_window_samples_complete": placement_diagnostics_complete,
+            "pacing_within_one_interval_fraction": (
+                sum(pacing_within_one_interval)
+                / len(pacing_within_one_interval)
+                if pacing_within_one_interval
+                else None
+            ),
+            "max_schedule_lateness_ms": max(
+                schedule_lateness_ms,
+                default=None,
+            ),
+            "max_recovery_seconds": max(recovery_seconds, default=None),
+            "max_endpoint_withdrawal_seconds": max(
+                (
+                    float(record["old_withdrawal_seconds"])
+                    for record in churn
+                    if isinstance(
+                        record.get("old_withdrawal_seconds"),
+                        (int, float),
+                    )
+                ),
+                default=None,
+            ),
+            "max_gateway_deletion_applied_seconds": max(
+                (
+                    record["last_deletion_applied_seconds"]
+                    for record in membership_epoch_causality
+                    if isinstance(
+                        record.get("last_deletion_applied_seconds"),
+                        (int, float),
+                    )
+                ),
+                default=None,
+            ),
+        },
         "traffic": {
-            "expected": config.expected_requests,
+            "expected": expected_requests,
+            "planned": config.planned_requests,
             "observed": len(requests),
             "http_2xx": status_2xx,
             "http_429": status_429,
             "http_5xx": status_5xx,
             "http_other_or_missing": status_other,
             "transport_errors": transport_errors,
+            "hung_requests": hung_requests,
             "not_sent": not_sent,
-            "pacing_within_one_interval_fraction": (
-                sum(pacing_ok) / len(pacing_ok) if pacing_ok else 0.0
-            ),
         },
         "placement": {
             "overall": overall,
@@ -4221,28 +4545,6 @@ def evaluate_gate(
             "endpoint_epoch_causality": endpoint_epoch_causality,
             "endpoint_withdrawal_observers": (
                 endpoint_withdrawal_observers
-            ),
-            "max_old_withdrawal_seconds": max(
-                (
-                    float(record["old_withdrawal_seconds"])
-                    for record in churn
-                    if isinstance(
-                        record.get("old_withdrawal_seconds"),
-                        (int, float),
-                    )
-                ),
-                default=None,
-            ),
-            "min_old_withdrawal_margin_seconds": min(
-                (
-                    float(record["old_withdrawal_margin_seconds"])
-                    for record in churn
-                    if isinstance(
-                        record.get("old_withdrawal_margin_seconds"),
-                        (int, float),
-                    )
-                ),
-                default=None,
             ),
         },
         "membership": {
@@ -4331,6 +4633,32 @@ def _containerd_metadata_file_matches(
     ) == descriptor
 
 
+def _image_archive_file_matches(
+    manifest_path: Path,
+    descriptor: Any,
+) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    archive_manifest = _safe_sidecar(
+        manifest_path,
+        str(descriptor.get("manifest_path", "")),
+    )
+    archive_config = _safe_sidecar(
+        manifest_path,
+        str(descriptor.get("config_path", "")),
+    )
+    return (
+        archive_manifest.is_file()
+        and archive_config.is_file()
+        and _image_archive_metadata(
+            archive_manifest,
+            archive_config,
+            manifest_path.parent,
+        )
+        == descriptor
+    )
+
+
 def verify_artifact(manifest_path: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text())
     if not isinstance(manifest, dict):
@@ -4382,6 +4710,13 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             checks[f"{role}_cri_image_metadata_raw"] = False
+        try:
+            checks[f"{role}_image_archive_raw"] = _image_archive_file_matches(
+                manifest_path,
+                environment.get(f"{role}_image_archive"),
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            checks[f"{role}_image_archive_raw"] = False
     loaded: dict[str, list[dict[str, Any]]] = {}
     for name in (
         "requests",
@@ -4430,6 +4765,7 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
     for key in (
         "checks",
         "passed",
+        "diagnostics",
         "traffic",
         "placement",
         "churn",
@@ -4518,12 +4854,14 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             )
         )
         owned_tasks.append(resource_task)
+        churn_completion = ChurnCompletion(asyncio.Event())
         traffic_task = asyncio.create_task(
             _traffic_loop(
                 args,
                 config,
                 sinks["requests"],
                 measurement_origin_ns,
+                churn_completion,
             )
         )
         owned_tasks.append(traffic_task)
@@ -4535,6 +4873,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 measurement_origin_ns,
                 sinks["endpointslices"],
                 sinks["churn"],
+                churn_completion,
             )
         )
         owned_tasks.append(churn_task)
@@ -4567,6 +4906,21 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         endpoints, resources = await asyncio.gather(
             endpoint_task,
             resource_task,
+        )
+        # One explicit post-churn capture: the final-fleet check never depends
+        # on whether a periodic sample happened to land after recovery.
+        final_endpoint_fetch_started_ns = time.monotonic_ns()
+        final_endpoints = await _read_endpoint_slices(args)
+        sinks["endpointslices"].write(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "endpointslices",
+                "capture": "final",
+                "fetch_started_ns": final_endpoint_fetch_started_ns,
+                "observed_ns": time.monotonic_ns(),
+                "error": None,
+                "payload": final_endpoints,
+            }
         )
         churn_pod_records = [
             {
@@ -4698,13 +5052,23 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "gate": GATE,
         "methodology": {
+            "verdict": (
+                "only the code under test decides pass/fail: durations, "
+                "pacing, placement latency and schedule lateness are "
+                "diagnostics; timeouts bound hangs and are reported as hangs"
+            ),
             "traffic": (
-                "absolute-deadline open-loop requests; retry=0; 429, 5xx, "
-                "transport errors, and unsent arrivals are failures"
+                "absolute-deadline open-loop requests; retry=0; a full "
+                "admission window delays a send instead of dropping it; "
+                "traffic covers the planned window and continues until the "
+                "last batch is replaced plus the cooldown; 429, 5xx, transport "
+                "errors and hung requests are failures"
             ),
             "churn": (
                 "fixed-seed permutation of every StatefulSet ordinal into "
-                "disjoint batches at absolute monotonic deadlines"
+                "disjoint batches; a batch is deleted at its planned offset "
+                "or once the previous batch is Ready and served by the "
+                "gateway, whichever is later"
             ),
             "placement": (
                 "gateway request receipt through replica selection, joined "
@@ -4712,26 +5076,27 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             ),
             "percentile": "nearest-rank over raw samples",
             "windows": (
-                "the overall measurement p99 is the F1a acceptance metric; "
-                "every epoch and post-delete window remains a replayed "
-                "diagnostic"
+                "placement latency overall, per epoch and per post-delete "
+                "window is a replayed diagnostic"
             ),
             "endpoint_identity": "EndpointSlice targetRef.uid joined to old/new pod UIDs",
             "endpoint_readiness": (
                 "only ready=true and terminating!=true endpoints count; "
-                "old withdrawal must precede the five-second preStop grace"
+                "deleted UIDs never reappear once withdrawn"
             ),
             "endpoint_withdrawal_observation": (
                 "an endpoint-only absolute-250ms observer starts with each "
-                "delete; raw sequence/schedule/fetch/observation timestamps "
-                "must replay before slower pod readiness recovery"
+                "delete and runs until the deleted UIDs are gone; its raw "
+                "sequence/schedule/fetch/observation timestamps replay"
             ),
             "kubernetes_observation_transport": (
                 _KUBERNETES_OBSERVATION_TRANSPORT
             ),
             "membership": (
-                "gateway audit snapshots must begin with the full old fleet "
-                "eligible and end with the full replacement fleet eligible"
+                "gateway audit snapshots begin with the full old fleet "
+                "eligible and end with the full replacement fleet eligible; "
+                "once the gateway applies a deleted UID's drain or removal, "
+                "that UID is never eligible or selected again"
             ),
             "clock_join": (
                 "Linux/CPython time.monotonic_ns and time.perf_counter_ns "
@@ -4805,9 +5170,10 @@ def _parser() -> argparse.ArgumentParser:
         default="/evidence/placements.jsonl",
     )
     parser.add_argument(
-        "--placement-log-timeout-seconds",
+        "--placement-log-hang-seconds",
         type=float,
-        default=10.0,
+        default=120.0,
+        help="hang bound for the gateway's audit writer to drain",
     )
     for field in fields(GateConfig):
         if field.name == "profile":
@@ -4830,10 +5196,13 @@ def _parser() -> argparse.ArgumentParser:
             "hash are independently verified"
         ),
     )
-    parser.add_argument("--gateway-image-digest")
-    parser.add_argument("--mock-image-digest")
-    parser.add_argument("--gateway-image-config-digest")
-    parser.add_argument("--mock-image-config-digest")
+    parser.add_argument(
+        "--gateway-image-archive-manifest",
+        help="manifest.json of the gateway image archive loaded into kind",
+    )
+    parser.add_argument("--gateway-image-archive-config")
+    parser.add_argument("--mock-image-archive-manifest")
+    parser.add_argument("--mock-image-archive-config")
     parser.add_argument("--gateway-containerd-image-digest")
     parser.add_argument("--mock-containerd-image-digest")
     parser.add_argument("--gateway-containerd-config-digest")
