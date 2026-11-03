@@ -278,7 +278,7 @@ async def test_concurrent_payload_preparation_is_single_flight_and_shielded(
         nonlocal calls
         calls += 1
         started.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=30)
         return original(candidate)
 
     monkeypatch.setattr(backend, "_dispatch_preflight", gated)
@@ -2012,7 +2012,7 @@ async def test_blocked_image_validation_does_not_occupy_default_executor(
             validation_threads.append(threading.current_thread().name)
             if len(validation_threads) == 2:
                 validation_started.set()
-        assert release_validation.wait(2)
+        assert release_validation.wait(30)
         return original_validate(self, prompt)
 
     monkeypatch.setattr(ImageInputPolicy, "validate_prompt", blocking_validate)
@@ -2034,10 +2034,10 @@ async def test_blocked_image_validation_does_not_occupy_default_executor(
             await asyncio.sleep(0)
 
     try:
-        await asyncio.wait_for(wait_until_validation_starts(), timeout=1)
+        await asyncio.wait_for(wait_until_validation_starts(), timeout=10)
         default_thread = await asyncio.wait_for(
             asyncio.to_thread(lambda: threading.current_thread().name),
-            timeout=0.5,
+            timeout=10,
         )
 
         assert default_thread.startswith("test-default")
@@ -3080,7 +3080,7 @@ async def test_owned_client_shutdown_is_terminal_exactly_once_and_cancellation_s
     assert backend._get_client() is client
 
     first = asyncio.create_task(backend.shutdown())
-    await asyncio.wait_for(started.wait(), timeout=0.2)
+    await asyncio.wait_for(started.wait(), timeout=10)
     second = asyncio.create_task(backend.shutdown())
     await asyncio.sleep(0)
     assert second.done() is False

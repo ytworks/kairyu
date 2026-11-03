@@ -97,7 +97,7 @@ def test_grammar_compilation_does_not_hold_the_compiler_cache_lock(monkeypatch):
         def compile_regex(self, regex):
             if regex == "a+":
                 first_entered.set()
-                release_first.wait(2)
+                release_first.wait(30)
             return self._compiler.compile_regex(regex)
 
     monkeypatch.setattr(xgr, "GrammarCompiler", BlockingCompiler)
@@ -117,10 +117,10 @@ def test_grammar_compilation_does_not_hold_the_compiler_cache_lock(monkeypatch):
         args=([*VOCAB, "second"], "b+", second_done),
     )
     first.start()
-    assert first_entered.wait(1)
+    assert first_entered.wait(10)
     second.start()
     try:
-        assert second_done.wait(1)
+        assert second_done.wait(10)
     finally:
         release_first.set()
         first.join()

@@ -59,7 +59,7 @@ def test_attention_dp_sampling_diagnostics_accept_every_request_owner_sampler() 
             rows = driver.sampling_ownership_metadata()
         finally:
             driver.shutdown()
-        assert tuple(worker.result(timeout=2) for worker in workers) == (0, 0, 0)
+        assert tuple(worker.result(timeout=10) for worker in workers) == (0, 0, 0)
 
     assert tuple(row["rank"] for row in rows) == (0, 1, 2, 3)
     assert all(row["sampling_owner"] is True for row in rows)

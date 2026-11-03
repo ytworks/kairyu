@@ -8,7 +8,6 @@ import json
 import math
 import sys
 import threading
-import time
 import types
 
 import pytest
@@ -61,7 +60,7 @@ class _FakeTextEmbedding:
     active = 0
     max_active = 0
     active_lock = threading.Lock()
-    delay_s = 0.0
+    gate: threading.Event | None = None
 
     @classmethod
     def list_supported_models(cls):
@@ -90,8 +89,8 @@ class _FakeTextEmbedding:
                 type(self).active,
             )
         try:
-            if type(self).delay_s:
-                time.sleep(type(self).delay_s)
+            if type(self).gate is not None:
+                assert type(self).gate.wait(timeout=30)
             for index, _text in enumerate(texts):
                 vector = [0.0] * 4
                 vector[index % 4] = 1.0
@@ -107,7 +106,7 @@ def _fake_fastembed(monkeypatch):
     _FakeTextEmbedding.thread_names = []
     _FakeTextEmbedding.active = 0
     _FakeTextEmbedding.max_active = 0
-    _FakeTextEmbedding.delay_s = 0.0
+    _FakeTextEmbedding.gate = None
     monkeypatch.setitem(
         sys.modules,
         "fastembed",
@@ -176,11 +175,16 @@ async def test_backend_executor_enforces_configured_concurrency(tmp_path):
     model_path, sha256, provenance_sha256 = _model_bundle(tmp_path)
     backend = _backend(model_path, sha256, provenance_sha256)
     await backend.startup()
-    _FakeTextEmbedding.delay_s = 0.03
+    _FakeTextEmbedding.gate = threading.Event()
 
+    # The accepted call stays in flight until the gate opens, so the second
+    # call meets a full executor whatever the runner's speed.
     accepted = backend.embed(["accepted"])
-    with pytest.raises(EmbeddingCapacityError, match="max concurrency"):
-        backend.embed(["rejected"])
+    try:
+        with pytest.raises(EmbeddingCapacityError, match="max concurrency"):
+            backend.embed(["rejected"])
+    finally:
+        _FakeTextEmbedding.gate.set()
     await accepted
 
     assert _FakeTextEmbedding.max_active == 1
@@ -243,7 +247,7 @@ async def test_startup_cancellation_drains_owned_executor(tmp_path, monkeypatch)
 
     def blocked_load():
         started.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=30)
         return original_load()
 
     monkeypatch.setattr(backend, "_load_sync", blocked_load)
@@ -276,7 +280,7 @@ async def test_cancelled_shutdown_still_drains_work_and_stops(tmp_path, monkeypa
 
     def blocked_embed(model, texts):
         started.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=30)
         return original_embed(model, texts)
 
     monkeypatch.setattr(backend, "_embed_sync", blocked_embed)

@@ -87,7 +87,7 @@ class _TPHarness:
 
     def close(self) -> None:
         self.driver.shutdown()
-        assert [worker.result(timeout=2) for worker in self.workers] == [
+        assert [worker.result(timeout=10) for worker in self.workers] == [
             0
         ] * len(self.workers)
         self.pool.shutdown()
@@ -220,7 +220,7 @@ def test_tp_restore_cannot_publish_before_every_rank_finishes():
 
     def blocking_restore(keys, page_ids):  # noqa: ARG001 - synchronization probe
         entered.set()
-        if not release.wait(timeout=5):
+        if not release.wait(timeout=30):
             raise RuntimeError("test did not release the blocking restore")
         return True
 
@@ -229,10 +229,10 @@ def test_tp_restore_cannot_publish_before_every_rank_finishes():
     try:
         with ThreadPoolExecutor(max_workers=1) as calls:
             restored = calls.submit(harness.driver.restore, ("prefix",), (8,))
-            assert entered.wait(timeout=2)
+            assert entered.wait(timeout=10)
             assert restored.done() is False
             release.set()
-            assert restored.result(timeout=2) is True
+            assert restored.result(timeout=10) is True
     finally:
         release.set()
         harness.close()
@@ -248,7 +248,7 @@ class _BlockingStepRunner:
         assert self.entered is not None
         assert self.release_step is not None
         self.entered.set()
-        if not self.release_step.wait(timeout=5):
+        if not self.release_step.wait(timeout=30):
             raise RuntimeError("test did not release the blocking model step")
         return {scheduled[0].request_id: (17,)}
 
@@ -261,6 +261,32 @@ class _BlockingStepRunner:
 
     def adopt_sampling_token_packet(self, scheduled, states, packet):  # noqa: ARG002
         return None
+
+
+class _ContendedLock:
+    """Protocol-lock proxy that reports a caller which has to wait for it."""
+
+    def __init__(self, inner, contended: Event) -> None:
+        self._inner = inner
+        self._contended = contended
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._inner.locked():
+            self._contended.set()
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def locked(self) -> bool:
+        return self._inner.locked()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
 
 
 def _snapshot() -> RequestSnapshot:
@@ -280,25 +306,35 @@ def _snapshot() -> RequestSnapshot:
 def test_tp_kv_tier_transaction_does_not_intersect_a_model_step():
     step_entered = Event()
     release_step = Event()
-    tiers = (_FakeTier(), _FakeTier())
+    # Set once the offload has acted: it either queued behind the step's
+    # protocol lock or, were that serialization missing, reached the tier.
+    offload_acted = Event()
+
+    def acting_offload(keys, page_ids):  # noqa: ARG001 - synchronization probe
+        offload_acted.set()
+        return True
+
+    tiers = (_FakeTier(offload=acting_offload), _FakeTier())
     control = FakeCommunicator.create_group(2)
     runners = (
         _BlockingStepRunner(tiers[0], step_entered, release_step),
         _BlockingStepRunner(tiers[1], None, None),
     )
     driver = DistTPModelRunner(control[0], runners[0])
+    driver._protocol_lock = _ContendedLock(driver._protocol_lock, offload_acted)
     chunk = ScheduledChunk("request", 1, True, 0)
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         worker = pool.submit(worker_step_loop, control[1], runners[1])
         step = pool.submit(driver.execute, (chunk,), {"request": _snapshot()})
-        assert step_entered.wait(timeout=2)
+        assert step_entered.wait(timeout=10)
         offload = pool.submit(driver.offload, ("prefix",), (4,))
         try:
-            assert tiers[0].offload_entered.wait(timeout=0.1) is False
+            assert offload_acted.wait(timeout=10)
+            assert tiers[0].offload_entered.is_set() is False
         finally:
             release_step.set()
-        assert step.result(timeout=2) == {"request": (17,)}
-        assert offload.result(timeout=2) is True
+        assert step.result(timeout=10) == {"request": (17,)}
+        assert offload.result(timeout=10) is True
         driver.shutdown()
-        assert worker.result(timeout=2) == 1
+        assert worker.result(timeout=10) == 1
