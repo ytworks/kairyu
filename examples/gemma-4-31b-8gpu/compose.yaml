@@ -30,12 +30,14 @@ x-vllm-health: &vllm-health
 # chat template (Google's canonical Gemma 4 template, 2026-07-09), Gemma 4
 # tool and reasoning parsers, thinking on unless a request sends
 # `reasoning.effort: none`, the model's full 262,144-token context, images.
+# The weights are mounted at /checkpoint: the pinned download, or the edited
+# checkpoint named by CHAT_CHECKPOINT_DIR (README "Serving an edited checkpoint").
 x-gemma: &gemma
   image: ${VLLM_IMAGE}
   ipc: host
   environment: *vllm-env
   command:
-    - /models/gemma-4-31b-it
+    - /checkpoint
     - --served-model-name
     - gemma-4-31b
     - --max-model-len
@@ -104,6 +106,12 @@ x-models: &models
   target: /models
   read_only: true
 
+x-checkpoint: &checkpoint
+  type: bind
+  source: ${CHAT_CHECKPOINT_PATH}
+  target: /checkpoint
+  read_only: true
+
 x-cache: &cache
   type: bind
   source: ${CACHE_PATH}
@@ -113,22 +121,22 @@ services:
   gemma-0:
     <<: *gemma
     cpuset: ${GEMMA_0_CPUSET}
-    volumes: [*models, *cache]
+    volumes: [*models, *checkpoint, *cache]
     deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['0', '1'], capabilities: [gpu]}]}}}
   gemma-1:
     <<: *gemma
     cpuset: ${GEMMA_1_CPUSET}
-    volumes: [*models, *cache]
+    volumes: [*models, *checkpoint, *cache]
     deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['2', '3'], capabilities: [gpu]}]}}}
   gemma-2:
     <<: *gemma
     cpuset: ${GEMMA_2_CPUSET}
-    volumes: [*models, *cache]
+    volumes: [*models, *checkpoint, *cache]
     deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['4', '5'], capabilities: [gpu]}]}}}
   gemma-3:
     <<: *gemma
     cpuset: ${GEMMA_3_CPUSET}
-    volumes: [*models, *cache]
+    volumes: [*models, *checkpoint, *cache]
     deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['6', '7'], capabilities: [gpu]}]}}}
   embed-0:
     <<: *embed

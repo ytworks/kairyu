@@ -692,3 +692,13 @@ save it as a user does, and record a reply that delivers nothing as a model
 miss; `file-download` asks again in a new chat, at most three times per
 device. With these, all 17 gates pass.
 
+Edited-checkpoint amendment (2026-11-04, owner decision; plan
+`docs/superpowers/plans/2026-11-04-gemma-edited-checkpoint.md`): the example
+is the time reference of the owner's weight-space programming benchmark
+(kairyu-bench `wsp`), so `CHAT_CHECKPOINT_DIR` lets its four chat replicas
+load an edited Gemma 4 31B checkpoint below `/mnt/nvme` instead of the pinned
+one, with the layout, flags, served name, MTP assistant and embedding model
+unchanged. That directory's tree hash is computed with the attestation's
+algorithm and recorded in `chat-checkpoint.json` once the replicas serve.
+The setting is example-owned; `kairyu/` is unchanged.
+

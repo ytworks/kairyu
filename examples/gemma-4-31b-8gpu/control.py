@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import math
 import os
@@ -98,15 +99,33 @@ def _run(
     )
 
 
-def _nvme_root() -> Path:
-    configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
+def _below_nvme(value: str, variable: str) -> Path:
+    configured = Path(value)
     if not configured.is_absolute():
-        raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
+        raise SystemExit(f"{variable} must be an absolute path below /mnt/nvme")
     root = configured.resolve()
     nvme = Path("/mnt/nvme")
     if root != nvme and nvme not in root.parents:
-        raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
+        raise SystemExit(f"{variable} must be /mnt/nvme or one of its descendants")
     return root
+
+
+def _nvme_root() -> Path:
+    return _below_nvme(
+        os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]), "NVME_STORAGE_ROOT"
+    )
+
+
+def chat_checkpoint_override() -> Path | None:
+    """The edited chat checkpoint named by CHAT_CHECKPOINT_DIR, or None for the pinned one."""
+
+    configured = os.environ.get("CHAT_CHECKPOINT_DIR", "").strip()
+    if not configured:
+        return None
+    path = _below_nvme(configured, "CHAT_CHECKPOINT_DIR")
+    if not (path / "config.json").is_file() or not any(path.glob("*.safetensors")):
+        raise SystemExit(f"CHAT_CHECKPOINT_DIR {path} must hold config.json and safetensors")
+    return path
 
 
 def environment_storage() -> Path:
@@ -152,6 +171,11 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": PROJECT,
             "MODEL_STORAGE_PATH": str(paths["models"]),
+            # Every chat replica loads /checkpoint: the pinned download unless
+            # CHAT_CHECKPOINT_DIR names an edited checkpoint.
+            "CHAT_CHECKPOINT_PATH": str(
+                chat_checkpoint_override() or paths["models"] / SPEC["model"]["slug"]
+            ),
             "CACHE_PATH": str(paths["cache"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
@@ -491,14 +515,21 @@ def _attest_model(env: dict[str, str], volume: Path, model: dict, *extra: str) -
 
 
 CHECKPOINTS = (SPEC["model"], SPEC["drafter"], SPEC["embedding"])
+CHAT_CHECKPOINT_RECORD = "chat-checkpoint.json"
 
 
 def _ensure_models(env: dict[str, str]) -> None:
-    """The chat model, its MTP drafter and the embedding model, pinned and hashed."""
+    """The chat model, its MTP drafter and the embedding model, pinned and hashed.
+
+    An edited chat checkpoint (CHAT_CHECKPOINT_DIR) replaces only the chat
+    model; the drafter and the embedding model stay pinned.
+    """
 
     volume = Path(env["MODEL_STORAGE_PATH"])
+    edited = chat_checkpoint_override() is not None
+    checkpoints = [model for model in CHECKPOINTS if not (edited and model is SPEC["model"])]
     absent = [
-        model for model in CHECKPOINTS
+        model for model in checkpoints
         if not (volume / model["slug"] / ".kairyu-model-attestation.json").exists()
     ]
     if absent:
@@ -506,8 +537,63 @@ def _ensure_models(env: dict[str, str]) -> None:
         minimum = int(SPEC["storage"]["minimum_free_gib"])
         if free_gib < minimum:
             raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
-    for model in CHECKPOINTS:
+    for model in checkpoints:
         _attest_model(env, volume, model)
+
+
+def checkpoint_tree(path: Path) -> tuple[list[dict], str]:
+    """Files and tree hash of a checkpoint directory, computed as its attestation does."""
+
+    files = sorted(
+        file
+        for file in path.rglob("*")
+        if file.is_file()
+        and file != path / ".kairyu-model-attestation.json"
+        and ".cache" not in file.relative_to(path).parts
+    )
+
+    def digest(file: Path) -> str:
+        sha256 = hashlib.sha256()
+        with file.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        digests = list(pool.map(digest, files))
+    rows = [
+        {"path": str(file.relative_to(path)), "size": file.stat().st_size, "sha256": sha256}
+        for file, sha256 in zip(files, digests, strict=True)
+    ]
+    tree = hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return rows, tree
+
+
+def chat_checkpoint_record(env: dict[str, str]) -> dict:
+    """What the chat replicas serve: the pinned tree, or an edited checkpoint's own hash."""
+
+    edited = chat_checkpoint_override()
+    if edited is None:
+        model = SPEC["model"]
+        return {
+            "schema_version": 1,
+            "source": "pinned",
+            "path": env["CHAT_CHECKPOINT_PATH"],
+            "repo": model["repo"],
+            "revision": model["revision"],
+            "tree_sha256": model["tree_sha256"],
+        }
+    print(f"hashing the edited chat checkpoint {edited}", flush=True)
+    rows, tree = checkpoint_tree(edited)
+    return {
+        "schema_version": 1,
+        "source": "CHAT_CHECKPOINT_DIR",
+        "path": str(edited),
+        "tree_sha256": tree,
+        "files": rows,
+    }
 
 
 def _ensure_reranker(env: dict[str, str]) -> None:
@@ -1344,12 +1430,17 @@ def up() -> None:
     _ensure_vllm_image(env)
     _ensure_models(env)
     _ensure_reranker(env)
+    # The record names the served chat weights only once they serve.
+    record_path = environment_storage() / CHAT_CHECKPOINT_RECORD
+    record_path.unlink(missing_ok=True)
+    record = chat_checkpoint_record(env)
     _run(
         _compose_command(["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"]),
         env=env,
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_serving(api_url)
+    record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     provision_chat_ui(chat_ui_local_url(env))
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1 (chat {CHAT_MODEL}, embeddings {EMBED_MODEL})")
@@ -1358,6 +1449,7 @@ def up() -> None:
         f"Chat model: {CHAT_MODEL} ({len(CHAT_SERVICES)} TP{CHAT_TP} replicas; text + image "
         f"input; thinking on); embeddings: {EMBED_MODEL} ({len(EMBED_SERVICES)} replicas)"
     )
+    print(f"Chat weights: {record['path']} ({record['source']}, tree {record['tree_sha256']})")
     print(
         "Thinking: Chat Controls -> Valves -> Thinking "
         f"({'/'.join(CHAT_UI_EFFORT_LEVELS)}; none turns it off)"
