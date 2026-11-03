@@ -302,7 +302,7 @@ def _publish_under_fixed_lock(
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         ready.set()
-        if not release.wait(timeout=10):
+        if not release.wait(timeout=60):
             raise RuntimeError("test did not release history writer")
         (root / history.INDEX_NAME).write_bytes(raw)
     finally:
@@ -1784,7 +1784,9 @@ def test_concurrent_processes_append_complete_unique_records(tmp_path):
     assert len({entry["record_sha256"] for entry in entries}) == 8
 
 
-def test_reader_waits_on_existing_lock_before_concluding_index_is_empty(tmp_path):
+def test_reader_waits_on_existing_lock_before_concluding_index_is_empty(
+    tmp_path, monkeypatch
+):
     metadata = _metadata()
     entry = history.build_entry(
         _scoreboard(metadata), metadata, pairs=(_pair(metadata),), previous_record_sha256=None
@@ -1798,21 +1800,34 @@ def test_reader_waits_on_existing_lock_before_concluding_index_is_empty(tmp_path
         args=(str(tmp_path), raw, ready, release),
     )
     process.start()
-    assert ready.wait(timeout=5)
+    assert ready.wait(timeout=10)
 
+    # The writer publishes the index only after release, so the reader must be
+    # at the lock (or already finished) before release: a reader that did not
+    # wait on the lock then concludes the index is empty.
+    reader_progressed = threading.Event()
+    real_flock = fcntl.flock
+
+    def observed_flock(descriptor: int, operation: int) -> None:
+        if operation & fcntl.LOCK_SH:
+            reader_progressed.set()
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(history.fcntl, "flock", observed_flock)
     loaded: list[tuple[dict, ...]] = []
-    done = threading.Event()
 
     def load() -> None:
-        loaded.append(ResultStore(tmp_path, "reader").load_scoreboard_index())
-        done.set()
+        try:
+            loaded.append(ResultStore(tmp_path, "reader").load_scoreboard_index())
+        finally:
+            reader_progressed.set()
 
     thread = threading.Thread(target=load)
     thread.start()
-    assert not done.wait(timeout=0.1)
+    assert reader_progressed.wait(timeout=10)
     release.set()
-    thread.join(timeout=5)
-    process.join(timeout=5)
+    thread.join(timeout=10)
+    process.join(timeout=10)
 
     assert process.exitcode == 0
     assert not thread.is_alive()
