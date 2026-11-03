@@ -313,6 +313,8 @@ async function downloadMain() {
 	await step('desktop: after a reload the same link saves the same file', async () => {
 		await page.reload({ waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
 		await page.locator('ul[role="log"] [role="listitem"]').first().waitFor({ timeout: navigationTimeoutMs });
+		// The reloaded page opens Open WebUI's "what's new" dialog again.
+		await dismissNotices();
 		const again = await downloadFromReply(lastReply(), 'desktop-after-reload.xlsx');
 		invariant(again === href, `the link changed after the reload: ${href} -> ${again}`);
 	});
