@@ -7,7 +7,7 @@ implementation (plan `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example
 
 | Item | Value |
 |---|---|
-| vLLM | `vllm/vllm-openai:v0.33.0@sha256:d825baf9…84c6e` (fallback v0.32.0 `@sha256:befccf0e…5b34`) |
+| vLLM | overlay `local/vllm-openai:gemma-4-31b-8gpu-v0.33.0` (`vllm-sm120.Dockerfile`, one edit) on `vllm/vllm-openai:v0.33.0@sha256:d825baf9…84c6e`; fallback the same overlay on v0.32.0 `@sha256:befccf0e…5b34` |
 | Chat checkpoint | `google/gemma-4-31B-it@842da379`, tree `cab440f8…ccbd9` |
 | MTP assistant | `google/gemma-4-31B-it-assistant@627c5ec1`, tree `bb22c750…d5556` |
 | Embedding checkpoint | `google/embeddinggemma-2@f9972ac2`, tree `287cbbd3…03661` |

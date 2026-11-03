@@ -666,3 +666,14 @@ L1 uses the checkpoint's own chat template (Google's canonical Gemma 4 template)
 with thinking on by default; FP8 KV and third-party quantized checkpoints are
 excluded because they trade quality.
 
+GPU-stage finding (2026-11-04): stock vLLM v0.33.0 and v0.32.0 cannot start
+EmbeddingGemma 2 on SM120. Its Triton encoder attention uses 128-row tiles,
+which need 160 KiB of shared memory for 256-dimensional heads, and an RTX PRO
+6000 offers 99 KiB per block (`FLEX_ATTENTION` fails on CUDA-graph reuse, and
+`FLASHINFER` has no encoder-only attention). As the plan allowed ("an SM120
+overlay only if needed"), the example owns a one-edit overlay
+(`vllm-sm120.Dockerfile`, `patch_sm120.py`) that uses 64-row tiles for those
+heads on GPUs with less than 160 KiB of shared memory per block; the build
+fails if the patched source or the vLLM version differs. Chat replicas use the
+unified Triton kernel and run the same overlay image unchanged.
+

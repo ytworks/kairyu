@@ -1,7 +1,7 @@
 # Gemma 4 31B with EmbeddingGemma 2 on eight RTX PRO 6000 GPUs
 
 `google/gemma-4-31B-it` chat replicas and `google/embeddinggemma-2` embedding
-replicas on stock vLLM, behind Kairyu, with the Chat UI of the 1017 eight-GPU
+replicas on vLLM (the pinned v0.33.0 release with one SM120 edit), behind Kairyu, with the Chat UI of the 1017 eight-GPU
 example: Japanese OCR knowledge bases, Word / Excel / PowerPoint, download
 links, images, tools and a thinking selector.
 
@@ -94,6 +94,15 @@ Kairyu's `/v1/responses` passes `reasoning.effort: none` to an engine or
 pool model as thinking off (m11 D4 Responses thinking-off amendment,
 2026-11-03); chat-completions callers turn thinking off with
 `chat_template_kwargs: {"enable_thinking": false}`.
+
+vLLM is the pinned v0.33.0 release (by digest) with one edit,
+`vllm-sm120.Dockerfile` / `patch_sm120.py`, built by `run.sh up` when absent:
+vLLM's Triton encoder attention, which runs EmbeddingGemma 2's bidirectional
+layers, uses 128-row tiles that need 160 KiB of shared memory for its
+256-dimensional heads, while an RTX PRO 6000 (SM120) offers 99 KiB per block,
+so stock vLLM v0.33.0 and v0.32.0 cannot start EmbeddingGemma 2 on these GPUs.
+The edit uses 64-row tiles there; the build fails if the patched source
+changes. Gemma 4 chat uses a different kernel and is unaffected.
 
 Kairyu sends each request to vLLM in its caller's API (`upstream_chat_models`,
 `upstream_responses_models`, `upstream_messages_models`). vLLM renders the

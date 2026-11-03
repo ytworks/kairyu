@@ -385,15 +385,30 @@ def _image_present(image: str) -> bool:
 
 
 def _ensure_vllm_image(env: dict[str, str]) -> None:
-    """Pull the pinned upstream vLLM release (by digest) when it is absent."""
+    """Build this example's SM120 overlay on its pinned upstream release when absent."""
 
     image = env["VLLM_IMAGE"]
-    pinned = {SPEC["vllm"]["image"], SPEC["vllm"]["fallback_image"]}
-    if image not in pinned:
-        raise SystemExit(f"VLLM_IMAGE must be one of the pinned releases {sorted(pinned)!r}")
+    bases = {
+        SPEC["vllm"]["image"]: SPEC["vllm"]["base_image"],
+        SPEC["vllm"]["fallback_image"]: SPEC["vllm"]["fallback_base_image"],
+    }
+    if image not in bases:
+        raise SystemExit(f"VLLM_IMAGE must be one of this example's overlays {sorted(bases)!r}")
     if not _image_present(image):
-        print("vLLM image is absent; pulling the pinned upstream release", flush=True)
-        _run(["docker", "pull", image])
+        print("vLLM image is absent; building this example's SM120 overlay", flush=True)
+        _run(
+            [
+                "docker",
+                "build",
+                "--file",
+                str(HERE / SPEC["vllm"]["dockerfile"]),
+                "--build-arg",
+                f"VLLM_BASE_IMAGE={bases[image]}",
+                "--tag",
+                image,
+                str(HERE),
+            ]
+        )
 
 
 _MODEL_PROGRAM = r"""

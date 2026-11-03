@@ -76,11 +76,14 @@
     }
   },
   "vllm": {
-    "image": "vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e",
-    "distribution": "upstream",
+    "image": "local/vllm-openai:gemma-4-31b-8gpu-v0.33.0",
+    "base_image": "vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e",
+    "distribution": "overlay",
+    "dockerfile": "vllm-sm120.Dockerfile",
     "release": "v0.33.0",
     "source_repository": "https://github.com/vllm-project/vllm",
-    "fallback_image": "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
+    "fallback_image": "local/vllm-openai:gemma-4-31b-8gpu-v0.32.0",
+    "fallback_base_image": "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
     "tool_call_parser": "gemma4",
     "reasoning_parser": "gemma4",
     "chat_template": "checkpoint",
