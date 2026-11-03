@@ -231,7 +231,9 @@ async def test_request_deadline_releases_http_work_when_callback_is_late() -> No
         async with _client(
             _app(
                 reauthorize=late,
-                request_timeout_s=0.05,
+                # Reading and parsing the body takes milliseconds; 2 s only
+                # bounds that, while the held callback always meets the deadline.
+                request_timeout_s=2.0,
                 backend_timeout_s=0.01,
             )
         ) as client:

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import kairyu.async_requests.worker as worker_module
 from kairyu.async_requests import (
     AsyncRequestError,
     AsyncRequestState,
@@ -1441,19 +1442,33 @@ class _HeldBackend(MockBackend):
         return await super().generate(request)
 
 
-async def test_async_worker_renews_and_publishes_through_postgres(store_factory) -> None:
+class _ImmediateSleepAsyncio:
+    """The worker's asyncio with ``sleep`` reduced to a yield (clock stays real)."""
+
+    @staticmethod
+    async def sleep(delay: float, result=None):
+        await asyncio.sleep(0)
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+
+async def test_async_worker_renews_and_publishes_through_postgres(
+    store_factory, monkeypatch
+) -> None:
     create, _store_id = store_factory
     store = create()
     # Inference is held until a lease renewal has landed in PostgreSQL, so the
     # result publishes after a renewal instead of after a fixed delay. The
-    # lease still expires on the database clock and the worker renews on its
-    # own loop clock at lease / 3; a 3 s lease leaves 2 s for one renewal
-    # round trip (neither clock has an injection point).
+    # worker's heartbeat sleeps yield at once, so a renewal follows the claim
+    # immediately, and a 60 s lease on the database clock only bounds a hang.
+    monkeypatch.setattr(worker_module, "asyncio", _ImmediateSleepAsyncio())
     backend = _HeldBackend(responses={"hello": "postgres result"})
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
-        lease_seconds=3.0,
+        lease_seconds=60.0,
         legacy_chat_models={"m"},
     )
     request = store.submit(
