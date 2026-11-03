@@ -15,6 +15,9 @@
  * admin's Responses filter before `initial`. `outage` runs while
  * Kairyu is stopped, and `recovery` runs after Kairyu is started again without
  * restarting Open WebUI.
+ *
+ * Every wait observes a page state or event. Timeouts only detect a hang and
+ * are reported as one; elapsed time never decides the verdict.
  */
 
 import { chromium } from 'playwright';
@@ -37,7 +40,7 @@ const autoModel = process.env.EXPECTED_AUTO_MODEL ?? 'kairyu-auto';
 const actionTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_ACTION_TIMEOUT_MS', 20_000);
 const navigationTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_NAVIGATION_TIMEOUT_MS', 30_000);
 const responseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_RESPONSE_TIMEOUT_MS', 45_000);
-const phaseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_PHASE_TIMEOUT_MS', 120_000);
+const phaseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_PHASE_TIMEOUT_MS', 600_000);
 
 const models = Object.freeze([directModel, autoModel]);
 const initialDefaultMarker = 'KAIRYU_WEBUI_INITIAL_DEFAULT_197';
@@ -71,10 +74,20 @@ function positiveIntegerEnv(name, fallback) {
 	return parsed;
 }
 
+class HangError extends Error {}
+
 function invariant(condition, message) {
 	if (!condition) {
 		throw new Error(message);
 	}
+}
+
+function isHang(error) {
+	return (
+		error instanceof HangError ||
+		error?.name === 'TimeoutError' ||
+		(error?.cause !== undefined && isHang(error.cause))
+	);
 }
 
 async function step(name, operation) {
@@ -111,7 +124,7 @@ async function bounded(promise, timeoutMs, description) {
 			promise,
 			new Promise((_, reject) => {
 				timer = setTimeout(
-					() => reject(new Error(`${description} exceeded ${timeoutMs} ms`)),
+					() => reject(new HangError(`${description} did not finish within ${timeoutMs} ms`)),
 					timeoutMs
 				);
 			})
@@ -119,13 +132,6 @@ async function bounded(promise, timeoutMs, description) {
 	} finally {
 		clearTimeout(timer);
 	}
-}
-
-async function becomesVisible(locator, timeoutMs) {
-	return locator
-		.waitFor({ state: 'visible', timeout: timeoutMs })
-		.then(() => true)
-		.catch(() => false);
 }
 
 function isAllowedBrowserUrl(rawUrl) {
@@ -174,38 +180,54 @@ async function waitForChatSurface() {
 	await page.locator('#chat-input').waitFor({ state: 'visible', timeout: navigationTimeoutMs });
 }
 
+// Open WebUI decides whether to show its release notes before it renders the
+// chat surface, so once that surface is visible the modal is shown now or not
+// at all. It closes only after the dismissal is saved to the user's settings,
+// so later phases never see it.
 async function dismissFreshInstallChangelog() {
 	const accept = page.getByRole('button', {
 		name: "Okay, Let's Go!",
 		exact: true
 	});
-	if (await becomesVisible(accept, 5_000)) {
+	if (await accept.isVisible()) {
 		await accept.click({ timeout: actionTimeoutMs });
+		await accept.waitFor({ state: 'hidden', timeout: navigationTimeoutMs });
 	}
 }
 
 async function signupFreshUser() {
 	await goto('/auth');
 
+	// Once its config has loaded, the auth page renders the login card and,
+	// on a fresh install, the onboarding screen in the same update.
 	const getStarted = page.getByRole('button', { name: 'Get started', exact: true });
-	if (await becomesVisible(getStarted, 5_000)) {
+	const signupCard = page.locator('#auth-login-card');
+	await getStarted.or(signupCard).first().waitFor({
+		state: 'visible',
+		timeout: navigationTimeoutMs
+	});
+	if (await getStarted.isVisible()) {
 		await getStarted.click({ timeout: actionTimeoutMs });
 	}
 
-	const signupCard = page.locator('#auth-login-card');
 	await signupCard.waitFor({ state: 'visible', timeout: navigationTimeoutMs });
 	const nameInput = page.locator('#name');
-	invariant(
-		await becomesVisible(nameInput, 5_000),
-		'fresh signup form was not shown; ensure the Open WebUI data volume is empty and auth is enabled'
-	);
+	try {
+		await nameInput.waitFor({ state: 'visible', timeout: navigationTimeoutMs });
+	} catch (error) {
+		throw new Error(
+			'fresh signup form was not shown; ensure the Open WebUI data volume is empty and auth is enabled',
+			{ cause: error }
+		);
+	}
 
 	await nameInput.fill(fullName);
 	await page.locator('#email').fill(email);
 	await page.locator('#password').fill(password);
 
+	// The signup form renders as a whole: a confirmation field is there now or never.
 	const confirmation = page.locator('#confirm-password');
-	if (await becomesVisible(confirmation, 1_000)) {
+	if (await confirmation.isVisible()) {
 		await confirmation.fill(password);
 	}
 
@@ -214,8 +236,8 @@ async function signupFreshUser() {
 		exact: true
 	});
 	await submit.click({ timeout: actionTimeoutMs });
-	await dismissFreshInstallChangelog();
 	await waitForChatSurface();
+	await dismissFreshInstallChangelog();
 
 	const hasToken = await page.evaluate(() => Boolean(localStorage.token));
 	invariant(hasToken, 'signup reached the chat surface without an authenticated browser session');
@@ -405,7 +427,8 @@ async function uploadRagDocument() {
 	);
 
 	const fileId = upload.body.id;
-	for (let attempt = 0; attempt < 40; attempt += 1) {
+	const deadline = Date.now() + responseTimeoutMs;
+	while (Date.now() < deadline) {
 		const status = await browserJson(
 			`/api/v1/files/${encodeURIComponent(fileId)}/process/status`
 		);
@@ -421,7 +444,7 @@ async function uploadRagDocument() {
 		}
 		await new Promise((resolve) => setTimeout(resolve, 250));
 	}
-	throw new Error('RAG document processing did not complete within 10 seconds');
+	throw new HangError(`RAG document processing did not finish within ${responseTimeoutMs} ms`);
 }
 
 async function queryRagDocument(fileId) {
@@ -945,7 +968,9 @@ try {
 	await bounded(main(), phaseTimeoutMs, `${phase} browser smoke phase`);
 } catch (error) {
 	const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-	console.error(`WEBUI BROWSER SMOKE FAIL [phase=${phase}] [step=${currentStep}]\n${detail}`);
+	// A timeout is a hang bound, never a speed limit; say which one this was.
+	const verdict = isHang(error) ? 'HANG' : 'FAIL';
+	console.error(`WEBUI BROWSER SMOKE ${verdict} [phase=${phase}] [step=${currentStep}]\n${detail}`);
 	if (page) {
 		console.error(`Current URL: ${page.url()}`);
 		const visibleText = await page

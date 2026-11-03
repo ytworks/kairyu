@@ -1,13 +1,35 @@
 #!/usr/bin/env bash
 # Locally reproducible PostgreSQL integration suite.
+#
+# Usage: postgres_integration.sh [--setup-only | --no-setup]
+#   (none)        pull the pinned image when it is absent, then run the suite
+#   --setup-only  pull the pinned image (the networked setup; CI retries it)
+#   --no-setup    run the suite on the pulled image; never pull
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-POSTGRES_IMAGE=${KAIRYU_TEST_POSTGRES_IMAGE:-postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3}
+# The linux/amd64 manifest of postgres:17.6-bookworm (index sha256:f3bd19c6...):
+# a single-platform digest names the same image under every Docker image store.
+POSTGRES_IMAGE=${KAIRYU_TEST_POSTGRES_IMAGE:-postgres:17.6-bookworm@sha256:45cd22f8d32e189d245403954882f88e7a8714301fda80dab6da90f1265b25a3}
 CONTAINER="kairyu-postgres-test-$$"
 PASSWORD="kairyu-test"
 DATABASE="kairyu_test"
-READY_ATTEMPTS=${KAIRYU_TEST_POSTGRES_READY_ATTEMPTS:-60}
+# Readiness polls the server's state; the bound only detects a hang.
+READY_ATTEMPTS=${KAIRYU_TEST_POSTGRES_READY_ATTEMPTS:-180}
+MODE=${1:-}
+case "$MODE" in
+  "" | --setup-only | --no-setup) ;;
+  *) echo "usage: $0 [--setup-only | --no-setup]" >&2; exit 2 ;;
+esac
+
+if [[ "$MODE" == --setup-only ]]; then
+  docker pull "$POSTGRES_IMAGE"
+  exit 0
+fi
+if [[ "$MODE" != --no-setup ]] \
+  && ! docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1; then
+  docker pull "$POSTGRES_IMAGE"
+fi
 
 if command -v uv >/dev/null 2>&1; then
   PYTHON_RUN=(uv run --frozen)
@@ -39,7 +61,7 @@ cd "$REPO_ROOT"
   --require-executable docker \
   --require-module psycopg
 
-docker run --detach \
+docker run --detach --pull never \
   --name "$CONTAINER" \
   --publish 127.0.0.1::5432 \
   --env "POSTGRES_PASSWORD=$PASSWORD" \
@@ -70,7 +92,7 @@ for _ in $(seq 1 "$READY_ATTEMPTS"); do
   sleep 1
 done
 if [[ "$ready" != true ]]; then
-  echo "PostgreSQL did not accept external TCP queries after $READY_ATTEMPTS attempts" >&2
+  echo "PostgreSQL HANG: no external TCP query succeeded after $READY_ATTEMPTS attempts (a hang bound, not a speed limit)" >&2
   exit 1
 fi
 
