@@ -1,4 +1,11 @@
-"""Measure RuleRouter latency (p50/p99). Prints only measured values.
+"""Measure RuleRouter and LearnedRouter latency (p50/p99) and count their routing work.
+
+Latency percentiles are diagnostics.  The verdict is deterministic: before
+and after the measured routes it routes the fixed queries once more and counts
+the Python and C calls made (feature candidates, keywords, and markers each
+cost calls) plus every hash or comparison of the query itself, and checks that
+the work per route stays within a fixed budget and does not grow with the
+number of routes already served.
 
 Run: uv run python verification/orchestration/performance/router_latency.py
 """
@@ -7,20 +14,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import statistics
+import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
+from kairyu.orchestration.features import extract_features
+from kairyu.orchestration.learning.classifier import LearnedRouter, train_model
+from kairyu.orchestration.learning.dataset import LabeledExample
 from kairyu.orchestration.router import RuleRouter
 
 N_ROUTES = 10_000
-P99_BUDGET_SECONDS = 0.010
 QUERIES = (
     "What is the capital of France?",
     "Prove the theorem and explain your reasoning step by step.",
     "Fix this bug:\n```python\nx = [\n```\nwhy?",
     "First, research options. Then design. After that, implement. Finally, verify. " * 5,
 )
+WORK_UNIT = "Python and C calls plus query hashes and comparisons while routing"
+# Rule routing is a few dozen calls per query; a model, tokenizer, or remote
+# call in the hot path costs far more than this budget.
+MAX_CALLS_PER_ROUTE = 1_000
+# The router keeps no growing state, so per-route work must not grow with the
+# number of routes served.
+MAX_WORK_GROWTH = 2.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,31 +57,120 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--assert-gate",
         action="store_true",
-        help="exit nonzero when the p99 budget is exceeded",
+        help="exit nonzero when a deterministic work check fails",
     )
     return parser
 
 
-def measure(routes: int) -> dict[str, float | int | bool]:
+class _WorkCounter:
+    count = 0
+
+
+class _CountedQuery(str):
+    """Query whose hashing and comparisons are counted."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        _WorkCounter.count += 1
+        return str.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        _WorkCounter.count += 1
+        return str.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        _WorkCounter.count += 1
+        return str.__ne__(self, other)
+
+
+def _count_work(fn: Callable[[], object]) -> int:
+    def profile(_frame, event: str, _arg) -> None:
+        if event in ("call", "c_call"):
+            _WorkCounter.count += 1
+
+    _WorkCounter.count = 0
+    sys.setprofile(profile)
+    try:
+        fn()
+    finally:
+        sys.setprofile(None)
+    return _WorkCounter.count
+
+
+def _route_queries(router: RuleRouter | LearnedRouter) -> int:
+    queries = [_CountedQuery(query) for query in QUERIES]
+    return _count_work(lambda: [router.route(query) for query in queries])
+
+
+def _learned_router() -> LearnedRouter:
+    """A LearnedRouter trained on a fixed synthetic set (seeded, deterministic)."""
+    rng = random.Random(7)
+    examples = []
+    for index in range(300):
+        kind = rng.choice(["short", "code", "multi"])
+        if kind == "short":
+            query, label = f"What is {index}?", "tier1"
+        elif kind == "code":
+            query, label = f"Fix bug {index}:\n```python\nx = {index}\n```\nwhy?", "tier2"
+        else:
+            query, label = (
+                f"First, research topic {index}. Then design. After that, build. "
+                "Finally verify.",
+                "multi_agent",
+            )
+        examples.append(
+            LabeledExample(
+                query_hash=str(index),
+                features=extract_features(query).as_dict(),
+                label=label,
+            )
+        )
+    return LearnedRouter(model=train_model(examples, epochs=50, seed=3), fallback=RuleRouter())
+
+
+def measure(routes: int) -> dict[str, object]:
+    """RuleRouter at the top level (as before) plus the LearnedRouter under ``learned``."""
+    rule = measure_router(RuleRouter(), routes)
+    learned = measure_router(_learned_router(), routes)
+    return {**rule, "learned": learned, "passed": bool(rule["passed"] and learned["passed"])}
+
+
+def measure_router(router: RuleRouter | LearnedRouter, routes: int) -> dict[str, object]:
     if routes < 1:
         raise ValueError("routes must be at least 1")
 
-    router = RuleRouter()
+    first = _route_queries(router)
     durations = []
     for index in range(routes):
         query = QUERIES[index % len(QUERIES)]
         start = time.perf_counter()
         router.route(query)
         durations.append(time.perf_counter() - start)
+    last = _route_queries(router)
     durations.sort()
-    p50 = statistics.median(durations)
-    p99 = durations[int(len(durations) * 0.99)]
+    queries = len(QUERIES)
+    first_per_route = first / queries
+    last_per_route = last / queries
     return {
         "routes": routes,
-        "p50_seconds": p50,
-        "p99_seconds": p99,
-        "p99_budget_seconds": P99_BUDGET_SECONDS,
-        "passed": p99 < P99_BUDGET_SECONDS,
+        "p50_seconds": statistics.median(durations),
+        "p99_seconds": durations[int(len(durations) * 0.99)],
+        "work": {
+            "unit": WORK_UNIT,
+            "routes_served": {
+                "sizes": [0, routes],
+                "operations": [queries, queries],
+                "work": [first, last],
+            },
+        },
+        "max_calls_per_route": MAX_CALLS_PER_ROUTE,
+        "max_work_growth": MAX_WORK_GROWTH,
+        "passed": (
+            0 < first_per_route <= MAX_CALLS_PER_ROUTE
+            and last_per_route <= MAX_CALLS_PER_ROUTE
+            and last_per_route <= MAX_WORK_GROWTH * first_per_route
+        ),
     }
 
 
@@ -79,13 +186,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         p50 = float(result["p50_seconds"])
         p99 = float(result["p99_seconds"])
+        first, last = result["work"]["routes_served"]["work"]
         print(f"routes={args.routes}")
         print(
             f"router latency p50={p50 * 1e6:.1f}us "
-            f"p99={p99 * 1e6:.1f}us"
+            f"p99={p99 * 1e6:.1f}us (diagnostic)"
+        )
+        print(
+            f"work for {len(QUERIES)} routes: first={first} last={last}"
+        )
+        learned = result["learned"]
+        learned_first, learned_last = learned["work"]["routes_served"]["work"]
+        print(
+            f"learned router latency p50={float(learned['p50_seconds']) * 1e6:.1f}us "
+            f"p99={float(learned['p99_seconds']) * 1e6:.1f}us (diagnostic)"
+        )
+        print(
+            f"learned work for {len(QUERIES)} routes: "
+            f"first={learned_first} last={learned_last}"
         )
         verdict = "OK" if result["passed"] else "VIOLATED"
-        print(f"budget: p99 < 10ms -> {verdict}")
+        print(
+            f"work: <= {MAX_CALLS_PER_ROUTE} calls per route and growth <= "
+            f"{MAX_WORK_GROWTH} -> {verdict}"
+        )
     return int(args.assert_gate and not result["passed"])
 
 

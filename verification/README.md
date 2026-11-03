@@ -76,7 +76,7 @@ historical paths and bytes. `bench/results/index.json` remains the discovery
 catalog, and `scripts/verify_bench_results_index.py` validates it against
 tracked files. New runtime outputs under `verification/results/` are ignored.
 
-### CPU microbenchmark CI smoke gate
+### CPU microbenchmark CI gate
 
 Pull requests run six source-checkout-only CPU benchmarks in one dedicated
 Python 3.12 job:
@@ -87,83 +87,78 @@ uv run --frozen python scripts/cpu_microbench_gate.py \
 ```
 
 The runner executes scheduler queue, radix eviction, operation queue, sampler
-penalty-state, process-wire, and router-latency measurements sequentially with
-CUDA hidden and native math thread pools fixed to one. Optimized/legacy ratios
-are measured within the same child process. The deliberately loose checks catch
-large regressions while tolerating shared-runner frequency and scheduling
-variance: scheduler speedups must remain at least 2.0x/10x/0.90x, radix
-eviction at least 100x, operation-queue throughput at least 0.50x with exact
-coalesced container/ID counts, and both sampler legacy
-speedups at least 5x. The deterministic process-wire gate retains its own byte
-growth contract, and router p99 remains strictly below 10 ms.
+penalty-state, process-wire, and router-latency benchmarks once each, in order,
+with CUDA hidden and native math thread pools fixed to one. The verdict depends
+only on the code under test. Each benchmark counts its work deterministically
+at two sizes eight times apart: waiting-store primitives and request-ID and
+priority-key comparisons (scheduler FIFO drain, indexed removal, priority
+drain), children-map and eviction-index accesses and LRU-stamp comparisons per
+eviction (radix), operation-queue primitives and request-ID hashes per producer
+operation (operation queue), and output-history tokens read per step for
+unchanged and appended history (sampler). Work per operation must be observed
+and may at most double across the eightfold size step, so constant or
+logarithmic work passes and linear work fails. The router must stay within
+1,000 Python and C calls plus query comparisons per route and must not grow
+its work over 10,000 routes. Exact workload, coalesced container/ID counts,
+bitwise sampler equality, and the process-wire byte growth contract remain
+binding.
 
-The JSON report is a short-lived CI diagnostic, not formal benchmark evidence.
-Absolute timings and the profiled runner must not be used to claim a product
-speedup; reproduce any suspected regression on the owning benchmark before
-changing production behavior or a formal performance gate.
+Speed ratios, absolute timings, router p50/p99, and each benchmark's elapsed
+time are recorded under `diagnostics` and never decide pass/fail. One 420 s
+bound covers all benchmarks; it only detects a hang, which the report names as
+a hang (later benchmarks are reported as not run). The JSON report is a
+short-lived CI diagnostic, not formal benchmark evidence; reproduce any
+suspected speed regression on the owning benchmark before changing production
+behavior or a formal performance gate.
 
 ### Nightly CPU performance series
 
 The main-only `.github/workflows/nightly-cpu-perf.yml` workflow reuses the
 same `scripts/cpu_microbench_gate.py` report once per night and on explicit
-manual dispatch.  It adds a cross-run smoke alarm without turning shared
-GitHub-hosted runner timings into formal performance evidence.  Only these
-eight higher-is-better, same-process ratios are hard-alert metrics:
+manual dispatch. Its verdict is that report's deterministic gate (the
+operation counts and fixed workload above). On top, it keeps a speed trend for
+the eight higher-is-better, same-process ratios (scheduler FIFO-drain,
+indexed-removal, and priority-drain speedups; radix-eviction speedup;
+operation-queue add and abort elapsed-time speedups; sampler legacy and
+append-legacy speedups). The trend is a report that never fails the run.
 
-- scheduler FIFO-drain, indexed-removal, and priority-drain speedups;
-- radix-eviction speedup;
-- operation-queue add and abort elapsed-time speedups; and
-- sampler legacy and append-legacy speedups.
-
-For each metric, the current observation is compared with the median of at
+For each ratio, the current observation is compared with the median of at
 most the seven most recent preceding records anywhere in the chain with its
-exact compatibility fingerprint.  Intervening incompatible records are
-ignored, and the current observation is never part of its own baseline.  Five
-preceding compatible records are required; an unseen or younger fingerprint
-is reported as warmup and cannot raise a cross-run regression alert.  Returning
-to an exact prior fingerprint resumes its prior compatible history.  A hard
-alert occurs when the current value is at least 15% below that trailing median.
-Absolute legacy and optimized timings, router p50/p99, process-wire sizes and
-growth, and all other report fields remain report-only for the cross-run
-trailing-median comparison.  They can still fail the unchanged issue-#378
-same-run source gate and keep the workflow red.  A nightly alert must be
-reproduced on the owning benchmark before it supports a product-performance
-claim or a threshold change.
+exact compatibility fingerprint. Intervening incompatible records are
+ignored, and the current observation is never part of its own baseline. With
+fewer than five preceding compatible records the ratio is reported as warmup.
+A ratio at least 15% below that trailing median is listed under `declines` in
+`comparison.json`. A decline is a prompt to reproduce the owning benchmark,
+not a verdict and not a performance conclusion.
 
 Compatibility segmentation binds the report/methodology schema, benchmark
 inventory and fixed arguments, CPU-only environment controls, Python
 implementation and major/minor version, runner operating-system, architecture,
-and hosted-image class, metric paths and directions, and the comparator policy
-(15%, seven, and five).  A previously unseen methodology or runtime-class
+and hosted-image class, metric paths and directions, and the trend policy
+(15%, seven, and five). A previously unseen methodology or runtime-class
 fingerprint therefore starts a new warmup segment.
 The measured source commit is provenance, not compatibility: including it in
 the segment key would prevent comparison across main commits.
 
-Every completed record uploads `report.json`, `series.jsonl`, and
-`comparison.json` from a directory under `RUNNER_TEMP`, with 90-day retention;
-an earlier infrastructure/input failure can retain only the files it safely
-produced and is never a history candidate.  The canonical JSONL series is
-append-only and SHA-256 chained.  Recovery scans this workflow's
-completed main-branch artifacts newest first, including artifacts from runs
-whose regression-enforcement step failed.  Expired, incomplete, malformed,
-non-finite, duplicate, non-canonical, or hash-chain-invalid candidates are
-skipped in full; they are never truncated into an apparently valid baseline.
-Only an authoritative empty artifact listing starts first-run warmup; if one
-or more eligible candidates exist but none validates, recovery fails closed
-instead of silently resetting the baseline.  Artifact-listing, attempt-metadata,
-and download transport failures also fail immediately.  The comparison command
-validates the existing report and writes the updated series and comparison
-before returning a regression status.  The workflow uploads those outputs
-together with the unchanged report using `always()` before propagating that
-status.
-If the reused issue-#378 absolute gate returns nonzero but emits a structurally
-valid report, the record is still appended with that source-gate outcome while
-the workflow remains red; dropping it would create a measurement blind spot.
-Only explicitly allowlisted performance failures receive that treatment.
-Fixed requests, repeats, benchmark configuration, protocol, shape, and
-structural-source mismatches are invalid and are not recorded.
-The seven-day pull-request reports produced by issue #378 do not seed this
-separate nightly chain.
+Every recorded run uploads `report.json`, `series.jsonl`, and
+`comparison.json` from a directory under `RUNNER_TEMP`, with 90-day retention.
+The canonical JSONL series is append-only and SHA-256 chained. Recovery scans
+this workflow's completed main-branch artifacts newest first, including
+artifacts from failed runs. Expired, incomplete, malformed, non-finite,
+duplicate, non-canonical, or hash-chain-invalid candidates are skipped in
+full; they are never truncated into an apparently valid baseline. An empty
+artifact listing starts a new chain. When history cannot be fetched or
+selected (artifact listing, attempt metadata, download, or selection fails),
+the run is a warm-up: `cpu_perf_series.py warmup` validates the report and
+writes `comparison.json` with `history: unavailable`, no series is written,
+and the artifact is therefore not a history candidate, so the next run
+continues the previous chain. The workflow uploads its outputs using
+`always()` before enforcing the gate verdict.
+If the gate fails a deterministic operation-count check but emits a
+structurally valid report, the record is still appended with that source-gate
+outcome while the workflow is red. Fixed requests, repeats, work sizes,
+benchmark configuration, protocol, shape, and structural-source mismatches are
+invalid and are not recorded.
 
 ### L1/L3 Responses equivalence
 

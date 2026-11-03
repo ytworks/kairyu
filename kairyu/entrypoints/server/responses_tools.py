@@ -242,6 +242,10 @@ def _reasoning_effort(reasoning: dict | None) -> str | None:
     if not reasoning:
         return None
     effort = reasoning.get("effort")
+    if effort == "none":
+        # Thinking off: Kairyu's internal effort, applied by the caller to a
+        # direct model only (m11 D4 Responses thinking-off amendment).
+        return "none"
     try:
         return normalize_reasoning_effort(effort)
     except ValueError:

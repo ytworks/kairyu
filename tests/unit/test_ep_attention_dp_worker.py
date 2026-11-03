@@ -257,7 +257,7 @@ def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(
 
         evidence = driver.attention_dp_ownership_metadata()
         driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [3, 3, 3]
+        assert [worker.result(timeout=10) for worker in workers] == [3, 3, 3]
 
     assert evidence["assignment_count"] == 6
     assert evidence["active_request_count"] == 4
@@ -335,8 +335,8 @@ def test_one_rank_fast_failure_rejects_on_every_rank_without_collective_skew(
     )
 
     world_size = 4
-    control = FakeCommunicator.create_group(world_size, timeout_s=1)
-    model = FakeCommunicator.create_group(world_size, timeout_s=1)
+    control = FakeCommunicator.create_group(world_size, timeout_s=10)
+    model = FakeCommunicator.create_group(world_size, timeout_s=10)
     protocol_events: list[list[str]] = [[] for _ in range(world_size)]
     for rank in range(world_size):
         original_packet_gather = model[rank].tensor_all_gather
@@ -409,7 +409,7 @@ def test_one_rank_fast_failure_rejects_on_every_rank_without_collective_skew(
                     "rank 2: local execution or token-packet encoding failed"
                 ),
             ):
-                worker.result(timeout=2)
+                worker.result(timeout=10)
 
     assert [communicator._gather_round for communicator in model] == [1] * 4
     # Graph preflight plus the failure-only bounded diagnostic gather.
@@ -435,8 +435,8 @@ def test_non_fast_sampling_retains_final_control_gather_with_rank_symmetry(
     )
 
     world_size = 4
-    control = FakeCommunicator.create_group(world_size, timeout_s=1)
-    model = FakeCommunicator.create_group(world_size, timeout_s=1)
+    control = FakeCommunicator.create_group(world_size, timeout_s=10)
+    model = FakeCommunicator.create_group(world_size, timeout_s=10)
     local = tuple(_AttentionDPRunner(rank) for rank in range(world_size))
     driver = worker_module.DistEPModelRunner(
         control[0],
@@ -470,7 +470,7 @@ def test_non_fast_sampling_retains_final_control_gather_with_rank_symmetry(
             {"logprobs": state},
         ) == {"logprobs": (SampledToken(0),)}
         driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [1, 1, 1]
+        assert [worker.result(timeout=10) for worker in workers] == [1, 1, 1]
 
     assert tuple(
         (control_comm._gather_round, model_comm._gather_round)
@@ -703,7 +703,7 @@ def test_attention_dp_startup_prepares_every_capture_forward_on_every_rank(
         assert driver.capture_decode_graphs(attention_dp=True) == (1, 2, 4, 8)
         assert driver.capture_decode_graphs(attention_dp=True) == (1, 2, 4, 8)
         driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [0, 0, 0]
+        assert [worker.result(timeout=10) for worker in workers] == [0, 0, 0]
 
     assert [runner._model.prepared for runner in local] == [
         [expected_layouts],
@@ -819,7 +819,7 @@ def test_attention_dp_rejects_live_graph_invalidation_until_shutdown() -> None:
         assert not control[0]._group.broadcasts.get(0)
 
         driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [0, 0, 0]
+        assert [worker.result(timeout=10) for worker in workers] == [0, 0, 0]
 
     driver.invalidate_graphs()
     assert local[0].graph_invalidations == 1

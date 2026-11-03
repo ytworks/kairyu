@@ -51,6 +51,7 @@ jobs:
           CANDIDATE_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/candidates
           DOWNLOAD_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/downloads
           HISTORY: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history.jsonl
+          RESET_NOTE: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history-reset.json
         run: |
           set -euo pipefail
 
@@ -163,13 +164,18 @@ jobs:
                 cp "${staging}/series.jsonl" "${candidate}/series.jsonl"
                 break
               fi
+            else
+              # Not a current-schema series.  select-history replaces it with a
+              # new chain only if it is a complete series of an older schema.
+              cp "${staging}/series.jsonl" "${candidate}/series.jsonl"
             fi
           done < "$artifact_list"
 
           uv run --frozen python scripts/cpu_perf_series.py select-history \
             --candidates "$CANDIDATE_DIR" \
-            --output "$HISTORY"
-      - name: Append and compare the nightly record
+            --output "$HISTORY" \
+            --reset-note "$RESET_NOTE"
+      - name: Append the nightly record and report the trend
         id: comparison
         if: >-
           always() &&
@@ -180,6 +186,7 @@ jobs:
           HISTORY: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history.jsonl
           SERIES: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/series.jsonl
           COMPARISON: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+          RESET_NOTE: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history-reset.json
         run: >-
           uv run --frozen python scripts/cpu_perf_series.py record
           --report "$REPORT"
@@ -190,8 +197,28 @@ jobs:
           --run-id "$GITHUB_RUN_ID"
           --run-attempt "$GITHUB_RUN_ATTEMPT"
           --sha "$GITHUB_SHA"
+          --reset-note "$RESET_NOTE"
+      - name: Report a warm-up run when history is unavailable
+        id: warmup
+        if: >-
+          always() &&
+          steps.recovery.outcome != 'success'
+        continue-on-error: true
+        env:
+          REPORT: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+          COMPARISON: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+        run: >-
+          uv run --frozen python scripts/cpu_perf_series.py warmup
+          --report "$REPORT"
+          --comparison "$COMPARISON"
+          --repository "$GITHUB_REPOSITORY"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --sha "$GITHUB_SHA"
       - name: Retain nightly report, series, and comparison
-        if: always()
+        if: >-
+          always() &&
+          steps.recovery.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nightly-cpu-perf-${{ github.run_id }}-${{ github.run_attempt }}
@@ -201,17 +228,34 @@ jobs:
             ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
           if-no-files-found: error
           retention-days: 90
+      # A warm-up has no series.  Its own name keeps it out of the history
+      # candidates, so the next run still recovers the previous chain.
+      - name: Retain the warm-up report and comparison
+        if: >-
+          always() &&
+          steps.recovery.outcome != 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-cpu-perf-warmup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+            ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Enforce the retained nightly verdict
         if: always()
         env:
           MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
           RECOVERY_OUTCOME: ${{ steps.recovery.outcome }}
           COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+          WARMUP_OUTCOME: ${{ steps.warmup.outcome }}
         run: |
+          # The verdict is the deterministic gate.  Missing history only makes
+          # this run a warm-up; the speed trend is reported, never enforced.
+          echo "measurement=${MEASUREMENT_OUTCOME} recovery=${RECOVERY_OUTCOME} comparison=${COMPARISON_OUTCOME} warmup=${WARMUP_OUTCOME}"
           if [[ "$MEASUREMENT_OUTCOME" == "success" &&
-                "$RECOVERY_OUTCOME" == "success" &&
-                "$COMPARISON_OUTCOME" == "success" ]]; then
+                ( "$COMPARISON_OUTCOME" == "success" ||
+                  "$WARMUP_OUTCOME" == "success" ) ]]; then
             exit 0
           fi
-          echo "measurement=${MEASUREMENT_OUTCOME} recovery=${RECOVERY_OUTCOME} comparison=${COMPARISON_OUTCOME}" >&2
           exit 1

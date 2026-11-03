@@ -26,7 +26,7 @@ permissions:
 jobs:
   churn:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       F1A_RESULTS_DIR: bench/results/f1a-fleet-churn
       PROFILE: ${{ github.event_name == 'pull_request' && 'smoke' || 'formal' }}

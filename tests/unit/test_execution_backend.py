@@ -1,16 +1,46 @@
 """HttpExecutionBackend degrade contract and code-block extraction (ECO-D3)."""
 
+import asyncio
 import json
 
 import httpx
 import pytest
 
+import kairyu.orchestration.execution as execution_module
 from kairyu.orchestration.execution import (
     ExecutionLimits,
     ExecutionRequest,
     HttpExecutionBackend,
     extract_python_block,
 )
+
+
+class _VirtualClockAsyncio:
+    """The backend's asyncio, with a loop clock that only its sleeps advance."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def get_running_loop(self):
+        return self
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+
+@pytest.fixture
+def virtual_clock(monkeypatch) -> _VirtualClockAsyncio:
+    clock = _VirtualClockAsyncio()
+    monkeypatch.setattr(execution_module, "asyncio", clock)
+    return clock
 
 
 def _request() -> ExecutionRequest:
@@ -48,7 +78,7 @@ async def test_server_error_degrades_to_unavailable():
     assert report.detail == "http_500"
 
 
-async def test_double_429_degrades_after_one_retry():
+async def test_double_429_degrades_after_one_retry(virtual_clock):
     calls = []
 
     def handler(request):
@@ -58,6 +88,7 @@ async def test_double_429_degrades_after_one_retry():
     report = await _backend(handler).execute(_request())
     assert report.status == "unavailable"
     assert len(calls) == 2
+    assert virtual_clock.sleeps == [0.5]
 
 
 async def test_unsupported_language_maps_to_unsupported():
@@ -140,7 +171,9 @@ async def test_unix_socket_transport_is_selected(monkeypatch):
     assert captured == {"uds": "/run/kairyu-executor/executor.sock"}
 
 
-async def test_queue_allowance_is_budgeted_and_retry_uses_remaining_deadline():
+async def test_queue_allowance_is_budgeted_and_retry_uses_remaining_deadline(
+    virtual_clock,
+):
     timeout_headers = []
 
     def handler(request):
@@ -171,8 +204,10 @@ async def test_queue_allowance_is_budgeted_and_retry_uses_remaining_deadline():
         await backend.shutdown()
 
     assert report.status == "ok"
-    assert 14_500 <= timeout_headers[0] <= 15_000
-    assert timeout_headers[1] <= timeout_headers[0] - 400
+    # wall 2 s + queue 8 s + 5 s margin, then the same deadline minus the
+    # single 0.5 s backoff on the backend's own (virtual) loop clock.
+    assert timeout_headers == [15_000, 14_500]
+    assert virtual_clock.sleeps == [0.5]
 
 
 def test_negative_queue_allowance_is_rejected():

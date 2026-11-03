@@ -1,0 +1,84 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  # Above 4 chat replicas x 64 vLLM sequences plus the Chat UI's embedding batches.
+  max_concurrency: 512
+  # A bounded queue wait fails a stuck request fast instead of parking it
+  # (issue #495 rationale, shared with the other examples).
+  admission_wait_timeout_s: 600
+  max_chat_body_bytes: 100663296
+
+# Layout (replica search 2026-11-04, MEASUREMENTS.md): four TP2 chat
+# replicas and two embedding replicas (example.json allocation).
+pools:
+  gemma-4-31b:
+    replicas:
+      - backend: openai
+        health_url: http://gemma-0:8000/health
+        options: &gemma
+          base_url: http://gemma-0:8000/v1
+          model: gemma-4-31b
+          api_key_env: null
+          # Bounded so a hung upstream call fails instead of holding its
+          # replica slot for a day (issue #495).
+          timeout_s: 1800
+          upstream: vllm
+          capabilities:
+            allow_prompt_kinds: [multimodal]
+            allow_chat_template_kwargs: [enable_thinking]
+          image_input_policy:
+            max_images: 8
+            max_image_bytes: 8388608
+            max_total_image_bytes: 67108864
+            max_image_pixels: 16777216
+            max_total_image_pixels: 134217728
+            max_image_dimension: 8192
+            max_image_aspect_ratio: 200
+            max_processed_prompt_tokens: 262144
+          model_revision: 842da3794eaa0b77d5f08bae87a17459d91ff475
+          max_model_len: 262144
+      - backend: openai
+        health_url: http://gemma-1:8000/health
+        options: {<<: *gemma, base_url: http://gemma-1:8000/v1}
+      - backend: openai
+        health_url: http://gemma-2:8000/health
+        options: {<<: *gemma, base_url: http://gemma-2:8000/v1}
+      - backend: openai
+        health_url: http://gemma-3:8000/health
+        options: {<<: *gemma, base_url: http://gemma-3:8000/v1}
+    unhealthy_after: 1
+    # A request whose prompt prefix is warm on a replica goes there only
+    # while that replica is idle; with one request in flight the valve
+    # (threshold 0, strict >) falls through to least-outstanding, so
+    # concurrent traffic spreads one-per-replica first.
+    queue_depth_threshold: 0
+    prefix_index: true
+    probe_interval_s: 2.0
+    placement_log_path: /var/lib/kairyu/placement/gemma-4-31b.jsonl
+
+# EmbeddingGemma 2 on vLLM pooling replicas (m11 D4 upstream-embeddings
+# amendment). Every batch goes to the least-busy validated replica; one
+# failure ejects a replica until its /health answers again. The Chat UI's
+# knowledge bases embed through this model only (control.py checks it).
+embeddings:
+  embeddinggemma-2:
+    backend: openai
+    model: embeddinggemma-2
+    dimensions: 768
+    timeout_s: 120
+    unhealthy_after: 1
+    probe_interval_s: 2.0
+    placement_log_path: /var/lib/kairyu/placement/embeddinggemma-2.jsonl
+    replicas:
+      - { base_url: http://embed-0:8000/v1, health_url: http://embed-0:8000/health }
+      - { base_url: http://embed-1:8000/v1, health_url: http://embed-1:8000/health }
+
+# m9 D2 amendment 2026-10-17: L1 receives each request in its caller's API
+# (chat as the caller's own messages, Responses as Responses, Anthropic
+# Messages as Messages); vLLM renders each one with the checkpoint's own
+# Gemma 4 template (thinking on by default, `reasoning.effort: none` turns
+# it off) and parses the tool calls.
+upstream_chat_models: [gemma-4-31b]
+upstream_responses_models: [gemma-4-31b]
+upstream_messages_models: [gemma-4-31b]

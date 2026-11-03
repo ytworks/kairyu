@@ -19,6 +19,10 @@ from evals.types import ExecutionConfig
 
 pytestmark = pytest.mark.docker_exec
 
+# Hang bound for programs that finish on their own (about 1-2 s per container
+# run at the 0.5 CPU limit); the verdict never depends on how fast they finish.
+_RUN_BOUND_S = 60.0
+
 
 @dataclass
 class _RunnerPair:
@@ -94,7 +98,7 @@ def test_local_and_container_have_identical_scoring_semantics(runners):
             code,
             stdin="input",
             files={"fixture.txt": b"artifact"},
-            timeout_s=3,
+            timeout_s=_RUN_BOUND_S,
             memory_mb=128,
         )
         assert result.ok, result.stderr
@@ -105,16 +109,20 @@ def test_local_and_container_have_identical_scoring_semantics(runners):
     for runner in (local, container):
         failed = runner.run_python(
             "raise RuntimeError('representative failure')",
-            timeout_s=3,
+            timeout_s=_RUN_BOUND_S,
             memory_mb=128,
         )
         assert _semantic(failed) == (False, False)
         assert "representative failure" in failed.stderr
 
-    for runner in (local, container):
+    # The program outlives every budget. A container budget fires only after
+    # the container has started (the runner otherwise reports a pre-start
+    # infrastructure failure), so it also bounds start-up (about 1 s at the
+    # 0.5 CPU limit) generously.
+    for runner, budget_s in ((local, 3.0), (container, 15.0)):
         timed_out = runner.run_python(
-            "import time; time.sleep(30)",
-            timeout_s=3.0,
+            "import time; time.sleep(300)",
+            timeout_s=budget_s,
             memory_mb=128,
         )
         assert _semantic(timed_out) == (False, True)
@@ -155,7 +163,7 @@ else:
 interfaces = sorted(name for _index, name in socket.if_nameindex())
 print("interfaces=" + ",".join(interfaces))
 """
-    result = container.run_python(code, timeout_s=3, memory_mb=128)
+    result = container.run_python(code, timeout_s=_RUN_BOUND_S, memory_mb=128)
     assert result.ok, result.stderr
     observations = set(result.stdout.splitlines())
     assert "secret=None" in observations
@@ -177,7 +185,7 @@ def test_read_only_large_artifact_does_not_consume_work_tmpfs(runners):
     result = container.run_python(
         "import os; print(os.path.getsize('large.bin'))",
         files={"large.bin": payload},
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=128,
     )
     assert result.ok, result.stderr
@@ -226,7 +234,7 @@ print(f"cpu_ratio={quota / period}")
 print(f"work_bytes={work_bytes}")
 print("small_write=ok")
 """,
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=128,
     )
     assert limits.ok, limits.stderr
@@ -241,7 +249,7 @@ print("small_write=ok")
 
     memory = container.run_python(
         "x = bytearray(512 * 1024 * 1024); print('allocated')",
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=64,
     )
     assert not memory.ok
@@ -258,7 +266,7 @@ try:
 except OSError:
     print("disk-bounded")
 """,
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=128,
     )
     assert "wrote-unbounded" not in disk.stdout
@@ -285,7 +293,7 @@ finally:
         child.wait()
 print(len(children))
 """,
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=128,
     )
     assert pids.ok, pids.stderr
@@ -293,7 +301,7 @@ print(len(children))
 
     output = container.run_python(
         "print('x' * 1_000_000)",
-        timeout_s=4,
+        timeout_s=_RUN_BOUND_S,
         memory_mb=128,
     )
     assert output.ok, output.stderr

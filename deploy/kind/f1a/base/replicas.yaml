@@ -74,22 +74,26 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # Probe thresholds tolerate a slow or loaded node: one late probe
+          # must neither drop a Ready replica from the EndpointSlice nor
+          # restart it. Drain and deletion still withdraw the replica through
+          # its own readiness flip and the EndpointSlice terminating state.
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
             initialDelaySeconds: 1
             periodSeconds: 1
-            timeoutSeconds: 1
-            failureThreshold: 1
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
-            timeoutSeconds: 1
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6
           lifecycle:
             preStop:
               exec:

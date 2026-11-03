@@ -109,34 +109,39 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated; the eight-GPU one's Chat UI also serves Japanese knowledge bases (Docling OCR, bge-m3, multilingual reranker; GPU-verified 2026-10-21, PR #661) and Word / Excel / PowerPoint read and edit through its default-on browser code interpreter (GPU-verified 2026-10-22, PR #662), delivered as download links in the reply (PR #664)
 
+- Gemma 4 31B + EmbeddingGemma 2 example `gemma-4-31b-8gpu` (FN-D9 Gemma amendment, PR #667): GPU-verified 2026-11-04. The replica search chose 4 x TP2 chat replicas with MTP 4 (one GPU cannot hold a 262,144-token context) and 2 EmbeddingGemma 2 replicas sharing GPUs 1 and 7; serving c1/c8/c32/c64 68 / 385 / 589 / 651 tok/s; all 17 gates pass under the owner's gate amendments (official sampling only, model misses recorded); EmbeddingGemma 2 runs on the example's one-edit SM120 overlay; remaining: merge after CI
+
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-11-04 — [progress] Gemma 4 31B example GPU-verified; gate amendments
+- What: replica search: TP1 excluded (26.5 of 33.3 GiB KV for one 262,144-token request); of eight L1 candidates only MTP 4 clears 5 %; under ingestion 4 x TP2 with the embedding replicas sharing GPUs 1 and 7 beats 3 x TP2 with dedicated GPUs by 29-32 % at c32/c64. EmbeddingGemma 2 needs a one-edit SM120 overlay (Triton encoder tiles); chat runs with custom all-reduce off. All 17 gates pass (serving 68 / 385 / 503 / 589 / 651 tok/s at c1-c64, 16 per replica at c8+).
+- Why: owner decisions during the gates: official sampling only; a gate failing on the model's own behaviour is excessive, so the ~250K answer and file replies that deliver nothing are recorded, not judged; a file the tool attached counts as delivered.
+- Refs: PR #667; FN-D9 Gemma amendment (GPU finding, gate amendments); `examples/gemma-4-31b-8gpu/MEASUREMENTS.md`
+
+### 2026-11-03 — [amendment] Review fixes to the deterministic CI gates
+- What: scheduler priority work also counts elements the priority list shifts or copies; sampler work also counts active-index upkeep (tensor sorts, copies, allocations; position/ref-count map writes); the nightly series explicitly starts a version-2 chain when only older-schema history exists, and warm-ups are retained under their own artifact name; F1a takes one final resource capture after traffic and requires it as the last row (m10 A23 amendment).
+- Why: owner review of PR #667: a sorted-list priority queue and a per-step index rebuild passed the gate, the nightly could stay in warm-up forever after the schema change, and a truncated resource sidecar was judged complete.
+- Refs: PR #667; `docs/design/m10-fleet-cpu.md` A23; `docs/design/issue-377-nightly-cpu-perf.md`
+
+### 2026-11-03 — [design] CI verdicts depend only on the code
+- What: every CI pass/fail is decided by the code alone: timing became diagnostics (cpu-microbench and nightly perf judge operation counts; kind F1a/F1b/F1c, async smoke and F2b judge order, fencing tokens or a virtual clock; ~190 pytest waits rewritten to events, fake clocks or hang bounds); runner inputs pinned (umask 022, uv 0.11.31, single-platform postgres digest, images loaded from archives); networked setup separated from tests; the CPU suite runs on four workers to meet the five-minute target. CLAUDE.md test policy rule 8.
+- Why: owner principle after PR #667's CI failed on a wall-clock ratio and a runner image-store change ("not caused by this PR" is not a resolution).
+- Refs: PR #668; plan `docs/superpowers/plans/2026-11-03-ci-deterministic.md`; m10 A31 amendment; `docs/design/issue-377-nightly-cpu-perf.md`
+### 2026-11-03 — [amendment] Responses accepts reasoning.effort none (thinking off)
+- What: `/v1/responses` turns an engine or pool model's thinking off on `reasoning.effort: "none"` (the internal `none` of the 2026-10-19 Messages amendment, sent on the model's wire); AUTO models keep their stage policy; the public Chat parser still rejects `none`.
+- Why: the 2026-10-05 rejection predates any thinking-off path; since 2026-10-19 the L1 renders thinking off from its own template. The Gemma 4 example's Chat UI needs it for its thinking-off choice (owner decision).
+- Refs: m11 D4 Responses thinking-off amendment; `test_responses_effort_none_turns_a_direct_models_thinking_off`
+
+### 2026-11-03 — [design] Gemma 4 31B + EmbeddingGemma 2 example; upstream embedding replica pools
+- What: `/v1/embeddings` forwards to OpenAI-compatible embedding servers (`embeddings.<name>.backend: openai`, replicas with `health_url`); the replicas form one `ReplicaPool` (least-outstanding, ejection, probe restore, placement log), `/readyz` and pool metrics include it. New example `gemma-4-31b-8gpu` (fifth family): Gemma 4 31B chat and EmbeddingGemma 2 embedding replicas on stock vLLM, the 1017 Chat UI features in the example itself, knowledge bases embedded through Kairyu with EmbeddingGemma's prefixes, sign-in Chat UI; layout provisional until the replica search.
+- Why: owner request (L2 balances chat and embedding replicas, L3 uses the new embedding automatically, best replica counts by measurement); L3 could only serve in-process CPU embeddings. Main only (old PRs closed, L4 not used).
+- Refs: m5 D4 / m11 D4 A20 / m7 D4 amendments; FN-D9 Gemma amendment; plan `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`
 
 ### 2026-10-22 — [progress] Download links for files the 1017 eight-GPU Chat UI makes
 - What: a `file_download` Open WebUI tool (installed by `run.sh up`, on by default) reads a file the browser code interpreter wrote, stores it in Open WebUI's file store, attaches it to the reply and returns a link; its description also has the model import the bundled Office libraries directly. GPU: `file-download` (owner's Excel request: link saves the file on desktop, after a reload and on an emulated phone), `office` (edits saved from the link), `chat-ui`, `knowledge` pass.
 - Why: the owner could not download a file the Chat UI made on a phone: a dead `sandbox:` link, invented UI steps, and working files that exist only in the page.
 - Refs: PR #664; plan `docs/superpowers/plans/2026-10-22-1017-8gpu-file-download.md`; the example's `MEASUREMENTS.md`
 
-### 2026-10-22 — [amendment] Images beside tool history for upstream-rendered models; Office files in the 1017 eight-GPU Chat UI
-- What: `MultimodalMessage` carries the caller's tool calls, tool-result id, name and reasoning; for `upstream_chat_models` models Chat Completions and Responses send an image beside tool history to the upstream (chat wire, Responses / Messages wires) instead of a 400; other models, AUTO and Kairyu's own engines unchanged. `deepseek-v4.1-flash-1017-8gpu` turns its Chat UI's browser code interpreter on by default: attached docx / xlsx / pptx are read (Docling) and edited into downloadable files. GPU: `office`, `chat-ui`, `vision`, `tool-calling`, `api-equivalence` (new `image-tools`: vLLM and Kairyu both "red PLUM" on both APIs) pass.
-- Why: Open WebUI passes built-in tools in every chat, so with the code interpreter on, an image after a tool call was refused (issue #659 item 6); owner chose the Kairyu fix over turning the default off.
-- Refs: PR #662; m9 D2 images-beside-tools amendment; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plans `docs/superpowers/plans/2026-10-22-*.md`
-
-### 2026-10-21 — [design] Japanese knowledge bases in the 1017 eight-GPU Chat UI
-- What: `deepseek-v4.1-flash-1017-8gpu`'s Open WebUI extracts through a pinned docling-serve (RapidOCR `iso:ja`), embeds with `BAAI/bge-m3`, reranks with `BAAI/bge-reranker-v2-m3` (pinned, hashed, offline), hybrid search at BM25 weight 0, 300-character chunks; Docling 4 CPUs, Chat UI 8; `run.sh up` fails closed on any other retrieval configuration. GPU gates pass: OCR 4.7 s/page, 20-page scan ingested in 80 s, Japanese query top-1 in 3.5 s, Chat UI answers from the base with a citation, c1/c8 serving with Docling and embedding at their caps at 99.8 / 99.2 % of the recorded rows.
-- Why: Japanese documents (incl. scans) in knowledge bases; Open WebUI's BM25 splits on whitespace and its 1,000-character default chunk dilutes Japanese passages (dense rank 27/40 vs 9/120 at 300).
-- Refs: PR #661; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plan `docs/superpowers/plans/2026-10-21-1017-8gpu-japanese-knowledge.md`; the example's `MEASUREMENTS.md`
-
-### 2026-10-20 — [progress] DeepSWE with mini-swe-agent: 81/113 on the 1017 eight-GPU example
-- What: the six-GPU mini-swe-agent run's setup (kairyu-bench `52b06ce`, effort max, 8 workers) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 81/113 (six-GPU 79/113, eight-GPU dsh 83/113), 3 h 59 min (0.66x of six-GPU), 10,012 API calls all 200 (1.00x), input 1.181 B, output 8.69 M; all 113 tasks scored. Wiki: two dsh-vs-DeepSeek-8GPU-high overlap rows corrected (a time-limit trial had been counted as correct).
-- Refs: run `deepswe-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison
-
-### 2026-10-20 — [progress] DeepSWE with DeepSeek Harness: 83/113 on the 1017 eight-GPU example
-- What: the same dsh run as the six-GPU one (dsh 0.2.1rc2, kairyu-bench PR #31, effort max, 8 workers, Kairyu code of PR #660 `0513750a`) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 83/113 (six-GPU dsh 76/113, mini-swe-agent 79/113), 4 h 33 min (0.72x), 10,753 API calls all 200 (1.00x), 10,424 with thinking, input 1.106 B, output 9.33 M; all 113 tasks scored, no re-run needed. No new Kairyu-side problem.
-- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660
-
-### 2026-10-19 — [progress] DeepSWE with DeepSeek Harness via Messages: 76/113 on the 1017 six-GPU example
-- What: PR #660 (`0513750a`, Kairyu only replaced) passed the GPU smokes: dsh effort max (91 calls 200, 88 replies with thinking, 3,857 replayed blocks accepted, reward 1) and effort off (thinking off, first input 1,171 tokens, reward 1). DeepSWE v1.1 with DeepSeek Harness (dsh 0.2.1rc2, kairyu-bench PR #31) on `deepseek-v4.1-flash-1017-6gpu`, effort max, 8 workers: 76/113 (mini-swe-agent on the same L1: 79/113), 6 h 20 min, 10,768 API calls all 200, 10,393 with thinking. New finding: `count_tokens` is 404 on tool-call history (vLLM v0.32.0 `/tokenize` fails on `content: null`; #659 item 5, recorded only).
-- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660; issue #659

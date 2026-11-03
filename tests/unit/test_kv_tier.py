@@ -725,7 +725,7 @@ def test_concurrent_double_finalize_cannot_release_a_new_transfer_owner(
     def blocking_finalize(candidate) -> None:
         original_finalize(candidate)
         finalized.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=30)
 
     monkeypatch.setattr(tier, "_finalize_transfer", blocking_finalize)
     second_started = Event()
@@ -736,18 +736,18 @@ def test_concurrent_double_finalize_cannot_release_a_new_transfer_owner(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(transfer.finalize)
-        assert finalized.wait(timeout=2)
+        assert finalized.wait(timeout=10)
         replacement = tier.begin_offload((_key("double-finalize-new-owner"),), (1,))
         submissions = backend.submission_count
         second = executor.submit(finalize_again)
-        assert second_started.wait(timeout=2)
+        assert second_started.wait(timeout=10)
         assert not second.done()
         with pytest.raises(KVPageStateError):
             tier.begin_offload((_key("double-finalize-overlap"),), (1,))
         assert backend.submission_count == submissions
         release.set()
-        assert first.result(timeout=2) is True
-        assert second.result(timeout=2) is True
+        assert first.result(timeout=10) is True
+        assert second.result(timeout=10) is True
 
     with pytest.raises(KVPageStateError):
         tier.begin_offload((_key("double-finalize-after"),), (1,))
@@ -769,7 +769,7 @@ def test_concurrent_finalize_then_cancel_cannot_quarantine_a_new_transfer_owner(
     def blocking_finalize(candidate) -> None:
         original_finalize(candidate)
         finalized.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=30)
 
     monkeypatch.setattr(tier, "_finalize_transfer", blocking_finalize)
     cancel_started = Event()
@@ -780,16 +780,16 @@ def test_concurrent_finalize_then_cancel_cannot_quarantine_a_new_transfer_owner(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         finalizing = executor.submit(transfer.finalize)
-        assert finalized.wait(timeout=2)
+        assert finalized.wait(timeout=10)
         replacement = tier.begin_offload((_key("finalize-cancel-new-owner"),), (1,))
         submissions = backend.submission_count
         cancelling = executor.submit(cancel_after_finalize)
-        assert cancel_started.wait(timeout=2)
+        assert cancel_started.wait(timeout=10)
         assert not cancelling.done()
         release.set()
-        assert finalizing.result(timeout=2) is True
+        assert finalizing.result(timeout=10) is True
         with pytest.raises(KVPageStateError, match="already finalized"):
-            cancelling.result(timeout=2)
+            cancelling.result(timeout=10)
 
     with pytest.raises(KVPageStateError):
         tier.begin_offload((_key("finalize-cancel-overlap"),), (1,))
@@ -812,7 +812,7 @@ def test_concurrent_cancel_then_finalize_has_one_fail_closed_terminal_cleanup(
     def blocking_cancel(candidate, cause=None):
         failure = original_cancel(candidate, cause)
         cancelled.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=30)
         return failure
 
     monkeypatch.setattr(tier, "_cancel_transfer", blocking_cancel)
@@ -825,17 +825,17 @@ def test_concurrent_cancel_then_finalize_has_one_fail_closed_terminal_cleanup(
     submissions = backend.submission_count
     with ThreadPoolExecutor(max_workers=2) as executor:
         cancelling = executor.submit(transfer.cancel)
-        assert cancelled.wait(timeout=2)
+        assert cancelled.wait(timeout=10)
         finalizing = executor.submit(finalize_after_cancel)
-        assert finalize_started.wait(timeout=2)
+        assert finalize_started.wait(timeout=10)
         assert not finalizing.done()
         with pytest.raises(KVPageStateError):
             tier.begin_offload((_key("cancel-finalize-overlap"),), (1,))
         assert backend.submission_count == submissions
         release.set()
-        assert cancelling.result(timeout=2) is None
+        assert cancelling.result(timeout=10) is None
         with pytest.raises(KVPageTransferError) as failed:
-            finalizing.result(timeout=2)
+            finalizing.result(timeout=10)
 
     assert not failed.value.source_reusable
     assert not failed.value.destination_reusable

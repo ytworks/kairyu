@@ -641,3 +641,54 @@ example-owned Open WebUI tool (`file_download`, on by default) reads a file
 from that workspace through the code interpreter's own browser event,
 stores it in Open WebUI's file store, attaches it to the reply and returns
 a link that works on a phone, after a reload and from another device.
+
+### Gemma 4 31B with EmbeddingGemma 2 amendment (2026-11-03)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`, including the
+verification plan); CPU implementation done; GPU-verified 2026-11-04 (replica
+search and all 17 gates, the example's `MEASUREMENTS.md`).
+
+`examples/gemma-4-31b-8gpu` adds a fifth model family at the owner's request:
+`google/gemma-4-31B-it` (31B dense, official BF16, the owner's choice of size)
+chat replicas and `google/embeddinggemma-2` embedding replicas, both on stock
+vLLM (v0.33.0, v0.32.0 as the pinned fallback), with every Chat UI feature of the
+1017 eight-GPU example written in the example itself. L2 balances both: the chat
+replicas in one `ReplicaPool` (the `qwen3.8-27b-dp8-8gpu` policy), the embedding
+replicas in another (m5 D4 embedding amendment). L3 publishes the embedding model
+on `/v1/embeddings` (m11 D4 upstream-embeddings amendment, A20), and the Chat
+UI's knowledge bases embed through it with EmbeddingGemma 2's query and document
+instructions; `run.sh up` fails closed on any other retrieval configuration. The
+replica counts are not assumed: a measured search (`tune.py`) fixes them, under
+the conditions that every chat replica holds one 262,144-token request and that
+at least two embedding replicas exist. Search result (2026-11-04): one GPU
+cannot hold a 262,144-token context (TP1 excluded); the MTP assistant drafting
+four tokens is the only L1 option above the 5 % bar; four TP2 chat replicas
+with the two embedding replicas sharing GPUs 1 and 7 beat three TP2 replicas
+with dedicated embedding GPUs by 29-32 % at c32/c64 under knowledge-base
+ingestion, within the ingestion and query budgets.
+L1 uses the checkpoint's own chat template (Google's canonical Gemma 4 template)
+with thinking on by default; FP8 KV and third-party quantized checkpoints are
+excluded because they trade quality.
+
+GPU-stage finding (2026-11-04): stock vLLM v0.33.0 and v0.32.0 cannot start
+EmbeddingGemma 2 on SM120. Its Triton encoder attention uses 128-row tiles,
+which need 160 KiB of shared memory for 256-dimensional heads, and an RTX PRO
+6000 offers 99 KiB per block (`FLEX_ATTENTION` fails on CUDA-graph reuse, and
+`FLASHINFER` has no encoder-only attention). As the plan allowed ("an SM120
+overlay only if needed"), the example owns a one-edit overlay
+(`vllm-sm120.Dockerfile`, `patch_sm120.py`) that uses 64-row tiles for those
+heads on GPUs with less than 160 KiB of shared memory per block; the build
+fails if the patched source or the vLLM version differs. Chat replicas use the
+unified Triton kernel and run the same overlay image unchanged.
+
+Gate amendments (2026-11-04, owner decisions): gates run the model's official
+sampling only. `long-context` judges the key at 32K and 128K and, at ~250K,
+that the request is accepted with its server-reported token count and ends
+normally (Gemma 4's reasoning copied the one-word haystack until the output
+cap in 2 of 4 samples). `office` and `file-download` count a reply as
+delivering a file when `provide_download` attached it or its text links it,
+save it as a user does, and record a reply that delivers nothing as a model
+miss; `file-download` asks again in a new chat, at most three times per
+device. With these, all 17 gates pass.
+

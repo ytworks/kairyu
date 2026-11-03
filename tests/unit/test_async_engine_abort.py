@@ -67,7 +67,7 @@ async def test_abort_interrupts_blocked_stream_and_closes_backend_once():
     await engine.abort("blocked")
 
     with pytest.raises(StopAsyncIteration):
-        await asyncio.wait_for(pending, timeout=1)
+        await asyncio.wait_for(pending, timeout=10)
     assert backend.closed["blocked"] == 1
     assert engine._active == {}
 
@@ -110,7 +110,7 @@ async def test_abort_is_isolated_and_finished_request_id_can_be_reused():
     await engine.abort("stop")
     backend.release["keep"].set()
     stopped_outputs, kept_outputs = await asyncio.wait_for(
-        asyncio.gather(stopped, kept), timeout=1
+        asyncio.gather(stopped, kept), timeout=10
     )
 
     assert stopped_outputs == []
@@ -134,13 +134,13 @@ async def test_duplicate_active_id_fails_without_deregistering_original():
     try:
         duplicate = engine.generate("second", SamplingParams(), "duplicate")
         with pytest.raises(ValueError, match="already active"):
-            await asyncio.wait_for(anext(duplicate), timeout=1)
+            await asyncio.wait_for(anext(duplicate), timeout=10)
         assert "duplicate" in engine._active
     finally:
         await engine.abort("duplicate")
         backend.release["duplicate"].set()
         with contextlib.suppress(StopAsyncIteration):
-            await asyncio.wait_for(pending, timeout=1)
+            await asyncio.wait_for(pending, timeout=10)
     assert engine._active == {}
     assert backend.closed["duplicate"] == 1
 

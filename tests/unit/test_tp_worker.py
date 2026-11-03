@@ -540,7 +540,7 @@ def test_dist_release_reaches_driver_and_idle_worker():
             driver.release("finished")
         finally:
             driver.shutdown()
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
     assert local[0].released == ["finished"]
     assert local[1].released == ["finished"]
 
@@ -558,7 +558,7 @@ def test_dist_startup_warms_identical_graph_buckets_on_every_rank():
         assert driver.capture_decode_graphs() == (1, 2, 4, 8)
         assert driver.decode_graph_metadata()["cuda_graph_captures"] == 4
         driver.shutdown()
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
 
     assert [runner.capture_calls for runner in local] == [1, 1]
     assert [runner.synchronize_calls for runner in local] == [1, 1]
@@ -568,14 +568,15 @@ def test_dist_graph_metadata_does_not_wait_for_serving_protocol_lock():
     (comm,) = FakeCommunicator.create_group(1)
     driver = DistTPModelRunner(comm, _GraphWarmupRunner((1, 2)))
 
+    pool = ThreadPoolExecutor(max_workers=1)
     driver._protocol_lock.acquire()
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            snapshot = pool.submit(driver.decode_graph_metadata).result(
-                timeout=0.5
-            )
+        # The lock stays held until the snapshot returns, so a metadata read
+        # that waited on it could only finish by hitting this hang bound.
+        snapshot = pool.submit(driver.decode_graph_metadata).result(timeout=10)
     finally:
         driver._protocol_lock.release()
+        pool.shutdown(wait=True)
 
     assert snapshot["cuda_graph_buckets"] == (1, 2)
 
@@ -593,7 +594,7 @@ def test_dist_startup_rejects_graph_skew_before_any_rank_captures():
         with pytest.raises(RuntimeError, match="configuration differs across ranks"):
             driver.capture_decode_graphs()
         with pytest.raises(RuntimeError, match="configuration differs across ranks"):
-            worker.result(timeout=2)
+            worker.result(timeout=10)
 
     assert [runner.capture_calls for runner in local] == [0, 0]
     assert [runner.synchronize_calls for runner in local] == [0, 0]
@@ -610,7 +611,7 @@ def test_idle_shutdown_batches_and_deduplicates_releases_exactly_once():
         driver.release("second")
         driver.release("second")
         driver.shutdown()
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
 
     assert local[0].released == ["first", "second"]
     assert local[1].released == ["first", "second"]
@@ -673,7 +674,7 @@ def test_step_delta_uses_nccl_payload_while_rare_control_stays_object():
         )
         driver.execute(chunks, states)
         driver.shutdown()
-        assert worker.result(timeout=5) == 1
+        assert worker.result(timeout=10) == 1
 
     assert not any(isinstance(payload, StepDelta) for payload in recorded_control.payloads)
     assert len(recorded_control.payloads) == 1  # shutdown remains on object control
@@ -708,28 +709,60 @@ def test_unencodable_step_fails_before_header_without_poisoning_runner():
 
 
 class _BlockingStepControl:
-    def __init__(self) -> None:
+    def __init__(self, non_step_reached: Event | None = None) -> None:
         self.step_entered = Event()
         self.continue_step = Event()
         self.non_step_payload_entered = Event()
+        self.non_step_reached = non_step_reached
         self.payloads: list[object] = []
 
     def broadcast(self, payload, src):
         self.payloads.append(payload)
         if isinstance(payload, StepDelta):
             self.step_entered.set()
-            if not self.continue_step.wait(timeout=5):
+            if not self.continue_step.wait(timeout=30):
                 raise RuntimeError("test did not release the blocked step")
         else:
             self.non_step_payload_entered.set()
+            if self.non_step_reached is not None:
+                self.non_step_reached.set()
         return payload
 
     def tensor_broadcast(self, tensor, src):
         return tensor
 
 
+class _ContendedLock:
+    """Protocol-lock proxy that reports a caller which has to wait for it."""
+
+    def __init__(self, inner, contended: Event) -> None:
+        self._inner = inner
+        self._contended = contended
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._inner.locked():
+            self._contended.set()
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def locked(self) -> bool:
+        return self._inner.locked()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
+
+
 def test_out_of_band_control_waits_for_the_active_step_transaction():
-    control = _BlockingStepControl()
+    # Set once the toggle has acted: it either queued behind the step's
+    # protocol lock or, were that serialization missing, broadcast its payload.
+    toggle_acted = Event()
+    control = _BlockingStepControl(non_step_reached=toggle_acted)
     local = _DiagnosticRunner(
         (),
         sampling_owner=True,
@@ -737,26 +770,23 @@ def test_out_of_band_control_waits_for_the_active_step_transaction():
         device="cpu",
     )
     driver = DistTPModelRunner(control, local)
-    toggle_started = Event()
-
-    def toggle() -> None:
-        toggle_started.set()
-        driver.set_batched_prefill_enabled(False)
+    driver._protocol_lock = _ContendedLock(driver._protocol_lock, toggle_acted)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         execute = pool.submit(driver.execute, (), {})
-        assert control.step_entered.wait(timeout=5)
-        pending_toggle = pool.submit(toggle)
-        assert toggle_started.wait(timeout=5)
+        assert control.step_entered.wait(timeout=10)
+        pending_toggle = pool.submit(driver.set_batched_prefill_enabled, False)
         try:
-            # The toggle thread is running, but its control payload cannot be
-            # inserted between StepDelta and the model/token collectives.
-            assert not control.non_step_payload_entered.wait(timeout=0.1)
+            assert toggle_acted.wait(timeout=10)
+            # The toggle is queued behind the step transaction: its control
+            # payload cannot be inserted between StepDelta and the model/token
+            # collectives.
+            assert not control.non_step_payload_entered.is_set()
             assert len(control.payloads) == 1
         finally:
             control.continue_step.set()
-        execute.result(timeout=5)
-        pending_toggle.result(timeout=5)
+        execute.result(timeout=10)
+        pending_toggle.result(timeout=10)
 
     assert control.non_step_payload_entered.is_set()
     assert len(control.payloads) == 2
@@ -772,14 +802,14 @@ def test_same_id_release_after_snapshot_survives_the_older_ack():
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         execute = pool.submit(driver.execute, (), {})
-        assert control.step_entered.wait(timeout=5)
+        assert control.step_entered.wait(timeout=10)
         try:
             # This is a newer release generation than the one in the blocked
             # StepDelta. Its matching-generation ack must leave it pending.
             driver.release("reused")
         finally:
             control.continue_step.set()
-        execute.result(timeout=5)
+        execute.result(timeout=10)
 
     assert local.released == ["reused"]
     driver.shutdown()
@@ -806,7 +836,7 @@ class _ReleaseOrderRunner(_AuthorityRunner):
         self.events.append(f"execute:{request_id}")
         if self._block_first_execute and len(self.events) == 1:
             self.first_execute_entered.set()
-            if not self.continue_first_execute.wait(timeout=5):
+            if not self.continue_first_execute.wait(timeout=30):
                 raise RuntimeError("test did not release the blocked execute")
         return super().execute(scheduled, states)
 
@@ -834,24 +864,24 @@ def test_release_returns_during_execute_and_piggybacks_on_the_next_step():
     with ThreadPoolExecutor(max_workers=3) as pool:
         worker = pool.submit(worker_step_loop, control[1], local[1], model[1])
         first_execute = pool.submit(driver.execute, chunks, states)
-        assert local[0].first_execute_entered.wait(timeout=5)
+        assert local[0].first_execute_entered.wait(timeout=10)
         release = pool.submit(driver.release, "reused")
         try:
             # release() neither waits for the active protocol transaction nor
             # inserts a second control broadcast underneath it.
-            release.result(timeout=1)
+            release.result(timeout=10)
             assert len(recorded_control.payloads) == 1
             assert local[0].released == []
             assert local[1].released == []
         finally:
             local[0].continue_first_execute.set()
-        first_execute.result(timeout=5)
+        first_execute.result(timeout=10)
 
         # Reusing the same id with an identical snapshot must still be a full
         # "new" entry, and both ranks release old local state before executing it.
         driver.execute(chunks, states)
         driver.shutdown()
-        assert worker.result(timeout=5) == 2
+        assert worker.result(timeout=10) == 2
 
     step_deltas = [
         payload for payload in recorded_control.payloads if isinstance(payload, StepDelta)
@@ -882,7 +912,7 @@ class _BlockingShutdownControl:
     def broadcast(self, payload, src):
         self.payloads.append(payload)
         self.entered.set()
-        if not self.continue_shutdown.wait(timeout=5):
+        if not self.continue_shutdown.wait(timeout=30):
             raise RuntimeError("test did not release the blocked shutdown")
         return payload
 
@@ -895,13 +925,13 @@ def test_release_racing_shutdown_is_included_or_rejected():
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         shutdown = pool.submit(driver.shutdown)
-        assert control.entered.wait(timeout=5)
+        assert control.entered.wait(timeout=10)
         try:
             with pytest.raises(RuntimeError, match="shutting down"):
                 driver.release("after-fence")
         finally:
             control.continue_shutdown.set()
-        shutdown.result(timeout=5)
+        shutdown.result(timeout=10)
 
     # Shutdown is idempotent and does not open a second race window.
     driver.shutdown()
@@ -930,7 +960,7 @@ def test_rank_zero_samples_once_and_workers_adopt_its_fixed_packet():
             sampled = driver.execute(chunks, states)
         finally:
             driver.shutdown()
-        assert worker.result(timeout=2) == 1
+        assert worker.result(timeout=10) == 1
 
     assert sampled == {"a": ("rank-0-public-result",)}
     assert local[0].sampled_calls == 1
@@ -966,7 +996,7 @@ def test_sampling_ownership_metadata_is_rank_sorted_and_step_loop_resumes():
             )
         finally:
             driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [1, 1]
+        assert [worker.result(timeout=10) for worker in workers] == [1, 1]
 
     assert rows == (
         {
@@ -1031,7 +1061,7 @@ def test_prefill_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
             )
         finally:
             driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [1, 1]
+        assert [worker.result(timeout=10) for worker in workers] == [1, 1]
 
     assert [row["rank"] for row in rows] == [0, 1, 2]
     assert [row["device"] for row in rows] == ["cuda:0", "cuda:1", "cuda:2"]
@@ -1042,8 +1072,8 @@ def test_prefill_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
 
 
 def test_prefill_stats_rank_failure_is_gathered_without_control_hang():
-    control = FakeCommunicator.create_group(3, timeout_s=0.2)
-    model = FakeCommunicator.create_group(3, timeout_s=0.2)
+    control = FakeCommunicator.create_group(3, timeout_s=10)
+    model = FakeCommunicator.create_group(3, timeout_s=10)
     local = [
         _DiagnosticRunner(
             (),
@@ -1078,7 +1108,7 @@ def test_prefill_stats_rank_failure_is_gathered_without_control_hang():
         # The diagnostic failure marks the public runner fatal, so stop the
         # still-healthy fake workers with the raw control protocol.
         control[0].broadcast(None, src=0)
-        assert [worker.result(timeout=2) for worker in workers] == [0, 0]
+        assert [worker.result(timeout=10) for worker in workers] == [0, 0]
 
     assert isinstance(driver.fatal_error, RuntimeError)
 
@@ -1111,7 +1141,7 @@ def test_verification_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
             )
         finally:
             driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [1, 1]
+        assert [worker.result(timeout=10) for worker in workers] == [1, 1]
 
     assert [row["rank"] for row in rows] == [0, 1, 2]
     assert [row["device"] for row in rows] == ["cuda:0", "cuda:1", "cuda:2"]
@@ -1122,8 +1152,8 @@ def test_verification_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
 
 
 def test_verification_stats_rank_failure_is_gathered_without_control_hang():
-    control = FakeCommunicator.create_group(3, timeout_s=0.2)
-    model = FakeCommunicator.create_group(3, timeout_s=0.2)
+    control = FakeCommunicator.create_group(3, timeout_s=10)
+    model = FakeCommunicator.create_group(3, timeout_s=10)
     local = [
         _DiagnosticRunner(
             (),
@@ -1156,7 +1186,7 @@ def test_verification_stats_rank_failure_is_gathered_without_control_hang():
         ):
             driver.verification_execution_stats()
         control[0].broadcast(None, src=0)
-        assert [worker.result(timeout=2) for worker in workers] == [0, 0]
+        assert [worker.result(timeout=10) for worker in workers] == [0, 0]
 
     assert isinstance(driver.fatal_error, RuntimeError)
 
@@ -1189,7 +1219,7 @@ def test_page_table_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
             )
         finally:
             driver.shutdown()
-        assert [worker.result(timeout=2) for worker in workers] == [1, 1]
+        assert [worker.result(timeout=10) for worker in workers] == [1, 1]
 
     assert [row["rank"] for row in rows] == [0, 1, 2]
     assert [row["device"] for row in rows] == ["cuda:0", "cuda:1", "cuda:2"]
@@ -1201,8 +1231,8 @@ def test_page_table_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
 
 
 def test_page_table_stats_rank_failure_is_gathered_and_marks_driver_fatal():
-    control = FakeCommunicator.create_group(3, timeout_s=0.2)
-    model = FakeCommunicator.create_group(3, timeout_s=0.2)
+    control = FakeCommunicator.create_group(3, timeout_s=10)
+    model = FakeCommunicator.create_group(3, timeout_s=10)
     local = [
         _DiagnosticRunner(
             (),
@@ -1238,7 +1268,7 @@ def test_page_table_stats_rank_failure_is_gathered_and_marks_driver_fatal():
         with pytest.raises(RuntimeError, match="unavailable"):
             driver.decode_page_table_cache_stats()
         control[0].broadcast(None, src=0)
-        assert [worker.result(timeout=2) for worker in workers] == [0, 0]
+        assert [worker.result(timeout=10) for worker in workers] == [0, 0]
 
 
 def test_sampling_ownership_metadata_reports_missing_rank():
@@ -1358,7 +1388,7 @@ def test_sampling_ownership_rank_local_failure_is_gathered_without_hang():
         ):
             driver.sampling_ownership_metadata()
         control[0].broadcast(None, src=0)
-        assert worker.result(timeout=2) == 0
+        assert worker.result(timeout=10) == 0
 
     assert isinstance(driver.fatal_error, RuntimeError)
 
@@ -1390,7 +1420,7 @@ def test_step_delta_dropped_does_not_release_request():
         )
         model[0].tensor_broadcast(torch.empty(0, dtype=torch.int64), src=0)
         driver.shutdown()
-        assert worker.result(timeout=2) == 1
+        assert worker.result(timeout=10) == 1
     assert local[0].released == []
     assert local[1].released == []
 

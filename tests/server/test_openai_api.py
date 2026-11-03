@@ -520,18 +520,17 @@ async def test_native_stream_bounds_queue_and_body_sends_under_asgi_backpressure
     request_task = asyncio.create_task(app(scope, receive, send))
 
     try:
-        await asyncio.wait_for(first_body_blocked.wait(), timeout=2)
+        # Hang bounds only: each awaited condition is expected in milliseconds.
+        await asyncio.wait_for(first_body_blocked.wait(), timeout=10)
         assert len(backend._queues) == 1
         queue = next(iter(backend._queues.values()))
-        for _ in range(200):
-            if queue._sealed:
-                break
-            await asyncio.sleep(0.005)
-        assert queue._sealed is True
+        async with asyncio.timeout(10):
+            while not queue._sealed:
+                await asyncio.sleep(0.005)
         assert queue.qsize() == 1
 
         release_body.set()
-        await asyncio.wait_for(request_task, timeout=2)
+        await asyncio.wait_for(request_task, timeout=10)
 
         body_messages = [
             message
@@ -2032,7 +2031,7 @@ async def _disconnect_after_partial(app, path, body):
         "client": ("127.0.0.1", 1234),
         "server": ("test", 80),
     }
-    await asyncio.wait_for(app(scope, receive, send), timeout=2)
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
     assert disconnect.is_set()
     return response_messages
 

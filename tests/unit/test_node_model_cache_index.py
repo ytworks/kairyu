@@ -599,16 +599,16 @@ def test_get_reads_entry_and_pins_from_one_generation_snapshot(
 
     def blocked_record(connection, row):
         entry_selected.set()
-        assert continue_read.wait(timeout=5)
+        assert continue_read.wait(timeout=10)
         return original(connection, row)
 
     monkeypatch.setattr(index, "_record_from_row", blocked_record)
     with ThreadPoolExecutor(max_workers=2) as pool:
         read = pool.submit(index.get, "a" * 64)
-        assert entry_selected.wait(timeout=5)
+        assert entry_selected.wait(timeout=10)
         pinned = writer.pin("a" * 64, owner="deployment/a", reason="active")
         continue_read.set()
-        snapshot = read.result(timeout=5)
+        snapshot = read.result(timeout=10)
 
     assert snapshot.generation == created.generation
     assert snapshot.pin_owners == ()
@@ -630,16 +630,16 @@ def test_snapshot_revision_and_records_are_read_from_one_sqlite_snapshot(
 
     def blocked_record(connection, row):
         entry_selected.set()
-        assert continue_read.wait(timeout=5)
+        assert continue_read.wait(timeout=10)
         return original(connection, row)
 
     monkeypatch.setattr(index, "_record_from_row", blocked_record)
     with ThreadPoolExecutor(max_workers=2) as pool:
         read = pool.submit(index.snapshot)
-        assert entry_selected.wait(timeout=5)
+        assert entry_selected.wait(timeout=10)
         pinned = writer.pin("a" * 64, owner="deployment/a", reason="active")
         continue_read.set()
-        snapshot = read.result(timeout=5)
+        snapshot = read.result(timeout=10)
 
     assert snapshot.revision == before.revision
     assert snapshot.records == (created,)

@@ -1,0 +1,268 @@
+name: kairyu-gemma-4-31b-8gpu
+
+# Gemma 4 31B chat replicas and EmbeddingGemma 2 embedding replicas on vLLM
+# (pinned release + this example's SM120 overlay), behind one Kairyu L3
+# endpoint, plus the Chat UI and its Docling.
+# Layout (replica search 2026-11-04, MEASUREMENTS.md): four TP2 chat replicas
+# on GPUs 0-1, 2-3, 4-5 and 6-7 with the MTP assistant, and two embedding
+# replicas sharing GPUs 1 and 7. control.py refuses a compose file that
+# disagrees with example.json's allocation.
+x-vllm-env: &vllm-env
+  HF_HOME: /models/.cache
+  HF_HUB_OFFLINE: '1'
+  HF_HUB_DISABLE_TELEMETRY: '1'
+  VLLM_NO_USAGE_STATS: '1'
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  SAFETENSORS_FAST_GPU: '1'
+  XDG_CACHE_HOME: /root/.cache
+  TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+  TRITON_CACHE_DIR: /root/.cache/triton
+  VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+
+x-vllm-health: &vllm-health
+  test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
+  interval: 5s
+  timeout: 3s
+  retries: 1440
+  start_period: 30s
+
+# One Gemma 4 31B chat replica: official BF16 weights, the checkpoint's own
+# chat template (Google's canonical Gemma 4 template, 2026-07-09), Gemma 4
+# tool and reasoning parsers, thinking on unless a request sends
+# `reasoning.effort: none`, the model's full 262,144-token context, images.
+x-gemma: &gemma
+  image: ${VLLM_IMAGE}
+  ipc: host
+  environment: *vllm-env
+  command:
+    - /models/gemma-4-31b-it
+    - --served-model-name
+    - gemma-4-31b
+    - --max-model-len
+    - '262144'
+    - --dtype
+    - bfloat16
+    - --tensor-parallel-size
+    - '2'
+    # vLLM's custom all-reduce fails CUDA-graph capture on these PCIe SM120
+    # GPUs ('invalid argument'); NCCL carries tensor-parallel all-reduce.
+    - --disable-custom-all-reduce
+    - --gpu-memory-utilization
+    - ${CHAT_GPU_MEMORY_UTILIZATION}
+    - --enable-prefix-caching
+    - --max-num-seqs
+    - '64'
+    - --max-num-batched-tokens
+    - '8192'
+    - --async-scheduling
+    # The checkpoint's MTP assistant drafts four tokens (replica search step 2:
+    # +9-104 % output at c1-c32, MEASUREMENTS.md); verification keeps the
+    # target model's distribution.
+    - --speculative-config
+    - '{"model":"/models/gemma-4-31b-it-assistant","num_speculative_tokens":4}'
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - gemma4
+    - --reasoning-parser
+    - gemma4
+    - --default-chat-template-kwargs
+    - '{"enable_thinking":true}'
+    - --limit-mm-per-prompt
+    - '{"image":8,"audio":0,"video":0}'
+    - --disable-uvicorn-access-log
+  healthcheck: *vllm-health
+  restart: unless-stopped
+
+# One EmbeddingGemma 2 replica: vLLM's pooling runner (mean pooling and L2
+# normalization, 768 dimensions), text only, bf16 (the model card forbids
+# float16), its full 8,192-token input.
+x-embed: &embed
+  image: ${VLLM_IMAGE}
+  ipc: host
+  environment: *vllm-env
+  command:
+    - /models/embeddinggemma-2
+    - --served-model-name
+    - embeddinggemma-2
+    - --runner
+    - pooling
+    - --dtype
+    - bfloat16
+    - --max-model-len
+    - '8192'
+    - --gpu-memory-utilization
+    - ${EMBED_GPU_MEMORY_UTILIZATION}
+    - --limit-mm-per-prompt
+    - '{"image":0,"audio":0,"video":0}'
+    - --disable-uvicorn-access-log
+  healthcheck: *vllm-health
+  restart: unless-stopped
+
+x-models: &models
+  type: bind
+  source: ${MODEL_STORAGE_PATH}
+  target: /models
+  read_only: true
+
+x-cache: &cache
+  type: bind
+  source: ${CACHE_PATH}
+  target: /root/.cache
+
+services:
+  gemma-0:
+    <<: *gemma
+    cpuset: ${GEMMA_0_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['0', '1'], capabilities: [gpu]}]}}}
+  gemma-1:
+    <<: *gemma
+    cpuset: ${GEMMA_1_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['2', '3'], capabilities: [gpu]}]}}}
+  gemma-2:
+    <<: *gemma
+    cpuset: ${GEMMA_2_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['4', '5'], capabilities: [gpu]}]}}}
+  gemma-3:
+    <<: *gemma
+    cpuset: ${GEMMA_3_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['6', '7'], capabilities: [gpu]}]}}}
+  embed-0:
+    <<: *embed
+    cpuset: ${EMBED_0_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['1'], capabilities: [gpu]}]}}}
+  embed-1:
+    <<: *embed
+    cpuset: ${EMBED_1_CPUSET}
+    volumes: [*models, *cache]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ['7'], capabilities: [gpu]}]}}}
+
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: '1'
+    image: ${KAIRYU_IMAGE:-local/kairyu:gemma-4-31b-8gpu-example}
+    command: [/etc/kairyu/kairyu.yaml]
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+    volumes:
+      # Per-placement JSONL evidence for both pools (replica id + reason per
+      # request); verify.sh reads it to prove the spread.
+      - type: bind
+        source: ${PLACEMENT_LOG_PATH}
+        target: /var/lib/kairyu/placement
+      - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+    depends_on:
+      gemma-0: {condition: service_healthy}
+      gemma-1: {condition: service_healthy}
+      gemma-2: {condition: service_healthy}
+      gemma-3: {condition: service_healthy}
+      embed-0: {condition: service_healthy}
+      embed-1: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:${API_PORT:-8020}:8000
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+
+  # Document extraction for the Chat UI's knowledge bases: Docling with
+  # RapidOCR (one recognizer covers Japanese, Chinese and English), CPU only,
+  # capped at 4 CPUs so OCR cannot slow the L1; two workers x two threads.
+  docling:
+    image: ${DOCLING_IMAGE}
+    environment:
+      DOCLING_SERVE_MAX_SYNC_WAIT: '3600'
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: '2'
+      OMP_NUM_THREADS: '2'
+      HF_HUB_OFFLINE: '1'
+    cpus: 4
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:5001/health", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
+
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      # m11 D7 amendment 2026-10-17: the Chat UI talks to Kairyu over
+      # /v1/responses. Only the chat model is offered: Kairyu also lists the
+      # embedding model, which must never appear in the model picker.
+      OPENAI_API_CONFIGS: ${CHAT_UI_OPENAI_API_CONFIGS}
+      DEFAULT_MODELS: gemma-4-31b
+      DEFAULT_MODEL_PARAMS: ${CHAT_UI_DEFAULT_MODEL_PARAMS}
+      ENABLE_PERSISTENT_CONFIG: 'false'
+      RESET_CONFIG_ON_START: 'true'
+      # Published on the host's public address, so every user signs in. The
+      # first start creates the admin from these variables (control.py
+      # refuses to start without them); the admin adds other users.
+      WEBUI_AUTH: 'true'
+      ENABLE_SIGNUP: 'false'
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      WEBUI_URL: ${WEBUI_URL}
+      ENABLE_OLLAMA_API: 'false'
+      ENABLE_EVALUATION_ARENA_MODELS: 'false'
+      # Japanese knowledge bases: Docling extraction (OCR for bitmaps only),
+      # EmbeddingGemma 2 through Kairyu's /v1/embeddings (its query and
+      # document instructions prepended here, where query and document are
+      # known), the pinned reranker from the data volume. Open WebUI's BM25
+      # splits on whitespace and cannot tokenize Japanese, so hybrid search
+      # runs with BM25 weight 0: vector search, then the reranker.
+      CONTENT_EXTRACTION_ENGINE: docling
+      DOCLING_SERVER_URL: ${DOCLING_SERVER_URL}
+      DOCLING_PARAMS: ${DOCLING_PARAMS}
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: embeddinggemma-2
+      RAG_OPENAI_API_BASE_URL: ${RAG_OPENAI_API_BASE_URL}
+      RAG_OPENAI_API_KEY: sk-local-kairyu
+      RAG_EMBEDDING_BATCH_SIZE: ${RAG_EMBEDDING_BATCH_SIZE}
+      ENABLE_ASYNC_EMBEDDING: 'true'
+      RAG_EMBEDDING_CONCURRENT_REQUESTS: ${RAG_EMBEDDING_CONCURRENT_REQUESTS}
+      RAG_EMBEDDING_QUERY_PREFIX: ${RAG_EMBEDDING_QUERY_PREFIX}
+      RAG_EMBEDDING_CONTENT_PREFIX: ${RAG_EMBEDDING_CONTENT_PREFIX}
+      RAG_RERANKING_ENGINE: ''
+      RAG_RERANKING_MODEL: ${RAG_RERANKING_MODEL_PATH}
+      ENABLE_RAG_HYBRID_SEARCH: 'true'
+      RAG_HYBRID_BM25_WEIGHT: ${RAG_HYBRID_BM25_WEIGHT}
+      RAG_TOP_K: ${RAG_TOP_K}
+      RAG_TOP_K_RERANKER: ${RAG_TOP_K_RERANKER}
+      # Chunks in characters; 1,000 dilutes a Japanese passage (1017 example).
+      CHUNK_SIZE: ${CHUNK_SIZE}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP}
+      OFFLINE_MODE: 'true'
+      # Word / Excel / PowerPoint: the code interpreter runs Pyodide in the
+      # user's browser (python-docx, python-pptx, openpyxl are bundled), on
+      # in every chat by default; files reach the user through the
+      # file_download tool's link.
+      ENABLE_CODE_INTERPRETER: 'true'
+      CODE_INTERPRETER_ENGINE: ${CODE_INTERPRETER_ENGINE}
+      ENABLE_PYODIDE_FILE_PERSISTENCE: ${ENABLE_PYODIDE_FILE_PERSISTENCE}
+      DEFAULT_MODEL_METADATA: ${DEFAULT_MODEL_METADATA}
+      # The reranker runs on CPU in this container; one thread per CPU.
+      OMP_NUM_THREADS: '8'
+    volumes:
+      - type: bind
+        source: ${WEBUI_STORAGE_PATH}
+        target: /app/backend/data
+    depends_on:
+      kairyu: {condition: service_healthy}
+      docling: {condition: service_healthy}
+    cpus: 8
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3020}:8080
+    restart: unless-stopped

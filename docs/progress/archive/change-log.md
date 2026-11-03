@@ -11,6 +11,28 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-10-22 — [amendment] Images beside tool history for upstream-rendered models; Office files in the 1017 eight-GPU Chat UI
+- What: `MultimodalMessage` carries the caller's tool calls, tool-result id, name and reasoning; for `upstream_chat_models` models Chat Completions and Responses send an image beside tool history to the upstream (chat wire, Responses / Messages wires) instead of a 400; other models, AUTO and Kairyu's own engines unchanged. `deepseek-v4.1-flash-1017-8gpu` turns its Chat UI's browser code interpreter on by default: attached docx / xlsx / pptx are read (Docling) and edited into downloadable files. GPU: `office`, `chat-ui`, `vision`, `tool-calling`, `api-equivalence` (new `image-tools`: vLLM and Kairyu both "red PLUM" on both APIs) pass.
+- Why: Open WebUI passes built-in tools in every chat, so with the code interpreter on, an image after a tool call was refused (issue #659 item 6); owner chose the Kairyu fix over turning the default off.
+- Refs: PR #662; m9 D2 images-beside-tools amendment; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plans `docs/superpowers/plans/2026-10-22-*.md`
+
+### 2026-10-21 — [design] Japanese knowledge bases in the 1017 eight-GPU Chat UI
+- What: `deepseek-v4.1-flash-1017-8gpu`'s Open WebUI extracts through a pinned docling-serve (RapidOCR `iso:ja`), embeds with `BAAI/bge-m3`, reranks with `BAAI/bge-reranker-v2-m3` (pinned, hashed, offline), hybrid search at BM25 weight 0, 300-character chunks; Docling 4 CPUs, Chat UI 8; `run.sh up` fails closed on any other retrieval configuration. GPU gates pass: OCR 4.7 s/page, 20-page scan ingested in 80 s, Japanese query top-1 in 3.5 s, Chat UI answers from the base with a citation, c1/c8 serving with Docling and embedding at their caps at 99.8 / 99.2 % of the recorded rows.
+- Why: Japanese documents (incl. scans) in knowledge bases; Open WebUI's BM25 splits on whitespace and its 1,000-character default chunk dilutes Japanese passages (dense rank 27/40 vs 9/120 at 300).
+- Refs: PR #661; 1017 amendment addendum in `docs/design/frontier-native-runtime.md`; plan `docs/superpowers/plans/2026-10-21-1017-8gpu-japanese-knowledge.md`; the example's `MEASUREMENTS.md`
+
+### 2026-10-20 — [progress] DeepSWE with mini-swe-agent: 81/113 on the 1017 eight-GPU example
+- What: the six-GPU mini-swe-agent run's setup (kairyu-bench `52b06ce`, effort max, 8 workers) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 81/113 (six-GPU 79/113, eight-GPU dsh 83/113), 3 h 59 min (0.66x of six-GPU), 10,012 API calls all 200 (1.00x), input 1.181 B, output 8.69 M; all 113 tasks scored. Wiki: two dsh-vs-DeepSeek-8GPU-high overlap rows corrected (a time-limit trial had been counted as correct).
+- Refs: run `deepswe-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison
+
+### 2026-10-20 — [progress] DeepSWE with DeepSeek Harness: 83/113 on the 1017 eight-GPU example
+- What: the same dsh run as the six-GPU one (dsh 0.2.1rc2, kairyu-bench PR #31, effort max, 8 workers, Kairyu code of PR #660 `0513750a`) on `deepseek-v4.1-flash-1017-8gpu` (TP8/EP8): 83/113 (six-GPU dsh 76/113, mini-swe-agent 79/113), 4 h 33 min (0.72x), 10,753 API calls all 200 (1.00x), 10,424 with thinking, input 1.106 B, output 9.33 M; all 113 tasks scored, no re-run needed. No new Kairyu-side problem.
+- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-8gpu-max-8w-20261020-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660
+
+### 2026-10-19 — [progress] DeepSWE with DeepSeek Harness via Messages: 76/113 on the 1017 six-GPU example
+- What: PR #660 (`0513750a`, Kairyu only replaced) passed the GPU smokes: dsh effort max (91 calls 200, 88 replies with thinking, 3,857 replayed blocks accepted, reward 1) and effort off (thinking off, first input 1,171 tokens, reward 1). DeepSWE v1.1 with DeepSeek Harness (dsh 0.2.1rc2, kairyu-bench PR #31) on `deepseek-v4.1-flash-1017-6gpu`, effort max, 8 workers: 76/113 (mini-swe-agent on the same L1: 79/113), 6 h 20 min, 10,768 API calls all 200, 10,393 with thinking. New finding: `count_tokens` is 404 on tool-call history (vLLM v0.32.0 `/tokenize` fails on `content: null`; #659 item 5, recorded only).
+- Refs: run `deepswe-dsh-deepseek-v4.1-flash-1017-6gpu-max-8w-20261019-r1`; kairyu-bench wiki DeepSWE-Comparison; PR #660; issue #659
+
 ### 2026-10-19 — [amendment] Messages `thinking: disabled` turns thinking off; review fixes (m11 D4)
 - What: an engine or pool model now receives `thinking: disabled` as thinking off (internal effort `none`, per wire: Messages `thinking.disabled`, Responses/chat `none`; AUTO unchanged); `display: omitted` returns empty thinking; a Kairyu upstream gets replayed thinking; the first thinking delta is the SLO first token. GPU: the dsh smoke (effort max, 1 task) on `423494b0` passed (66 calls 200, 65 with thinking, reward 1).
 - Why: issue #659 item 4 (disabled was a no-op, so L1 thought at its default unseen) and three owner review findings on PR #660; owner decision 2026-10-19.

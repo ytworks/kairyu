@@ -6,6 +6,7 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import pytest
 
@@ -22,6 +23,22 @@ if _POSTGRES_DSN:
     psycopg = pytest.importorskip("psycopg")
 else:  # Keep core-only test collection importable.
     psycopg = None
+
+
+def _wait_for_database_clock_after(instant: datetime) -> None:
+    """Wait for the database clock to pass ``instant``; it is re-read after
+    every wait, so a slow runner only waits longer."""
+
+    assert _POSTGRES_DSN is not None and psycopg is not None
+    for _ in range(100):
+        with psycopg.connect(_POSTGRES_DSN, autocommit=True) as connection:
+            row = connection.execute("SELECT clock_timestamp()").fetchone()
+        assert row is not None
+        remaining = (instant - row[0]).total_seconds()
+        if remaining < 0:
+            return
+        time.sleep(remaining + 0.001)
+    raise AssertionError("database clock did not pass the requested instant")
 
 
 @pytest.fixture
@@ -260,10 +277,10 @@ def test_different_search_paths_cannot_split_the_election(isolated_database) -> 
         contender_dsns[1], store_id=store_id, initialize_schema=False
     )
     try:
-        lease = first.acquire("runner-control-plane", "controller-a", lease_seconds=5)
+        lease = first.acquire("runner-control-plane", "controller-a", lease_seconds=10)
         assert lease is not None
         assert second.acquire(
-            "runner-control-plane", "controller-b", lease_seconds=5
+            "runner-control-plane", "controller-b", lease_seconds=10
         ) is None
         assert first.authorize(lease).fencing_token == 1
     finally:
@@ -287,7 +304,7 @@ def test_reconnect_rejects_recreated_control_namespace(isolated_database) -> Non
             original.acquire(
                 "runner-control-plane",
                 "controller-a",
-                lease_seconds=5,
+                lease_seconds=10,
             )
     finally:
         original.close()
@@ -297,13 +314,13 @@ def test_cross_instance_election_renewal_release_and_fencing(store_factory) -> N
     create, _store_id = store_factory
     first = create()
     second = create()
-    lease = first.acquire("runner-control-plane", "controller-a", lease_seconds=5)
+    lease = first.acquire("runner-control-plane", "controller-a", lease_seconds=10)
     assert lease is not None
     assert isinstance(first, RunnerLeaderLeaseStore)
     assert lease.fencing_token == 1
-    assert second.acquire("runner-control-plane", "controller-b", lease_seconds=5) is None
+    assert second.acquire("runner-control-plane", "controller-b", lease_seconds=10) is None
 
-    renewed = first.renew(lease, lease_seconds=5)
+    renewed = first.renew(lease, lease_seconds=10)
     assert renewed.tenure == lease.tenure
     assert renewed.renewed_at >= lease.renewed_at
     assert first.authorize(lease).lease_until == renewed.lease_until
@@ -312,7 +329,7 @@ def test_cross_instance_election_renewal_release_and_fencing(store_factory) -> N
     successor = second.acquire(
         "runner-control-plane",
         "controller-b",
-        lease_seconds=5,
+        lease_seconds=10,
     )
     assert successor is not None
     assert successor.fencing_token == lease.fencing_token + 1
@@ -330,7 +347,7 @@ def test_expired_lease_is_reclaimed_with_a_higher_token(store_factory) -> None:
         lease_seconds=0.1,
     )
     assert expired is not None
-    time.sleep(0.15)
+    _wait_for_database_clock_after(expired.lease_until)
 
     successor = second.acquire(
         "runner-control-plane",
@@ -352,7 +369,7 @@ def test_released_equal_timestamp_tombstone_remains_reclaimable(store_factory) -
     released = first.acquire(
         "runner-control-plane",
         "controller-a",
-        lease_seconds=5,
+        lease_seconds=10,
     )
     assert released is not None
     first.release(released)
@@ -372,7 +389,7 @@ def test_released_equal_timestamp_tombstone_remains_reclaimable(store_factory) -
     successor = second.acquire(
         "runner-control-plane",
         "controller-b",
-        lease_seconds=5,
+        lease_seconds=10,
     )
     assert successor is not None
     assert successor.fencing_token == released.fencing_token + 1
@@ -387,7 +404,7 @@ def test_concurrent_cross_instance_campaign_has_one_winner(store_factory) -> Non
         return store.acquire(
             "runner-control-plane",
             f"controller-{index}",
-            lease_seconds=5,
+            lease_seconds=10,
         )
 
     with ThreadPoolExecutor(max_workers=len(stores)) as pool:

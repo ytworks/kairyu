@@ -100,6 +100,14 @@ def find_takeover(
     return None
 
 
+class SmokeHang(Exception):
+    """An awaited event did not happen within its hang bound.
+
+    Timeouts only detect hangs; the report labels them separately from
+    assertion failures so a hang is never mistaken for a slow pass/fail.
+    """
+
+
 class Smoke:
     def __init__(
         self,
@@ -114,7 +122,9 @@ class Smoke:
         self._namespace = namespace
         self._timeout_seconds = timeout_seconds
         self._sessions = sessions_by_gateway()
-        self._client = httpx.Client(timeout=15.0)
+        # A hang bound per HTTP call, far above any expected response time and
+        # above the LB's connect failover plus its upstream hang bound.
+        self._client = httpx.Client(timeout=120.0)
         self.checks: list[dict[str, Any]] = []
         self.request_ids: list[str] = []
 
@@ -221,8 +231,16 @@ class Smoke:
                 continue
             if last.get("state") in states:
                 return last
+            if last.get("state") in TERMINAL_STATES:
+                raise AssertionError(
+                    f"request {request_id} ended {last.get('state')!r}, "
+                    f"expected {sorted(states)}"
+                )
             time.sleep(0.1)
-        raise AssertionError(f"request {request_id} did not reach {sorted(states)}; last={last}")
+        raise SmokeHang(
+            f"request {request_id} did not reach {sorted(states)} within the "
+            f"{self._timeout_seconds:g} s hang bound; last={last}"
+        )
 
     def _audit(self, request_id: str) -> list[dict[str, Any]]:
         if not _REQUEST_ID.fullmatch(request_id):
@@ -297,7 +315,10 @@ class Smoke:
             if matches:
                 return matches[-1]
             time.sleep(0.1)
-        raise AssertionError(f"request {request_id} has no {event_name!r} audit event: {latest}")
+        raise SmokeHang(
+            f"request {request_id} has no {event_name!r} audit event within the "
+            f"{self._timeout_seconds:g} s hang bound: {latest}"
+        )
 
     def _advisory_lock_count(self, *, granted: bool) -> int:
         completed = self._kubectl_run(
@@ -324,7 +345,7 @@ class Smoke:
         holder: subprocess.Popen[bytes],
         submission: concurrent.futures.Future[str] | None = None,
     ) -> None:
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + self._timeout_seconds
         while time.monotonic() < deadline:
             if holder.poll() is not None:
                 raise AssertionError("PostgreSQL advisory-lock holder exited early")
@@ -336,7 +357,10 @@ class Smoke:
                 return
             time.sleep(0.05)
         state = "granted holder" if granted else "blocked submit waiter"
-        raise AssertionError(f"did not observe the expected PostgreSQL {state}")
+        raise SmokeHang(
+            f"did not observe the expected PostgreSQL {state} within the "
+            f"{self._timeout_seconds:g} s hang bound"
+        )
 
     def _gateway_pods(self) -> dict[str, dict[str, Any]]:
         completed = self._kubectl_run(
@@ -418,11 +442,13 @@ class Smoke:
         )
 
     def deadline(self) -> None:
+        # A deadline that has already passed must expire deterministically; a
+        # deadline a few seconds ahead would race the runner's speed.
         request_id = self._submit(
             gateway_id="b",
             prompt="expire-me",
             idempotency_key="async-smoke-deadline",
-            deadline_at=datetime.now(UTC) + timedelta(seconds=1.5),
+            deadline_at=datetime.now(UTC) - timedelta(hours=1),
         )
         status = self._wait_state(request_id, {"expired"}, gateway_id="c")
         if status["state"] != "expired":
@@ -432,16 +458,16 @@ class Smoke:
 
     def large_body_responsiveness(self) -> None:
         owner_lock_key = json.dumps([STORE_ID, "default"])
-        lock_sql = (
-            "BEGIN; SELECT pg_advisory_xact_lock(hashtextextended("
-            f"'{owner_lock_key}', 0)); SELECT pg_sleep(8); COMMIT"
-        )
+        # The holder keeps the owner lock until this smoke releases it, so
+        # "answered while the submission waits on the lock" is an order
+        # property, not a race against a fixed lock duration.
         holder = subprocess.Popen(
             [
                 self._kubectl,
                 "-n",
                 self._namespace,
                 "exec",
+                "-i",
                 "deployment/f1c-postgres",
                 "--",
                 "psql",
@@ -449,34 +475,73 @@ class Smoke:
                 "-XAt",
                 "-v",
                 "ON_ERROR_STOP=1",
-                "-c",
-                lock_sql,
             ],
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
+            if holder.stdin is None:
+                raise AssertionError("PostgreSQL lock holder has no stdin")
+            holder.stdin.write(
+                (
+                    "BEGIN;\nSELECT pg_advisory_xact_lock(hashtextextended("
+                    f"'{owner_lock_key}', 0));\n"
+                ).encode()
+            )
+            holder.stdin.flush()
             self._wait_for_advisory_lock(granted=True, holder=holder)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                submit_started = time.monotonic()
-                submission = executor.submit(
-                    self._submit,
-                    gateway_id="c",
-                    prompt="x" * (768 * 1024),
-                    idempotency_key="async-smoke-large-body",
-                )
-                self._wait_for_advisory_lock(
-                    granted=False,
-                    holder=holder,
-                    submission=submission,
-                )
-                health_started = time.monotonic()
+            submit_started = time.monotonic()
+            submission = executor.submit(
+                self._submit,
+                gateway_id="c",
+                prompt="x" * (768 * 1024),
+                idempotency_key="async-smoke-large-body",
+            )
+            self._wait_for_advisory_lock(
+                granted=False,
+                holder=holder,
+                submission=submission,
+            )
+            health_started = time.monotonic()
+            try:
                 self._request("GET", "/v1/models", gateway_id="c")
-                health_seconds = time.monotonic() - health_started
-                if holder.wait(timeout=12.0) != 0:
-                    raise AssertionError("PostgreSQL advisory-lock holder failed")
-                request_id = submission.result(timeout=15.0)
-                submit_seconds = time.monotonic() - submit_started
+            except httpx.TimeoutException as error:
+                raise SmokeHang(
+                    "/v1/models did not answer within its hang bound while a "
+                    "durable submission waited on the store lock"
+                ) from error
+            health_seconds = time.monotonic() - health_started
+            if (
+                submission.done()
+                or holder.poll() is not None
+                or self._advisory_lock_count(granted=False) == 0
+            ):
+                raise AssertionError(
+                    "/v1/models was not answered while the large durable "
+                    "submission still waited on the held store lock"
+                )
+            holder.stdin.write(b"COMMIT;\n")
+            holder.stdin.close()
+            try:
+                holder_status = holder.wait(timeout=self._timeout_seconds)
+            except subprocess.TimeoutExpired as error:
+                raise SmokeHang(
+                    "PostgreSQL lock holder did not commit within the "
+                    f"{self._timeout_seconds:g} s hang bound"
+                ) from error
+            if holder_status != 0:
+                raise AssertionError("PostgreSQL advisory-lock holder failed")
+            try:
+                request_id = submission.result(timeout=self._timeout_seconds)
+            except concurrent.futures.TimeoutError as error:
+                raise SmokeHang(
+                    "large durable submission did not finish within the "
+                    f"{self._timeout_seconds:g} s hang bound after the lock "
+                    "was released"
+                ) from error
+            submit_seconds = time.monotonic() - submit_started
         finally:
             if holder.poll() is None:
                 holder.terminate()
@@ -485,17 +550,15 @@ class Smoke:
                 except subprocess.TimeoutExpired:
                     holder.kill()
                     holder.wait(timeout=3.0)
+            # Terminating the holder releases the lock, so a still-blocked
+            # submission can finish before the executor is joined.
+            executor.shutdown(wait=True)
         self._request(
             "POST",
             f"/v1/requests/{request_id}/cancel",
             gateway_id="a",
         )
         self._wait_state(request_id, {"cancelled"}, gateway_id="b")
-        if health_seconds >= 5.0:
-            raise AssertionError(
-                "large durable submission blocked gateway responsiveness: "
-                f"submit={submit_seconds:.3f}s health={health_seconds:.3f}s"
-            )
         self.checks.append(
             {
                 "name": "large_body_responsiveness",
@@ -542,7 +605,10 @@ class Smoke:
                     break
                 time.sleep(0.2)
             if takeover is None:
-                raise AssertionError(f"no fenced takeover was observed: {latest}")
+                raise SmokeHang(
+                    "no fenced takeover was observed within the "
+                    f"{self._timeout_seconds:g} s hang bound: {latest}"
+                )
             status = self._wait_state(request_id, {"succeeded"}, gateway_id=survivor)
             if int(status["attempt"]) < 2:
                 raise AssertionError("takeover did not increment the public attempt")
@@ -625,8 +691,10 @@ class Smoke:
                 pass
             time.sleep(0.5)
         if new_restarts <= old_restarts or not ready:
-            raise AssertionError(
-                f"PostgreSQL did not restart cleanly: {old_restarts} -> {new_restarts}"
+            raise SmokeHang(
+                "PostgreSQL did not restart and become Ready within the "
+                f"{self._timeout_seconds:g} s hang bound: "
+                f"{old_restarts} -> {new_restarts}, ready={ready}"
             )
         for gateway_id in GATEWAY_IDS:
             status = self._wait_state(
@@ -660,7 +728,10 @@ class Smoke:
             except (httpx.HTTPError, AssertionError):
                 time.sleep(0.2)
         if reconnect_request is None:
-            raise AssertionError("gateway did not recover async submission after DB restart")
+            raise SmokeHang(
+                "gateway did not accept an async submission within the "
+                f"{self._timeout_seconds:g} s hang bound after the DB restart"
+            )
         self._wait_audit_event(reconnect_request, "running")
         self._wait_state(reconnect_request, {"succeeded"}, gateway_id="b")
         reconnect_result = self._request(
@@ -712,7 +783,10 @@ class Smoke:
                     break
             time.sleep(0.2)
         else:
-            raise AssertionError("gateways exposed inconsistent shared queue metrics")
+            raise SmokeHang(
+                "gateways did not expose one consistent shared queue snapshot "
+                f"within the {self._timeout_seconds:g} s hang bound"
+            )
 
         reference = snapshots["a"]
         if (
@@ -747,8 +821,12 @@ class Smoke:
             "kairyu_async_request_attempts_total",
             store=STORE_ID,
         )
-        if attempts < 6:
-            raise AssertionError(f"attempt counter was {attempts}, expected >= 6")
+        # Deterministic claims only: shared-state, cancellation and
+        # post-reconnect run once each and the failover twice. The expired
+        # request is never claimed, and whether the large submission is
+        # claimed before its cancellation depends on timing.
+        if attempts < 5:
+            raise AssertionError(f"attempt counter was {attempts}, expected >= 5")
         for request_id in self.request_ids:
             if request_id in reference:
                 raise AssertionError("request ID leaked into Prometheus labels")
@@ -863,7 +941,10 @@ class Smoke:
                 break
             time.sleep(0.2)
         else:
-            raise AssertionError("retention metrics did not converge")
+            raise SmokeHang(
+                "retention metrics did not converge within the "
+                f"{self._timeout_seconds:g} s hang bound"
+            )
         self._sql_scalar(
             "UPDATE async_request_claim_audit_archive "
             "SET at = clock_timestamp() - interval '2 days' "
@@ -896,7 +977,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gateway-url", default="http://127.0.0.1:18082")
     parser.add_argument("--kubectl", default="kubectl")
     parser.add_argument("--namespace", default="kairyu-f1c")
-    parser.add_argument("--timeout-seconds", type=float, default=90.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=300.0,
+        help="hang bound for each awaited event",
+    )
     parser.add_argument("--source-commit", required=True)
     parser.add_argument(
         "--output",
@@ -945,10 +1031,11 @@ def main() -> int:
         print(f"AsyncRequest three-gateway smoke passed: {args.output}")
         return 0
     except Exception as error:
+        hung = isinstance(error, (SmokeHang, httpx.TimeoutException))
         report = {
             "schema_version": 1,
             "gate": "async-request-three-gateway-smoke",
-            "verdict": "fail",
+            "verdict": "hang" if hung else "fail",
             "started_at": started_at.isoformat(),
             "finished_at": datetime.now(UTC).isoformat(),
             "source_commit": args.source_commit,

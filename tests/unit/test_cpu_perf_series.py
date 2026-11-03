@@ -17,12 +17,35 @@ _SHA = "a" * 40
 _REPOSITORY = "owner/repository"
 
 
+def _work_case(
+    sizes: tuple[int, int],
+    operations: tuple[int, int],
+    per_operation: int,
+) -> dict[str, list[int]]:
+    return {
+        "sizes": list(sizes),
+        "operations": list(operations),
+        "work": [count * per_operation for count in operations],
+    }
+
+
 def _results(value: float = 100.0) -> dict[str, dict[str, object]]:
     proc_lengths = (128, 256, 512, 1024)
+    queue_sizes = series.gate.SCHEDULER_WORK_SIZES
     return {
         "scheduler_queue": {
             "requests": 30_000,
             "removals": 3_000,
+            "work": {
+                "unit": "test",
+                "fifo_full_drain": _work_case(queue_sizes, queue_sizes, 7),
+                "indexed_removal": _work_case(
+                    queue_sizes,
+                    (queue_sizes[0] // 10, queue_sizes[1] // 10),
+                    4,
+                ),
+                "priority_full_drain": _work_case(queue_sizes, queue_sizes, 30),
+            },
             "fifo_full_drain": {
                 "median_speedup": value,
                 "legacy": {"median_seconds": 0.3, "repeats": 5},
@@ -45,10 +68,29 @@ def _results(value: float = 100.0) -> dict[str, dict[str, object]]:
             "median_speedup": value,
             "scanning": {"median_seconds": 0.3, "repeats": 3},
             "indexed": {"median_seconds": 0.1, "repeats": 3},
+            "work": {
+                "unit": "test",
+                "eviction": _work_case(
+                    series.gate.RADIX_WORK_SIZES, (25, 25), 31
+                ),
+            },
         },
         "op_queue": {
             "operations": 50_000,
             "producers": 1,
+            "work": {
+                "unit": "test",
+                "add_burst": _work_case(
+                    series.gate.OP_QUEUE_WORK_SIZES,
+                    series.gate.OP_QUEUE_WORK_SIZES,
+                    8,
+                ),
+                "duplicate_abort_burst": _work_case(
+                    series.gate.OP_QUEUE_WORK_SIZES,
+                    series.gate.OP_QUEUE_WORK_SIZES,
+                    2,
+                ),
+            },
             "add_burst": {
                 "elapsed_speedup": value,
                 "legacy": {"elapsed_seconds": 0.3, "repeats": 5},
@@ -79,6 +121,15 @@ def _results(value: float = 100.0) -> dict[str, dict[str, object]]:
             "iterations": 20,
             "repeats": 3,
             "validated_bitwise": True,
+            "work": {
+                "unit": "test",
+                "steady_state": _work_case(
+                    series.gate.SAMPLER_WORK_SIZES, (20, 20), 2
+                ),
+                "append": _work_case(
+                    series.gate.SAMPLER_WORK_SIZES, (20, 20), 3
+                ),
+            },
             "legacy_speedup": value,
             "append_legacy_speedup": value,
             "overlay_speedup": 1.1,
@@ -137,7 +188,12 @@ def _results(value: float = 100.0) -> dict[str, dict[str, object]]:
             "routes": 10_000,
             "p50_seconds": 0.00001,
             "p99_seconds": 0.00002,
-            "p99_budget_seconds": 0.010,
+            "work": {
+                "unit": "test",
+                "routes_served": _work_case((0, 10_000), (4, 4), 33),
+            },
+            "max_calls_per_route": 1_000,
+            "max_work_growth": 2.0,
             "passed": True,
         },
     }
@@ -147,13 +203,20 @@ def _report(value: float = 100.0) -> dict[str, object]:
     benchmarks = _results(value)
     checks = series.gate.evaluate_results(benchmarks)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "cpu_only": True,
         "benchmarks": benchmarks,
         "checks": [asdict(check) for check in checks],
+        "diagnostics": {"timing": series.gate.timing_diagnostics(benchmarks)},
         "errors": {},
         "all_passed": all(check.passed for check in checks),
     }
+
+
+def _reevaluate(report: dict[str, object]) -> None:
+    checks = series.gate.evaluate_results(report["benchmarks"])
+    report["checks"] = [asdict(check) for check in checks]
+    report["all_passed"] = all(check.passed for check in checks)
 
 
 def _write_report(path: Path, report: object) -> None:
@@ -217,15 +280,15 @@ def _append(
     return code, comparison
 
 
-def test_metric_allowlist_and_compatibility_exclude_source_sha(
+def test_trend_metrics_and_compatibility_exclude_source_sha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ImageOS", "ubuntu24")
     report = _report()
-    metrics = series._hard_metrics(report)
+    metrics = series._trend_metrics(report)
     segment = series._segment(repository=_REPOSITORY)
 
-    assert tuple(metrics) == tuple(name for name, _path in series.HARD_METRICS)
+    assert tuple(metrics) == tuple(name for name, _path in series.TREND_METRICS)
     assert all(value == 100.0 for value in metrics.values())
     assert set(segment) == {"compatibility", "policy", "runtime", "workload"}
     assert segment["runtime"]["hosted_image_class"] == "ubuntu24"
@@ -233,9 +296,7 @@ def test_metric_allowlist_and_compatibility_exclude_source_sha(
     assert series.MAX_REPORT_BYTES == series.MAX_SERIES_BYTES == 64 * 1024 * 1024
 
 
-def test_warmup_excludes_current_and_exact_fifteen_percent_is_binding(
-    tmp_path: Path,
-) -> None:
+def test_speed_decline_is_reported_and_never_fails(tmp_path: Path) -> None:
     for run_id in range(1, 6):
         code, comparison = _append(tmp_path, run_id=run_id, value=200.0)
         assert code == 0
@@ -243,9 +304,11 @@ def test_warmup_excludes_current_and_exact_fifteen_percent_is_binding(
 
     code, comparison = _append(tmp_path, run_id=6, value=170.0)
 
-    assert code == 1
-    assert comparison["status"] == "regression"
-    assert set(comparison["regressions"]) == set(comparison["metrics"])
+    assert code == 0
+    assert comparison["all_passed"] is True
+    assert comparison["status"] == "pass"
+    assert comparison["trend"] == "report-only"
+    assert set(comparison["declines"]) == set(comparison["metrics"])
     for metric in comparison["metrics"].values():
         assert metric["baseline_median"] == 200.0
         assert [sample["value"] for sample in metric["baseline_samples"]] == [
@@ -253,53 +316,10 @@ def test_warmup_excludes_current_and_exact_fifteen_percent_is_binding(
         ] * 5
         assert metric["current"] == 170.0
         assert Decimal(metric["decline_fraction"]) == Decimal("0.15")
-        assert metric["regressed"] is True
+        assert metric["declined"] is True
+        assert metric["status"] == "decline"
     assert (tmp_path / "series.jsonl").is_file()
     assert (tmp_path / "comparison.json").is_file()
-
-
-@pytest.mark.parametrize(("metric_name", "report_path"), series.HARD_METRICS)
-def test_each_hard_metric_independently_triggers_regression(
-    tmp_path: Path,
-    metric_name: str,
-    report_path: tuple[str, ...],
-) -> None:
-    for run_id in range(1, 6):
-        code, _comparison = _append(tmp_path, run_id=run_id, value=200.0)
-        assert code == 0
-    report = _report(200.0)
-    parent = series._at(report, *report_path[:-1])
-    assert isinstance(parent, dict)
-    parent[report_path[-1]] = 170.0
-    checks = series.gate.evaluate_results(report["benchmarks"])
-    report["checks"] = [asdict(check) for check in checks]
-    report["all_passed"] = all(check.passed for check in checks)
-
-    code, comparison = _append(tmp_path, run_id=6, report=report)
-
-    assert code == 1
-    assert comparison["regressions"] == [metric_name]
-    assert comparison["metrics"][metric_name]["status"] == "regression"
-
-
-@pytest.mark.parametrize(
-    ("current", "regressed"),
-    [(170.0000001, False), (169.9999999, True)],
-)
-def test_fifteen_percent_boundary_neighbors(
-    tmp_path: Path,
-    current: float,
-    regressed: bool,
-) -> None:
-    for run_id in range(1, 6):
-        _append(tmp_path, run_id=run_id, value=200.0)
-    code, comparison = _append(tmp_path, run_id=6, value=current)
-
-    assert (code == 1) is regressed
-    assert all(
-        metric["regressed"] is regressed
-        for metric in comparison["metrics"].values()
-    )
 
 
 def test_trailing_window_is_seven_and_odd_even_medians_are_exact(
@@ -341,63 +361,95 @@ def test_compatibility_segments_ignore_intervening_incompatible_records(
     monkeypatch.setenv("ImageOS", "ubuntu24")
     _code, restored = _append(tmp_path, run_id=7, value=170.0)
     assert restored["compatible_history_count"] == 5
-    assert restored["status"] == "regression"
+    assert set(restored["declines"]) == set(restored["metrics"])
 
 
-def test_report_only_diagnostics_cannot_change_the_verdict(tmp_path: Path) -> None:
-    for run_id in range(1, 6):
-        report = _report()
-        scheduler = report["benchmarks"]["scheduler_queue"]
-        scheduler["fifo_full_drain"]["legacy"]["median_seconds"] = run_id * 1000.0
-        _append(tmp_path, run_id=run_id, report=report)
+def _linear_scheduler_removal(report: dict[str, object]) -> None:
+    case = report["benchmarks"]["scheduler_queue"]["work"]["indexed_removal"]
+    # Each removal scans the whole queue: work per removal grows with size.
+    case["work"] = [
+        count * size
+        for count, size in zip(case["operations"], case["sizes"], strict=True)
+    ]
 
+
+def _accumulating_router(report: dict[str, object]) -> None:
+    case = report["benchmarks"]["router_latency"]["work"]["routes_served"]
+    case["work"] = [132, 132 * 1_000]
+    report["benchmarks"]["router_latency"]["passed"] = False
+
+
+@pytest.mark.parametrize(
+    ("regress", "failed_check"),
+    [
+        (_linear_scheduler_removal, "scheduler.indexed_removal.work_growth"),
+        (_accumulating_router, "router.routes_served.work_growth"),
+    ],
+)
+def test_operation_count_regression_fails_and_is_retained(
+    tmp_path: Path,
+    regress,
+    failed_check: str,
+) -> None:
     report = _report()
-    report["benchmarks"]["router_latency"]["p50_seconds"] = 0.009
-    code, comparison = _append(tmp_path, run_id=6, report=report)
-
-    assert code == 0
-    assert comparison["status"] == "pass"
-    assert comparison["regressions"] == []
-
-
-def test_structurally_valid_source_gate_failure_is_retained(tmp_path: Path) -> None:
-    report = _report()
-    report["benchmarks"]["scheduler_queue"]["priority_full_drain"][
-        "median_speedup"
-    ] = 0.5
-    checks = series.gate.evaluate_results(report["benchmarks"])
-    report["checks"] = [asdict(check) for check in checks]
-    report["all_passed"] = False
+    regress(report)
+    _reevaluate(report)
+    assert failed_check in {
+        check["name"] for check in report["checks"] if not check["passed"]
+    }
 
     code, comparison = _append(tmp_path, run_id=1, report=report)
 
     assert code == 1
     assert comparison["source_gate_passed"] is False
     assert comparison["status"] == "source_gate_failed"
-    records = series.load_series(tmp_path / "series.jsonl")
-    assert records[-1]["source"]["source_gate_passed"] is False
-
-
-def test_nonseries_router_source_gate_failure_is_retained(tmp_path: Path) -> None:
-    report = _report()
-    router = report["benchmarks"]["router_latency"]
-    router["p99_seconds"] = 0.02
-    router["passed"] = False
-    checks = series.gate.evaluate_results(report["benchmarks"])
-    report["checks"] = [asdict(check) for check in checks]
-    report["all_passed"] = False
-
-    code, comparison = _append(tmp_path, run_id=1, report=report)
-
-    assert code == 1
-    assert comparison["status"] == "source_gate_failed"
-    assert comparison["regressions"] == []
     assert series.load_series(tmp_path / "series.jsonl")[-1]["source"] == {
         "report_sha256": series._sha256_bytes(
             (tmp_path / "report.json").read_bytes()
         ),
         "source_gate_passed": False,
     }
+
+
+def test_unavailable_history_is_a_warmup_decided_by_the_gate(
+    tmp_path: Path,
+) -> None:
+    def warmup(report: dict[str, object]) -> tuple[int, dict[str, object]]:
+        _write_report(tmp_path / "report.json", report)
+        code = series.main(
+            [
+                "warmup",
+                "--report",
+                str(tmp_path / "report.json"),
+                "--comparison",
+                str(tmp_path / "comparison.json"),
+                "--repository",
+                _REPOSITORY,
+                "--run-id",
+                "1",
+                "--run-attempt",
+                "1",
+                "--sha",
+                _SHA,
+            ]
+        )
+        comparison = json.loads(
+            (tmp_path / "comparison.json").read_text(encoding="utf-8")
+        )
+        return code, comparison
+
+    code, comparison = warmup(_report())
+    assert code == 0
+    assert comparison["status"] == "warmup"
+    assert comparison["history"] == "unavailable"
+    assert not (tmp_path / "series.jsonl").exists()
+
+    regressed = _report()
+    _linear_scheduler_removal(regressed)
+    _reevaluate(regressed)
+    code, comparison = warmup(regressed)
+    assert code == 1
+    assert comparison["status"] == "source_gate_failed"
 
 
 @pytest.mark.parametrize(
@@ -413,6 +465,16 @@ def test_nonseries_router_source_gate_failure_is_retained(tmp_path: Path) -> Non
                 "repeats",
             ),
             4,
+        ),
+        (
+            (
+                "benchmarks",
+                "scheduler_queue",
+                "work",
+                "indexed_removal",
+                "sizes",
+            ),
+            [1_000, 8_000],
         ),
         (("benchmarks", "radix_eviction", "leaves"), 1),
         (("benchmarks", "op_queue", "operations"), 1),
@@ -431,9 +493,7 @@ def test_fixed_workload_or_shape_mismatch_is_never_recorded(
     parent = series._at(report, *report_path[:-1])
     assert isinstance(parent, dict)
     parent[report_path[-1]] = value
-    checks = series.gate.evaluate_results(report["benchmarks"])
-    report["checks"] = [asdict(check) for check in checks]
-    report["all_passed"] = all(check.passed for check in checks)
+    _reevaluate(report)
 
     code, comparison = _append(tmp_path, run_id=1, report=report)
 
@@ -498,7 +558,7 @@ def test_report_parser_rejects_duplicate_and_nonfinite_json(
 
 
 @pytest.mark.parametrize("value", [True, 0, -1, float("inf")])
-def test_hard_metrics_must_be_positive_finite_numbers(
+def test_trend_metrics_must_be_positive_finite_numbers(
     tmp_path: Path,
     value: object,
 ) -> None:
@@ -507,9 +567,7 @@ def test_hard_metrics_must_be_positive_finite_numbers(
         "median_speedup"
     ] = value
     if type(value) in (int, float) and math.isfinite(value):
-        checks = series.gate.evaluate_results(report["benchmarks"])
-        report["checks"] = [asdict(check) for check in checks]
-        report["all_passed"] = all(check.passed for check in checks)
+        _reevaluate(report)
     report_path = tmp_path / "report.json"
     report_path.write_text(
         json.dumps(report, allow_nan=True),
@@ -580,13 +638,13 @@ def test_huge_integer_report_fails_closed_without_an_uncaught_error(
 def test_extreme_finite_metrics_keep_comparison_json_finite(tmp_path: Path) -> None:
     for run_id in range(1, 6):
         code, _comparison = _append(tmp_path, run_id=run_id, value=5e-324)
-        assert code == 1
+        assert code == 0
 
     code, comparison = _append(tmp_path, run_id=6, value=1e308)
 
     assert code == 0
     for metric in comparison["metrics"].values():
-        assert metric["status"] == "pass"
+        assert metric["status"] == "steady"
         assert Decimal(metric["decline_fraction"]).is_finite()
         assert Decimal(metric["decline_fraction"]) < 0
 
@@ -704,6 +762,64 @@ def test_select_history_skips_invalid_newest_and_fails_if_none_valid(
         ]
     ) == 2
     assert not failed_output.exists()
+
+
+def test_older_schema_history_starts_a_new_chain_that_the_next_run_continues(
+    tmp_path: Path,
+) -> None:
+    # A complete schema-1 series as the previous nightly wrote it.
+    older = b"".join(
+        series._canonical_bytes(line) + b"\n"
+        for line in (
+            {**series._header(), "schema_version": 1},
+            {"kind": "record", "schema_version": 1, "sequence": 1},
+            {
+                "kind": "trailer",
+                "record_count": 1,
+                "schema_version": 1,
+                "tip_sha256": "0" * 64,
+            },
+        )
+    )
+    candidates = tmp_path / "candidates"
+    (candidates / "000").mkdir(parents=True)
+    (candidates / "000" / "series.jsonl").write_bytes(older)
+    (candidates / "001").mkdir()  # an artifact without a usable series
+    history = tmp_path / "history.jsonl"
+    note = tmp_path / "history-reset.json"
+
+    def select() -> int:
+        return series.main(
+            [
+                "select-history",
+                "--candidates",
+                str(candidates),
+                "--output",
+                str(history),
+                "--reset-note",
+                str(note),
+            ]
+        )
+
+    assert select() == 0
+    assert series.load_series(history) == []
+    _write_report(tmp_path / "report.json", _report())
+    assert series.main([*_record_argv(tmp_path), "--reset-note", str(note)]) == 0
+    comparison = json.loads((tmp_path / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["history"] == "reset"
+    assert comparison["history_reset"] == {
+        "from_schema_versions": [1],
+        "superseded_candidates": 1,
+    }
+    started = (tmp_path / "series.jsonl").read_bytes()
+    assert len(series._load_series_bytes(started, label="new chain")) == 1
+
+    # The next run selects the new chain ahead of the older-schema one.
+    (candidates / "000" / "series.jsonl").write_bytes(started)
+    (candidates / "001" / "series.jsonl").write_bytes(older)
+    assert select() == 0
+    assert history.read_bytes() == started
+    assert not note.exists()
 
 
 def test_empty_candidate_root_creates_a_valid_genesis(tmp_path: Path) -> None:

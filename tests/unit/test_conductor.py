@@ -1,6 +1,5 @@
 import asyncio
 import threading
-import time
 from dataclasses import replace
 
 import pytest
@@ -500,9 +499,32 @@ async def test_unit_backend_failure_does_not_destroy_the_run():
     assert not result.final_unit_ok
 
 
+class _HeldWaveBackend(MockBackend):
+    """Holds calls whose prompt starts with a held prefix until released."""
+
+    def __init__(self, held_prefixes: tuple[str, ...]) -> None:
+        super().__init__()
+        self._held_prefixes = held_prefixes
+        self._held = 0
+        self.order: list[str] = []
+        self.all_held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, request):
+        role = request.prompt.split(":", 1)[0]
+        self.order.append(f"start {role}")
+        if request.prompt.startswith(self._held_prefixes):
+            self._held += 1
+            if self._held == len(self._held_prefixes):
+                self.all_held.set()
+            await self.release.wait()
+        result = await super().generate(request)
+        self.order.append(f"finish {role}")
+        return result
+
+
 async def test_diamond_dag_runs_middle_wave_concurrently():
-    latency = 0.05
-    backend = MockBackend(latency_s=latency)
+    backend = _HeldWaveBackend(held_prefixes=("a:", "b:"))
     roles = (
         RoleSpec(name="root", worker="w", prompt="root: {query}"),
         RoleSpec(name="a", worker="w", prompt="a: {root}", depends_on=("root",)),
@@ -516,10 +538,20 @@ async def test_diamond_dag_runs_middle_wave_concurrently():
         ),
     )
     conductor = Conductor(roles=roles, workers={"w": backend})
-    start = time.perf_counter()
-    result = await conductor.run("q")
-    elapsed = time.perf_counter() - start
-    assert elapsed < latency * 4  # a and b overlapped: 3 waves, not 4 sequential calls
+    run = asyncio.create_task(conductor.run("q"))
+    try:
+        # Hang bound only: an overlapping middle wave holds a and b at once.
+        await asyncio.wait_for(backend.all_held.wait(), timeout=10)
+    except TimeoutError:
+        pass  # a sequential wave never holds both; the order check reports it
+    finally:
+        backend.release.set()
+    result = await asyncio.wait_for(run, timeout=10)
+    # a and b both started before either finished: 3 waves, not 4 sequential calls.
+    assert backend.order[:2] == ["start root", "finish root"]
+    assert sorted(backend.order[2:4]) == ["start a", "start b"]
+    assert sorted(backend.order[4:6]) == ["finish a", "finish b"]
+    assert backend.order[6:] == ["start synth", "finish synth"]
     assert result.outputs["root"][-10:] in result.outputs["a"]
     assert result.final_text == result.outputs["synth"]
 

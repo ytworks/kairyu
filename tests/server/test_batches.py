@@ -35,6 +35,17 @@ from kairyu.pricing import (
 )
 from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
 
+# Hang bound only: every awaited condition is expected within milliseconds.
+_HANG_S = 10.0
+
+
+async def _until(condition) -> None:
+    """Poll ``condition``; the bound only turns a hang into a failure."""
+
+    async with asyncio.timeout(_HANG_S):
+        while not condition():
+            await asyncio.sleep(0)
+
 
 def _client(app) -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=app)
@@ -65,13 +76,17 @@ batch:
 """
 
 
-async def _wait_status(client, batch_id: str, wanted: str, attempts: int = 100) -> dict:
-    for _ in range(attempts):
-        job = (await client.get(f"/v1/batches/{batch_id}")).json()
-        if job["status"] == wanted:
-            return job
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"batch never reached {wanted}: {job}")
+async def _wait_status(client, batch_id: str, wanted: str) -> dict:
+    job: dict = {}
+    try:
+        async with asyncio.timeout(_HANG_S):  # hang bound only
+            while True:
+                job = (await client.get(f"/v1/batches/{batch_id}")).json()
+                if job["status"] == wanted:
+                    return job
+                await asyncio.sleep(0.02)
+    except TimeoutError:
+        raise AssertionError(f"batch never reached {wanted}: {job}") from None
 
 
 async def test_batch_lifecycle_end_to_end(tmp_path):
@@ -325,10 +340,12 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     class CountingBackend(MockBackend):
         def __init__(self):
             super().__init__()
+            self.release = asyncio.Event()
             self.active = 0
             self.max_active = 0
             self.batch_active = 0
             self.max_batch_active = 0
+            self.batch_lanes = set()
 
         async def generate(self, request):
             self.active += 1
@@ -339,8 +356,9 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
                 self.max_batch_active = max(
                     self.max_batch_active, self.batch_active
                 )
+                self.batch_lanes.add(asyncio.current_task())
             try:
-                await asyncio.sleep(0.02)
+                await self.release.wait()  # held until the test releases it
                 return await super().generate(request)
             finally:
                 if is_batch:
@@ -355,13 +373,20 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     interactive = asyncio.create_task(backend.generate(_interactive_request()))
-    await worker.process(job.id)
+    processing = asyncio.create_task(worker.process(job.id))
+    # Both batch slots and the interactive request are in flight together.
+    # While the first two lines are held, any further execution lane takes the
+    # third line, so the lane count below exposes a cap overrun without timing.
+    await _until(lambda: backend.batch_active >= 2)
+    backend.release.set()
+    await asyncio.wait_for(processing, timeout=_HANG_S)
     await interactive  # interactive request completed alongside the batch
 
     finished = store.get_batch(job.id)
     assert finished.status == "completed"
     assert finished.request_counts.completed == 8
     assert backend.max_batch_active == 2
+    assert len(backend.batch_lanes) == 2  # every line ran in one of the 2 slots
     assert backend.max_active <= 3  # 2 batch slots + the 1 interactive request
 
 
@@ -375,7 +400,16 @@ async def test_worker_waits_while_interactive_ttft_prediction_exceeds_slo(tmp_pa
             self.dispatched.set()
             return await super().generate(request)
 
-    controller = AdmissionController(ttft_slo_s=1.0)
+    yielded = 0
+
+    class RecordingController(AdmissionController):
+        def batch_should_yield(self):
+            nonlocal yielded
+            should_yield = super().batch_should_yield()
+            yielded += should_yield
+            return should_yield
+
+    controller = RecordingController(ttft_slo_s=1.0)
     controller._ttft_per_unit_ema = 0.6
     interactive = controller.begin()
     assert interactive.decision.action == "admit"
@@ -397,11 +431,12 @@ async def test_worker_waits_while_interactive_ttft_prediction_exceeds_slo(tmp_pa
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     processing = asyncio.create_task(worker.process(job.id))
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(backend.dispatched.wait(), timeout=0.05)
+    # The worker was told to yield and asked again: it is waiting, undispatched.
+    await _until(lambda: yielded >= 3)
+    assert not backend.dispatched.is_set()
 
     interactive.completed()
-    await asyncio.wait_for(processing, timeout=2)
+    await asyncio.wait_for(processing, timeout=_HANG_S)
 
     assert backend.dispatched.is_set()
     assert store.get_batch(job.id).status == "completed"
@@ -445,9 +480,9 @@ async def test_worker_observes_batch_cancellation_while_waiting_for_slo_slack(
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     processing = asyncio.create_task(worker.process(job.id))
-    await asyncio.wait_for(waiting.wait(), timeout=1)
+    await asyncio.wait_for(waiting.wait(), timeout=_HANG_S)
     cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
-    await asyncio.wait_for(processing, timeout=1)
+    await asyncio.wait_for(processing, timeout=_HANG_S)
     interactive.completed()
 
     assert cancelled.status == "cancelled"
@@ -464,7 +499,7 @@ async def test_cancel_wins_atomically_before_filesystem_terminal_publication(tmp
 
         def finalize_batch(self, job):
             self.finalize_started.set()
-            assert self.allow_finalize.wait(1)
+            assert self.allow_finalize.wait(_HANG_S)
             return super().finalize_batch(job)
 
     store = BlockingFinalizeStore(tmp_path)
@@ -478,10 +513,10 @@ async def test_cancel_wins_atomically_before_filesystem_terminal_publication(tmp
     files_before = {path.name for path in (tmp_path / "files").iterdir()}
 
     processing = asyncio.create_task(worker.process(job.id))
-    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    assert await asyncio.to_thread(store.finalize_started.wait, _HANG_S)
     cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
     store.allow_finalize.set()
-    await asyncio.wait_for(processing, timeout=1)
+    await asyncio.wait_for(processing, timeout=_HANG_S)
 
     current = store.get_batch(job.id)
     assert cancelled.status == current.status == "cancelled"
@@ -499,7 +534,7 @@ async def test_shutdown_after_filesystem_terminal_commit_keeps_result_files(tmp_
 
         def finalize_batch(self, job):
             self.finalize_started.set()
-            assert self.allow_finalize.wait(1)
+            assert self.allow_finalize.wait(_HANG_S)
             return super().finalize_batch(job)
 
     store = BlockingFinalizeStore(tmp_path)
@@ -512,7 +547,7 @@ async def test_shutdown_after_filesystem_terminal_commit_keeps_result_files(tmp_
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     processing = asyncio.create_task(worker.process(job.id))
-    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    assert await asyncio.to_thread(store.finalize_started.wait, _HANG_S)
     processing.cancel()
     store.allow_finalize.set()
     with pytest.raises(asyncio.CancelledError):
@@ -639,7 +674,7 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
     monkeypatch.setattr(worker, "_run_line", recording_run_line)
     process_task = asyncio.create_task(worker.process(job.id))
     try:
-        await asyncio.wait_for(all_consumers_started.wait(), timeout=1)
+        await asyncio.wait_for(all_consumers_started.wait(), timeout=_HANG_S)
     finally:
         release.set()
     await process_task
@@ -1065,7 +1100,7 @@ async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
 
     monkeypatch.setattr(worker, "_run_line", fail_after_cancel)
     task = asyncio.create_task(worker.process(job.id))
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=_HANG_S)
     cancelled = store.get_batch(job.id)
     cancelled.status = "cancelled"
     store.update_batch(cancelled)
@@ -1095,7 +1130,7 @@ async def test_task_cancellation_propagates_after_spool_cleanup(tmp_path, monkey
 
     monkeypatch.setattr(worker, "_run_line", block_line)
     task = asyncio.create_task(worker.process(job.id))
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=_HANG_S)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -1115,17 +1150,18 @@ def _interactive_request():
 
 
 async def test_cancel_stops_remaining_lines(tmp_path):
-    class SlowBackend(MockBackend):
+    class HeldBackend(MockBackend):
         def __init__(self):
             super().__init__()
             self.calls = 0
+            self.release = asyncio.Event()
 
         async def generate(self, request):
             self.calls += 1
-            await asyncio.sleep(0.05)
+            await self.release.wait()  # held until the test releases it
             return await super().generate(request)
 
-    backend = SlowBackend()
+    backend = HeldBackend()
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
     worker = LegacyBatchWorker(
@@ -1136,10 +1172,11 @@ async def test_cancel_stops_remaining_lines(tmp_path):
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     task = asyncio.create_task(worker.process(job.id))
-    await asyncio.sleep(0.08)  # let a line or two start
+    await _until(lambda: backend.calls == 1)  # a line is in flight
     cancelled = store.get_batch(job.id)
     cancelled.status = "cancelled"
     store.update_batch(cancelled)
+    backend.release.set()
     await task
 
     cancelled = store.get_batch(job.id)

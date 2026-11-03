@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Run the variance-tolerant CPU microbenchmark regression gate.
+"""Run the deterministic CPU microbenchmark regression gate.
 
-The gate compares optimized and legacy implementations inside the same child
-process wherever possible.  Ratios are intentionally loose: this is a smoke
-alarm for large hot-path regressions on shared CI runners, not formal
-performance evidence.
-
-A benchmark whose only failing checks are timing ratios is re-run (up to
-``MAX_BENCHMARK_ATTEMPTS`` total attempts) before the gate fails: shared
-runners jitter individual ratios, while a real hot-path regression keeps
-failing on every attempt.  Structural (equality) failures and benchmark
-errors are never retried.
+Each child benchmark reports wall-clock timings and deterministic work counts.
+The verdict depends only on the code under test: it uses the work counts
+(store primitives, items iterated, comparisons and hashes, nodes visited,
+history reads, calls per route) and their growth between two sizes eight times
+apart, plus exact workload and shape equality checks.  Timings, speed ratios,
+and router latency percentiles are recorded under ``diagnostics`` and never
+decide pass/fail.  The children run once, in order, under one generous hang
+bound for the whole gate; the child that exceeds it is reported as a hang (and
+any child not started as not run), never as slow.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from itertools import pairwise
@@ -28,8 +28,20 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-BENCHMARK_TIMEOUT_SECONDS = 45
-MAX_BENCHMARK_ATTEMPTS = 3
+# One bound for all children together: about ten times their normal total
+# (under a minute), and still inside the CI job's 10-minute limit so the report
+# is written and uploaded.  Only a hang reaches it.
+HANG_TIMEOUT_SECONDS = 420
+# Work per operation may at most double between two sizes eight times apart:
+# constant work stays at 1x, logarithmic work grows about 1.3x, and linear
+# work grows 8x.
+MAX_WORK_GROWTH = 2.0
+SCHEDULER_WORK_SIZES = (2_000, 16_000)
+RADIX_WORK_SIZES = (2_000, 16_000)
+OP_QUEUE_WORK_SIZES = (2_000, 16_000)
+SAMPLER_WORK_SIZES = (4_096, 32_768)
+ROUTER_ROUTES = 10_000
+ROUTER_MAX_CALLS_PER_ROUTE = 1_000
 PROC_WIRE_LENGTHS = (128, 256, 512, 1024)
 PROC_WIRE_EXPECTED_CHECKS = frozenset(
     {
@@ -46,6 +58,10 @@ PROC_WIRE_EXPECTED_CHECKS = frozenset(
         *(f"v2_structure_at_{length}" for length in PROC_WIRE_LENGTHS),
     }
 )
+
+
+def _sizes_arg(sizes: tuple[int, ...]) -> str:
+    return ",".join(str(size) for size in sizes)
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,8 @@ BENCHMARKS = (
             "3000",
             "--repeats",
             "5",
+            "--work-sizes",
+            _sizes_arg(SCHEDULER_WORK_SIZES),
         ),
     ),
     BenchmarkSpec(
@@ -78,6 +96,8 @@ BENCHMARKS = (
             "25",
             "--repeats",
             "3",
+            "--work-sizes",
+            _sizes_arg(RADIX_WORK_SIZES),
         ),
     ),
     BenchmarkSpec(
@@ -90,6 +110,8 @@ BENCHMARKS = (
             "1",
             "--repeats",
             "5",
+            "--work-sizes",
+            _sizes_arg(OP_QUEUE_WORK_SIZES),
         ),
     ),
     BenchmarkSpec(
@@ -110,6 +132,8 @@ BENCHMARKS = (
             "20",
             "--repeats",
             "3",
+            "--work-sizes",
+            _sizes_arg(SAMPLER_WORK_SIZES),
         ),
     ),
     BenchmarkSpec(
@@ -124,9 +148,59 @@ BENCHMARKS = (
     BenchmarkSpec(
         name="router_latency",
         script="verification/orchestration/performance/router_latency.py",
-        args=("--routes", "10000", "--json", "--assert-gate"),
+        args=("--routes", str(ROUTER_ROUTES), "--json", "--assert-gate"),
     ),
 )
+
+# Report-only timing values: (diagnostic name, path inside the results).
+TIMING_DIAGNOSTICS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "scheduler.fifo_speedup",
+        ("scheduler_queue", "fifo_full_drain", "median_speedup"),
+    ),
+    (
+        "scheduler.removal_speedup",
+        ("scheduler_queue", "indexed_removal", "median_speedup"),
+    ),
+    (
+        "scheduler.priority_speedup",
+        ("scheduler_queue", "priority_full_drain", "median_speedup"),
+    ),
+    ("radix.eviction_speedup", ("radix_eviction", "median_speedup")),
+    (
+        "op_queue.add_elapsed_speedup",
+        ("op_queue", "add_burst", "elapsed_speedup"),
+    ),
+    (
+        "op_queue.abort_elapsed_speedup",
+        ("op_queue", "duplicate_abort_burst", "elapsed_speedup"),
+    ),
+    ("sampler.legacy_speedup", ("sampler_penalty_state", "legacy_speedup")),
+    (
+        "sampler.append_legacy_speedup",
+        ("sampler_penalty_state", "append_legacy_speedup"),
+    ),
+    ("router.p50_seconds", ("router_latency", "p50_seconds")),
+    ("router.p99_seconds", ("router_latency", "p99_seconds")),
+    ("router.learned_p50_seconds", ("router_latency", "learned", "p50_seconds")),
+    ("router.learned_p99_seconds", ("router_latency", "learned", "p99_seconds")),
+)
+
+# Checks of the protected behaviour, as opposed to fixed workload and shape.
+_PROPERTY_CHECK_SUFFIXES = (".work_observed", ".work_growth")
+_PROPERTY_CHECK_NAMES = frozenset(
+    {
+        "proc_wire.all_passed",
+        "proc_wire.checks_complete",
+        "router.calls_per_route",
+        "router.passed",
+    }
+)
+
+
+def is_property_check(name: str) -> bool:
+    """Whether a check protects behaviour rather than the fixed workload."""
+    return name in _PROPERTY_CHECK_NAMES or name.endswith(_PROPERTY_CHECK_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -166,7 +240,7 @@ def run_benchmark(
     *,
     python: str = sys.executable,
     root: Path = ROOT,
-    timeout_seconds: int = BENCHMARK_TIMEOUT_SECONDS,
+    timeout_seconds: int = HANG_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     command = (python, str(root / spec.script), *spec.args)
     try:
@@ -179,9 +253,14 @@ def run_benchmark(
             timeout=timeout_seconds,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
         raise BenchmarkFailure(
-            f"{spec.name} did not complete: {type(error).__name__}"
+            f"{spec.name} hang: no result within the remaining "
+            f"{timeout_seconds} s of the {HANG_TIMEOUT_SECONDS} s hang bound"
+        ) from error
+    except OSError as error:
+        raise BenchmarkFailure(
+            f"{spec.name} did not start: {type(error).__name__}"
         ) from error
     parsed: object | None = None
     try:
@@ -231,12 +310,19 @@ def _number(result: Mapping[str, Any], *path: str) -> float:
     return float(value)
 
 
-def _minimum(name: str, actual: float, threshold: float) -> Check:
-    return Check(name, actual, ">=", threshold, actual >= threshold)
-
-
-def _less_than(name: str, actual: float, threshold: float) -> Check:
-    return Check(name, actual, "<", threshold, actual < threshold)
+def _counts(
+    case: Mapping[str, Any], field: str, label: str, *, minimum: int
+) -> tuple[int, int]:
+    values = _at(case, field)
+    if (
+        not isinstance(values, list)
+        or len(values) != 2
+        or any(type(value) is not int or value < minimum for value in values)
+    ):
+        raise BenchmarkFailure(
+            f"{label}.{field} must be two integers of at least {minimum}"
+        )
+    return values[0], values[1]
 
 
 def _equal(
@@ -251,6 +337,40 @@ def _equal(
         threshold,
         type(actual) is type(threshold) and actual == threshold,
     )
+
+
+def _work_checks(
+    name: str,
+    result: Mapping[str, Any],
+    case_name: str,
+    expected_sizes: tuple[int, int],
+) -> list[Check]:
+    """Work must be observed and per-operation work must stay sublinear."""
+    case = _at(result, "work", case_name)
+    if not isinstance(case, Mapping):
+        raise BenchmarkFailure(f"{name} work must be an object")
+    sizes = _counts(case, "sizes", name, minimum=0)
+    operations = _counts(case, "operations", name, minimum=1)
+    work = _counts(case, "work", name, minimum=0)
+    small, large = (
+        units / count for units, count in zip(work, operations, strict=True)
+    )
+    growth = large / small if small > 0 else 0.0
+    return [
+        _equal(
+            f"{name}.work_sizes",
+            tuple(float(size) for size in sizes),
+            tuple(float(size) for size in expected_sizes),
+        ),
+        Check(f"{name}.work_observed", small, ">", 0.0, small > 0),
+        Check(
+            f"{name}.work_growth",
+            growth,
+            "<=",
+            MAX_WORK_GROWTH,
+            small > 0 and growth <= MAX_WORK_GROWTH,
+        ),
+    ]
 
 
 def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, ...]:
@@ -323,42 +443,59 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
         "coalesced",
         "queued_operation_containers_including_add",
     )
+    router_first, router_last = _counts(
+        _at(router, "work", "routes_served"),
+        "work",
+        "router.routes_served",
+        minimum=0,
+    )
+    router_routes = _counts(
+        _at(router, "work", "routes_served"),
+        "operations",
+        "router.routes_served",
+        minimum=1,
+    )
+    router_calls_per_route = max(
+        router_first / router_routes[0],
+        router_last / router_routes[1],
+    )
     checks = [
         _equal("scheduler.requests", _number(scheduler, "requests"), 30_000.0),
         _equal("scheduler.removals", _number(scheduler, "removals"), 3_000.0),
-        _minimum(
-            "scheduler.fifo_speedup",
-            _number(scheduler, "fifo_full_drain", "median_speedup"),
-            2.0,
+        *_work_checks(
+            "scheduler.fifo_full_drain",
+            scheduler,
+            "fifo_full_drain",
+            SCHEDULER_WORK_SIZES,
         ),
-        _minimum(
-            "scheduler.removal_speedup",
-            _number(scheduler, "indexed_removal", "median_speedup"),
-            10.0,
+        *_work_checks(
+            "scheduler.indexed_removal",
+            scheduler,
+            "indexed_removal",
+            SCHEDULER_WORK_SIZES,
         ),
-        _minimum(
-            "scheduler.priority_speedup",
-            _number(scheduler, "priority_full_drain", "median_speedup"),
-            0.90,
+        *_work_checks(
+            "scheduler.priority_full_drain",
+            scheduler,
+            "priority_full_drain",
+            SCHEDULER_WORK_SIZES,
         ),
         _equal("radix.leaves", _number(radix, "leaves"), 10_000.0),
         _equal("radix.evictions", _number(radix, "evictions"), 25.0),
-        _minimum(
-            "radix.eviction_speedup",
-            _number(radix, "median_speedup"),
-            100.0,
-        ),
+        *_work_checks("radix.eviction", radix, "eviction", RADIX_WORK_SIZES),
         _equal("op_queue.operations", operations, 50_000.0),
         _equal("op_queue.producers", _number(op_queue, "producers"), 1.0),
-        _minimum(
-            "op_queue.add_elapsed_speedup",
-            _number(op_queue, "add_burst", "elapsed_speedup"),
-            0.50,
+        *_work_checks(
+            "op_queue.add_burst",
+            op_queue,
+            "add_burst",
+            OP_QUEUE_WORK_SIZES,
         ),
-        _minimum(
-            "op_queue.abort_elapsed_speedup",
-            _number(op_queue, "duplicate_abort_burst", "elapsed_speedup"),
-            0.50,
+        *_work_checks(
+            "op_queue.duplicate_abort_burst",
+            op_queue,
+            "duplicate_abort_burst",
+            OP_QUEUE_WORK_SIZES,
         ),
         _equal(
             "op_queue.add_containers",
@@ -388,16 +525,13 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
             _at(sampler, "validated_bitwise"),
             True,
         ),
-        _minimum(
-            "sampler.legacy_speedup",
-            _number(sampler, "legacy_speedup"),
-            5.0,
+        *_work_checks(
+            "sampler.steady_state",
+            sampler,
+            "steady_state",
+            SAMPLER_WORK_SIZES,
         ),
-        _minimum(
-            "sampler.append_legacy_speedup",
-            _number(sampler, "append_legacy_speedup"),
-            5.0,
-        ),
+        *_work_checks("sampler.append", sampler, "append", SAMPLER_WORK_SIZES),
         _equal("proc_wire.schema_version", _number(proc_wire, "schema_version"), 1.0),
         _equal("proc_wire.metric", _at(proc_wire, "metric"), "msgpack_frame_bytes"),
         _equal("proc_wire.protocol_legacy", _number(proc_wire, "protocols", "legacy"), 1.0),
@@ -425,16 +559,29 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
         _equal("proc_wire.checks_complete", proc_checks_complete, True),
         _equal("proc_wire.tracked_dirty", _at(proc_wire, "source", "tracked_dirty"), False),
         _equal("proc_wire.all_passed", _at(proc_wire, "all_passed"), True),
-        _equal("router.routes", _number(router, "routes"), 10_000.0),
+        _equal("router.routes", _number(router, "routes"), float(ROUTER_ROUTES)),
         _equal(
-            "router.p99_budget_seconds",
-            _number(router, "p99_budget_seconds"),
-            0.010,
+            "router.max_calls_per_route",
+            _number(router, "max_calls_per_route"),
+            float(ROUTER_MAX_CALLS_PER_ROUTE),
         ),
-        _less_than(
-            "router.p99_seconds",
-            _number(router, "p99_seconds"),
-            0.010,
+        _equal(
+            "router.max_work_growth",
+            _number(router, "max_work_growth"),
+            MAX_WORK_GROWTH,
+        ),
+        *_work_checks(
+            "router.routes_served",
+            router,
+            "routes_served",
+            (0, ROUTER_ROUTES),
+        ),
+        Check(
+            "router.calls_per_route",
+            router_calls_per_route,
+            "<=",
+            float(ROUTER_MAX_CALLS_PER_ROUTE),
+            router_calls_per_route <= ROUTER_MAX_CALLS_PER_ROUTE,
         ),
         _equal("router.passed", _at(router, "passed"), True),
     ]
@@ -467,32 +614,15 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
     return tuple(checks)
 
 
-_TIMING_RELATIONS = frozenset({">=", "<"})
-_CHECK_PREFIX_TO_BENCHMARK = {
-    "scheduler": "scheduler_queue",
-    "radix": "radix_eviction",
-    "op_queue": "op_queue",
-    "sampler": "sampler_penalty_state",
-    "proc_wire": "proc_wire",
-    "router": "router_latency",
-}
-
-
-def retryable_benchmarks(failed: Sequence[Check]) -> frozenset[str]:
-    """Benchmarks whose failing checks are all timing ratios.
-
-    Any structural (equality) failure or unknown check name disables retries
-    entirely: those indicate a real contract violation, not runner noise.
-    """
-    names: set[str] = set()
-    for check in failed:
-        if check.passed:
+def timing_diagnostics(results: Mapping[str, Any]) -> dict[str, float]:
+    """Report-only speed ratios and latencies that are present and finite."""
+    diagnostics: dict[str, float] = {}
+    for name, path in TIMING_DIAGNOSTICS:
+        try:
+            diagnostics[name] = _number(results, *path)
+        except BenchmarkFailure:
             continue
-        benchmark = _CHECK_PREFIX_TO_BENCHMARK.get(check.name.split(".", 1)[0])
-        if benchmark is None or check.relation not in _TIMING_RELATIONS:
-            return frozenset()
-        names.add(benchmark)
-    return frozenset(names)
+    return diagnostics
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -508,60 +638,48 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
-    specs = {spec.name: spec for spec in BENCHMARKS}
     results: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
-    attempts = dict.fromkeys(specs, 0)
-
-    def run_specs(names: Sequence[str]) -> None:
-        for name in names:
-            attempts[name] += 1
-            suffix = f" (attempt {attempts[name]})" if attempts[name] > 1 else ""
-            print(f"running {name}{suffix}...", file=sys.stderr, flush=True)
-            try:
-                results[name] = run_benchmark(specs[name])
-                errors.pop(name, None)
-            except BenchmarkFailure as error:
-                if error.result is not None:
-                    results[name] = error.result
-                errors[name] = str(error)
-
-    def evaluated() -> tuple[Check, ...]:
-        if set(results) != set(specs):
-            return ()
+    elapsed: dict[str, float] = {}
+    deadline = time.monotonic() + HANG_TIMEOUT_SECONDS
+    for spec in BENCHMARKS:
+        started = time.monotonic()
+        remaining = math.floor(deadline - started)
+        if remaining <= 0:
+            errors[spec.name] = (
+                f"{spec.name} not run: the {HANG_TIMEOUT_SECONDS} s hang bound "
+                "was reached by an earlier benchmark"
+            )
+            continue
+        print(f"running {spec.name}...", file=sys.stderr, flush=True)
         try:
-            return evaluate_results(results)
+            results[spec.name] = run_benchmark(spec, timeout_seconds=remaining)
+        except BenchmarkFailure as error:
+            if error.result is not None:
+                results[spec.name] = error.result
+            errors[spec.name] = str(error)
+        elapsed[spec.name] = round(time.monotonic() - started, 3)
+
+    checks: tuple[Check, ...] = ()
+    if set(results) == {spec.name for spec in BENCHMARKS}:
+        try:
+            checks = evaluate_results(results)
         except BenchmarkFailure as error:
             errors["evaluation"] = str(error)
-            return ()
-
-    run_specs(list(specs))
-    checks = evaluated()
-    while not errors:
-        failed = tuple(check for check in checks if not check.passed)
-        if not failed:
-            break
-        stale = sorted(
-            name
-            for name in retryable_benchmarks(failed)
-            if attempts[name] < MAX_BENCHMARK_ATTEMPTS
-        )
-        if not stale:
-            break
-        print(
-            "retrying after timing-ratio noise: " + ", ".join(stale),
-            file=sys.stderr,
-            flush=True,
-        )
-        run_specs(stale)
-        checks = evaluated()
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "cpu_only": True,
         "benchmarks": results,
         "checks": [asdict(check) for check in checks],
+        "diagnostics": {
+            "timing": timing_diagnostics(results),
+            "elapsed_seconds": elapsed,
+            "hang_timeout_seconds": HANG_TIMEOUT_SECONDS,
+        },
         "errors": errors,
-        "all_passed": not errors and all(check.passed for check in checks),
+        "all_passed": not errors
+        and bool(checks)
+        and all(check.passed for check in checks),
     }
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
@@ -580,6 +698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "schema_version": report["schema_version"],
             "report_path": str(args.output),
             "checks": report["checks"],
+            "diagnostics": report["diagnostics"],
             "errors": report["errors"],
             "all_passed": report["all_passed"],
         }

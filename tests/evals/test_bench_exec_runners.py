@@ -6,7 +6,7 @@ import io
 import stat
 import subprocess
 import threading
-import time
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -167,9 +167,9 @@ class DelayedCreateRecorder(CommandRecorder):
 
     def __call__(self, command, **kwargs):
         if command[:2] == ["docker", "create"]:
-            self.create_started.set()
             result = super().__call__(command, **kwargs)
-            assert self.release_create.wait(timeout=2)
+            self.create_started.set()
+            assert self.release_create.wait(timeout=10)
         else:
             result = super().__call__(command, **kwargs)
         if command[:3] == ["docker", "rm", "-f"]:
@@ -539,8 +539,24 @@ def test_docker_start_failure_still_removes_the_created_container():
     assert not commands.container_present
 
 
-def test_slow_create_times_out_caller_and_helper_removes_late_container():
+def test_slow_create_times_out_caller_and_helper_removes_late_container(monkeypatch):
     commands = DelayedCreateRecorder()
+
+    class VirtualClockWait(threading.Event):
+        """The caller's create wait: its deadline passes while create is in flight."""
+
+        bounds: list[float | None] = []
+
+        def wait(self, timeout=None):
+            self.bounds.append(timeout)
+            assert commands.create_started.wait(timeout=10)
+            return self.is_set()
+
+    @dataclass
+    class VirtualClockCreateState(execution._CreateState):
+        finished: threading.Event = field(default_factory=VirtualClockWait)
+
+    monkeypatch.setattr(execution, "_CreateState", VirtualClockCreateState)
     process = FakeProcess()
     popen = PopenRecorder(process)
     runner = DockerExecutionRunner(
@@ -553,15 +569,19 @@ def test_slow_create_times_out_caller_and_helper_removes_late_container():
         _create_timeout_s=0.02,
     )
 
-    started = time.monotonic()
+    # `docker create` stays blocked until the caller has already failed: the
+    # caller's own wait is bounded by the configured timeout (checked through
+    # the virtual clock), and a caller blocking on create in any other way
+    # could only proceed through the fake's hang bound, which fails the
+    # create with a different error.
     try:
         with pytest.raises(RuntimeError, match="creation exceeded"):
             runner.run_python("pass")
     finally:
         commands.release_create.set()
 
-    assert time.monotonic() - started < 1.0
+    assert VirtualClockWait.bounds == [0.02]
     assert commands.create_started.is_set()
     assert popen.command is None
-    assert commands.removed.wait(timeout=1), commands.commands
+    assert commands.removed.wait(timeout=10), commands.commands
     assert not commands.container_present

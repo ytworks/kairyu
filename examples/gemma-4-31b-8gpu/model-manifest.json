@@ -1,0 +1,195 @@
+{
+  "checkpoints": [
+    {
+      "repo": "google/gemma-4-31B-it",
+      "revision": "842da3794eaa0b77d5f08bae87a17459d91ff475",
+      "tree_sha256": "cab440f871a32b5ea1c12364db7dd35ac8768a83b413ca24bbc18d6478eccbd9",
+      "files": [
+        {
+          "path": ".eval_results/mmmu_pro.yaml",
+          "size": 182,
+          "sha256": "e673fe773afc0807cf25534cefac2e9c4c81673fc450fb1fe501624fb807532c"
+        },
+        {
+          "path": ".gitattributes",
+          "size": 1708,
+          "sha256": "aa4fc74fe06acc698271341dee76eca26c6672a1f4b2840dedbf37f1b4fe27a4"
+        },
+        {
+          "path": "README.md",
+          "size": 27963,
+          "sha256": "e209f5c435b1e66055bd6d7c29185103ae8d2027a03a96b359335154f206b82b"
+        },
+        {
+          "path": "chat_template.jinja",
+          "size": 18683,
+          "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+        },
+        {
+          "path": "config.json",
+          "size": 4621,
+          "sha256": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 208,
+          "sha256": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de"
+        },
+        {
+          "path": "model-00001-of-00002.safetensors",
+          "size": 49784788364,
+          "sha256": "eeef8791537bc04f110967c513149e037d2a9ae97d49add7291ebfa62806bbfa"
+        },
+        {
+          "path": "model-00002-of-00002.safetensors",
+          "size": 12761549884,
+          "sha256": "018912220f559f7025d60333e0996183cd538aa77ad6f4988a89ce47be681f10"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "size": 120246,
+          "sha256": "d4aff3b976d69c123a29d1c085d7ba4de1ac3f4ca1726a7f81e1b11462a64ea2"
+        },
+        {
+          "path": "processor_config.json",
+          "size": 1689,
+          "sha256": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 32169626,
+          "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 3082,
+          "sha256": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        }
+      ]
+    },
+    {
+      "repo": "google/gemma-4-31B-it-assistant",
+      "revision": "627c5ec1458b9086b841a91e0512fd31fd2fbbf1",
+      "tree_sha256": "bb22c75040e4730ece52a1e61b40121cc435e8affe1ea3c61cf0dc697e8d5556",
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1570,
+          "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930"
+        },
+        {
+          "path": "README.md",
+          "size": 29768,
+          "sha256": "85bc257e770a7765e7a4c9bb366597abab3aba9efe1606033a7baede39375be6"
+        },
+        {
+          "path": "config.json",
+          "size": 2316,
+          "sha256": "d09487c1083a334a97545f204dd41ab1a40b0438bdead19558f0e1357e26d66a"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 307,
+          "sha256": "8e58004dc0e2407b63410b190bb8470efbdcfeb71533f1770e09c20abe193a6f"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 939042560,
+          "sha256": "9f80df6099fa1fd7db71220ec9ee864d5ecff769878697dd5763e4285b15a1da"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 32169440,
+          "sha256": "75a6583c1a418e2bbd79c60d95d28e0f5bf549ad3f2990b5bdb5238c6c2bf70c"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 822,
+          "sha256": "089594a3924fcfd4cb1c596a7906fbf476193519e5198f780912eed02b177e42"
+        }
+      ]
+    },
+    {
+      "repo": "google/embeddinggemma-2",
+      "revision": "f9972ac22e696a105c482202646979e33e4b5a1e",
+      "tree_sha256": "287cbbd3b1037b9a690de26228a30514312cb597317ca73e60b5a7fb01e03661",
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1301,
+          "sha256": "bcdccfaa66bc1240c7192dbd374cfb39b695bb1d8ff6b7ce0113aa5e9ac21a44"
+        },
+        {
+          "path": "1_Pooling/config.json",
+          "size": 90,
+          "sha256": "8759bdf7c77efc7df7723f64856a593c8943b71ee38baf2a88771fbaf78438f9"
+        },
+        {
+          "path": "2_Normalize/config.json",
+          "size": 97,
+          "sha256": "cdb09dfca347a56aa2d691744e38d5ad3c7cbc2834e7181272b9a15328b82524"
+        },
+        {
+          "path": "README.md",
+          "size": 22234,
+          "sha256": "2c058c304c68221f1de80979594036eff3972b2bce686bb7b0f43621a6b0b011"
+        },
+        {
+          "path": "chat_template.jinja",
+          "size": 1016,
+          "sha256": "4b852efc0b9960283e735363331e6f325b33bc74bdbaa076f595bc4e9b94d85e"
+        },
+        {
+          "path": "config.json",
+          "size": 4455,
+          "sha256": "b8f1e9931b57fbc054acdb445c41765d55b0074c58d145fa82839941ad1b5bb3"
+        },
+        {
+          "path": "config_sentence_transformers.json",
+          "size": 1565,
+          "sha256": "031e56a498d33c349ab489a21885bcfe25b4fcba841149dc99e1e90d4a7c28f5"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1488915288,
+          "sha256": "197a32965d4b1105faf060417baa899e193fb73cd401f42ec9295234d5553d79"
+        },
+        {
+          "path": "modules.json",
+          "size": 413,
+          "sha256": "3d02572a0455b832de67fb8e63a54981bc7e8b46e337c95e917bd8122a533bfd"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 511,
+          "sha256": "ea2ae257e901064abdd98dceb19f2b0da06af600bed15e0f99f5c85c37ee9d78"
+        },
+        {
+          "path": "processor_config.json",
+          "size": 1788,
+          "sha256": "168f6a08522f3ce5dea596d94d003af2fd691742d4f41fe1f9d8cce76bfbf69c"
+        },
+        {
+          "path": "sentence_bert_config.json",
+          "size": 747,
+          "sha256": "b1bcd9f2dce3ae863b359e87d0710b5dbc3314a59ecb4e2f97c7778fc8e4b228"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 32170510,
+          "sha256": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"
+        },
+        {
+          "path": "tokenizer.model",
+          "size": 4689013,
+          "sha256": "e594c8a90eb08d8bda498ff4747977dc827ae0c3c56b5c0d41a605a22d02ef03"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 1599,
+          "sha256": "17bd5d6e9364ca49a534e1502076593317c298d4a663623091ed45388f004874"
+        }
+      ]
+    }
+  ]
+}

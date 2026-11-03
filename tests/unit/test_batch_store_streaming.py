@@ -80,7 +80,7 @@ async def test_streaming_save_discards_partial_file_on_cancellation(tmp_path):
             stalled_chunks(), "cancelled", "batch", max_bytes=1024
         )
     )
-    await asyncio.wait_for(waiting.wait(), timeout=1)
+    await asyncio.wait_for(waiting.wait(), timeout=10)
     assert len(list((tmp_path / "files").glob("*.tmp"))) == 1
 
     task.cancel()

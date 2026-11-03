@@ -688,16 +688,18 @@ def test_compose_recovery_allows_detection_race_but_asserts_the_result():
         '$convergence_status" ;;'
         in smoke
     )
-    assert (
-        "wait_for_metric "
-        '\'kairyu_replica_healthy{pool="llama",replica="0"}\' "0.0" 10'
-        in smoke
+    # Ejection and restoration are state transitions of the replica's health,
+    # observed in order; time only bounds a hang.
+    validated = smoke.index(
+        '"prober validating replica-1 before the kill" replica_1_health_is "1.0"'
     )
-    assert (
-        "wait_for_metric "
-        '\'kairyu_replica_healthy{pool="llama",replica="0"}\' "1.0" 30'
-        in smoke
+    killed = smoke.index("compose kill replica-1")
+    ejected = smoke.index(
+        '"gateway ejecting replica-1 after it stopped" replica_1_health_is "0.0"'
     )
+    started = smoke.index("compose start replica-1")
+    restored = smoke.index('"prober restoring replica-1" replica_1_health_is "1.0"')
+    assert validated < killed < ejected < started < restored
     assert '[[ "$(chat "user-$i")" == 200 ]]' in smoke
 
 
@@ -842,38 +844,40 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
     )
     assert commands == [
         f"{compose} --profile browser-smoke config --format json",
+        f"{compose} --profile browser-smoke build kairyu browser",
+        f"{compose} pull webui",
         (
-            f"{compose} up -d --build --wait "
-            "--wait-timeout 240 kairyu webui"
+            f"{compose} up -d --no-build --pull never --wait "
+            "--wait-timeout 600 kairyu webui"
         ),
-        f"{compose} --profile browser-smoke build browser",
         (
-            f"{compose} --profile browser-smoke run --rm --no-deps "
+            f"{compose} --profile browser-smoke run --rm --no-deps --pull never "
             "-e WEBUI_SMOKE_PHASE=signup browser"
         ),
         (
-            f"{compose} run --rm --no-deps -e WEBUI_ADMIN_EMAIL=smoke@example.invalid "
+            f"{compose} run --rm --no-deps --pull never "
+            "-e WEBUI_ADMIN_EMAIL=smoke@example.invalid "
             "-e WEBUI_ADMIN_PASSWORD=smoke-password webui-setup"
         ),
         (
-            f"{compose} --profile browser-smoke run --rm --no-deps "
+            f"{compose} --profile browser-smoke run --rm --no-deps --pull never "
             "-e WEBUI_SMOKE_PHASE=initial browser"
         ),
         f"{compose} stop kairyu",
         (
-            f"{compose} --profile browser-smoke run --rm --no-deps "
+            f"{compose} --profile browser-smoke run --rm --no-deps --pull never "
             "-e WEBUI_SMOKE_PHASE=outage browser"
         ),
         f"{compose} start kairyu",
         (
-            f"{compose} --profile browser-smoke run --rm --no-deps "
+            f"{compose} --profile browser-smoke run --rm --no-deps --pull never "
             "-e WEBUI_SMOKE_PHASE=recovery browser"
         ),
         f"{compose} --profile browser-smoke down --volumes --remove-orphans",
     ]
     curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
     assert len(curl_commands) == 6
-    assert all("--connect-timeout 2 --max-time 10" in line for line in curl_commands)
+    assert all("--connect-timeout 30 --max-time 120" in line for line in curl_commands)
     assert "/v1/embeddings" in curl_commands[0]
     assert '"model":"embed-small"' in curl_commands[0]
     assert all(line.endswith("http://localhost:8000/metrics") for line in curl_commands[1:3])
@@ -917,7 +921,7 @@ def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=120,  # hang bound only; the faked run takes a few seconds
     )
 
     assert result.returncode != 0
@@ -951,9 +955,9 @@ def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
     assert 'WEBUI_SMOKE_PROJECT_NAME:-kairyu-webui-smoke-' in smoke
     assert 'docker compose --project-name "$SMOKE_PROJECT_NAME"' in smoke
     assert "http://kairyu:8000/v1" in smoke
-    assert "compose up -d --build --wait --wait-timeout" in smoke
+    assert "compose up -d --no-build --pull never --wait --wait-timeout" in smoke
     assert '"$COMPOSE_WAIT_SECONDS" kairyu webui' in smoke
-    assert "compose --profile browser-smoke build browser" in smoke
+    assert "compose --profile browser-smoke build kairyu browser" in smoke
     assert 'WEBUI_SMOKE_PHASE="$phase"' in smoke
     assert "browser_phase initial" in smoke
     assert "browser_phase outage" in smoke
@@ -987,19 +991,22 @@ def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
         step.get("run")
         for step in webui_steps
         if "webui_smoke.sh" in step.get("run", "")
-    ] == ["./scripts/webui_smoke.sh"]
+    ] == [
+        "bash scripts/ci_setup_retry.sh ./scripts/webui_smoke.sh --setup-only",
+        "./scripts/webui_smoke.sh --no-setup",
+    ]
 
 
 def test_webui_smoke_uses_only_bounded_http_requests():
     smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
 
-    assert 'curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }' in smoke
+    assert 'curl_bounded() { curl --connect-timeout 30 --max-time 120 "$@"; }' in smoke
     raw_curl_lines = [
         line.strip()
         for line in smoke.splitlines()
         if "curl " in line and not line.lstrip().startswith("#")
     ]
     assert raw_curl_lines == [
-        'curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }'
+        'curl_bounded() { curl --connect-timeout 30 --max-time 120 "$@"; }'
     ]
     assert "curl_bounded" in smoke

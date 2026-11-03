@@ -353,6 +353,22 @@ sanitizes backend failures as 502, and refunds conservative tenant reservations
 only when the backend returns exact usage. The deterministic mock remains for
 wire/unit tests and never claims authoritative tokenizer usage.
 
+**Upstream embeddings amendment (2026-11-03, `gemma-4-31b-8gpu`).** An
+`embeddings:` entry with `backend: openai` names an upstream `model`, its
+`dimensions` and one or more `replicas` (`base_url`, required `health_url`).
+Each replica is an `OpenAIEmbeddingBackend` that posts `{model, input,
+encoding_format: float}` to `<base_url>/embeddings`, never forwards
+`dimensions`, reorders by `data[].index`, validates count, width and
+finiteness with the FastEmbed validator, and returns the upstream's
+`usage.prompt_tokens` as exact usage; an upstream 4xx raises
+`UpstreamClientError`. The replicas form one `ReplicaPool` (m5 D4 embedding
+amendment) with a `HealthProber`; its placement log shares the pools'
+uniqueness check, `/readyz` counts it (m7 D4) and `/metrics` tracks it. The
+route, its caps, usage and tenancy are unchanged. Why: an embedding model on
+GPU (the Gemma example's EmbeddingGemma 2 on vLLM) could not be published
+through L3 at all, and the Chat UI's knowledge bases would otherwise bypass
+Kairyu; see A20.
+
 **Typed stream/tool amendment (2026-07-28, issue #201).** Responses requests
 normalize into the existing Chat Completions validation/execution boundary so
 model-specific templates, sampling, structured output, named/required tool
@@ -493,7 +509,8 @@ streams buffer", "no reasoning output", and "comment keep-alives".
   - tools: `tool_choice` `allowed_tools` or hosted tools; custom, built-in,
     and hosted tool types
   - input items: `item_reference` and other unsupported item types
-  - reasoning: `reasoning.effort=none`, non-default `reasoning.context`/`mode`
+  - reasoning: non-default `reasoning.context`/`mode` (`reasoning.effort=none`
+    is accepted since the Responses thinking-off amendment, 2026-11-03)
   - media: `file_id` images, `input_file`/`input_audio`, images in tool
     output, and images beside tool-call history on a model outside
     `upstream_chat_models` (an upstream-rendered model receives them with the
@@ -653,6 +670,20 @@ Tests: the `kairyu` and `omitted` cases of
 `test_vllm_templated_completion_with_thinking_off_is_all_public`, and the
 non-string `display`/`type` cases of `test_error_envelope_matrix`; `disabled`
 left `test_compatible_thinking_modes_are_accepted_as_noops`.
+
+*Responses thinking-off amendment (2026-11-03, owner decision).*
+`/v1/responses` accepts `reasoning.effort: "none"`: for an engine or pool model
+it becomes the internal effort `none` of the Messages amendment above and
+reaches L1 on that model's wire (Responses `reasoning.effort: "none"`, chat
+`reasoning_effort: "none"`, Messages `thinking: {"type": "disabled"}`); an AUTO
+model keeps its stage policy, so it is a no-op there, as on Messages. The
+public Chat parser still rejects `none`. Why: the 2026-10-05 rejection predates
+any thinking-off path ("disabling thinking is model-template specific"); since
+the Messages amendment the L1 renders thinking off from its own template, so the
+only reason left was the earlier amendment's scope. The Gemma 4 example's Chat
+UI (Responses) needs it for its thinking-off choice, and any Responses client
+that sends OpenAI's `none` got a 400. Test:
+`test_responses_effort_none_turns_a_direct_models_thinking_off`.
 
 ### D5 — Vision wire format
 
@@ -1190,3 +1221,10 @@ depend on one GPU. Tests: `tests/server/test_systemone_api.py`.
   non-object provider values, provider objects on other roles, non-null legacy
   calls, and unrelated extras remain fail-closed before dispatch. These
   compatibility fields stay absent from the typed `ChatMessage` schema.
+- **A20 (D4, 2026-11-03)**: an embedding model may be served by upstream
+  engine replicas (`backend: openai`). Kairyu, not the client, owns replica
+  choice, health and ejection for them through `ReplicaPool`; an empty pool
+  makes `/readyz` 503; the public request/response contract, usage and
+  tenancy are identical to the in-process backends. Task prefixes stay with
+  the client because an OpenAI embeddings request does not say whether its
+  input is a query or a document.

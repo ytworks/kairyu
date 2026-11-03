@@ -16,6 +16,7 @@ import threading
 import time
 import types
 import weakref
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -251,7 +252,7 @@ def _fake_nested_engine_service(port_pipe, config):
     )
     rank.start()
     rank_ready_send.close()
-    if not rank_ready_recv.poll(timeout=5):
+    if not rank_ready_recv.poll(timeout=60):
         raise RuntimeError("fake rank did not become ready")
     rank_ready_recv.recv_bytes()
     rank_ready_recv.close()
@@ -289,7 +290,7 @@ def _fake_api_parent_with_nested_service(result_pipe):
     rank_pid_send.close()
     port_parent.recv()
     port_parent.recv()
-    if not rank_pid_recv.poll(timeout=5):
+    if not rank_pid_recv.poll(timeout=10):
         raise RuntimeError("fake service did not report its rank PID")
     rank_pid = rank_pid_recv.recv()
     rank_pid_recv.close()
@@ -472,7 +473,7 @@ class _GatedTokenizer(ToyTokenizer):
     def encode(self, text: str) -> tuple[int, ...]:
         self.calls += 1
         self.entered.set()
-        if not self.release.wait(2):
+        if not self.release.wait(10):
             raise TimeoutError("test did not release parent tokenization")
         return super().encode(text)
 
@@ -493,12 +494,76 @@ class _OverlapRejectingTokenizer(ToyTokenizer):
         try:
             self.calls += 1
             self.entered.set()
-            if not self.release.wait(2):
+            if not self.release.wait(10):
                 raise TimeoutError("test did not release parent tokenization")
             return super().encode(text)
         finally:
             with self._guard:
                 self._active = False
+
+
+async def _wait_until(condition: Callable[[], bool], *, timeout: float = 10) -> None:
+    """Poll observable state; the bound only detects a hang."""
+
+    async def poll() -> None:
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
+def _process_stopped(pid: int) -> bool:
+    status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    state_line = next(
+        (line for line in status.splitlines() if line.startswith("State:")),
+        "",
+    )
+    return state_line.split()[1:2] in (["T"], ["t"])
+
+
+class _ObservedGate(asyncio.Lock):
+    """The backend's prompt-tokenizer gate, counting callers queued behind it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued = 0
+
+    async def acquire(self) -> bool:
+        if not self.locked():
+            return await super().acquire()
+        self.queued += 1
+        try:
+            return await super().acquire()
+        finally:
+            self.queued -= 1
+
+
+def _record_startup_frame_reads(monkeypatch) -> threading.Event:
+    """Signal once the parent has read the child's port frame."""
+
+    spawn = multiprocessing.get_context("spawn")
+    real_pipe = spawn.Pipe
+    port_read = threading.Event()
+
+    class RecordingParentPipe:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+
+        def recv(self):
+            frame = self._connection.recv()
+            port_read.set()
+            return frame
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    def recording_pipe(duplex=True):
+        parent, child = real_pipe(duplex)
+        # Only the duplex startup pipe carries the port frame.
+        return (RecordingParentPipe(parent), child) if duplex else (parent, child)
+
+    monkeypatch.setattr(spawn, "Pipe", recording_pipe)
+    return port_read
 
 
 @pytest.mark.parametrize("max_model_len", [None, 32])
@@ -740,7 +805,7 @@ async def test_new_service_keeps_legacy_client_cumulative_wire():
         queue = await backend._submit(request)
         events = []
         while True:
-            event = await asyncio.wait_for(queue.get(), timeout=5)
+            event = await asyncio.wait_for(queue.get(), timeout=10)
             events.append(event)
             if event.get("finished"):
                 break
@@ -918,7 +983,7 @@ async def test_engine_service_packs_off_thread_while_depth_one_next_step_runs(
                 not chunk.is_prefill and chunk.position >= 1
                 for chunk in scheduled
             ):
-                if not pack_entered.wait(5):
+                if not pack_entered.wait(10):
                     raise TimeoutError("wire packing did not start")
                 self.next_decode_finished.set()
             return {
@@ -974,7 +1039,7 @@ async def test_engine_service_packs_off_thread_while_depth_one_next_step_runs(
         if gate:
             pack_threads.append(threading.get_ident())
             pack_entered.set()
-            if not runner.next_decode_finished.wait(5):
+            if not runner.next_decode_finished.wait(10):
                 raise TimeoutError("next depth-one step did not finish")
         return real_packb(payload)
 
@@ -1232,12 +1297,13 @@ async def test_forced_cleanup_kills_nested_rank_process_group(monkeypatch):
         assert await asyncio.to_thread(backend._spawn) == 43216
         rank_pid_send.close()
         process = backend._process
-        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        assert await asyncio.to_thread(rank_pid_recv.poll, 10)
         rank_pid = rank_pid_recv.recv()
         assert process is not None and process.is_alive()
         assert isinstance(rank_pid, int) and Path(f"/proc/{rank_pid}").exists()
 
-        assert await asyncio.to_thread(_kill_and_reap_process, process, 3.0)
+        # The reap bound stays below the fake rank's 60 s lifetime.
+        assert await asyncio.to_thread(_kill_and_reap_process, process, 30.0)
         assert not Path(f"/proc/{rank_pid}").exists()
         assert _process_group_member_states(process) == ()
     finally:
@@ -1261,16 +1327,17 @@ async def test_parent_death_lease_kills_service_and_nested_rank():
     result_send.close()
     service_pid = rank_pid = None
     try:
-        assert await asyncio.to_thread(result_recv.poll, 10)
+        assert await asyncio.to_thread(result_recv.poll, 60)
         service_pid, rank_pid = result_recv.recv()
         assert all(
             Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
             for pid in (service_pid, rank_pid)
         )
         os.kill(api_parent.pid, signal.SIGKILL)
-        await asyncio.to_thread(api_parent.join, 3)
+        await asyncio.to_thread(api_parent.join, 60)
         assert not api_parent.is_alive()
-        for _ in range(300):
+
+        def service_tree_reaped() -> bool:
             present = []
             for pid in (service_pid, rank_pid):
                 try:
@@ -1282,11 +1349,11 @@ async def test_parent_death_lease_kills_service_and_nested_rank():
                         os.waitpid(pid, os.WNOHANG)
                 if Path(f"/proc/{pid}").exists():
                     present.append(pid)
-            if not present:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail(f"parent death left unreaped service tree: {present}")
+            return not present
+
+        # A hang bound only, kept below the fake tree's 60 s lifetime so a
+        # tree the watchdog failed to kill cannot exit by itself in time.
+        await _wait_until(service_tree_reaped, timeout=30)
     finally:
         if api_parent.is_alive():
             api_parent.kill()
@@ -1319,7 +1386,7 @@ async def test_shutdown_kills_sigterm_resistant_nested_rank(
     try:
         assert await asyncio.to_thread(backend._spawn) == 43216
         rank_pid_send.close()
-        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        assert await asyncio.to_thread(rank_pid_recv.poll, 10)
         rank_pid = rank_pid_recv.recv()
         await backend.shutdown()
         assert not Path(f"/proc/{rank_pid}").exists()
@@ -1355,7 +1422,7 @@ async def test_receiver_reaps_followers_when_service_rank_dies(
         assert await asyncio.to_thread(backend._spawn) == 43216
         rank_pid_send.close()
         process = backend._process
-        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        assert await asyncio.to_thread(rank_pid_recv.poll, 10)
         rank_pid = rank_pid_recv.recv()
         assert process is not None
         backend._live_generation = 1
@@ -1366,7 +1433,7 @@ async def test_receiver_reaps_followers_when_service_rank_dies(
         # Kill rank 0 only. Its follower deliberately remains in the owned
         # process group until the receiver observes death and sweeps the group.
         os.kill(process.pid, signal.SIGKILL)
-        await asyncio.wait_for(receiver, timeout=3)
+        await asyncio.wait_for(receiver, timeout=60)
         assert not process.is_alive()
         assert not Path(f"/proc/{rank_pid}").exists()
         assert _process_group_member_states(process) == ()
@@ -1415,7 +1482,7 @@ async def test_receiver_transport_failure_marks_readiness_fatal_and_sanitized(
     )
     backend._receiver = receiver
 
-    await asyncio.wait_for(asyncio.shield(receiver), timeout=0.5)
+    await asyncio.wait_for(asyncio.shield(receiver), timeout=10)
 
     event = queue.get_nowait()
     assert "secret transport path" in event["error"]
@@ -1480,8 +1547,8 @@ async def test_receiver_updates_live_decode_graph_metadata_without_dropping_even
         backend._receive_loop(23, Socket(), LiveProcess())
     )
     try:
-        first = await asyncio.wait_for(backend._queues["public"].get(), 0.5)
-        second = await asyncio.wait_for(backend._queues["public"].get(), 0.5)
+        first = await asyncio.wait_for(backend._queues["public"].get(), 10)
+        second = await asyncio.wait_for(backend._queues["public"].get(), 10)
         assert first["finished"] is False
         assert second["finished"] is True
         assert backend.decode_graph_metadata_snapshot() == {
@@ -1504,18 +1571,44 @@ async def test_receiver_heartbeat_timeout_fails_generation_and_readiness(
         def is_alive(self):
             return True
 
+    # The receiver judges silence by its event loop's clock. Give it a clock
+    # that advances one receive tick per silent receive, so the pings before
+    # the deadline do not depend on how fast this runner schedules the loop.
+    clock = types.SimpleNamespace(now=0.0)
+
+    class VirtualClockLoop:
+        def __init__(self, loop) -> None:
+            self._loop = loop
+
+        def time(self):
+            return clock.now
+
+        def __getattr__(self, name):
+            return getattr(self._loop, name)
+
+    virtual_asyncio = types.ModuleType("asyncio")
+    virtual_asyncio.__dict__.update(vars(asyncio))
+    virtual_asyncio.get_running_loop = lambda: VirtualClockLoop(
+        asyncio.get_running_loop()
+    )
+
     class SilentSocket:
         def __init__(self) -> None:
             self.sent = []
 
         async def recv(self):
-            await asyncio.Future()
+            # Yield so the hang bound below can still fire if the receiver
+            # never gives up.
+            await asyncio.sleep(0)
+            clock.now += 0.25
+            raise TimeoutError
 
         async def send(self, payload):
             self.sent.append(msgpack.unpackb(payload))
 
     signals = []
-    monkeypatch.setattr("kairyu.engine.zmq_backend._RECV_TICK_S", 0.005)
+    monkeypatch.setattr("kairyu.engine.zmq_backend.asyncio", virtual_asyncio)
+    monkeypatch.setattr("kairyu.engine.zmq_backend._RECV_TICK_S", 0.25)
     monkeypatch.setattr(
         "kairyu.engine.zmq_backend._signal_process_tree",
         lambda _process, sig: signals.append(sig),
@@ -1524,7 +1617,7 @@ async def test_receiver_heartbeat_timeout_fails_generation_and_readiness(
         "kairyu.engine.zmq_backend._wait_process_tree_exit",
         lambda _process, _timeout: True,
     )
-    backend = ZmqEngineBackend(num_pages=64, death_timeout_s=0.03)
+    backend = ZmqEngineBackend(num_pages=64, death_timeout_s=1.0)
     process = LiveProcess()
     socket = SilentSocket()
     queue = asyncio.Queue()
@@ -1535,7 +1628,7 @@ async def test_receiver_heartbeat_timeout_fails_generation_and_readiness(
     receiver = asyncio.create_task(backend._receive_loop(5, socket, process))
     backend._receiver = receiver
     try:
-        await asyncio.wait_for(asyncio.shield(receiver), timeout=0.5)
+        await asyncio.wait_for(asyncio.shield(receiver), timeout=10)
     finally:
         if not receiver.done():
             receiver.cancel()
@@ -1571,7 +1664,7 @@ async def test_receiver_retires_generation_before_blocked_reap(monkeypatch):
     def controlled_reap(process, timeout_s):
         reap_calls.append((process, timeout_s))
         reap_entered.set()
-        assert release_reap.wait(timeout=2)
+        assert release_reap.wait(timeout=10)
         return True
 
     monkeypatch.setattr(
@@ -1594,7 +1687,7 @@ async def test_receiver_retires_generation_before_blocked_reap(monkeypatch):
     )
     backend._receiver = receiver
     try:
-        assert await asyncio.to_thread(reap_entered.wait, 1)
+        assert await asyncio.to_thread(reap_entered.wait, 10)
 
         # Reaping is still blocked and the fake process is still alive, yet
         # admission and readiness must already expose the fatal generation.
@@ -1607,7 +1700,7 @@ async def test_receiver_retires_generation_before_blocked_reap(monkeypatch):
         assert "transport failed" in queue.get_nowait()["error"]
     finally:
         release_reap.set()
-        await asyncio.wait_for(asyncio.shield(receiver), timeout=1)
+        await asyncio.wait_for(asyncio.shield(receiver), timeout=10)
 
     assert reap_calls == [(process, 5.0)]
     assert backend._process is None
@@ -1633,7 +1726,7 @@ async def test_cancelled_reset_shares_and_drains_receiver_reap(monkeypatch):
     def controlled_reap(process, timeout_s):
         reap_calls.append((process, timeout_s))
         reap_entered.set()
-        assert release_reap.wait(timeout=2)
+        assert release_reap.wait(timeout=10)
         return True
 
     monkeypatch.setattr(
@@ -1654,20 +1747,16 @@ async def test_cancelled_reset_shares_and_drains_receiver_reap(monkeypatch):
     backend._receiver = receiver
     reset = None
     try:
-        assert await asyncio.to_thread(reap_entered.wait, 1)
+        assert await asyncio.to_thread(reap_entered.wait, 10)
         reset = asyncio.create_task(backend._reset_dead_locked())
-        for _ in range(100):
-            if backend._receiver is None:
-                break
-            await asyncio.sleep(0)
-        assert backend._receiver is None
+        await _wait_until(lambda: backend._receiver is None)
 
         reset.cancel()
         await asyncio.sleep(0)
         assert reset.done() is False
         release_reap.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(reset, timeout=1)
+            await asyncio.wait_for(reset, timeout=10)
     finally:
         release_reap.set()
         if reset is not None and not reset.done():
@@ -2045,14 +2134,13 @@ async def test_concurrent_parent_prepare_single_flights_same_request():
     first = asyncio.create_task(backend.prepare_request(request))
     second = asyncio.create_task(backend.prepare_request(request))
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
-        for _ in range(100):
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+
+        def joined_one_flight() -> bool:
             flight = backend._preparing_requests.get(id(request))
-            if flight is not None and flight.waiters == 2:
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("same-request parent preflight did not join one flight")
+            return flight is not None and flight.waiters == 2
+
+        await _wait_until(joined_one_flight)
 
         tokenizer.release.set()
         await asyncio.gather(first, second)
@@ -2071,6 +2159,7 @@ async def test_different_parent_requests_serialize_custom_tokenizer_calls():
     tokenizer = _OverlapRejectingTokenizer()
     backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
     backend._preflight_tokenizer = tokenizer
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     first = asyncio.create_task(
         backend.prepare_request(
             _request("serialize-parent-a", "first", max_tokens=1)
@@ -2082,8 +2171,10 @@ async def test_different_parent_requests_serialize_custom_tokenizer_calls():
         )
     )
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+        # The second request reached the tokenizer while the first holds it.
+        await _wait_until(lambda: gate.queued == 1)
+        assert tokenizer.calls == 1
         tokenizer.release.set()
         await asyncio.gather(first, second)
 
@@ -2099,6 +2190,7 @@ async def test_parent_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
     tokenizer = _OverlapRejectingTokenizer()
     backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
     backend._preflight_tokenizer = tokenizer
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     preparation = asyncio.create_task(
         backend.prepare_request(
             _request("serialize-parent-prepare", "prompt", max_tokens=1)
@@ -2106,11 +2198,11 @@ async def test_parent_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
     )
     scoring = None
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
         scoring = asyncio.create_task(
             backend.tokenize_loglikelihood_async("context", " continuation")
         )
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: gate.queued == 1)
         assert tokenizer.calls == 1
 
         tokenizer.release.set()
@@ -2133,17 +2225,14 @@ async def test_cancelled_parent_prepare_worker_does_not_publish_cache():
     request = _request("cancelled-parent-prepare", "abandoned", max_tokens=1)
     preparation = asyncio.create_task(backend.prepare_request(request))
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
         preparation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await preparation
         assert backend._prepared_requests == {}
 
         tokenizer.release.set()
-        for _ in range(100):
-            if not backend._preparing_requests:
-                break
-            await asyncio.sleep(0.01)
+        await _wait_until(lambda: not backend._preparing_requests)
 
         assert tokenizer.calls == 1
         assert backend._preparing_requests == {}
@@ -2762,13 +2851,12 @@ async def test_cancelled_model_load_reclaims_its_child_before_a_new_generation(
         _fake_slow_starting_engine_service,
     )
     backend = ZmqEngineBackend(num_pages=64)
-    port_sent = multiprocessing.get_context("spawn").Event()
-    backend._config["_test_port_sent"] = port_sent
+    port_read = _record_startup_frame_reads(monkeypatch)
+    backend._config["_test_port_sent"] = multiprocessing.get_context("spawn").Event()
     starting = asyncio.create_task(backend._ensure_started())
-    assert await asyncio.to_thread(port_sent.wait, 3)
-    # The first frame is now in the Pipe; let the parent consume it and enter
-    # the unbounded model-load wait for the optional second frame.
-    await asyncio.sleep(0.1)
+    # Once the parent has read the port frame it is in the unbounded
+    # model-load wait for the optional second frame.
+    assert await asyncio.to_thread(port_read.wait, 60)
     abandoned_process = backend._process
     assert abandoned_process is not None and abandoned_process.is_alive()
     backend.attention_backend_decision = _decision_from_startup_frame(
@@ -2780,9 +2868,13 @@ async def test_cancelled_model_load_reclaims_its_child_before_a_new_generation(
     )
 
     starting.cancel()
-    asyncio.get_running_loop().call_later(0.01, starting.cancel)
+    # The first cancellation is handled before this coroutine resumes, so the
+    # second one lands while the caller drains the abandoned spawn worker.
+    await asyncio.sleep(0)
+    starting.cancel()
+    # The bound stays below the fake child's 60 s lifetime.
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(starting, timeout=3)
+        await asyncio.wait_for(starting, timeout=30)
 
     assert backend._process is None
     assert backend.attention_backend_decision is None
@@ -2813,7 +2905,7 @@ async def test_shutdown_before_spawn_registers_a_process_closes_admission(
 
     def delayed_spawn(abandoned=None):
         entered.set()
-        if not release.wait(3):
+        if not release.wait(10):
             raise RuntimeError("test did not release delayed spawn")
         return original_spawn(abandoned)
 
@@ -2821,20 +2913,19 @@ async def test_shutdown_before_spawn_registers_a_process_closes_admission(
     starting = asyncio.create_task(backend._ensure_started())
     shutdown = None
     try:
-        assert await asyncio.to_thread(entered.wait, 3)
+        assert await asyncio.to_thread(entered.wait, 10)
         shutdown = asyncio.create_task(backend.shutdown())
-        for _ in range(300):
+
+        def admission_closed_and_startup_cancelled() -> bool:
             abandoned = backend._startup_abandoned
-            if backend._closed and abandoned is not None and abandoned.is_set():
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("shutdown did not close admission and cancel startup")
+            return backend._closed and abandoned is not None and abandoned.is_set()
+
+        await _wait_until(admission_closed_and_startup_cancelled)
 
         release.set()
         with pytest.raises(EngineServiceError, match="startup was cancelled"):
-            await asyncio.wait_for(starting, timeout=3)
-        await asyncio.wait_for(shutdown, timeout=3)
+            await asyncio.wait_for(starting, timeout=10)
+        await asyncio.wait_for(shutdown, timeout=10)
 
         assert backend._process is None
         assert backend._startup_task is None
@@ -2859,19 +2950,20 @@ async def test_shutdown_cancels_and_reaps_an_inflight_model_load(
         _fake_slow_starting_engine_service,
     )
     backend = ZmqEngineBackend(num_pages=64)
-    port_sent = multiprocessing.get_context("spawn").Event()
-    backend._config["_test_port_sent"] = port_sent
+    port_read = _record_startup_frame_reads(monkeypatch)
+    backend._config["_test_port_sent"] = multiprocessing.get_context("spawn").Event()
     starting = asyncio.create_task(backend._ensure_started())
 
-    assert await asyncio.to_thread(port_sent.wait, 3)
-    await asyncio.sleep(0.1)
+    # Shutdown cancels the load while the parent waits for the model.
+    assert await asyncio.to_thread(port_read.wait, 60)
     process = backend._process
     assert process is not None and process.is_alive()
 
     shutdown = asyncio.create_task(backend.shutdown())
+    # The bounds stay below the fake child's 60 s lifetime.
     with pytest.raises(EngineServiceError, match="startup was cancelled"):
-        await asyncio.wait_for(starting, timeout=3)
-    await asyncio.wait_for(shutdown, timeout=3)
+        await asyncio.wait_for(starting, timeout=30)
+    await asyncio.wait_for(shutdown, timeout=30)
 
     assert not process.is_alive()
     assert backend._process is None
@@ -2958,8 +3050,12 @@ async def test_inflight_request_sees_service_death():
     backend = ZmqEngineBackend(num_pages=64, death_timeout_s=2.0)
     try:
         await backend.generate(_request("d1", "warm up", max_tokens=2))
+        # A stopped child cannot answer d2 before it dies.
+        process = backend._process
+        os.kill(process.pid, signal.SIGSTOP)
+        await _wait_until(lambda: _process_stopped(process.pid))
         queue = await backend._submit(_request("d2", "in flight", max_tokens=64))
-        backend._process.kill()  # crash while d2 awaits
+        process.kill()  # crash while d2 awaits
         event = await asyncio.wait_for(queue.get(), timeout=10)
         assert "error" in event  # delivered, not a permanent hang
     finally:
@@ -2974,6 +3070,10 @@ async def test_backend_recovers_after_service_death():
     backend = ZmqEngineBackend(num_pages=64, death_timeout_s=2.0)
     try:
         await backend.generate(_request("r1", "warm up", max_tokens=2))
+        # A stopped child cannot finish r2 before it dies.
+        process = backend._process
+        os.kill(process.pid, signal.SIGSTOP)
+        await _wait_until(lambda: _process_stopped(process.pid))
         queue = await backend._submit(_request("r2", "in flight", max_tokens=10_000))
         backend.attention_backend_decision = _decision_from_startup_frame(
             {
@@ -2982,10 +3082,9 @@ async def test_backend_recovers_after_service_death():
                 "attention_backend_decision": _READY_DECISION,
             }
         )
-        backend._process.kill()
-        # A token frame can already be queued before kill() takes effect. Wait
-        # for the terminal death event rather than treating the first frame as
-        # proof that the receiver has observed and cleared the dead child.
+        process.kill()
+        # Wait for the terminal death event rather than treating any earlier
+        # frame as proof that the receiver has observed and cleared the child.
         async with asyncio.timeout(10):
             while "error" not in await queue.get():
                 pass
@@ -2994,7 +3093,7 @@ async def test_backend_recovers_after_service_death():
         backend._release_wire_route("r2")
         # the next request respawns a fresh child and completes normally
         result = await asyncio.wait_for(
-            backend.generate(_request("r3", "recovered", max_tokens=2)), timeout=15
+            backend.generate(_request("r3", "recovered", max_tokens=2)), timeout=60
         )
         assert result.completions[0].token_ids
     finally:
@@ -3011,20 +3110,24 @@ async def test_respawn_before_receiver_death_tick_fails_old_generation_once(
     backend = ZmqEngineBackend(num_pages=64)
     queue = None
     try:
-        queue = await asyncio.wait_for(
-            backend._submit(_request("death-reset-race", "in flight", max_tokens=10_000)),
-            timeout=15,
-        )
-        old_generation = backend._queue_generations["death-reset-race"]
+        await asyncio.wait_for(backend._ensure_started(), timeout=60)
         old_process = backend._process
         assert old_process is not None
+        # A stopped child cannot finish the request before it dies.
+        os.kill(old_process.pid, signal.SIGSTOP)
+        await _wait_until(lambda: _process_stopped(old_process.pid))
+        queue = await asyncio.wait_for(
+            backend._submit(_request("death-reset-race", "in flight", max_tokens=10_000)),
+            timeout=10,
+        )
+        old_generation = backend._queue_generations["death-reset-race"]
         old_process.kill()
-        await asyncio.to_thread(old_process.join, 3)
+        await asyncio.to_thread(old_process.join, 60)
         assert not old_process.is_alive()
 
         # This used to cancel the old receiver before its timeout without
         # notifying the old queue, leaving that request blocked forever.
-        await asyncio.wait_for(backend._ensure_started(), timeout=10)
+        await asyncio.wait_for(backend._ensure_started(), timeout=60)
         assert backend._live_generation != old_generation
 
         queued = []
@@ -3085,7 +3188,7 @@ async def test_shutdown_control_send_is_bounded_and_still_closes_transport(
     backend._process = process
 
     shutdown = asyncio.create_task(backend.shutdown())
-    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.5)
+    await asyncio.wait_for(asyncio.shield(shutdown), timeout=10)
 
     assert shutdown.done() and not shutdown.cancelled()
     assert shutdown.exception() is None
@@ -3112,7 +3215,7 @@ async def test_cancelled_shutdown_drains_one_shared_reap_for_all_callers(
     def controlled_reap(process, timeout_s):
         reap_calls.append((process, timeout_s))
         reap_entered.set()
-        assert release_reap.wait(timeout=2)
+        assert release_reap.wait(timeout=10)
         return True
 
     monkeypatch.setattr(
@@ -3125,7 +3228,7 @@ async def test_cancelled_shutdown_drains_one_shared_reap_for_all_callers(
     first = asyncio.create_task(backend.shutdown())
     second = None
     try:
-        assert await asyncio.to_thread(reap_entered.wait, 1)
+        assert await asyncio.to_thread(reap_entered.wait, 10)
         shared_shutdown = backend._shutdown_task
         assert shared_shutdown is not None
         second = asyncio.create_task(backend.shutdown())
@@ -3137,8 +3240,8 @@ async def test_cancelled_shutdown_drains_one_shared_reap_for_all_callers(
         assert second.done() is False
         release_reap.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(first, timeout=1)
-        await asyncio.wait_for(second, timeout=1)
+            await asyncio.wait_for(first, timeout=10)
+        await asyncio.wait_for(second, timeout=10)
     finally:
         release_reap.set()
         for caller in (first, second):
@@ -3214,7 +3317,7 @@ async def test_abort_control_send_is_bounded_and_returns_normally(monkeypatch):
     backend._stream_ids["bounded-abort"] = "stream-bounded-abort"
 
     abort = asyncio.create_task(backend._abort("bounded-abort"))
-    await asyncio.wait_for(asyncio.shield(abort), timeout=0.5)
+    await asyncio.wait_for(asyncio.shield(abort), timeout=10)
 
     assert abort.done() and not abort.cancelled()
     assert abort.exception() is None
@@ -3240,7 +3343,7 @@ async def test_submit_send_is_bounded_and_releases_its_route(monkeypatch):
     with pytest.raises(EngineServiceError, match="request send timed out"):
         await asyncio.wait_for(
             backend._submit(_request("bounded-add", "prompt", max_tokens=2)),
-            timeout=0.5,
+            timeout=10,
         )
 
     assert socket.send_started is True
@@ -3277,7 +3380,7 @@ async def test_submit_does_not_send_old_frame_to_replacement_generation(
 
     def blocked_pack(*args):
         pack_started.set()
-        assert release_pack.wait(timeout=5)
+        assert release_pack.wait(timeout=10)
         return original_pack(*args)
 
     monkeypatch.setattr(backend, "_ensure_started", already_started)
@@ -3285,7 +3388,7 @@ async def test_submit_does_not_send_old_frame_to_replacement_generation(
     submit = asyncio.create_task(
         backend._submit(_request("generation-swap", "prompt", max_tokens=2))
     )
-    assert await asyncio.to_thread(pack_started.wait, 5)
+    assert await asyncio.to_thread(pack_started.wait, 10)
 
     backend._socket = new_socket
     backend._live_generation = 2
@@ -3316,13 +3419,8 @@ async def test_cancelled_submit_send_retires_unknown_delivery_generation(monkeyp
     submit = asyncio.create_task(
         backend._submit(_request("cancelled-add", "prompt", max_tokens=2))
     )
-    # The prompt worker thread needs wall-clock time before the send starts;
-    # bare loop yields are not enough on a loaded runner.
-    for _ in range(500):
-        if socket.send_started:
-            break
-        await asyncio.sleep(0.01)
-    assert socket.send_started is True
+    # The send starts after off-loop prompt preparation finishes.
+    await _wait_until(lambda: socket.send_started)
 
     submit.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -3340,29 +3438,39 @@ async def test_cancelled_submit_send_retires_unknown_delivery_generation(monkeyp
 async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(
     zmq_backend,
 ):
-    original = asyncio.create_task(
-        zmq_backend.generate(_request("same", "first", max_tokens=10_000))
-    )
-    for _ in range(500):
-        if "same" in zmq_backend._active_request_ids and "same" in zmq_backend._queues:
-            break
-        await asyncio.sleep(0.01)
-    assert "same" in zmq_backend._active_request_ids
-    assert "same" in zmq_backend._queues
-    original_queue = zmq_backend._queues["same"]
+    await asyncio.wait_for(zmq_backend._ensure_started(), timeout=60)
+    process = zmq_backend._process
+    assert process is not None
+    # A stopped child keeps the original request in flight until it is
+    # cancelled, however fast the child could otherwise finish it.
+    os.kill(process.pid, signal.SIGSTOP)
+    try:
+        await _wait_until(lambda: _process_stopped(process.pid))
+        original = asyncio.create_task(
+            zmq_backend.generate(_request("same", "first", max_tokens=10_000))
+        )
+        await _wait_until(
+            lambda: "same" in zmq_backend._active_request_ids
+            and "same" in zmq_backend._queues
+        )
+        original_queue = zmq_backend._queues["same"]
 
-    with pytest.raises(ValueError, match="duplicate request_id"):
-        await zmq_backend.generate(_request("same", "second", max_tokens=2))
-    duplicate_stream = zmq_backend.stream(_request("same", "second stream", max_tokens=2))
-    with pytest.raises(ValueError, match="duplicate request_id"):
-        await anext(duplicate_stream)
-    assert zmq_backend._queues["same"] is original_queue
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await zmq_backend.generate(_request("same", "second", max_tokens=2))
+        duplicate_stream = zmq_backend.stream(
+            _request("same", "second stream", max_tokens=2)
+        )
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await anext(duplicate_stream)
+        assert zmq_backend._queues["same"] is original_queue
 
-    original.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await original
-    assert "same" not in zmq_backend._active_request_ids
-    assert "same" not in zmq_backend._queues
+        original.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original
+        assert "same" not in zmq_backend._active_request_ids
+        assert "same" not in zmq_backend._queues
+    finally:
+        os.kill(process.pid, signal.SIGCONT)
 
     reused = await zmq_backend.generate(_request("same", "reused", max_tokens=2))
     assert reused.finished is True
@@ -3382,39 +3490,22 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_versio
     process = None
     stopped = False
     try:
-        original = asyncio.create_task(
-            backend.generate(_request("queued-reuse", "first", max_tokens=10_000))
-        )
-        for _ in range(500):
-            if (
-                "queued-reuse" in backend._active_request_ids
-                and "queued-reuse" in backend._queues
-                and backend._process is not None
-            ):
-                break
-            await asyncio.sleep(0.01)
-        assert "queued-reuse" in backend._active_request_ids
-        assert "queued-reuse" in backend._queues
+        await asyncio.wait_for(backend._ensure_started(), timeout=60)
         process = backend._process
         assert process is not None and process.is_alive()
 
+        # Stop the child first: the original add, its abort and the reused add
+        # all queue behind the stop, however fast the child could run.
         os.kill(process.pid, sigstop)
         stopped = True
-        proc_status = Path(f"/proc/{process.pid}/status")
-        for _ in range(500):
-            state_line = next(
-                (
-                    line
-                    for line in proc_status.read_text(encoding="utf-8").splitlines()
-                    if line.startswith("State:")
-                ),
-                "",
-            )
-            if state_line.split()[1:2] in (["T"], ["t"]):
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("engine service did not enter a stopped process state")
+        await _wait_until(lambda: _process_stopped(process.pid))
+        original = asyncio.create_task(
+            backend.generate(_request("queued-reuse", "first", max_tokens=10_000))
+        )
+        await _wait_until(
+            lambda: "queued-reuse" in backend._active_request_ids
+            and "queued-reuse" in backend._queues
+        )
         original.cancel()
         with pytest.raises(asyncio.CancelledError):
             await original
@@ -3422,12 +3513,10 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_versio
         reused = asyncio.create_task(
             backend.generate(_request("queued-reuse", "reused", max_tokens=2))
         )
-        for _ in range(500):
-            if "queued-reuse" in backend._active_request_ids and "queued-reuse" in backend._queues:
-                break
-            await asyncio.sleep(0.01)
-        assert "queued-reuse" in backend._active_request_ids
-        assert "queued-reuse" in backend._queues
+        await _wait_until(
+            lambda: "queued-reuse" in backend._active_request_ids
+            and "queued-reuse" in backend._queues
+        )
 
         os.kill(process.pid, sigcont)
         stopped = False
@@ -3464,7 +3553,7 @@ async def test_pipeline_depth_three_cancelled_id_can_be_reused_immediately():
         )
     )
     try:
-        first = await asyncio.wait_for(anext(stream), timeout=15)
+        first = await asyncio.wait_for(anext(stream), timeout=60)
         assert first.finished is False
         await stream.aclose()
         result = await asyncio.wait_for(
@@ -3546,13 +3635,9 @@ async def test_duplicate_request_id_stays_reserved_until_abort_finishes(monkeypa
         original_stream = backend.stream(request)
         original = asyncio.create_task(anext(original_stream))
 
-    for _ in range(100):
-        if "abort-race" in backend._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert "abort-race" in backend._active_request_ids
+    await _wait_until(lambda: "abort-race" in backend._active_request_ids)
     original.cancel()
-    await asyncio.wait_for(abort_started.wait(), timeout=1)
+    await asyncio.wait_for(abort_started.wait(), timeout=10)
 
     try:
         with pytest.raises(ValueError, match="duplicate request_id"):

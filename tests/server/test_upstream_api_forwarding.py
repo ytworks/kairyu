@@ -592,6 +592,34 @@ async def test_messages_thinking_disabled_turns_a_pool_models_thinking_off(
     assert "output_config" not in body
 
 
+@pytest.mark.parametrize(
+    ("responses", "expected", "field", "off"),
+    [
+        (True, "/v1/responses", "reasoning", {"effort": "none"}),
+        (False, "/v1/chat/completions", "reasoning_effort", "none"),
+    ],
+)
+async def test_responses_effort_none_turns_a_direct_models_thinking_off(
+    upstream, responses, expected, field, off
+):
+    app = build_app_from_spec(load_deployment_spec(_spec(responses=responses)))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "remote",
+                "input": "Hi",
+                "max_output_tokens": 64,
+                "reasoning": {"effort": "none"},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    ((_host, path, body),) = upstream.calls
+    assert path == expected
+    assert body[field] == off
+
+
 async def test_an_assistant_prefill_continues_on_responses_not_messages(upstream):
     backend = OpenAICompatBackend(
         base_url="http://vllm.test/v1",
@@ -906,7 +934,9 @@ def test_a_client_disconnect_ends_the_upstream_request_at_once(path, body, marke
     gc.disable()
     try:
         _read_first_delta_then_disconnect(kairyu_url, path, body, marker)
-        assert closed.wait(timeout=5), "the upstream request outlived its client"
+        # Hang bound only; without the disconnect, the read timeout (60 s) or
+        # shutdown would be the first to close the upstream request.
+        assert closed.wait(timeout=10), "the upstream request outlived its client"
     finally:
         if collecting:
             gc.enable()
@@ -1002,7 +1032,7 @@ expose_intermediate_outputs: true
     kairyu_url, kairyu_server = serve(app)
 
     def roles_pending() -> None:
-        assert upstream.both_pending.wait(timeout=5), upstream.roles
+        assert upstream.both_pending.wait(timeout=10), upstream.roles
 
     collecting = gc.isenabled()
     gc.disable()
@@ -1010,7 +1040,7 @@ expose_intermediate_outputs: true
         _read_first_delta_then_disconnect(
             kairyu_url, path, body, marker, before_close=roles_pending
         )
-        assert upstream.all_closed.wait(timeout=5), "a role call outlived its client"
+        assert upstream.all_closed.wait(timeout=10), "a role call outlived its client"
         assert sorted(upstream.roles) == ["alpha", "beta"]
     finally:
         if collecting:

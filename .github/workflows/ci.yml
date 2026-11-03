@@ -25,21 +25,33 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
           python-version: ${{ matrix.python-version }}
-      - name: Configure tokenizer cache
+          enable-cache: true
+      # Networked setup (dependencies, tokenizer data) is cached and retried and
+      # is never part of a verdict; the test steps after it run offline.
+      - name: "Setup: configure tokenizer cache"
         run: >-
           echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken-cache" >> "$GITHUB_ENV"
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Restore pinned o200k_base tokenizer data
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --dev
+      - name: "Setup: restore pinned o200k_base tokenizer data"
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/tiktoken-cache
           key: tiktoken-o200k-base-446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
-      - name: Prefetch pinned o200k_base tokenizer data
+      - name: "Setup: prefetch pinned o200k_base tokenizer data"
         run: >-
-          uv run --frozen python -c
+          bash scripts/ci_setup_retry.sh uv run --frozen python -c
           "import tiktoken; tiktoken.get_encoding('o200k_base')"
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
       - name: Verify required test dependencies
         run: >-
           uv run --frozen python scripts/test_prerequisites.py
@@ -63,8 +75,11 @@ jobs:
           uv run --frozen pytest --fail-on-skip -ra \
             -n 2 --dist loadfile tests/evals \
             --cov=kairyu --cov-report= --cov-fail-under=0
+          # Four workers (the runner's four vCPUs), whole files per worker:
+          # the suite finishes inside the five-minute target, and a verdict
+          # must not depend on which worker or order a file runs in.
           uv run --frozen pytest --fail-on-skip -ra \
-            tests --ignore=tests/evals \
+            -n 4 --dist loadfile tests --ignore=tests/evals \
             --cov=kairyu --cov-append --cov-report=term-missing \
             --cov-fail-under=80
 
@@ -82,10 +97,20 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
           python-version: "3.12"
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Run variance-tolerant CPU microbenchmarks
+          enable-cache: true
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --dev
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
+      - name: Run the CPU microbenchmark gate (operation counts)
         env:
           KAIRYU_CPU_MICROBENCH_REPORT: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
         run: >-
@@ -108,12 +133,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
+          enable-cache: true
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --dev
+      - name: "Setup: build Compose images"
+        run: bash scripts/ci_setup_retry.sh ./scripts/compose_smoke.sh --setup-only
+      - name: "Setup: pull the pinned PostgreSQL image"
+        run: bash scripts/ci_setup_retry.sh bash scripts/postgres_integration.sh --setup-only
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
       - name: Validate Compose bind sources
         run: uv run --frozen --no-dev python scripts/validate_compose_binds.py deploy/compose/docker-compose*.yaml
       - name: Compose integration test
-        run: ./scripts/compose_smoke.sh
+        run: ./scripts/compose_smoke.sh --no-setup
       - name: PostgreSQL integration tests
-        run: bash scripts/postgres_integration.sh
+        run: bash scripts/postgres_integration.sh --no-setup
 
   webui-e2e:
     # Goal P-B3: a pinned Open WebUI release must support first-user setup,
@@ -122,15 +164,33 @@ jobs:
     # in parallel and a failure identifies the affected product surface.
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Setup and test are separate steps that must name one Compose project.
+      WEBUI_SMOKE_PROJECT_NAME: kairyu-webui-smoke-ci
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
+          enable-cache: true
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --no-dev
+      - name: "Setup: build and pull WebUI images"
+        run: bash scripts/ci_setup_retry.sh ./scripts/webui_smoke.sh --setup-only
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
       - name: Validate WebUI Compose bind sources
         run: >-
           uv run --frozen --no-dev python scripts/validate_compose_binds.py
           deploy/compose/docker-compose.webui.yaml
       - name: Open WebUI browser end-to-end test
-        run: ./scripts/webui_smoke.sh
+        run: ./scripts/webui_smoke.sh --no-setup
 
   verification-exec-container:
     # Issue #210: the real isolation/conformance gate is mandatory here. The
@@ -141,19 +201,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
           python-version: "3.12"
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Build and pin execution image
+          enable-cache: true
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --dev
+      - name: "Setup: build and pin execution image"
         run: |
           iidfile="$RUNNER_TEMP/kairyu-verification-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
-          docker build \
+          bash scripts/ci_setup_retry.sh docker build \
             --iidfile "$iidfile" \
             -f deploy/verification/Dockerfile.exec \
             deploy/verification
           image_id="$(tr -d '\r\n' < "$iidfile")"
           test "${image_id#sha256:}" != "$image_id"
           echo "KAIRYU_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
       - name: Real Docker runner conformance
         run: >-
           uv run --frozen pytest --fail-on-skip
@@ -165,14 +235,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - name: Install kind and kubectl
+        with:
+          # The uv release is pinned: a runner-side upgrade must not change a verdict.
+          version: "0.11.31"
+          enable-cache: true
+      - name: "Setup: sync dependencies"
+        run: bash scripts/ci_setup_retry.sh uv sync --frozen --dev
+      - name: "Setup: install kind, kubectl and Helm"
         env:
           KIND_VERSION: v0.31.0
           KUBECTL_VERSION: v1.35.0
+          # Pinned so the Helm gates do not depend on the runner image's Helm.
+          HELM_VERSION: v3.22.1
         run: bash scripts/install_kind_tools.sh
+      - name: "Setup: build the kind smoke image archive and pull the node image"
+        run: bash scripts/ci_setup_retry.sh bash scripts/kind_smoke.sh --setup-only
+      - name: "Setup done: test steps run offline"
+        run: |
+          {
+            echo "UV_NO_SYNC=1"
+            echo "UV_OFFLINE=1"
+            echo "HF_HUB_OFFLINE=1"
+          } >> "$GITHUB_ENV"
       - name: Helm schema and GPU template gate
         run: bash scripts/kind_smoke.sh --helm-check
       - name: Run Helm integration tests
         run: bash scripts/helm_integration.sh
       - name: kind smoke (m10a D5)
-        run: bash scripts/kind_smoke.sh
+        run: bash scripts/kind_smoke.sh --no-setup

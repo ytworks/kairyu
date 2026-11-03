@@ -146,6 +146,11 @@ validating a replacement that reused the same ID. m5 D4's "no background
 tasks" is preserved: the pool remains pure hashing and exposes only read-only
 health/validation/generation accessors plus explicit probe state changes.
 
+**Embedding pools amendment (2026-11-03).** `/readyz` also requires at least
+one eligible replica in every upstream embedding pool (m11 D4 upstream-embeddings
+amendment), and the same prober validates those replicas through their declared
+`health_url`. Embedding pools appear in the `kairyu_pool_*` metrics.
+
 **Serving hot-path amendment (2026-08-07, issue #349).** Metrics path
 templating uses a 1,024-entry LRU keyed by the raw path, retaining the existing
 bounded-cardinality label while avoiding repeated regex work on ordinary

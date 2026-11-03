@@ -7,10 +7,10 @@ import pytest
 from kairyu.engine.core.comm import FakeCommunicator
 
 _FAST_TIMEOUT_S = 0.05
-_TEST_JOIN_TIMEOUT_S = 5.0
+_TEST_JOIN_TIMEOUT_S = 10.0
 
 
-def _group(world_size: int, timeout_s: float = 5.0) -> tuple[FakeCommunicator, ...]:
+def _group(world_size: int, timeout_s: float = 10.0) -> tuple[FakeCommunicator, ...]:
     return FakeCommunicator.create_group(world_size, timeout_s=timeout_s)
 
 
@@ -105,7 +105,7 @@ def test_all_reduce_world_size_one_returns_own_values():
 
 
 def test_all_reduce_mismatched_lengths_raises_for_all_ranks():
-    comms = _group(2, timeout_s=1.0)
+    comms = _group(2)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(comms[0].all_reduce, (1.0, 2.0)),

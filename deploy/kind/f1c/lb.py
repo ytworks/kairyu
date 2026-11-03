@@ -125,11 +125,13 @@ class F1cLoadBalancer(ThreadingHTTPServer):
         gateways: tuple[Gateway, ...],
         audit: AuditWriter,
         *,
+        upstream_connect_timeout_s: float,
         upstream_timeout_s: float,
         max_body_bytes: int,
     ) -> None:
         self.gateways = gateways
         self.audit = audit
+        self.upstream_connect_timeout_s = upstream_connect_timeout_s
         self.upstream_timeout_s = upstream_timeout_s
         self.max_body_bytes = max_body_bytes
         super().__init__(address, ProxyHandler)
@@ -264,9 +266,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             connection = http.client.HTTPConnection(
                 gateway.host,
                 gateway.port,
-                timeout=self._lb.upstream_timeout_s,
+                timeout=self._lb.upstream_connect_timeout_s,
             )
             try:
+                # Only the TCP connect detects an unreachable gateway; the
+                # kernel completes it for any live gateway however loaded.
+                # Once connected, the response wait is a hang bound only, so
+                # a slow gateway is never mistaken for a dead one.
+                connection.connect()
+                if connection.sock is not None:
+                    connection.sock.settimeout(self._lb.upstream_timeout_s)
                 connection.request(
                     self.command,
                     self.path,
@@ -469,7 +478,10 @@ def main() -> None:
         ),
         gateways,
         audit,
-        upstream_timeout_s=_positive_float("F1C_UPSTREAM_TIMEOUT_S", "10"),
+        upstream_connect_timeout_s=_positive_float(
+            "F1C_UPSTREAM_CONNECT_TIMEOUT_S", "10"
+        ),
+        upstream_timeout_s=_positive_float("F1C_UPSTREAM_TIMEOUT_S", "60"),
         max_body_bytes=_positive_int("F1C_MAX_BODY_BYTES", str(64 * 1024 * 1024)),
     )
     print(

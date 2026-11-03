@@ -57,6 +57,23 @@ download "${KUBECTL_BASE_URL}/kubectl" "${TOOLS_DIR}/kubectl"
 verify "${TOOLS_DIR}/kubectl.sha256" "${TOOLS_DIR}/kubectl"
 
 chmod +x "${TOOLS_DIR}/kind" "${TOOLS_DIR}/kubectl"
+
+# Optional: a pinned Helm, so the Helm gates do not depend on the runner image.
+if [[ -n "${HELM_VERSION:-}" ]]; then
+  HELM_ARCHIVE="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+  download "https://get.helm.sh/${HELM_ARCHIVE}.sha256sum" "${TOOLS_DIR}/helm.sha256"
+  download "https://get.helm.sh/${HELM_ARCHIVE}" "${TOOLS_DIR}/${HELM_ARCHIVE}"
+  verify "${TOOLS_DIR}/helm.sha256" "${TOOLS_DIR}/${HELM_ARCHIVE}"
+  tar -xzf "${TOOLS_DIR}/${HELM_ARCHIVE}" -C "$TOOLS_DIR" \
+    --strip-components=1 linux-amd64/helm
+  helm_version_output=$("${TOOLS_DIR}/helm" version --short)
+  if [[ "$helm_version_output" != "${HELM_VERSION}+"* ]]; then
+    echo "unexpected helm version: ${helm_version_output}" >&2
+    exit 1
+  fi
+  printf '%s\n' "$helm_version_output"
+fi
+
 kind_version_output=$("${TOOLS_DIR}/kind" version)
 kubectl_version_output=$("${TOOLS_DIR}/kubectl" version --client=true)
 if [[ "$kind_version_output" != "kind ${KIND_VERSION} "* ]]; then

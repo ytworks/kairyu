@@ -243,7 +243,7 @@ def test_graph_preflight_skips_only_certified_replay(
             )
             for rank in range(world_size)
         )
-        assert [future.result(timeout=2) for future in futures] == [None] * world_size
+        assert [future.result(timeout=10) for future in futures] == [None] * world_size
 
     assert [communicator._gather_round for communicator in control] == [
         expected_gathers
@@ -256,7 +256,7 @@ def test_graph_preflight_skips_only_certified_replay(
 
 def test_capture_preflight_still_reports_one_rank_graph_state_skew_to_all() -> None:
     world_size = 4
-    control = FakeCommunicator.create_group(world_size, timeout_s=1)
+    control = FakeCommunicator.create_group(world_size, timeout_s=10)
     capture = GraphDecodeDecision("capture", 8, 4)
     payload, states = _payload(capture)
     runners = tuple(
@@ -282,14 +282,14 @@ def test_capture_preflight_still_reports_one_rank_graph_state_skew_to_all() -> N
                 RuntimeError,
                 match="rank 2: RuntimeError: attention-DP graph decision differs",
             ):
-                future.result(timeout=2)
+                future.result(timeout=10)
 
     assert [communicator._gather_round for communicator in control] == [1] * world_size
 
 
 def test_replay_rank_skew_reduces_status_before_all_rank_diagnostics() -> None:
     world_size = 4
-    control = FakeCommunicator.create_group(world_size, timeout_s=1)
+    control = FakeCommunicator.create_group(world_size, timeout_s=10)
     replay = GraphDecodeDecision("replay", 8, 0)
     payload, states = _payload(replay)
     runners = tuple(
@@ -315,7 +315,7 @@ def test_replay_rank_skew_reduces_status_before_all_rank_diagnostics() -> None:
                 RuntimeError,
                 match="rank 2: RuntimeError: attention-DP graph decision differs",
             ):
-                future.result(timeout=2)
+                future.result(timeout=10)
 
     assert [communicator._reduce_round for communicator in control] == [1] * world_size
     assert [communicator._gather_round for communicator in control] == [1] * world_size

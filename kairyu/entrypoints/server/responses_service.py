@@ -309,6 +309,7 @@ def add_responses_route(
                 # AUTO reasoning is intermediate stage output; replaying it into
                 # the L2 conversation would grow every later prompt.
                 replay_reasoning=not orchestrated,
+                direct=not orchestrated,
             )
             if compaction_request:
                 # The summary is a plain text turn: tools cannot help it and a

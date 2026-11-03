@@ -12,6 +12,7 @@ import pytest
 from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.prompt import TokensPrompt
+from kairyu.entrypoints.server import app as server_app
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from tests.server._legacy_chat import create_legacy_app
@@ -131,7 +132,7 @@ class _OverlapRejectingScoringBackend(_ScoringBackend):
             self._active = True
         try:
             self.entered.set()
-            if not self.release.wait(2):
+            if not self.release.wait(10):  # hang bound only
                 raise TimeoutError("test did not release tokenizer")
             return super().tokenize_loglikelihood(context, continuation)
         finally:
@@ -187,9 +188,21 @@ async def test_continuation_loglikelihood_dispatches_exact_forced_tokens():
     ]
 
 
-async def test_sync_compat_tokenizer_calls_are_serialized_before_executor():
+async def test_sync_compat_tokenizer_calls_are_serialized_before_executor(
+    monkeypatch,
+):
     backend = _OverlapRejectingScoringBackend()
     app = create_legacy_app(engines={"score": backend})
+    arrived = 0
+    tokenize = server_app._loglikelihood_token_ids_async
+
+    async def counting_tokenize(*args, **kwargs):
+        # Counted synchronously before the request reaches the tokenizer gate.
+        nonlocal arrived
+        arrived += 1
+        return await tokenize(*args, **kwargs)
+
+    monkeypatch.setattr(server_app, "_loglikelihood_token_ids_async", counting_tokenize)
 
     async with _client(app) as client:
         first = asyncio.create_task(
@@ -197,18 +210,22 @@ async def test_sync_compat_tokenizer_calls_are_serialized_before_executor():
         )
         requests = [first]
         try:
-            assert await asyncio.to_thread(backend.entered.wait, 1)
+            # Hang bounds only: each awaited event is expected in milliseconds.
+            assert await asyncio.to_thread(backend.entered.wait, 10)
             requests.extend(
                 asyncio.create_task(
                     client.post("/v1/completions", json=_valid_body())
                 )
                 for _ in range(3)
             )
-            await asyncio.sleep(0.05)
+            async with asyncio.timeout(10):
+                while arrived < 4:  # all three later requests queued
+                    await asyncio.sleep(0)
             assert backend.tokenize_calls == 0
+            # Queued requests hold no executor lane: unrelated work still runs.
             assert await asyncio.wait_for(
                 run_prompt_work(lambda: "unrelated-ready"),
-                timeout=1,
+                timeout=10,
             ) == "unrelated-ready"
 
             backend.release.set()

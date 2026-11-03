@@ -516,6 +516,19 @@ online learning or the M4 request-family bandit.
   observer, one-second raw causality bracket, 10 ms placement bound, 99% pacing
   requirement, 50 requests/s, retry prohibition, churn schedule, exact-200
   checks, and raw artifact replay remain unchanged.
+
+  **CI-determinism amendment (2026-11-03):** the evidence tail is no longer
+  judged by whether the last periodic slot or observation reached traffic
+  completion, because how late a sampler runs depends on the runner. After
+  traffic and placement collection, F1a takes one explicit `capture: "final"`
+  resource fetch, as it does for EndpointSlices. Replay requires exactly one
+  such row, as the last resource row, with
+  `traffic_completed_ns <= fetch_started_ns <= observed_ns`; the first periodic
+  fetch must still start no later than traffic start, and deadlines and skips
+  replay as above. Resource evidence that stops early or a sidecar cut short
+  therefore fails `resource_evidence_complete` by order alone. Why: a CI
+  verdict must depend only on the code under test without dropping A23's
+  tail requirement.
 - **A24**: F1a control-plane observation no longer creates a fresh `kubectl`
   process for each read. One lifecycle-owned `kubectl proxy` and one persistent
   HTTP client carry every EndpointSlice, Pod LIST, and kubelet resource read;
@@ -932,6 +945,27 @@ online learning or the M4 request-family bandit.
   ms. The independently replayed 2,196-row artifact is retained byte-identically
   at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
   not repeat the binding run.
+
+  **CI-determinism amendment (2026-11-03):** F2b verdicts no longer read the
+  wall clock. The bench passes a virtual clock to `KvEventIndex` through its
+  existing `now` injection point; the product default stays `time.monotonic`,
+  so no framework change is needed. Heartbeat ticks, churn operations, the
+  socket fault, and routes run as one frozen logical timeline, so routes
+  interleave churn by event order instead of wall-clock windows. Each virtual
+  heartbeat tick waits for the physical feed's next heartbeat (an event; a
+  60 s deadline only reports a hang). Lease expiry, stale fallback, exact truth
+  age below the 250 ms lease, replay causality, and recovery are judged in
+  virtual time and event order; the topology, frozen schedule, causal joins,
+  replay contiguity, and final digest checks are unchanged. Emission, receipt,
+  apply, and restore wall times remain recorded diagnostics; the route
+  lateness, selected-route gap, and action lateness diagnostics are dropped
+  because no wall schedule remains. Before this change a 500 ms event-loop
+  stall failed `fresh_routes_use_the_exact_oracle`, because the product
+  correctly let the wall-clock lease expire; it no longer changes the verdict.
+  F2a and F2b also treat a run as clean when every gate input (each declared
+  source file and every repository file the process imported) is tracked and
+  unmodified, so unrelated untracked files cannot fail the clean-source check.
+  Why: a CI verdict must depend only on the code under test.
 - **A32 (closed 2026-07-29)**: F2c measures the real D6 placement path, not a
   gateway mock. The candidate is a production `ReplicaPool` with
   `PrefixIndex`; the control is

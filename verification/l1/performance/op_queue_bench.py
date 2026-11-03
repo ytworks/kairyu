@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Reproducible CPU benchmark for bursty EngineLoop producer operations.
 
+Timings compare the coalesced queue with the pre-#218 tuple queue and are
+diagnostics.  The ``work`` section is deterministic: for single-producer
+bursts of two sizes it counts the operation queue's primitives (one unit per
+call and one per item iterated) plus every request-ID hash and comparison, so
+the growth of work per producer operation can be checked without a clock.
+
 Run:
     uv run python verification/l1/performance/op_queue_bench.py --operations 100000 --repeats 5
 """
@@ -24,6 +30,111 @@ from kairyu.engine.engine_loop import (
     engine_sampling_from,
 )
 from kairyu.engine.tokenizer import IncrementalDetokenizer
+
+WORK_UNIT = (
+    "operation-queue primitives (1 per call, 1 per item iterated) plus "
+    "request-ID hashes and comparisons"
+)
+
+
+class _WorkCounter:
+    count = 0
+
+
+def _tick() -> None:
+    _WorkCounter.count += 1
+
+
+class _CountedId(str):
+    """Request ID whose hashing and comparisons are counted."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        _tick()
+        return str.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        _tick()
+        return str.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        _tick()
+        return str.__ne__(self, other)
+
+
+class _CountingDeque(deque):
+    """Operation queue that counts its primitives and the items iterated."""
+
+    def __len__(self) -> int:
+        _tick()
+        return deque.__len__(self)
+
+    def __getitem__(self, index):
+        _tick()
+        return deque.__getitem__(self, index)
+
+    def __setitem__(self, index, value) -> None:
+        _tick()
+        deque.__setitem__(self, index, value)
+
+    def __delitem__(self, index) -> None:
+        _tick()
+        deque.__delitem__(self, index)
+
+    def __contains__(self, value: object) -> bool:
+        _tick()
+        return deque.__contains__(self, value)
+
+    def __iter__(self):
+        for item in deque.__iter__(self):
+            _tick()
+            yield item
+
+    def __reversed__(self):
+        for item in deque.__reversed__(self):
+            _tick()
+            yield item
+
+    def append(self, value) -> None:
+        _tick()
+        deque.append(self, value)
+
+    def appendleft(self, value) -> None:
+        _tick()
+        deque.appendleft(self, value)
+
+    def extend(self, values) -> None:
+        _tick()
+        for value in values:
+            _tick()
+            deque.append(self, value)
+
+    def extendleft(self, values) -> None:
+        _tick()
+        for value in values:
+            _tick()
+            deque.appendleft(self, value)
+
+    def pop(self):
+        _tick()
+        return deque.pop(self)
+
+    def popleft(self):
+        _tick()
+        return deque.popleft(self)
+
+    def insert(self, index: int, value) -> None:
+        _tick()
+        deque.insert(self, index, value)
+
+    def remove(self, value) -> None:
+        _tick()
+        deque.remove(self, value)
+
+    def clear(self) -> None:
+        _tick()
+        deque.clear(self)
 
 
 class _Tokenizer:
@@ -198,11 +309,77 @@ def _comparison(
     }
 
 
+def _counted_loop() -> EngineLoop:
+    loop = EngineLoop(_Tokenizer(), _Scheduler(), _Runner())
+    # Instrument this instance's operation queue before any producer runs.
+    loop._ops = _CountingDeque()
+    return loop
+
+
+def _work_adds(operations: int) -> int:
+    loop = _counted_loop()
+    params = SamplingParams(max_tokens=1)
+    request_ids = [_CountedId(f"request-{index}") for index in range(operations)]
+    _WorkCounter.count = 0
+    for request_id in request_ids:
+        loop.submit(request_id, "p", params)
+    units = _WorkCounter.count
+    loop.close()
+    return units
+
+
+def _work_duplicate_aborts(operations: int) -> int:
+    loop = _counted_loop()
+    loop.submit(_CountedId("target"), "p", SamplingParams(max_tokens=1))
+    # Each client abort carries its own equal ID string.
+    aborts = [_CountedId("target") for _ in range(operations)]
+    _WorkCounter.count = 0
+    for request_id in aborts:
+        loop.abort(request_id)
+    units = _WorkCounter.count
+    loop.close()
+    return units
+
+
+def _work(sizes: tuple[int, ...]) -> dict[str, object]:
+    return {
+        "unit": WORK_UNIT,
+        "add_burst": {
+            "sizes": list(sizes),
+            "operations": list(sizes),
+            "work": [_work_adds(size) for size in sizes],
+        },
+        "duplicate_abort_burst": {
+            "sizes": list(sizes),
+            "operations": list(sizes),
+            "work": [_work_duplicate_aborts(size) for size in sizes],
+        },
+    }
+
+
+def _work_sizes(value: str) -> tuple[int, ...]:
+    try:
+        sizes = tuple(int(item) for item in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("work sizes must be integers") from error
+    if len(sizes) != 2 or not 1 <= sizes[0] < sizes[1]:
+        raise argparse.ArgumentTypeError(
+            "work sizes must be two increasing positive integers"
+        )
+    return sizes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operations", type=int, default=100_000)
     parser.add_argument("--producers", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--work-sizes",
+        type=_work_sizes,
+        default=(2_000, 16_000),
+        help="two single-producer burst sizes for the deterministic work counts",
+    )
     args = parser.parse_args()
     if args.operations < 1 or args.producers < 1 or args.repeats < 1:
         parser.error("operations, producers, and repeats must be positive")
@@ -222,6 +399,7 @@ def main() -> None:
             args.producers,
             args.repeats,
         ),
+        "work": _work(args.work_sizes),
     }
     print(json.dumps(result, indent=2, sort_keys=True))
 

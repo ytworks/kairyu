@@ -19,6 +19,9 @@ from kairyu.entrypoints.server.protocol import (
     ChatCompletionResponse,
 )
 
+# Hang bound only: every awaited condition is expected within milliseconds.
+_HANG_S = 10.0
+
 
 def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(
@@ -38,7 +41,9 @@ async def test_blocked_chat_render_leaves_event_loop_responsive():
     def blocking_render(*args, **kwargs):
         render_threads.append(threading.get_ident())
         render_started.set()
-        assert release_render.wait(2)
+        # Only the test coroutine on the event loop releases the render, so a
+        # render that owned the loop deadlocks; the bound turns that into a failure.
+        assert release_render.wait(_HANG_S), "the render blocked the event loop"
         return original_render(*args, **kwargs)
 
     template.render = blocking_render
@@ -53,8 +58,6 @@ async def test_blocked_chat_render_leaves_event_loop_responsive():
         chat_templates={"m": template},
     )
     loop_thread = threading.get_ident()
-    watchdog = threading.Timer(1, release_render.set)
-    watchdog.start()
     try:
         async with _client(app) as client:
             request_task = asyncio.create_task(
@@ -66,17 +69,14 @@ async def test_blocked_chat_render_leaves_event_loop_responsive():
                     },
                 )
             )
-            assert await asyncio.to_thread(render_started.wait, 0.5)
-            # If render still owned the event loop, the watchdog would be the
-            # only code able to release it and this assertion would fail.
-            assert not release_render.is_set()
-            health = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+            assert await asyncio.to_thread(render_started.wait, _HANG_S)
+            # Answered while the render is still held, so it is off the loop.
+            health = await asyncio.wait_for(client.get("/health"), timeout=_HANG_S)
             assert health.status_code == 200
             release_render.set()
             response = await request_task
     finally:
         release_render.set()
-        watchdog.cancel()
 
     assert response.status_code == 200
     assert render_threads and set(render_threads) != {loop_thread}
@@ -94,14 +94,13 @@ async def test_blocked_body_validation_leaves_event_loop_responsive(monkeypatch)
     def blocking_validation(*args, **kwargs):
         validation_threads.append(threading.get_ident())
         validation_started.set()
-        assert release_validation.wait(2)
+        # Only the test coroutine on the event loop releases the validation.
+        assert release_validation.wait(_HANG_S), "validation blocked the event loop"
         return original(*args, **kwargs)
 
     monkeypatch.setattr(server_app, "_prepare_request_body", blocking_validation)
     app = create_app({"m": MockBackend()}, legacy_chat_models={"m"})
     loop_thread = threading.get_ident()
-    watchdog = threading.Timer(1, release_validation.set)
-    watchdog.start()
     try:
         async with _client(app) as client:
             request_task = asyncio.create_task(
@@ -113,15 +112,13 @@ async def test_blocked_body_validation_leaves_event_loop_responsive(monkeypatch)
                     },
                 )
             )
-            assert await asyncio.to_thread(validation_started.wait, 0.5)
-            assert not release_validation.is_set()
-            health = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+            assert await asyncio.to_thread(validation_started.wait, _HANG_S)
+            health = await asyncio.wait_for(client.get("/health"), timeout=_HANG_S)
             assert health.status_code == 200
             release_validation.set()
             response = await request_task
     finally:
         release_validation.set()
-        watchdog.cancel()
 
     assert response.status_code == 200
     assert validation_threads and set(validation_threads) != {loop_thread}

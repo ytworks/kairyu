@@ -25,6 +25,11 @@ index era (review A1). ``add_replica``/``drain``/``remove_replica`` never drop
 in-flight work: drain stops NEW placements, completion on a removed id is a
 no-op (A2), and remove refuses while outstanding > 0 unless forced.
 
+Embedding members (m5 D4 embedding amendment): ``embed`` places one batch on the
+least-outstanding eligible replica. Embeddings carry no session or prefix, so
+the other policies do not apply; health, drain, probe restore, the decision
+counts and the placement log are the same as for generation.
+
 Health: replicas with a declared readiness URL stay off the ring until ``probe()``
 validates them. ``unhealthy_after`` consecutive failures eject a validated replica
 until another probe (which resets failures but NEVER clears draining — A4).
@@ -40,7 +45,7 @@ import logging
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kairyu.engine.backend import (
@@ -62,6 +67,7 @@ from kairyu.engine.backend import (
     validate_backend_request,
     validate_backend_request_before_prepare,
 )
+from kairyu.engine.embedding import EmbeddingCapacityError, EmbeddingResult
 from kairyu.engine.prompt import prompt_kind, prompt_text
 from kairyu.orchestration.kv_routing import KvRoutingIndex, PreparedKvRouting
 from kairyu.orchestration.prefix_index import PrefixIndex, PreparedPrefixKeys
@@ -1471,6 +1477,28 @@ class ReplicaPool:
                     "kairyu.placement.latency_ns",
                     placement_latency_ns,
                 )
+        self._record_placement(
+            replica_id,
+            reason,
+            session_id,
+            request_id=request.request_id,
+            started_ns=started_ns,
+            selected_at_ns=selected_at_ns,
+            eligible_size=len(eligible),
+        )
+        return replica_id, reason, prefix_keys, track_prefix
+
+    def _record_placement(
+        self,
+        replica_id: str,
+        reason: str,
+        session_id: str | None,
+        *,
+        request_id: str | None,
+        started_ns: int,
+        selected_at_ns: int,
+        eligible_size: int,
+    ) -> None:
         self._decision_counts[reason] += 1
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
@@ -1480,14 +1508,13 @@ class ReplicaPool:
                 reason,
                 replica_id=replica_id,
                 replica_generation=self._entries[replica_id].generation,
-                placement_latency_ns=placement_latency_ns,
-                request_id=request.request_id,
+                placement_latency_ns=max(0, selected_at_ns - started_ns),
+                request_id=request_id,
                 placement_started_ns=started_ns,
                 selected_at_ns=selected_at_ns,
                 pool_size=len(self._entries),
-                eligible_size=len(eligible),
+                eligible_size=eligible_size,
             )
-        return replica_id, reason, prefix_keys, track_prefix
 
     def _place(self, request: GenerationRequest) -> str:
         """Select a replica and log the decision before dispatch (m5 D4)."""
@@ -1668,6 +1695,86 @@ class ReplicaPool:
                     prefix_keys,
                     promote=promote,
                 )
+        finally:
+            self._finish(entry)
+
+    # -- embeddings (m5 D4 embedding amendment) -------------------------------
+
+    def _unanimous(self, attribute: str):
+        values = tuple(
+            getattr(entry.backend, attribute, None) for entry in self._entries.values()
+        )
+        if not values or values[0] is None:
+            return None
+        return values[0] if all(value == values[0] for value in values[1:]) else None
+
+    @property
+    def dimensions(self) -> int | None:
+        """Embedding width when every member embeds and agrees, else ``None``."""
+
+        return self._unanimous("dimensions")
+
+    @property
+    def reports_exact_usage(self) -> bool:
+        return self._unanimous("reports_exact_usage") is True
+
+    def embed(self, texts: list[str]) -> Awaitable[EmbeddingResult]:
+        """Place one embedding batch on the least-outstanding eligible replica.
+
+        Selection is synchronous, so an empty ring fails before dispatch. A 4xx
+        or a member's own capacity rejection is not a health signal (O1); any
+        other failure counts toward ejection, exactly as for generation.
+        """
+
+        started_ns = time.perf_counter_ns()
+        eligible = self._eligible_ids()
+        if not eligible:
+            raise RuntimeError("ReplicaPool: no eligible embedding replica")
+        replica_id = self._least_outstanding(eligible)
+        self._record_placement(
+            replica_id,
+            "least_outstanding",
+            None,
+            request_id=None,
+            started_ns=started_ns,
+            selected_at_ns=time.perf_counter_ns(),
+            eligible_size=len(eligible),
+        )
+        entry = self._entries[replica_id]
+        entry.outstanding += 1
+        try:
+            # ``EmbeddingBackend.embed`` may fail before it returns an
+            # awaitable (FastEmbed raises while not ready); that counts toward
+            # ejection exactly like a failed await.
+            work = entry.backend.embed(texts)
+        except (UpstreamClientError, EmbeddingCapacityError):
+            self._finish(entry)
+            raise
+        except Exception:
+            self._record_backend_failure(replica_id, entry)
+            self._finish(entry)
+            raise
+        except BaseException:
+            self._finish(entry)
+            raise
+        return self._complete_embedding(replica_id, entry, work)
+
+    async def _complete_embedding(
+        self,
+        replica_id: str,
+        entry: _ReplicaEntry,
+        work: Awaitable[EmbeddingResult],
+    ) -> EmbeddingResult:
+        try:
+            result = await work
+        except (UpstreamClientError, EmbeddingCapacityError):
+            raise
+        except Exception:
+            self._record_backend_failure(replica_id, entry)
+            raise
+        else:
+            self._record_backend_success(entry)
+            return result
         finally:
             self._finish(entry)
 

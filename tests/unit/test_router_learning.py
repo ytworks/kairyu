@@ -1,6 +1,5 @@
 import json
 import random
-import time
 
 from kairyu.orchestration.features import extract_features
 from kairyu.orchestration.learning.bandit import GreedyLinearBandit
@@ -100,18 +99,6 @@ def test_learned_router_implements_protocol_with_fallback():
         "min_confidence": 0.34,
         "fallback_type": "RuleRouter",
     }
-
-
-def test_learned_router_p99_latency_under_10ms():
-    model = train_model(_synthetic_examples(120), epochs=50, seed=3)
-    router = LearnedRouter(model=model, fallback=RuleRouter())
-    durations = []
-    for _ in range(500):
-        start = time.perf_counter()
-        router.route(CODE)
-        durations.append(time.perf_counter() - start)
-    durations.sort()
-    assert durations[int(len(durations) * 0.99)] < 0.010
 
 
 def test_learned_preview_rejects_route_only_fallback():

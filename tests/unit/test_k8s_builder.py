@@ -158,7 +158,7 @@ async def test_dynamic_replica_client_keeps_a_concurrent_wave_warm_and_closes_on
                         wave_arrived[wave].set()
                     await asyncio.wait_for(
                         wave_arrived[wave].wait(),
-                        timeout=5.0,
+                        timeout=10.0,
                     )
                 try:
                     writer.write(
@@ -209,13 +209,13 @@ async def test_dynamic_replica_client_keeps_a_concurrent_wave_warm_and_closes_on
 
             await pool.remove_replica("replica")
             assert client.is_closed is True
-            await asyncio.wait_for(handlers_done.wait(), timeout=5.0)
+            await asyncio.wait_for(handlers_done.wait(), timeout=10.0)
     finally:
         if pool.replica_ids:
             await pool.remove_replica("replica")
         if accepted_connections:
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(handlers_done.wait(), timeout=5.0)
+                await asyncio.wait_for(handlers_done.wait(), timeout=10.0)
 
 
 @pytest.mark.asyncio
@@ -362,10 +362,15 @@ legacy_chat_models: [qwen]
     assert prober._owns_client is True
 
     async with app.router.lifespan_context(app):
-        for _ in range(100):
-            if pool.replica_ids == ("pod-uid",) and pool.healthy == (True,):
-                break
-            await asyncio.sleep(0.001)
+        async def discovered_and_probed() -> None:
+            while not (
+                pool.replica_ids == ("pod-uid",) and pool.healthy == (True,)
+            ):
+                await asyncio.sleep(0.001)
+
+        # The bound only detects a hang; discovery and the first probe run
+        # within a few loop iterations.
+        await asyncio.wait_for(discovered_and_probed(), timeout=10)
         assert pool.replica_ids == ("pod-uid",)
         assert client_factory.replica_count() == 1
         assert pool.healthy == (True,)

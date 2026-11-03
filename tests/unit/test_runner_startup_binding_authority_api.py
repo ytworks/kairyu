@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import threading
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -90,8 +89,8 @@ def _app(
     response_limit: int = 1024 * 1024 + 1,
     active_limit: int = 16,
     total_limit: int = 64,
-    request_timeout_s: float = 1.5,
-    backend_timeout_s: float = 1.0,
+    request_timeout_s: float = 15.0,
+    backend_timeout_s: float = 10.0,
 ):
     if reauthorize is None:
 
@@ -147,7 +146,7 @@ async def test_authority_echoes_nonce_only_for_the_exact_live_binding() -> None:
     assert response.headers["cache-control"] == "no-store"
     assert observed == [binding]
     assert deadlines[0][0] > 0
-    assert deadlines[0][1] == 1.0
+    assert deadlines[0][1] == 10.0
     assert response.json() == {
         "schema_version": ("kairyu-runner-cache-placement-binding-authorization-response-v1"),
         "nonce": NONCE,
@@ -225,14 +224,16 @@ async def test_request_deadline_releases_http_work_when_callback_is_late() -> No
         assert deadline_monotonic > 0
         assert backend_timeout_s == 0.01
         entered.set()
-        release.wait(timeout=1)
+        release.wait(timeout=10)
         return candidate
 
     try:
         async with _client(
             _app(
                 reauthorize=late,
-                request_timeout_s=0.05,
+                # Reading and parsing the body takes milliseconds; 2 s only
+                # bounds that, while the held callback always meets the deadline.
+                request_timeout_s=2.0,
                 backend_timeout_s=0.01,
             )
         ) as client:
@@ -249,20 +250,25 @@ async def test_request_deadline_covers_response_validation_and_serialization(
     monkeypatch,
 ) -> None:
     original = RunnerCachePlacementBindingAuthorizationResponse.model_dump_json
+    release = threading.Event()
 
-    def slow_serialize(self, *args, **kwargs) -> str:
-        time.sleep(0.1)
+    def held_serialize(self, *args, **kwargs) -> str:
+        # Serialization finishes only after the response has been sent.
+        release.wait(timeout=10)
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(
         RunnerCachePlacementBindingAuthorizationResponse,
         "model_dump_json",
-        slow_serialize,
+        held_serialize,
     )
-    async with _client(
-        _app(request_timeout_s=0.05, backend_timeout_s=0.01)
-    ) as client:
-        response = await client.post("/v1/reauthorize", json=_payload())
+    try:
+        async with _client(
+            _app(request_timeout_s=0.05, backend_timeout_s=0.01)
+        ) as client:
+            response = await client.post("/v1/reauthorize", json=_payload())
+    finally:
+        release.set()
 
     assert response.status_code == 503
     assert response.json() == {
@@ -329,7 +335,7 @@ class _BlockingAuthority:
         **_deadline,
     ) -> RunnerCacheStartupBinding:
         self.entered.set()
-        assert self.release.wait(timeout=2)
+        assert self.release.wait(timeout=10)
         return candidate
 
 
@@ -341,7 +347,7 @@ async def test_authority_bounds_total_concurrency() -> None:
     app = _app(reauthorize=authority, active_limit=1, total_limit=1)
     async with _client(app) as client:
         active = asyncio.create_task(client.post("/v1/reauthorize", json=_payload()))
-        assert await asyncio.to_thread(authority.entered.wait, 2)
+        assert await asyncio.to_thread(authority.entered.wait, 10)
         overflow = await client.post("/v1/reauthorize", json=_payload())
         authority.release.set()
         completed = await active

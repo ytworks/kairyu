@@ -7,7 +7,8 @@ usage() {
 usage: scripts/kind_churn_gate.sh [--formal|--smoke] [--keep-cluster]
 
 Environment overrides:
-  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT, GREP, SED, JQ
+  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT, GREP, SED, JQ, SHA256SUM
+  TMPDIR (holds the clean source tree and the image archives)
   F1A_CLUSTER_NAME, F1A_KIND_CONFIG, F1A_MANIFEST_DIR
   F1A_RESULTS_DIR, F1A_GATEWAY_PORT
 
@@ -57,6 +58,8 @@ TIMEOUT=${TIMEOUT:-timeout}
 GREP=${GREP:-grep}
 SED=${SED:-sed}
 JQ=${JQ:-jq}
+SHA256SUM=${SHA256SUM:-sha256sum}
+SCRATCH_ROOT=${TMPDIR:-/tmp}
 
 run_bounded() {
   local duration=$1
@@ -77,6 +80,10 @@ GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
 GATEWAY_CONTAINERD_MANIFEST="${RESULTS_DIR}/gateway-containerd-manifest.json"
 MOCK_CONTAINERD_MANIFEST="${RESULTS_DIR}/mock-containerd-manifest.json"
+GATEWAY_ARCHIVE_MANIFEST="${RESULTS_DIR}/gateway-image-archive-manifest.json"
+GATEWAY_ARCHIVE_CONFIG="${RESULTS_DIR}/gateway-image-archive-config.json"
+MOCK_ARCHIVE_MANIFEST="${RESULTS_DIR}/mock-image-archive-manifest.json"
+MOCK_ARCHIVE_CONFIG="${RESULTS_DIR}/mock-image-archive-config.json"
 RENDERED_KIND_CONFIG="${RESULTS_DIR}/rendered-kind-config.yaml"
 OUTPUT="${RESULTS_DIR}/manifest.json"
 VERIFIER_OUTPUT="${RESULTS_DIR}/verifier.json"
@@ -115,6 +122,10 @@ known_results=(
   mock-cri-image.json
   gateway-containerd-manifest.json
   mock-containerd-manifest.json
+  gateway-image-archive-manifest.json
+  gateway-image-archive-config.json
+  mock-image-archive-manifest.json
+  mock-image-archive-config.json
 )
 for result_name in "${known_results[@]}"; do
   rm -f -- "${RESULTS_DIR}/${result_name}"
@@ -190,7 +201,7 @@ trap cleanup EXIT
 
 for tool in \
   "$KIND" "$KUBECTL" "$DOCKER" "$CURL" "$UV" "$GIT" "$TAR" "$TIMEOUT" \
-  "$GREP" "$SED" "$JQ"; do
+  "$GREP" "$SED" "$JQ" "$SHA256SUM"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required tool is unavailable: $tool" >&2
     exit 1
@@ -244,12 +255,14 @@ assert_clean_source
 
 # Build and apply only the committed tree. Concurrent worktree edits therefore
 # cannot change the gateway image or manifests after the clean-source check.
-SOURCE_ARCHIVE_DIR=$(mktemp -d /tmp/kairyu-f1a-source.XXXXXX)
+SOURCE_ARCHIVE_DIR=$(mktemp -d "${SCRATCH_ROOT}/kairyu-f1a-source.XXXXXX")
 "$GIT" archive --format=tar "$SOURCE_COMMIT" \
   | "$TAR" -xf - -C "$SOURCE_ARCHIVE_DIR"
 ARCHIVE_KIND_CONFIG="${SOURCE_ARCHIVE_DIR}/${KIND_CONFIG}"
 ARCHIVE_MANIFEST_DIR="${SOURCE_ARCHIVE_DIR}/${MANIFEST_DIR}"
 ARCHIVE_APPLY_DIR="${SOURCE_ARCHIVE_DIR}/${APPLY_DIR}"
+GATEWAY_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/gateway-image.tar"
+MOCK_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/mock-image.tar"
 if [[ ! -f "$ARCHIVE_KIND_CONFIG" ||
       ! -f "${ARCHIVE_APPLY_DIR}/kustomization.yaml" ]]; then
   echo "committed F1a kind config or kustomization is missing" >&2
@@ -282,42 +295,55 @@ fi
 "$KUBECTL" kustomize "$ARCHIVE_APPLY_DIR" \
   >"${RESULTS_DIR}/rendered-manifest.yaml"
 
+# kind receives each image only from a frozen archive. The archive's own
+# config blob is the image identity compared with containerd and CRI; Docker's
+# image ID differs between the classic and containerd image stores.
+save_image_archive() {
+  local image_reference=$1
+  local archive=$2
+  local manifest_sidecar=$3
+  local config_sidecar=$4
+  local config_path
+  "$DOCKER" image save --output "$archive" "$image_reference"
+  "$TAR" -xOf "$archive" manifest.json >"$manifest_sidecar"
+  config_path=$(
+    "$JQ" -er \
+      'if length == 1 then .[0].Config else error("expected one image") end' \
+      "$manifest_sidecar"
+  )
+  "$TAR" -xOf "$archive" "$config_path" >"$config_sidecar"
+}
+archive_config_digest() {
+  local config_sidecar=$1
+  local hex
+  hex=$("$SHA256SUM" "$config_sidecar" | awk '{print $1}')
+  printf 'sha256:%s\n' "$hex"
+}
+archive_revision() {
+  "$JQ" -r '.config.Labels["org.opencontainers.image.revision"] // ""' "$1"
+}
+
 # Docker 29 starts build containers with nofile=1024 on the target host.  uv's
 # bytecode compilation can exceed that, so both builds pin a sufficient limit.
 "$DOCKER" build --ulimit nofile=65536:65536 \
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"
+save_image_archive "$GATEWAY_IMAGE" "$GATEWAY_IMAGE_ARCHIVE" \
+  "$GATEWAY_ARCHIVE_MANIFEST" "$GATEWAY_ARCHIVE_CONFIG"
 "$DOCKER" build --ulimit nofile=65536:65536 \
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "${ARCHIVE_MANIFEST_DIR}/mock"
+save_image_archive "$MOCK_IMAGE" "$MOCK_IMAGE_ARCHIVE" \
+  "$MOCK_ARCHIVE_MANIFEST" "$MOCK_ARCHIVE_CONFIG"
 assert_clean_source
-GATEWAY_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$GATEWAY_IMAGE"
-)
-MOCK_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
-)
-docker_image_config_digest() {
-  local image_reference=$1
-  "$DOCKER" image inspect "$image_reference" |
-    "$JQ" -er '.[0] | .Descriptor.annotations["config.digest"] // .Id'
-}
-GATEWAY_IMAGE_CONFIG_DIGEST=$(
-  docker_image_config_digest "$GATEWAY_IMAGE"
-)
-MOCK_IMAGE_CONFIG_DIGEST=$(
-  docker_image_config_digest "$MOCK_IMAGE"
-)
-for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
-  image_revision=$(
-    "$DOCKER" image inspect \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      "$image"
-  )
+GATEWAY_IMAGE_CONFIG_DIGEST=$(archive_config_digest "$GATEWAY_ARCHIVE_CONFIG")
+MOCK_IMAGE_CONFIG_DIGEST=$(archive_config_digest "$MOCK_ARCHIVE_CONFIG")
+for config_sidecar in "$GATEWAY_ARCHIVE_CONFIG" "$MOCK_ARCHIVE_CONFIG"; do
+  image_revision=$(archive_revision "$config_sidecar")
   if [[ "$image_revision" != "$SOURCE_COMMIT" ]]; then
-    echo "image ${image} revision ${image_revision} != ${SOURCE_COMMIT}" >&2
+    echo "image archive ${config_sidecar} revision ${image_revision} != ${SOURCE_COMMIT}" >&2
     exit 1
   fi
 done
@@ -336,8 +362,15 @@ CLUSTER_MAY_EXIST=1
 CLUSTER_CREATED=1
 mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
 CONTROL_PLANE=${kind_nodes[0]}
-"$KIND" load docker-image "$GATEWAY_IMAGE" "$MOCK_IMAGE" \
-  --name "$CLUSTER_NAME"
+# 600 s only detects a hung import; it is far above the expected duration.
+if ! run_bounded 600s \
+  "$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
+  --name "$CLUSTER_NAME"; then
+  echo "retrying kind image archive import" >&2
+  run_bounded 600s \
+    "$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
+    --name "$CLUSTER_NAME"
+fi
 run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
   crictl inspecti --output json "$GATEWAY_IMAGE" \
   >"$GATEWAY_CRI_IMAGE_METADATA"
@@ -400,7 +433,6 @@ is_sha256_digest() {
   [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]
 }
 for digest in \
-  "$GATEWAY_IMAGE_DIGEST" "$MOCK_IMAGE_DIGEST" \
   "$GATEWAY_IMAGE_CONFIG_DIGEST" "$MOCK_IMAGE_CONFIG_DIGEST" \
   "$GATEWAY_CONTAINERD_IMAGE_DIGEST" "$MOCK_CONTAINERD_IMAGE_DIGEST" \
   "$GATEWAY_CONTAINERD_CONFIG_DIGEST" "$MOCK_CONTAINERD_CONFIG_DIGEST" \
@@ -415,14 +447,7 @@ if [[ "$GATEWAY_IMAGE_CONFIG_DIGEST" != \
       "$GATEWAY_IMAGE_CONFIG_DIGEST" != "$GATEWAY_CRI_STATUS_DIGEST" ||
       "$MOCK_IMAGE_CONFIG_DIGEST" != "$MOCK_CONTAINERD_CONFIG_DIGEST" ||
       "$MOCK_IMAGE_CONFIG_DIGEST" != "$MOCK_CRI_STATUS_DIGEST" ]]; then
-  echo "kind image config does not match built Docker image and CRI" >&2
-  exit 1
-fi
-if [[ "$GATEWAY_IMAGE_DIGEST" != "$GATEWAY_IMAGE_CONFIG_DIGEST" &&
-      "$GATEWAY_IMAGE_DIGEST" != "$GATEWAY_CONTAINERD_IMAGE_DIGEST" ]] ||
-   [[ "$MOCK_IMAGE_DIGEST" != "$MOCK_IMAGE_CONFIG_DIGEST" &&
-      "$MOCK_IMAGE_DIGEST" != "$MOCK_CONTAINERD_IMAGE_DIGEST" ]]; then
-  echo "Docker image ID is neither the config nor containerd target" >&2
+  echo "kind image config does not match the loaded archive config" >&2
   exit 1
 fi
 "$KUBECTL" apply -k "$ARCHIVE_APPLY_DIR"
@@ -459,8 +484,8 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 if ((replica_set_ready == 0)); then
-  echo "expected exactly ${REPLICAS} Ready replica pods; observed " \
-    "${observed_ready_count}/${observed_replica_count}" >&2
+  echo "hang: ${REPLICAS} Ready replica pods not reached within the 600-poll" \
+    "bound; observed ${observed_ready_count}/${observed_replica_count}" >&2
   exit 1
 fi
 # The StatefulSet deliberately uses OnDelete, so readiness is the exact
@@ -477,7 +502,7 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 if ((ready == 0)); then
-  echo "gateway NodePort did not become ready at ${GATEWAY_URL}" >&2
+  echo "hang: gateway NodePort ${GATEWAY_URL} not ready within the 120-poll bound" >&2
   exit 1
 fi
 
@@ -523,7 +548,8 @@ for _ in $(seq 1 300); do
   sleep 1
 done
 if ((membership_ready == 0)); then
-  echo "gateway membership did not converge: configured=${configured:-missing} " \
+  echo "hang: gateway membership did not converge within the 300-poll bound:" \
+    "configured=${configured:-missing} " \
     "healthy=${healthy:-missing} draining=${draining:-missing}; " \
     "expected ${REPLICAS}/${REPLICAS}/0" >&2
   exit 1
@@ -551,8 +577,10 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --profile "$PROFILE" \
   --gateway-url "$GATEWAY_URL" \
   --kubectl "$KUBECTL" \
-  --gateway-image-digest "$GATEWAY_IMAGE_DIGEST" \
-  --mock-image-digest "$MOCK_IMAGE_DIGEST" \
+  --gateway-image-archive-manifest "$GATEWAY_ARCHIVE_MANIFEST" \
+  --gateway-image-archive-config "$GATEWAY_ARCHIVE_CONFIG" \
+  --mock-image-archive-manifest "$MOCK_ARCHIVE_MANIFEST" \
+  --mock-image-archive-config "$MOCK_ARCHIVE_CONFIG" \
   --gateway-containerd-image-digest "$GATEWAY_CONTAINERD_IMAGE_DIGEST" \
   --mock-containerd-image-digest "$MOCK_CONTAINERD_IMAGE_DIGEST" \
   --gateway-containerd-config-digest "$GATEWAY_CONTAINERD_CONFIG_DIGEST" \
@@ -569,8 +597,6 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --driver-path scripts/kind_churn_gate.sh \
   "${frozen_args[@]}" \
   --frozen-sidecar "$RENDERED_KIND_CONFIG" \
-  --gateway-image-config-digest "$GATEWAY_IMAGE_CONFIG_DIGEST" \
-  --mock-image-config-digest "$MOCK_IMAGE_CONFIG_DIGEST" \
   --output "$OUTPUT" \
   --assert-gate
 

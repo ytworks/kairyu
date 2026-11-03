@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "environment": "gemma-4-31b-8gpu",
+  "hardware": {
+    "gpu_count": 8,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000,
+    "maximum_idle_used_mib": 1024,
+    "minimum_host_available_gib": 64
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 120
+  },
+  "allocation": {
+    "status": "measured by the replica search, 2026-11-04 (MEASUREMENTS.md)",
+    "gpu_ids": [0, 1, 2, 3, 4, 5, 6, 7],
+    "chat": {
+      "tensor_parallel_size": 2,
+      "replica_gpu_ids": [[0, 1], [2, 3], [4, 5], [6, 7]],
+      "gpu_memory_utilization": 0.86
+    },
+    "embedding": {
+      "replica_gpu_ids": [1, 7],
+      "gpu_memory_utilization": 0.06
+    }
+  },
+  "pool": {
+    "queue_depth_threshold": 0,
+    "prefix_index": true,
+    "unhealthy_after": 1,
+    "placement_log": "/var/lib/kairyu/placement/gemma-4-31b.jsonl"
+  },
+  "embedding_pool": {
+    "unhealthy_after": 1,
+    "probe_interval_s": 2.0,
+    "placement_log": "/var/lib/kairyu/placement/embeddinggemma-2.jsonl"
+  },
+  "model": {
+    "repo": "google/gemma-4-31B-it",
+    "revision": "842da3794eaa0b77d5f08bae87a17459d91ff475",
+    "tree_sha256": "cab440f871a32b5ea1c12364db7dd35ac8768a83b413ca24bbc18d6478eccbd9",
+    "slug": "gemma-4-31b-it",
+    "served_name": "gemma-4-31b",
+    "max_context_tokens": 262144,
+    "dtype": "bfloat16",
+    "modalities": ["text", "image"],
+    "thinking_default": true,
+    "sampling": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64
+    }
+  },
+  "drafter": {
+    "repo": "google/gemma-4-31B-it-assistant",
+    "revision": "627c5ec1458b9086b841a91e0512fd31fd2fbbf1",
+    "tree_sha256": "bb22c75040e4730ece52a1e61b40121cc435e8affe1ea3c61cf0dc697e8d5556",
+    "slug": "gemma-4-31b-it-assistant"
+  },
+  "embedding": {
+    "repo": "google/embeddinggemma-2",
+    "revision": "f9972ac22e696a105c482202646979e33e4b5a1e",
+    "tree_sha256": "287cbbd3b1037b9a690de26228a30514312cb597317ca73e60b5a7fb01e03661",
+    "slug": "embeddinggemma-2",
+    "served_name": "embeddinggemma-2",
+    "dimensions": 768,
+    "max_model_len": 8192,
+    "dtype": "bfloat16",
+    "query_prefix": "task: search result | query: ",
+    "document_prefix": "title: none | text: ",
+    "reference": {
+      "sentence_transformers": "6.1.0",
+      "min_cosine": 0.999
+    }
+  },
+  "vllm": {
+    "image": "local/vllm-openai:gemma-4-31b-8gpu-v0.33.0",
+    "base_image": "vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e",
+    "distribution": "overlay",
+    "dockerfile": "vllm-sm120.Dockerfile",
+    "release": "v0.33.0",
+    "source_repository": "https://github.com/vllm-project/vllm",
+    "fallback_image": "local/vllm-openai:gemma-4-31b-8gpu-v0.32.0",
+    "fallback_base_image": "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
+    "tool_call_parser": "gemma4",
+    "reasoning_parser": "gemma4",
+    "chat_template": "checkpoint",
+    "max_num_batched_tokens": 8192,
+    "max_num_seqs": 64,
+    "async_scheduling": true,
+    "custom_all_reduce": false,
+    "mtp_speculative_tokens": 4,
+    "images_per_prompt": 8
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.12.3@sha256:ef11a68f38457d831e23168486858c25b9d9c4399094c9e72c0d4d8767ac09de",
+    "port": 3020,
+    "bind": "0.0.0.0",
+    "auth": "admin",
+    "default_params": {"max_tokens": 32768, "temperature": 1.0, "top_p": 0.95},
+    "reasoning_effort_levels": ["default", "none"],
+    "code_interpreter": {
+      "engine": "pyodide",
+      "file_persistence": false,
+      "default_features": ["code_interpreter"],
+      "default_tools": ["file_download"],
+      "capabilities": {
+        "file_context": true,
+        "vision": true,
+        "file_upload": true,
+        "web_search": true,
+        "image_generation": true,
+        "code_interpreter": true,
+        "terminal": true,
+        "citations": true,
+        "status_updates": true,
+        "memory": true,
+        "builtin_tools": true
+      }
+    },
+    "retrieval": {
+      "docling_image": "quay.io/docling-project/docling-serve-cpu:v1.37.0@sha256:6eda9c524992147c1b0b06a1a9be4894bd68b1f43c86d92c32f996c4c60d18a3",
+      "docling_url": "http://docling:5001",
+      "docling_params": {"do_ocr": true, "force_ocr": false, "ocr_preset": "rapidocr", "ocr_lang": ["iso:ja"]},
+      "embedding_api_url": "http://kairyu:8000/v1",
+      "embedding_batch_size": 32,
+      "embedding_concurrent_requests": 4,
+      "models_dir": "rag-models",
+      "reranking": {
+        "repo": "BAAI/bge-reranker-v2-m3",
+        "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        "slug": "bge-reranker-v2-m3",
+        "tree_sha256": "5c3ea0eb074cf88bcea847b2ecb77246dcfe136dee5666fc2e599aec82cb9fba",
+        "allow_patterns": ["config.json", "model.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
+      },
+      "chunk_size": 300,
+      "chunk_overlap": 30,
+      "hybrid_bm25_weight": 0,
+      "top_k": 20,
+      "top_k_reranker": 5
+    }
+  },
+  "api_port": 8020,
+  "verification": {
+    "serving": {
+      "prompt_tokens_approx": 8192,
+      "output_tokens": 256,
+      "concurrency": [1, 8, 16, 32, 64],
+      "requests_per_concurrency": 64,
+      "placement_gate": {
+        "min_concurrency": 8,
+        "max_share_of_mean": 1.25
+      }
+    },
+    "l1": {
+      "probes_per_variant": 12,
+      "variants": ["default", "none"]
+    },
+    "vision": {
+      "requests": 6,
+      "max_tokens": 8192
+    },
+    "long_context_tokens": [32768, 131072, 250000],
+    "long_context_answer_tokens": [32768, 131072],
+    "embeddings": {
+      "texts": 64,
+      "concurrency": 8,
+      "min_cosine_kairyu_vs_l1": 0.9999,
+      "outage_max_failures": 1
+    },
+    "knowledge": {
+      "font_url": "https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf",
+      "font_sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
+      "browser_image": "kairyu-webui-browser:playwright-1.60.0",
+      "probe_pages": 3,
+      "scan_pages": 20,
+      "key_page": 13,
+      "distractor_documents": 20,
+      "seconds_per_page": 30,
+      "ingestion_seconds": 300,
+      "query_seconds": 10,
+      "top_n": 5,
+      "serving_concurrency": [1, 8],
+      "load_documents": 12,
+      "load_streams": 3,
+      "docling_busy_cores": 1.0,
+      "docling_busy_share": 0.95,
+      "docling_start_busy_seconds": 3,
+      "docling_start_seconds": 120,
+      "serving_min_fraction": 0.95
+    }
+  }
+}

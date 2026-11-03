@@ -194,12 +194,30 @@ def test_input_tokens_count_the_billed_prompt(tmp_path):
     assert auto.json()["error"]["param"] == "model"
 
 
-async def _overloaded_second_request(app, path: str, body: dict) -> httpx.Response:
+class _HeldBackend(MockBackend):
+    """Holds each generation in flight until the test sets ``release``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, request):
+        self.started.set()
+        await self.release.wait()
+        return await super().generate(request)
+
+
+async def _overloaded_second_request(path: str, body: dict, limits: dict) -> httpx.Response:
+    backend = _HeldBackend()
+    app = create_legacy_app({"m": backend}, **limits)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         first = asyncio.create_task(client.post(path, json=body))
-        await asyncio.sleep(0.05)  # the first request holds the only slot
-        second = await client.post(path, json=body)
+        # Hang bounds only: the first request holds the only slot until release.
+        await asyncio.wait_for(backend.started.wait(), timeout=10)
+        second = await asyncio.wait_for(client.post(path, json=body), timeout=10)
+        backend.release.set()
         assert (await first).status_code == 200
     return second
 
@@ -217,16 +235,13 @@ async def _overloaded_second_request(app, path: str, body: dict) -> httpx.Respon
     ids=["server-concurrency", "tenant-in-flight"],
 )
 async def test_transient_overload_is_a_retryable_slow_down_only_on_responses(limits):
-    def app():
-        return create_legacy_app({"m": MockBackend(latency_s=0.2)}, **limits)
-
     responses = await _overloaded_second_request(
-        app(), "/v1/responses", {"model": "m", "input": "hello"}
+        "/v1/responses", {"model": "m", "input": "hello"}, limits
     )
     chat = await _overloaded_second_request(
-        app(),
         "/v1/chat/completions",
         {"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+        limits,
     )
 
     assert responses.status_code == 503

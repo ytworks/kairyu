@@ -719,7 +719,7 @@ async def test_concurrency_gate_rejects_work_beyond_total_limit() -> None:
 
     def blocked(*args, **kwargs):
         entered.set()
-        assert unblock.wait(timeout=2)
+        assert unblock.wait(timeout=10)
         return original_execute(*args, **kwargs)
 
     executor.execute = blocked  # type: ignore[method-assign]
@@ -734,7 +734,7 @@ async def test_concurrency_gate_rejects_work_beyond_total_limit() -> None:
         first = asyncio.create_task(
             client.post("/v1/prestage/ensure", json=payload, headers=headers)
         )
-        assert await asyncio.to_thread(entered.wait, 1)
+        assert await asyncio.to_thread(entered.wait, 10)
         overloaded = await client.post("/v1/prestage/ensure", json=payload, headers=headers)
         unblock.set()
         completed = await first

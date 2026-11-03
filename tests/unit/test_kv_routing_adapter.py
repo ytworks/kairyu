@@ -332,7 +332,7 @@ def test_exact_scoring_releases_lifecycle_lock_and_revalidates_membership():
     class BlockingExactIndex(_ExactIndex):
         def route_overlaps(self, replica_ids, block_hashes):
             scoring.set()
-            assert resume.wait(timeout=2)
+            assert resume.wait(timeout=20)
             return tuple(len(block_hashes) for _replica_id in replica_ids)
 
     exact = BlockingExactIndex()
@@ -343,7 +343,7 @@ def test_exact_scoring_releases_lifecycle_lock_and_revalidates_membership():
         target=lambda: result.append(routing.route_view(("r1", "r2"), prepared))
     )
     route_thread.start()
-    assert scoring.wait(timeout=1)
+    assert scoring.wait(timeout=10)
 
     changed = threading.Event()
 
@@ -354,11 +354,11 @@ def test_exact_scoring_releases_lifecycle_lock_and_revalidates_membership():
     mutation_thread = threading.Thread(target=forget_candidate)
     mutation_thread.start()
     try:
-        assert changed.wait(timeout=1), "exact scoring retained the lifecycle lock"
+        assert changed.wait(timeout=10), "exact scoring retained the lifecycle lock"
     finally:
         resume.set()
-        route_thread.join(timeout=2)
-        mutation_thread.join(timeout=2)
+        route_thread.join(timeout=20)
+        mutation_thread.join(timeout=20)
 
     assert not route_thread.is_alive()
     assert not mutation_thread.is_alive()

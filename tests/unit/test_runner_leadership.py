@@ -210,7 +210,7 @@ def test_takeover_does_not_wait_for_an_old_callback_after_expiry() -> None:
 
     def mutation(authority):
         entered.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=10)
         return authority.fencing_token
 
     def campaign():
@@ -219,16 +219,16 @@ def test_takeover_does_not_wait_for_an_old_callback_after_expiry() -> None:
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         mutation_result = pool.submit(gate.mutate_autoscaler, mutation)
-        assert entered.wait(timeout=2)
+        assert entered.wait(timeout=10)
         clock.advance(5)
         takeover_result = pool.submit(campaign)
-        assert campaign_started.wait(timeout=2)
-        takeover = takeover_result.result(timeout=2)
+        assert campaign_started.wait(timeout=10)
+        takeover = takeover_result.result(timeout=10)
         assert takeover is not None
         assert takeover.fencing_token == lease.fencing_token + 1
         assert mutation_result.done() is False
         release.set()
-        assert mutation_result.result(timeout=2) == lease.fencing_token
+        assert mutation_result.result(timeout=10) == lease.fencing_token
 
 
 def test_concurrent_campaign_elects_exactly_one_holder() -> None:

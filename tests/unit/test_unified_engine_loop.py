@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 
 import pytest
 import torch
@@ -84,11 +83,9 @@ class _PositionRunner:
         self,
         *,
         base: int = 0,
-        delay_s: float = 0.0,
         events: list[str] | None = None,
     ) -> None:
         self.base = base
-        self.delay_s = delay_s
         self.events = events if events is not None else []
         self.seen_state_types: list[type] = []
         self.released: list[str] = []
@@ -99,8 +96,6 @@ class _PositionRunner:
         self._step += 1
         for chunk in scheduled:
             self.seen_state_types.append(type(states[chunk.request_id]))
-        if self.delay_s:
-            time.sleep(self.delay_s)
         sampled = {
             chunk.request_id: tuple(
                 SampledToken(self.base + chunk.position + offset)
@@ -478,15 +473,27 @@ def test_logprob_presentation_processes_each_token_once(monkeypatch) -> None:
 
 def test_depth_two_schedules_next_snapshot_before_oldest_execute_finishes() -> None:
     events: list[str] = []
+    next_snapshot_scheduled = threading.Event()
 
     class _RecordingScheduler(Scheduler):
         def schedule(self):
-            events.append(f"scheduled:{sum(e.startswith('scheduled:') for e in events)}")
+            index = sum(e.startswith("scheduled:") for e in events)
+            events.append(f"scheduled:{index}")
+            if index == 1:
+                next_snapshot_scheduled.set()
             return super().schedule()
+
+    class _HeldFirstStepRunner(_PositionRunner):
+        def execute(self, scheduled, states):
+            if self._step == 0:
+                # Hang bound only: an overlapping loop schedules the next
+                # snapshot while this step is held; a serial loop never does.
+                next_snapshot_scheduled.wait(timeout=10)
+            return super().execute(scheduled, states)
 
     cache = RadixKVCache(num_pages=64, page_size=4)
     scheduler = _RecordingScheduler(cache, max_num_batched_tokens=16, page_size=4)
-    runner = _PositionRunner(base=1000, delay_s=0.02, events=events)
+    runner = _HeldFirstStepRunner(base=1000, events=events)
     loop, _ = _loop(2, runner, scheduler=scheduler)
     loop.submit("overlap", "one two three four", SamplingParams(max_tokens=4))
 
@@ -1580,7 +1587,7 @@ async def test_depth_one_backend_overlaps_output_with_next_step_and_returns_stop
         def push(self, token_ids) -> str:
             detokenize_threads.append(threading.get_ident())
             detokenize_entered.set()
-            if not release_detokenize.wait(2):
+            if not release_detokenize.wait(10):  # hang bound only
                 raise TimeoutError("test did not release detokenization")
             self.stable += "".join(
                 chr(ord("a") + token_id % 26) for token_id in token_ids
@@ -1607,7 +1614,7 @@ async def test_depth_one_backend_overlaps_output_with_next_step_and_returns_stop
                 not chunk.is_prefill and chunk.position >= 1
                 for chunk in scheduled
             ):
-                if not detokenize_entered.wait(2):
+                if not detokenize_entered.wait(10):  # hang bound only
                     raise TimeoutError("detokenization did not start")
                 later_device_step_finished.set()
             return super().execute(scheduled, states)
@@ -1645,17 +1652,17 @@ async def test_depth_one_backend_overlaps_output_with_next_step_and_returns_stop
     try:
         detokenize_started = await asyncio.to_thread(
             detokenize_entered.wait,
-            2,
+            10,
         )
         device_progressed = await asyncio.to_thread(
             later_device_step_finished.wait,
-            2,
+            10,
         )
         assert detokenize_started
         assert device_progressed
         assert not generation.done()
         release_detokenize.set()
-        result = await asyncio.wait_for(generation, 5)
+        result = await asyncio.wait_for(generation, 10)
         assert result.finished
         assert detokenize_threads
         assert set(detokenize_threads).isdisjoint(runner.threads)

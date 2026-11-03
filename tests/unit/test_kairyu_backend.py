@@ -2,9 +2,8 @@ import asyncio
 import gc
 import json
 import threading
-import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import httpx
 import pytest
@@ -115,13 +114,39 @@ def test_validation_key_uses_effective_tokenizer_and_context_contract() -> None:
             backend._loop.close()
 
 
-class _SlowRunner:
+async def _wait_until(condition: Callable[[], bool]) -> None:
+    """Poll observable backend state; the bound only detects a hang."""
+
+    async def poll() -> None:
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
+class _ObservedGate(asyncio.Lock):
+    """The backend's prompt-tokenizer gate, counting callers queued behind it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued = 0
+
+    async def acquire(self) -> bool:
+        if not self.locked():
+            return await super().acquire()
+        self.queued += 1
+        try:
+            return await super().acquire()
+        finally:
+            self.queued -= 1
+
+
+class _TokenRunner:
     def execute(
         self,
         scheduled: tuple[ScheduledChunk, ...],
         states: Mapping[str, object],
     ) -> dict[str, tuple[SampledToken, ...]]:
-        time.sleep(0.01)
         return {
             chunk.request_id: (SampledToken(7),)
             for chunk in scheduled
@@ -130,11 +155,14 @@ class _SlowRunner:
 
 
 class _StepGateRunner:
+    """Holds one engine step until the test releases it; later steps run."""
+
     def __init__(self, gated_call: int) -> None:
         self.gated_call = gated_call
         self.calls = 0
         self.entered = threading.Event()
         self.allow_step = threading.Event()
+        self.returned = threading.Event()
 
     def execute(
         self,
@@ -144,8 +172,9 @@ class _StepGateRunner:
         self.calls += 1
         if self.calls == self.gated_call:
             self.entered.set()
-            if not self.allow_step.wait(timeout=2):
+            if not self.allow_step.wait(timeout=10):
                 raise TimeoutError("test did not release the gated engine step")
+            self.returned.set()
         return {
             chunk.request_id: (SampledToken(7),)
             for chunk in scheduled
@@ -273,7 +302,7 @@ class _GatedTokenizer(ToyTokenizer):
     def encode(self, text: str) -> tuple[int, ...]:
         self.calls += 1
         self.entered.set()
-        if not self.release.wait(2):
+        if not self.release.wait(10):
             raise TimeoutError("test did not release prompt tokenization")
         return super().encode(text)
 
@@ -294,7 +323,7 @@ class _OverlapRejectingTokenizer(ToyTokenizer):
         try:
             self.calls += 1
             self.entered.set()
-            if not self.release.wait(2):
+            if not self.release.wait(10):
                 raise TimeoutError("test did not release prompt tokenization")
             return super().encode(text)
         finally:
@@ -320,7 +349,7 @@ class _OptInConcurrentTokenizer(ToyTokenizer):
             if self._active >= 2:
                 self.two_entered.set()
         try:
-            if not self.release.wait(2):
+            if not self.release.wait(10):
                 raise TimeoutError("test did not release concurrent tokenization")
             return super().encode(text)
         finally:
@@ -346,7 +375,7 @@ class _EncodeSafeVocabGuardTokenizer(ToyTokenizer):
         try:
             self.calls += 1
             self.entered.set()
-            if not self.release.wait(2):
+            if not self.release.wait(10):
                 raise TimeoutError("test did not release vocabulary initialization")
             return super().vocab()
         finally:
@@ -541,14 +570,13 @@ async def test_concurrent_prepare_single_flights_same_request():
     first = asyncio.create_task(backend.prepare_request(request))
     second = asyncio.create_task(backend.prepare_request(request))
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
-        for _ in range(100):
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+
+        def joined_one_flight() -> bool:
             flight = backend._preparing_requests.get(id(request))
-            if flight is not None and flight.waiters == 2:
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("same-request preparation did not join one flight")
+            return flight is not None and flight.waiters == 2
+
+        await _wait_until(joined_one_flight)
 
         tokenizer.release.set()
         await asyncio.gather(first, second)
@@ -565,6 +593,7 @@ async def test_concurrent_prepare_single_flights_same_request():
 async def test_different_requests_serialize_custom_tokenizer_calls():
     tokenizer = _OverlapRejectingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     first = asyncio.create_task(
         backend.prepare_request(_request("serialize-a", "first", max_tokens=1))
     )
@@ -572,8 +601,10 @@ async def test_different_requests_serialize_custom_tokenizer_calls():
         backend.prepare_request(_request("serialize-b", "second", max_tokens=1))
     )
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+        # The second request reached the tokenizer while the first holds it.
+        await _wait_until(lambda: gate.queued == 1)
+        assert tokenizer.calls == 1
         tokenizer.release.set()
         await asyncio.gather(first, second)
 
@@ -587,6 +618,7 @@ async def test_different_requests_serialize_custom_tokenizer_calls():
 async def test_serialized_custom_tokenizer_waiters_do_not_fill_prompt_executor():
     tokenizer = _OverlapRejectingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     preparations = [
         asyncio.create_task(
             backend.prepare_request(
@@ -596,10 +628,13 @@ async def test_serialized_custom_tokenizer_waiters_do_not_fill_prompt_executor()
         for index in range(4)
     ]
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+        # Every other preparation is parked on the event-loop gate, so the
+        # prompt executor must still have a lane for unrelated work.
+        await _wait_until(lambda: gate.queued == 3)
         assert await asyncio.wait_for(
             run_prompt_work(lambda: "unrelated-ready"),
-            timeout=1,
+            timeout=10,
         ) == "unrelated-ready"
 
         tokenizer.release.set()
@@ -623,7 +658,7 @@ async def test_explicitly_safe_custom_tokenizer_prepares_concurrently():
         for index in range(2)
     ]
     try:
-        assert await asyncio.to_thread(tokenizer.two_entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.two_entered.wait, 10)
         tokenizer.release.set()
         await asyncio.gather(*preparations)
         assert tokenizer.max_active == 2
@@ -636,6 +671,7 @@ async def test_explicitly_safe_custom_tokenizer_prepares_concurrently():
 async def test_encode_safe_tokenizer_serializes_first_token_prompt_vocab_call():
     tokenizer = _EncodeSafeVocabGuardTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     preparations = [
         asyncio.create_task(
             backend.prepare_request(
@@ -649,8 +685,8 @@ async def test_encode_safe_tokenizer_serializes_first_token_prompt_vocab_call():
         for index in range(2)
     ]
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
+        await _wait_until(lambda: gate.queued == 1)
         assert tokenizer.calls == 1
         tokenizer.release.set()
         await asyncio.gather(*preparations)
@@ -664,16 +700,17 @@ async def test_encode_safe_tokenizer_serializes_first_token_prompt_vocab_call():
 async def test_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
     tokenizer = _OverlapRejectingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     preparation = asyncio.create_task(
         backend.prepare_request(_request("serialize-prepare", "prompt", max_tokens=1))
     )
     scoring = None
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
         scoring = asyncio.create_task(
             backend.tokenize_loglikelihood_async("context", " continuation")
         )
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: gate.queued == 1)
         assert tokenizer.calls == 1
 
         tokenizer.release.set()
@@ -691,12 +728,13 @@ async def test_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
 async def test_cancelled_loglikelihood_keeps_custom_tokenizer_gate():
     tokenizer = _OverlapRejectingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    gate = backend._prompt_tokenizer_gate = _ObservedGate()
     first = asyncio.create_task(
         backend.tokenize_loglikelihood_async("context", " continuation")
     )
     second = None
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
@@ -704,7 +742,8 @@ async def test_cancelled_loglikelihood_keeps_custom_tokenizer_gate():
         second = asyncio.create_task(
             backend.tokenize_loglikelihood_async("context", " continuation")
         )
-        await asyncio.sleep(0.05)
+        # The cancelled caller's worker still runs, so the gate stays held.
+        await _wait_until(lambda: gate.queued == 1)
         assert tokenizer.calls == 1
 
         tokenizer.release.set()
@@ -725,17 +764,14 @@ async def test_cancelled_prepare_worker_does_not_publish_cache():
     request = _request("cancelled-prepare", "abandoned request", max_tokens=1)
     preparation = asyncio.create_task(backend.prepare_request(request))
     try:
-        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.to_thread(tokenizer.entered.wait, 10)
         preparation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await preparation
         assert backend._prepared_requests == {}
 
         tokenizer.release.set()
-        for _ in range(100):
-            if not backend._preparing_requests:
-                break
-            await asyncio.sleep(0.01)
+        await _wait_until(lambda: not backend._preparing_requests)
 
         assert tokenizer.calls == 1
         assert backend._preparing_requests == {}
@@ -1412,14 +1448,10 @@ async def test_long_lived_worker_publishes_each_step_before_consumer_coalesces()
     stream = backend.stream(_request("cadence", "prompt", max_tokens=3))
     partials = []
     try:
-        first = await asyncio.wait_for(anext(stream), timeout=1)
+        first = await asyncio.wait_for(anext(stream), timeout=10)
         partials.append(first)
-        for _ in range(100):
-            if runner.entered.is_set():
-                break
-            await asyncio.sleep(0.01)
+        assert await asyncio.to_thread(runner.entered.wait, 10)
 
-        assert runner.entered.is_set()
         assert first.finished is False
         assert len(first.completions[0].token_ids) == 1
         assert backend._pump_task is not None
@@ -1427,11 +1459,7 @@ async def test_long_lived_worker_publishes_each_step_before_consumer_coalesces()
 
         runner.allow_step.set()
         queue = backend._queues["cadence"]
-        for _ in range(100):
-            if queue.qsize() == 1:
-                break
-            await asyncio.sleep(0.01)
-        assert queue.qsize() == 1
+        await _wait_until(lambda: queue.qsize() == 1)
         async for partial in stream:
             partials.append(partial)
     finally:
@@ -1462,7 +1490,7 @@ async def test_submit_after_worker_idle_snapshot_restarts_without_stranding():
             and not worker_saw_idle.is_set()
         ):
             worker_saw_idle.set()
-            if not release_idle_worker.wait(timeout=2):
+            if not release_idle_worker.wait(timeout=10):
                 raise TimeoutError("test did not release idle step worker")
         return has_work
 
@@ -1470,11 +1498,7 @@ async def test_submit_after_worker_idle_snapshot_restarts_without_stranding():
     try:
         first = await backend.generate(_request("before-idle", "first", max_tokens=1))
         assert first.finished
-        for _ in range(100):
-            if worker_saw_idle.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert worker_saw_idle.is_set()
+        assert await asyncio.to_thread(worker_saw_idle.wait, 10)
 
         second_task = asyncio.create_task(
             backend.generate(_request("after-idle", "second", max_tokens=2))
@@ -1483,7 +1507,7 @@ async def test_submit_after_worker_idle_snapshot_restarts_without_stranding():
         assert not second_task.done()
         release_idle_worker.set()
 
-        second = await asyncio.wait_for(second_task, timeout=2)
+        second = await asyncio.wait_for(second_task, timeout=10)
         assert second.finished
     finally:
         release_idle_worker.set()
@@ -1512,11 +1536,13 @@ async def test_submit_while_worker_steps_does_not_read_scheduler_from_event_loop
         backend.generate(_request("active-worker", "first", max_tokens=2))
     )
     try:
-        assert await asyncio.to_thread(runner.entered.wait, 2)
+        assert await asyncio.to_thread(runner.entered.wait, 10)
         second = asyncio.create_task(
             backend.generate(_request("submitted-during-step", "second", max_tokens=2))
         )
-        await asyncio.sleep(0)
+        # Submission registers the queue and asks for the pump in one event-loop
+        # step, so any scheduler read it makes has happened by now.
+        await _wait_until(lambda: "submitted-during-step" in backend._queues)
 
         assert not second.done()
         assert concurrent_event_loop_reads == 0
@@ -1524,7 +1550,7 @@ async def test_submit_while_worker_steps_does_not_read_scheduler_from_event_loop
         runner.allow_step.set()
         first_result, second_result = await asyncio.wait_for(
             asyncio.gather(first, second),
-            timeout=2,
+            timeout=10,
         )
         assert first_result.finished
         assert second_result.finished
@@ -1537,16 +1563,19 @@ async def test_submit_while_worker_steps_does_not_read_scheduler_from_event_loop
 
 
 async def test_stream_abandonment_aborts_engine_work():
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    # The held second step keeps the request running until the abort is queued.
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
     stream = backend.stream(_request("abandoned", "keep generating", max_tokens=10_000))
-    first = await anext(stream)
-    assert first.finished is False
+    try:
+        first = await anext(stream)
+        assert first.finished is False
+        assert await asyncio.to_thread(runner.entered.wait, 10)
 
-    await stream.aclose()
-    for _ in range(100):
-        if not backend._loop.has_work():
-            break
-        await asyncio.sleep(0.01)
+        await stream.aclose()
+    finally:
+        runner.allow_step.set()
+    await _wait_until(lambda: not backend._loop.has_work())
 
     assert backend._loop.has_work() is False
     assert "abandoned" not in backend._scheduler.states
@@ -1555,26 +1584,31 @@ async def test_stream_abandonment_aborts_engine_work():
 
 
 async def test_multi_completion_abandonment_aborts_all_siblings():
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
     request = GenerationRequest(
         request_id="multi-abandon",
         prompt="keep generating siblings",
         sampling_params=SamplingParams(max_tokens=10_000, n=3),
     )
     stream = backend.stream(request)
-    await anext(stream)
-    pump = backend._pump_task
-    assert pump is not None
-    pump.cancel()
+    try:
+        await anext(stream)
+        assert await asyncio.to_thread(runner.entered.wait, 10)
+        pump = backend._pump_task
+        assert pump is not None
+        pump.cancel()
+        # The pump handles its cancellation (stopping the worker) before this
+        # coroutine resumes; only then does the held step return.
+        await asyncio.sleep(0)
+    finally:
+        runner.allow_step.set()
     with pytest.raises(asyncio.CancelledError):
         await pump
     assert backend._pump_task is None
 
     await stream.aclose()
-    for _ in range(100):
-        if not backend._loop.has_work():
-            break
-        await asyncio.sleep(0.01)
+    await _wait_until(lambda: not backend._loop.has_work())
     assert backend._loop.has_work() is False
     assert not {
         "multi-abandon#c0",
@@ -1608,25 +1642,39 @@ async def test_pump_failure_purges_requests_and_backend_recovers(monkeypatch):
     await backend.shutdown()
 
 
-async def test_shutdown_waits_for_step_boundary_and_stops_worker():
+async def test_shutdown_waits_for_step_boundary_and_stops_worker(monkeypatch):
     runner = _StepGateRunner(gated_call=1)
     backend = KairyuBackend(num_pages=256, runner=runner)
+    real_to_thread = asyncio.to_thread
+    close_while_step_held: list[bool] = []
+
+    async def observed_to_thread(function, /, *args, **kwargs):
+        if function == backend._loop.close:
+            close_while_step_held.append(not runner.returned.is_set())
+        return await real_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(kairyu_backend_module.asyncio, "to_thread", observed_to_thread)
     generation = asyncio.create_task(
         backend.generate(_request("shutdown", "prompt", max_tokens=10_000))
     )
-    for _ in range(100):
-        if runner.entered.is_set():
-            break
-        await asyncio.sleep(0.01)
-    assert runner.entered.is_set()
+    assert await asyncio.to_thread(runner.entered.wait, 10)
+    pump = backend._pump_task
+    assert pump is not None
 
     shutdown = asyncio.create_task(backend.shutdown())
-    await asyncio.sleep(0.01)
-    assert not shutdown.done()
+    try:
+        await _wait_until(lambda: pump.cancelling() > 0)
+        # Let every event-loop continuation of the stop request run; only the
+        # held step thread can move shutdown further.
+        for _ in range(100):
+            await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert close_while_step_held == []
+    finally:
+        runner.allow_step.set()
+    await asyncio.wait_for(shutdown, timeout=10)
 
-    runner.allow_step.set()
-    await asyncio.wait_for(shutdown, timeout=2)
-
+    assert close_while_step_held == [False]
     assert runner.calls == 1
     assert backend._pump_task is None
     assert backend._loop.has_work() is False
@@ -1650,7 +1698,7 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
         nonlocal close_calls
         close_calls += 1
         close_started.set()
-        if not allow_close.wait(timeout=2):
+        if not allow_close.wait(timeout=10):
             raise TimeoutError("test did not release engine-loop close")
         real_close()
 
@@ -1661,7 +1709,7 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
         def shutdown(self) -> None:
             self.shutdown_calls += 1
             launcher_started.set()
-            if not allow_launcher.wait(timeout=2):
+            if not allow_launcher.wait(timeout=10):
                 raise TimeoutError("test did not release TP launcher shutdown")
 
     launcher = _BlockingLauncher()
@@ -1670,7 +1718,7 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
 
     first = asyncio.create_task(backend.shutdown())
     try:
-        assert await asyncio.to_thread(close_started.wait, 2)
+        assert await asyncio.to_thread(close_started.wait, 10)
         second = asyncio.create_task(backend.shutdown())
         await asyncio.sleep(0)
         assert not second.done()
@@ -1681,7 +1729,7 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
         assert not second.done()
 
         allow_close.set()
-        assert await asyncio.to_thread(launcher_started.wait, 2)
+        assert await asyncio.to_thread(launcher_started.wait, 10)
         first.cancel()
         await asyncio.sleep(0)
         assert not first.done()
@@ -1689,8 +1737,8 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
 
         allow_launcher.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(first, timeout=2)
-        await asyncio.wait_for(second, timeout=2)
+            await asyncio.wait_for(first, timeout=10)
+        await asyncio.wait_for(second, timeout=10)
     finally:
         allow_close.set()
         allow_launcher.set()
@@ -1713,7 +1761,7 @@ async def test_request_submitted_during_failure_purge_is_pumped():
 
     def delayed_purge(request_ids: tuple[str, ...]) -> None:
         purge_started.set()
-        if not allow_purge.wait(timeout=2):
+        if not allow_purge.wait(timeout=10):
             raise TimeoutError("test did not release purge")
         original_purge(request_ids)
 
@@ -1730,42 +1778,41 @@ async def test_request_submitted_during_failure_purge_is_pumped():
     backend._loop.purge = delayed_purge
     backend._loop.has_work = record_has_work
     failed = asyncio.create_task(backend.generate(_request("failed", "first", 2)))
-    assert await asyncio.to_thread(purge_started.wait, 2)
+    assert await asyncio.to_thread(purge_started.wait, 10)
 
     recovered = asyncio.create_task(
         backend.generate(_request("submitted-during-purge", "second", 2))
     )
-    await asyncio.sleep(0)
+    # Submission registers the queue and asks for the pump in one event-loop
+    # step, so any scheduler read it makes has happened by now.
+    await _wait_until(lambda: "submitted-during-purge" in backend._queues)
     assert concurrent_event_loop_reads == 0
     allow_purge.set()
 
     with pytest.raises(RuntimeError, match="injected runner failure"):
         await failed
-    result = await asyncio.wait_for(recovered, timeout=2)
+    result = await asyncio.wait_for(recovered, timeout=10)
     assert result.finished
 
 
 async def test_duplicate_request_id_is_rejected_without_disrupting_active_request():
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
     first = asyncio.create_task(backend.generate(_request("duplicate", "first", 10_000)))
-    for _ in range(100):
-        if "duplicate" in backend._loop._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert "duplicate" in backend._loop._active_request_ids
+    try:
+        assert await asyncio.to_thread(runner.entered.wait, 10)
+        assert "duplicate" in backend._loop._active_request_ids
 
-    with pytest.raises(ValueError, match="duplicate request_id"):
-        await backend.generate(_request("duplicate", "second"))
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await backend.generate(_request("duplicate", "second"))
 
-    assert not first.done()
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    for _ in range(100):
-        if "duplicate" not in backend._loop._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert "duplicate" not in backend._loop._active_request_ids
+        assert not first.done()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    finally:
+        runner.allow_step.set()
+    await _wait_until(lambda: "duplicate" not in backend._loop._active_request_ids)
 
     reused = await backend.generate(_request("duplicate", "reused", 2))
     assert reused.finished is True
@@ -1782,7 +1829,7 @@ def test_unknown_abort_does_not_reserve_request_id():
 async def test_duplicate_rejected_after_worker_forget_before_terminal_delivery(
     duplicate_api,
 ):
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    backend = KairyuBackend(num_pages=256, runner=_TokenRunner())
     forgot_request = threading.Event()
     allow_step_return = threading.Event()
     original_forget = backend._loop._forget
@@ -1790,12 +1837,12 @@ async def test_duplicate_rejected_after_worker_forget_before_terminal_delivery(
     def forget_then_block(request_id: str) -> None:
         original_forget(request_id)
         forgot_request.set()
-        if not allow_step_return.wait(timeout=2):
+        if not allow_step_return.wait(timeout=10):
             raise TimeoutError("test did not release terminal step")
 
     backend._loop._forget = forget_then_block
     first = asyncio.create_task(backend.generate(_request("delivery-gap", "first", 1)))
-    assert await asyncio.to_thread(forgot_request.wait, 2)
+    assert await asyncio.to_thread(forgot_request.wait, 10)
     original_queue = backend._queues["delivery-gap"]
     assertions_complete = False
 
@@ -1808,7 +1855,7 @@ async def test_duplicate_rejected_after_worker_forget_before_terminal_delivery(
 
     try:
         with pytest.raises(ValueError, match="duplicate request_id"):
-            await asyncio.wait_for(submit_duplicate(), timeout=0.2)
+            await asyncio.wait_for(submit_duplicate(), timeout=10)
         assert backend._queues["delivery-gap"] is original_queue
         assertions_complete = True
     finally:
@@ -1820,7 +1867,7 @@ async def test_duplicate_rejected_after_worker_forget_before_terminal_delivery(
             except asyncio.CancelledError:
                 pass
 
-    result = await asyncio.wait_for(first, timeout=2)
+    result = await asyncio.wait_for(first, timeout=10)
     assert result.finished
     reused = await backend.generate(_request("delivery-gap", "reused", 1))
     assert reused.finished
@@ -1835,19 +1882,19 @@ async def test_duplicate_rejected_after_fatal_purge_before_failure_delivery():
     def purge_then_block(request_ids: tuple[str, ...]) -> None:
         original_purge(request_ids)
         purged_request.set()
-        if not allow_purge_return.wait(timeout=2):
+        if not allow_purge_return.wait(timeout=10):
             raise TimeoutError("test did not release fatal purge")
 
     backend._loop.purge = purge_then_block
     first = asyncio.create_task(backend.generate(_request("purge-gap", "first", 1)))
-    assert await asyncio.to_thread(purged_request.wait, 2)
+    assert await asyncio.to_thread(purged_request.wait, 10)
     original_queue = backend._queues["purge-gap"]
     assertions_complete = False
 
     try:
         with pytest.raises(ValueError, match="duplicate request_id"):
             await asyncio.wait_for(
-                backend.generate(_request("purge-gap", "duplicate", 1)), timeout=0.2
+                backend.generate(_request("purge-gap", "duplicate", 1)), timeout=10
             )
         assert backend._queues["purge-gap"] is original_queue
         assertions_complete = True
@@ -1861,20 +1908,15 @@ async def test_duplicate_rejected_after_fatal_purge_before_failure_delivery():
                 pass
 
     with pytest.raises(RuntimeError, match="injected runner failure"):
-        await asyncio.wait_for(first, timeout=2)
+        await asyncio.wait_for(first, timeout=10)
     reused = await backend.generate(_request("purge-gap", "reused", 1))
     assert reused.finished
 
 
 async def test_multi_stream_reserves_all_sub_ids_before_submit():
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
     blocker = asyncio.create_task(backend.generate(_request("atomic#c1", "blocker", 10_000)))
-    for _ in range(100):
-        if "atomic#c1" in backend._loop._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert "atomic#c1" in backend._loop._active_request_ids
-    blocker_queue = backend._queues["atomic#c1"]
     request = GenerationRequest(
         request_id="atomic",
         prompt="multi",
@@ -1882,6 +1924,9 @@ async def test_multi_stream_reserves_all_sub_ids_before_submit():
     )
 
     try:
+        assert await asyncio.to_thread(runner.entered.wait, 10)
+        assert "atomic#c1" in backend._loop._active_request_ids
+        blocker_queue = backend._queues["atomic#c1"]
         with pytest.raises(ValueError, match="duplicate request_id"):
             await anext(backend.stream(request))
         assert backend._queues["atomic#c1"] is blocker_queue
@@ -1897,6 +1942,8 @@ async def test_multi_stream_reserves_all_sub_ids_before_submit():
             await blocker
         except asyncio.CancelledError:
             pass
+        runner.allow_step.set()
+        await backend.shutdown()
 
 
 def test_multi_candidate_sub_requests_preserve_parallel_tool_intent():
@@ -1958,11 +2005,7 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
         for leaked_id in sub_ids:
             backend._abort(leaked_id)
             backend._queues.pop(leaked_id, None)
-        for _ in range(100):
-            if not sub_ids & backend._loop._active_request_ids:
-                break
-            await asyncio.sleep(0.01)
-        assert not sub_ids & backend._loop._active_request_ids
+        await _wait_until(lambda: not sub_ids & backend._loop._active_request_ids)
         assert not sub_ids & backend._active_request_ids
 
 
@@ -1993,7 +2036,8 @@ async def test_single_submit_failure_rolls_back_public_id_reservation():
 
 
 async def test_multi_generate_reserves_each_sub_for_aggregate_lifetime():
-    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
     request = GenerationRequest(
         request_id="multi-generate",
         prompt="multi",
@@ -2001,28 +2045,27 @@ async def test_multi_generate_reserves_each_sub_for_aggregate_lifetime():
     )
     sub_ids = {"multi-generate#c0", "multi-generate#c1", "multi-generate#c2"}
     first = asyncio.create_task(backend.generate(request))
-    for _ in range(100):
-        if sub_ids <= backend._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert sub_ids <= backend._active_request_ids
-    original_queues = {request_id: backend._queues[request_id] for request_id in sub_ids}
+    try:
+        assert await asyncio.to_thread(runner.entered.wait, 10)
+        assert sub_ids <= backend._active_request_ids
+        original_queues = {
+            request_id: backend._queues[request_id] for request_id in sub_ids
+        }
 
-    with pytest.raises(ValueError, match="duplicate request_id"):
-        await backend.generate(request)
-    assert all(
-        backend._queues[request_id] is queue for request_id, queue in original_queues.items()
-    )
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await backend.generate(request)
+        assert all(
+            backend._queues[request_id] is queue
+            for request_id, queue in original_queues.items()
+        )
 
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    assert not sub_ids & backend._active_request_ids
-    for _ in range(100):
-        if not sub_ids & backend._loop._active_request_ids:
-            break
-        await asyncio.sleep(0.01)
-    assert not sub_ids & backend._loop._active_request_ids
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not sub_ids & backend._active_request_ids
+    finally:
+        runner.allow_step.set()
+    await _wait_until(lambda: not sub_ids & backend._loop._active_request_ids)
 
     reused = await backend.generate(
         GenerationRequest(
@@ -2697,7 +2740,7 @@ class _DeadRankLauncher:
 
 
 async def test_readiness_is_ready_before_any_work():
-    backend = KairyuBackend(runner=_SlowRunner())
+    backend = KairyuBackend(runner=_TokenRunner())
     assert backend.readiness().ready is True
 
 
@@ -2733,7 +2776,7 @@ async def test_the_reported_error_detail_carries_no_message():
 async def test_readiness_reports_dead_tensor_parallel_ranks_as_fatal():
     # nothing in-process can bring a dead rank back, so this is the one condition
     # that both stops traffic AND asks for a restart
-    backend = KairyuBackend(runner=_SlowRunner())
+    backend = KairyuBackend(runner=_TokenRunner())
     backend._loop.parallel_launcher = _DeadRankLauncher((2, 5))
     status = backend.readiness()
     assert status.ready is False
@@ -2743,13 +2786,13 @@ async def test_readiness_reports_dead_tensor_parallel_ranks_as_fatal():
 
 
 async def test_live_tensor_parallel_ranks_stay_ready():
-    backend = KairyuBackend(runner=_SlowRunner())
+    backend = KairyuBackend(runner=_TokenRunner())
     backend._loop.parallel_launcher = _DeadRankLauncher(())
     assert backend.readiness().ready is True
 
 
 async def test_failed_tensor_parallel_transport_is_fatal_even_with_live_ranks():
-    backend = KairyuBackend(runner=_SlowRunner())
+    backend = KairyuBackend(runner=_TokenRunner())
     backend._loop.parallel_launcher = _DeadRankLauncher(
         (),
         failure="DistBackendError",
@@ -2761,7 +2804,7 @@ async def test_failed_tensor_parallel_transport_is_fatal_even_with_live_ranks():
 
 
 async def test_readiness_names_expert_parallel_failures_without_calling_them_tp():
-    backend = KairyuBackend(runner=_SlowRunner())
+    backend = KairyuBackend(runner=_TokenRunner())
     backend._loop.parallel_launcher = _DeadRankLauncher((3,))
     backend._loop.parallelism_metadata = {
         "parallelism": "expert_parallel",

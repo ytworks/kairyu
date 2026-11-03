@@ -66,38 +66,47 @@ def test_f1b_pull_requests_always_run_the_local_smoke_gate() -> None:
     assert step["run"] == 'bash scripts/kind_rollout_gate.sh "--${PROFILE}"'
 
 
-def test_f1b_rollout_freezes_each_image_before_kind_cluster_creation() -> None:
-    script = (_ROOT / "scripts" / "kind_rollout_gate.sh").read_text(
-        encoding="utf-8"
-    )
-    gateway_build = script.index('-t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"')
-    gateway_save = script.index(
-        '"$DOCKER" image save --output "$GATEWAY_IMAGE_ARCHIVE" "$GATEWAY_IMAGE"'
-    )
-    mock_build = script.index('-t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"')
-    mock_save = script.index(
-        '"$DOCKER" image save --output "$MOCK_IMAGE_ARCHIVE" "$MOCK_IMAGE"'
-    )
-    cluster_create = script.index('"$KIND" create cluster')
-    archive_load = script.index(
-        '"$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE"'
-    )
+def test_kind_gates_load_frozen_archives_identified_by_config_digest() -> None:
+    # F1c broke on a runner whose Docker used the containerd image store:
+    # ``kind load docker-image`` and Docker's image ID both depend on the
+    # store. Every kind gate freezes archives before the cluster exists, loads
+    # only those archives, and identifies images by the archive config digest.
+    for name in (
+        "kind_churn_gate.sh",
+        "kind_rollout_gate.sh",
+        "kind_gateway_gate.sh",
+    ):
+        script = (_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        gateway_build = script.index('-t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"')
+        gateway_save = script.index(
+            'save_image_archive "$GATEWAY_IMAGE" "$GATEWAY_IMAGE_ARCHIVE"'
+        )
+        mock_save = script.index(
+            'save_image_archive "$MOCK_IMAGE" "$MOCK_IMAGE_ARCHIVE"'
+        )
+        cluster_create = script.index('"$KIND" create cluster')
+        archive_load = script.index('"$KIND" load image-archive')
 
-    assert gateway_build < gateway_save < mock_build < mock_save < cluster_create
-    assert cluster_create < archive_load
-    assert '"$KIND" load docker-image' not in script
+        assert gateway_build < gateway_save < mock_save < cluster_create, name
+        assert cluster_create < archive_load, name
+        assert '"$KIND" load docker-image' not in script, name
+        assert "{{.Id}}" not in script, name
 
 
 def test_kind_ci_uses_one_verified_retried_tool_installer() -> None:
+    kind_and_kubectl = "Install kind and kubectl"
     expected = {
-        ("ci.yml", "kind-smoke"): ("v0.31.0", "v1.35.0"),
-        ("f1a-churn.yml", "churn"): ("v0.32.0", "v1.36.3"),
-        ("f1b-rollout.yml", "rollout"): ("v0.32.0", "v1.36.3"),
-        ("f1c-gateway.yml", "gateway"): ("v0.32.0", "v1.36.3"),
+        ("ci.yml", "kind-smoke", "Setup: install kind, kubectl and Helm"): (
+            "v0.31.0",
+            "v1.35.0",
+        ),
+        ("f1a-churn.yml", "churn", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
+        ("f1b-rollout.yml", "rollout", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
+        ("f1c-gateway.yml", "gateway", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
     }
-    for (workflow_name, job_name), versions in expected.items():
+    for (workflow_name, job_name, step_name), versions in expected.items():
         workflow, _ = _load_workflow(workflow_name)
-        step = _named_step(workflow["jobs"][job_name], "Install kind and kubectl")
+        step = _named_step(workflow["jobs"][job_name], step_name)
         assert step["run"] == "bash scripts/install_kind_tools.sh"
         assert (
             step["env"]["KIND_VERSION"],
@@ -350,18 +359,16 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     report_path = "${{ runner.temp }}/kairyu-cpu-microbench/report.json"
     run_step = _named_step(
         job,
-        "Run variance-tolerant CPU microbenchmarks",
+        "Run the CPU microbenchmark gate (operation counts)",
     )
     assert run_step["env"] == {
         "KAIRYU_CPU_MICROBENCH_REPORT": (
             report_path
         )
     }
-    assert (
-        cpu_microbench_gate.BENCHMARK_TIMEOUT_SECONDS
-        * len(cpu_microbench_gate.BENCHMARKS)
-        < int(job["timeout-minutes"]) * 60
-    )
+    # The gate's single hang bound ends before the job limit, so its report
+    # is still written and uploaded when a benchmark hangs.
+    assert cpu_microbench_gate.HANG_TIMEOUT_SECONDS < int(job["timeout-minutes"]) * 60
     setup_steps = [
         step
         for step in job["steps"]
@@ -371,8 +378,8 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     ]
     assert len(setup_steps) == 1
     assert setup_steps[0]["with"]["python-version"] == "3.12"
-    assert _named_step(job, "Sync dependencies")["run"] == (
-        "uv sync --frozen --dev"
+    assert _named_step(job, "Setup: sync dependencies")["run"] == (
+        "bash scripts/ci_setup_retry.sh uv sync --frozen --dev"
     )
     command = run_step["run"]
     assert "uv run --frozen python scripts/cpu_microbench_gate.py" in command
@@ -433,7 +440,7 @@ def test_postgres_integration_uses_one_local_reproducible_script() -> None:
         encoding="utf-8"
     )
 
-    assert step["run"] == "bash scripts/postgres_integration.sh"
+    assert step["run"] == "bash scripts/postgres_integration.sh --no-setup"
     assert "postgres:17.6-bookworm@sha256:" in script
     assert "docker run --detach" in script
     assert "docker run --detach --rm" not in script
@@ -470,6 +477,7 @@ def _postgres_integration_fake_env(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
         'case "$1" in\n'
+        "  image) : ;;\n"
         "  run) printf 'fake-container-id\\n' ;;\n"
         "  port) printf '127.0.0.1:45678\\n' ;;\n"
         "  logs) printf 'postgres readiness diagnostic\\n' >&2 ;;\n"
