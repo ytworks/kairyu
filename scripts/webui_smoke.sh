@@ -2,6 +2,16 @@
 # End-to-end Open WebUI smoke: first-user setup, the admin's Responses filter,
 # direct/auto streaming, persistence, gateway outage, and recovery without
 # restarting Open WebUI.
+#
+# The verdict depends only on the code under test: waits observe states or
+# events, and their bounds only detect a hang.
+#
+# Usage: webui_smoke.sh [--setup-only | --no-setup]
+#   (none)        build and pull the images, then run the test
+#   --setup-only  build and pull the images (the networked setup; CI retries it)
+#   --no-setup    run the test on those images; never build or pull
+# The two split modes run as separate commands, so they need
+# WEBUI_SMOKE_PROJECT_NAME to name one Compose project (and its images).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -10,7 +20,18 @@ COMPOSE_FILE="$REPO_ROOT/deploy/compose/docker-compose.webui.yaml"
 COMPOSE_VALIDATOR="$REPO_ROOT/scripts/validate_compose_binds.py"
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 EXPECTED_WEBUI_BASE_URL="http://kairyu:8000/v1"
-COMPOSE_WAIT_SECONDS="${COMPOSE_WAIT_SECONDS:-240}"
+# Hang bounds, far above the expected times.
+COMPOSE_WAIT_SECONDS="${COMPOSE_WAIT_SECONDS:-600}"
+HANG_ATTEMPTS=90
+MODE="${1:-}"
+case "$MODE" in
+  "" | --setup-only | --no-setup) ;;
+  *) echo "usage: $0 [--setup-only | --no-setup]" >&2; exit 2 ;;
+esac
+if [[ -n "$MODE" && -z "${WEBUI_SMOKE_PROJECT_NAME:-}" ]]; then
+  echo "$MODE needs WEBUI_SMOKE_PROJECT_NAME so setup and test share one project" >&2
+  exit 2
+fi
 SMOKE_PROJECT_NAME="${WEBUI_SMOKE_PROJECT_NAME:-kairyu-webui-smoke-$$-${RANDOM}}"
 # The demo's admin credentials (README) would make Open WebUI create that admin
 # and close sign-up, so the browser's fresh first-user signup could not run.
@@ -22,7 +43,8 @@ export WEBUI_ADMIN_EMAIL="" WEBUI_ADMIN_PASSWORD=""
 compose() {
   docker compose --project-name "$SMOKE_PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
-curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }
+# Bounds only detect a hung connection; they are far above any response time.
+curl_bounded() { curl --connect-timeout 30 --max-time 120 "$@"; }
 
 cleanup() {
   compose --profile browser-smoke down --volumes --remove-orphans \
@@ -31,6 +53,12 @@ cleanup() {
 
 fail() {
   echo "WEBUI E2E FAIL: $1" >&2
+  compose logs --tail 80 kairyu webui >&2 || true
+  exit 1
+}
+
+hang() {
+  echo "WEBUI E2E HANG: $1 (a hang bound, not a speed limit)" >&2
   compose logs --tail 80 kairyu webui >&2 || true
   exit 1
 }
@@ -48,7 +76,7 @@ wait_for() { # wait_for <url> <substring> <attempts>
 
 browser_phase() {
   local phase=$1
-  compose --profile browser-smoke run --rm --no-deps \
+  compose --profile browser-smoke run --rm --no-deps --pull never \
     -e WEBUI_SMOKE_PHASE="$phase" browser
 }
 
@@ -76,11 +104,29 @@ assert vectors[0] != vectors[1], payload
 ' || fail "Kairyu embedding dimensions/order/usage contract failed"
 }
 
+# await_metrics <failure> <check> [args...]: the counters only grow, so a check
+# that exits 3 (below its minimum) is polled until it passes. A request the
+# browser saw finish may be counted just after its response reached the browser.
+await_metrics() {
+  local failure=$1 body status
+  shift
+  for _ in $(seq 1 "$HANG_ATTEMPTS"); do
+    body=$(curl_bounded -sf "$BASE_URL/metrics") \
+      || fail "Kairyu metrics were unavailable: $failure"
+    status=0
+    printf '%s' "$body" | "$@" || status=$?
+    case "$status" in
+      0) return 0 ;;
+      3) sleep 1 ;;
+      *) fail "$failure" ;;
+    esac
+  done
+  hang "$failure"
+}
+
 assert_embedding_metrics() {
-  local minimum=$1 phase=$2 body
-  body=$(curl_bounded -sf "$BASE_URL/metrics") \
-    || fail "Kairyu metrics were unavailable during $phase"
-  printf '%s' "$body" | python3 -c '
+  local minimum=$1 phase=$2
+  await_metrics "RAG embedding metrics did not prove $phase traffic" python3 -c '
 import sys
 
 minimum = float(sys.argv[1])
@@ -90,11 +136,24 @@ for line in sys.stdin:
         value = float(line.rsplit(" ", 1)[1])
         break
 if value is None or value < minimum:
-    raise SystemExit(
-        f"embed-small successful request count {value!r} is below required {minimum:g}"
+    print(
+        f"embed-small successful request count {value!r} is below required {minimum:g}",
+        file=sys.stderr,
     )
-' "$minimum" || fail "RAG embedding metrics did not prove $phase traffic"
+    raise SystemExit(3)
+' "$minimum"
 }
+
+setup_images() {
+  echo "== setup: build and pull images =="
+  compose --profile browser-smoke build kairyu browser
+  compose pull webui
+}
+
+if [[ "$MODE" == --setup-only ]]; then
+  setup_images
+  exit 0
+fi
 
 echo "== validate WebUI compose binds =="
 uv run --frozen --project "$REPO_ROOT" --no-dev \
@@ -138,15 +197,17 @@ print(json.load(sys.stdin)["services"]["browser"]["environment"][sys.argv[1]])
 smoke_email="$(browser_account WEBUI_SMOKE_EMAIL)"
 smoke_password="$(browser_account WEBUI_SMOKE_PASSWORD)"
 
+if [[ -z "$MODE" ]]; then
+  setup_images
+fi
+
 # From the first startup attempt onward, always remove containers and the
 # ephemeral first-user database so every run starts from the same state.
 trap cleanup EXIT
 
 assert_responses_wire() {
-  local minimum=$1 phase=$2 body
-  body=$(curl_bounded -sf "$BASE_URL/metrics") \
-    || fail "Kairyu metrics were unavailable during $phase"
-  printf '%s' "$body" | python3 -c '
+  local minimum=$1 phase=$2
+  await_metrics "Open WebUI did not use the Responses API during $phase" python3 -c '
 import sys
 
 minimum = float(sys.argv[1])
@@ -157,20 +218,17 @@ for line in sys.stdin:
         counts[labels] = float(value)
 responses = counts.get("kairyu_request_duration_seconds_count{path=\"/v1/responses\"}", 0.0)
 chat = counts.get("kairyu_request_duration_seconds_count{path=\"/v1/chat/completions\"}", 0.0)
-if responses < minimum:
-    raise SystemExit(f"/v1/responses request count {responses:g} is below required {minimum:g}")
 if chat:
     raise SystemExit(f"Open WebUI still reached /v1/chat/completions {chat:g} time(s)")
-' "$minimum" || fail "Open WebUI did not use the Responses API during $phase"
+if responses < minimum:
+    print(f"/v1/responses request count {responses:g} is below required {minimum:g}", file=sys.stderr)
+    raise SystemExit(3)
+' "$minimum"
 }
 
 echo "== start Kairyu and Open WebUI =="
-compose up -d --build --wait --wait-timeout "$COMPOSE_WAIT_SECONDS" kairyu webui \
-  || fail "Kairyu/Open WebUI topology did not become healthy"
-
-echo "== build pinned Playwright runner =="
-compose --profile browser-smoke build browser \
-  || fail "Playwright runner build failed"
+compose up -d --no-build --pull never --wait --wait-timeout "$COMPOSE_WAIT_SECONDS" kairyu webui \
+  || fail "Kairyu/Open WebUI topology did not become healthy (unhealthy, exited, or past the ${COMPOSE_WAIT_SECONDS}s hang bound)"
 
 echo "== production embedding dimensions, order, normalization, and exact usage =="
 assert_embedding_contract
@@ -179,7 +237,7 @@ echo "== fresh first-user signup =="
 browser_phase signup || fail "fresh first-user signup failed"
 
 echo "== admin installs the Responses filter =="
-compose run --rm --no-deps \
+compose run --rm --no-deps --pull never \
   -e WEBUI_ADMIN_EMAIL="$smoke_email" \
   -e WEBUI_ADMIN_PASSWORD="$smoke_password" \
   webui-setup || fail "Open WebUI Responses filter setup failed"
@@ -195,8 +253,8 @@ browser_phase outage || fail "browser did not surface the gateway outage"
 
 echo "== gateway recovery works without restarting Open WebUI =="
 compose start kairyu || fail "could not restart Kairyu"
-wait_for "$BASE_URL/readyz" '"ready"' 90 \
-  || fail "Kairyu did not become ready after restart"
+wait_for "$BASE_URL/readyz" '"ready"' "$HANG_ATTEMPTS" \
+  || hang "Kairyu did not become ready after restart"
 browser_phase recovery || fail "browser did not recover after Kairyu restart"
 assert_embedding_metrics 2 "post-restart retrieval/chat"
 assert_responses_wire 3 "post-restart RAG/streaming/UI chat"

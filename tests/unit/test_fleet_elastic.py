@@ -1275,11 +1275,13 @@ async def test_kind_smoke_gates_default_and_gpu_chart_before_cluster_creation():
         assert lines.count(command) == 1
     command_positions = [lines.index(command) for command in commands]
     gate_call = lines.index("helm_gate")
-    kind_create = lines.index('kind create cluster --name "$CLUSTER" --wait 120s')
+    kind_create = lines.index(
+        'kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait "${HANG_BOUND_S}s"'
+    )
     assert command_positions == sorted(command_positions)
     assert max(command_positions) < gate_call
     assert gate_call < kind_create
-    assert 'if [[ "${1:-}" == "--helm-check" ]]; then' in lines[gate_call:kind_create]
+    assert 'if [[ "$MODE" == --helm-check ]]; then' in lines[gate_call:kind_create]
 
 
 async def test_helm_check_exits_after_four_helm_commands_without_cluster_side_effects(
@@ -1339,7 +1341,7 @@ async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate()
 
     assert run_commands.index(
         "bash scripts/kind_smoke.sh --helm-check"
-    ) < run_commands.index("bash scripts/kind_smoke.sh")
+    ) < run_commands.index("bash scripts/kind_smoke.sh --no-setup")
     assert "helm lint" not in workflow_text
     assert "helm template" not in workflow_text
 

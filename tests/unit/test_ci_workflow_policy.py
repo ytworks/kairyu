@@ -89,15 +89,19 @@ def test_f1b_rollout_freezes_each_image_before_kind_cluster_creation() -> None:
 
 
 def test_kind_ci_uses_one_verified_retried_tool_installer() -> None:
+    kind_and_kubectl = "Install kind and kubectl"
     expected = {
-        ("ci.yml", "kind-smoke"): ("v0.31.0", "v1.35.0"),
-        ("f1a-churn.yml", "churn"): ("v0.32.0", "v1.36.3"),
-        ("f1b-rollout.yml", "rollout"): ("v0.32.0", "v1.36.3"),
-        ("f1c-gateway.yml", "gateway"): ("v0.32.0", "v1.36.3"),
+        ("ci.yml", "kind-smoke", "Setup: install kind, kubectl and Helm"): (
+            "v0.31.0",
+            "v1.35.0",
+        ),
+        ("f1a-churn.yml", "churn", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
+        ("f1b-rollout.yml", "rollout", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
+        ("f1c-gateway.yml", "gateway", kind_and_kubectl): ("v0.32.0", "v1.36.3"),
     }
-    for (workflow_name, job_name), versions in expected.items():
+    for (workflow_name, job_name, step_name), versions in expected.items():
         workflow, _ = _load_workflow(workflow_name)
-        step = _named_step(workflow["jobs"][job_name], "Install kind and kubectl")
+        step = _named_step(workflow["jobs"][job_name], step_name)
         assert step["run"] == "bash scripts/install_kind_tools.sh"
         assert (
             step["env"]["KIND_VERSION"],
@@ -371,8 +375,8 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     ]
     assert len(setup_steps) == 1
     assert setup_steps[0]["with"]["python-version"] == "3.12"
-    assert _named_step(job, "Sync dependencies")["run"] == (
-        "uv sync --frozen --dev"
+    assert _named_step(job, "Setup: sync dependencies")["run"] == (
+        "bash scripts/ci_setup_retry.sh uv sync --frozen --dev"
     )
     command = run_step["run"]
     assert "uv run --frozen python scripts/cpu_microbench_gate.py" in command
@@ -433,7 +437,7 @@ def test_postgres_integration_uses_one_local_reproducible_script() -> None:
         encoding="utf-8"
     )
 
-    assert step["run"] == "bash scripts/postgres_integration.sh"
+    assert step["run"] == "bash scripts/postgres_integration.sh --no-setup"
     assert "postgres:17.6-bookworm@sha256:" in script
     assert "docker run --detach" in script
     assert "docker run --detach --rm" not in script
@@ -470,6 +474,7 @@ def _postgres_integration_fake_env(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
         'case "$1" in\n'
+        "  image) : ;;\n"
         "  run) printf 'fake-container-id\\n' ;;\n"
         "  port) printf '127.0.0.1:45678\\n' ;;\n"
         "  logs) printf 'postgres readiness diagnostic\\n' >&2 ;;\n"
