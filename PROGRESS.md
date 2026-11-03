@@ -114,6 +114,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-11-03 — [design] CI verdicts depend only on the code
+- What: every CI pass/fail is decided by the code alone: timing became diagnostics (cpu-microbench and nightly perf judge operation counts; kind F1a/F1b/F1c, async smoke and F2b judge order, fencing tokens or a virtual clock; ~190 pytest waits rewritten to events, fake clocks or hang bounds); runner inputs pinned (umask 022, uv 0.11.31, single-platform postgres digest, images loaded from archives); networked setup separated from tests; the CPU suite runs on four workers to meet the five-minute target. CLAUDE.md test policy rule 8.
+- Why: owner principle after PR #667's CI failed on a wall-clock ratio and a runner image-store change ("not caused by this PR" is not a resolution).
+- Refs: PR #668; plan `docs/superpowers/plans/2026-11-03-ci-deterministic.md`; m10 A31 amendment; `docs/design/issue-377-nightly-cpu-perf.md`
+
 ### 2026-10-22 — [progress] Download links for files the 1017 eight-GPU Chat UI makes
 - What: a `file_download` Open WebUI tool (installed by `run.sh up`, on by default) reads a file the browser code interpreter wrote, stores it in Open WebUI's file store, attaches it to the reply and returns a link; its description also has the model import the bundled Office libraries directly. GPU: `file-download` (owner's Excel request: link saves the file on desktop, after a reload and on an emulated phone), `office` (edits saved from the link), `chat-ui`, `knowledge` pass.
 - Why: the owner could not download a file the Chat UI made on a phone: a dead `sandbox:` link, invented UI steps, and working files that exist only in the page.
