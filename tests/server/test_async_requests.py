@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+import kairyu.async_requests.worker as worker_module
 from kairyu.async_requests import (
     AsyncRequestState,
     AsyncRequestSubmission,
@@ -288,7 +289,26 @@ async def test_cancel_during_mark_running_cannot_escape_local_abort() -> None:
     assert store.get(request.id).state is AsyncRequestState.CANCELLED
 
 
-async def test_transient_renewal_error_does_not_abort_inference() -> None:
+class _ImmediateSleepAsyncio:
+    """The worker's asyncio with ``sleep`` reduced to a yield.
+
+    Heartbeat intervals and retry delays then pass at once while the loop clock
+    stays real, so a long lease bounds only a hang and never judges speed.
+    """
+
+    @staticmethod
+    async def sleep(delay: float, result=None):
+        await asyncio.sleep(0)
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+
+async def test_transient_renewal_error_does_not_abort_inference(monkeypatch) -> None:
+    # The verdict is the order "failed renewal, retried renewal, inference
+    # completes"; a 60 s lease is far beyond the milliseconds this takes.
+    monkeypatch.setattr(worker_module, "asyncio", _ImmediateSleepAsyncio())
     renewals: list[str] = []
 
     class FlakyRenewStore(InMemoryRequestStore):
@@ -316,7 +336,7 @@ async def test_transient_renewal_error_does_not_abort_inference() -> None:
     worker = AsyncRequestWorker(
         store,
         {"m": backend},
-        lease_seconds=0.6,
+        lease_seconds=60,
         legacy_chat_models={"m"},
     )
     request = store.submit(
