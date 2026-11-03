@@ -906,7 +906,9 @@ def test_a_client_disconnect_ends_the_upstream_request_at_once(path, body, marke
     gc.disable()
     try:
         _read_first_delta_then_disconnect(kairyu_url, path, body, marker)
-        assert closed.wait(timeout=5), "the upstream request outlived its client"
+        # Hang bound only; without the disconnect, the read timeout (60 s) or
+        # shutdown would be the first to close the upstream request.
+        assert closed.wait(timeout=10), "the upstream request outlived its client"
     finally:
         if collecting:
             gc.enable()
@@ -1002,7 +1004,7 @@ expose_intermediate_outputs: true
     kairyu_url, kairyu_server = serve(app)
 
     def roles_pending() -> None:
-        assert upstream.both_pending.wait(timeout=5), upstream.roles
+        assert upstream.both_pending.wait(timeout=10), upstream.roles
 
     collecting = gc.isenabled()
     gc.disable()
@@ -1010,7 +1012,7 @@ expose_intermediate_outputs: true
         _read_first_delta_then_disconnect(
             kairyu_url, path, body, marker, before_close=roles_pending
         )
-        assert upstream.all_closed.wait(timeout=5), "a role call outlived its client"
+        assert upstream.all_closed.wait(timeout=10), "a role call outlived its client"
         assert sorted(upstream.roles) == ["alpha", "beta"]
     finally:
         if collecting:

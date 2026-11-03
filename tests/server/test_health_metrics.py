@@ -63,7 +63,10 @@ async def test_blocking_store_warmup_does_not_block_health_or_move_render() -> N
 
         def metrics_snapshot(self):
             snapshot_started.set()
-            assert release_snapshot.wait(2)
+            # Only the test coroutine on the event loop releases the snapshot,
+            # so a snapshot that owned the loop deadlocks; the bound turns that
+            # into a failure.
+            assert release_snapshot.wait(10), "the snapshot blocked the event loop"
             return RequestQueueMetricsSnapshot(
                 state_counts={AsyncRequestState.QUEUED: 1},
                 oldest_queued_age_seconds=0.0,
@@ -80,20 +83,17 @@ async def test_blocking_store_warmup_does_not_block_health_or_move_render() -> N
         return original_render()
 
     app.state.metrics.render = recording_render
-    watchdog = threading.Timer(1, release_snapshot.set)
-    watchdog.start()
     try:
         async with _client(app) as client:
             metrics_task = asyncio.create_task(client.get("/metrics"))
-            assert await asyncio.to_thread(snapshot_started.wait, 0.5)
-            assert not release_snapshot.is_set()
-            health = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+            # Hang bounds only: answered while the snapshot is still held.
+            assert await asyncio.to_thread(snapshot_started.wait, 10)
+            health = await asyncio.wait_for(client.get("/health"), timeout=10)
             assert health.status_code == 200
             release_snapshot.set()
             scraped = await metrics_task
     finally:
         release_snapshot.set()
-        watchdog.cancel()
 
     assert scraped.status_code == 200
     assert 'kairyu_async_request_queue_depth{store="durable"} 1.0' in scraped.text

@@ -75,7 +75,7 @@ async def test_chat_body_limit_forwards_chunks_without_buffering() -> None:
             receive,
             send,
         ),
-        timeout=1,
+        timeout=10,  # hang bound: a buffering middleware would deadlock here
     )
 
     assert received == [b"first", b"second"]
