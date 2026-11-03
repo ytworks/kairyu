@@ -201,12 +201,16 @@ the Chat UI's APIs. Stop at the first failing gate.
   an image, a `#` knowledge answer citing the scan, only the chat model
   offered), `knowledge-serving` (c1/c8 while ingesting at least 95 % of the
   same run's unloaded rows), `office` (each docx / xlsx / pptx read and
-  edited by the code interpreter; every linked result saved and checked, at
-  least one linked), `file-download` (saved on a desktop, after a reload and
-  on an iPhone 13). A reply that offers no link is recorded as a model miss:
-  at its official sampling Gemma 4 sometimes answers that a file is ready
-  without calling `provide_download`; file-download asks again in a new chat,
-  at most three times.
+  edited by the code interpreter; every delivered result saved and checked,
+  at least one delivered), `file-download` (saved on a desktop, after a
+  reload and on an iPhone 13). A reply delivers a file when `provide_download`
+  attached it (the file item above the text) or the text links it; the gate
+  saves it as a user does, from the text link or from the file item's
+  dialog. A reply that delivers nothing is recorded as a model miss: at its
+  official sampling Gemma 4 sometimes answers that a file is ready without
+  calling the tool, or calls it without repeating the link (the file item
+  still delivers it); file-download asks again in a new chat, at most three
+  times.
 
 ## Primary references
 

@@ -8,16 +8,19 @@
  *
  * With WEBUI_SMOKE_MODE=office (run by `verify.sh office`), each Word, Excel
  * and PowerPoint fixture is attached with the clip, asked about, then edited
- * by the code interpreter; a result the reply links is saved into /results
- * for the gate to check. At its official sampling the model sometimes answers
- * without calling the download tool: such a format is recorded as a model
- * miss, and at least one format must offer its link.
+ * by the code interpreter; a result the reply delivers is saved into /results
+ * for the gate to check. A reply delivers a file when the download tool
+ * attached it (the file item above the text) or the text links it; it is
+ * saved the way a user does: the text link if there is one, else the file
+ * item and the link in its dialog. At its official sampling the model
+ * sometimes answers without calling the download tool: such a format is
+ * recorded as a model miss, and at least one format must be delivered.
  *
  * With WEBUI_SMOKE_MODE=download (run by `verify.sh file-download`), the
  * owner's request for an Excel template is asked on a desktop screen and on
- * an emulated phone, each in up to three new chats until a reply links the
- * file (misses recorded); the file is saved from that link, then again from
- * the same link after a reload.
+ * an emulated phone, each in up to three new chats until a reply delivers
+ * the file (misses recorded); the file is saved from that reply, then again
+ * from the same reply after a reload.
  *
  * The Chat UI requires sign-in: every browser context starts with the admin
  * session token the gate obtained (WEBUI_SMOKE_TOKEN), in local storage for
@@ -197,14 +200,35 @@ async function attach(path) {
 	}
 }
 
-// Save the file behind the reply's download link (the file-download tool's
+// The file item the download tool attached to a reply (shown above its
+// text); clicking it opens a dialog whose title links the stored file.
+function attachedFile(item) {
+	return item.locator('button.w-60').filter({ hasText: /\.(docx|xlsx|pptx)\b/i }).first();
+}
+
+// Whether the reply delivers a file: a link in its text or an attached file.
+async function deliversFile(item) {
+	return (
+		(await item.locator('a[href*="/api/v1/files/"]').count()) > 0 || (await attachedFile(item).count()) > 0
+	);
+}
+
+// Save the file the reply delivers (the file-download tool's
 // /api/v1/files/<id>/content link) as /results/<saveAs>, the way a user
-// clicks or taps it: the link opens a new tab that downloads the file.
+// clicks or taps it: the reply's link if its text has one, otherwise the
+// attached file item and the link in its dialog. The link opens a new tab
+// that downloads the file.
 async function downloadFromReply(item, saveAs, { tap = false } = {}) {
 	const text = (await item.innerText()).trim();
 	invariant(!/sandbox:/i.test(text), `the reply still writes a sandbox: link: ${text.slice(0, 400)}`);
-	const link = item.locator('a[href*="/api/v1/files/"]').last();
-	invariant((await link.count()) > 0, `the reply has no download link: ${text.slice(0, 600)}`);
+	let link = item.locator('a[href*="/api/v1/files/"]').last();
+	if ((await link.count()) === 0) {
+		const file = attachedFile(item);
+		invariant((await file.count()) > 0, `the reply delivers no file: ${text.slice(0, 600)}`);
+		await (tap ? file.tap({ timeout: actionTimeoutMs }) : file.click({ timeout: actionTimeoutMs }));
+		link = page.locator('div[role="dialog"] a[href*="/api/v1/files/"]').first();
+		await link.waitFor({ timeout: actionTimeoutMs });
+	}
 	const href = await link.getAttribute('href');
 	// The link opens a new tab whose response is an attachment; Chromium hands
 	// the download to the opening page and closes the tab, another browser may
@@ -219,21 +243,22 @@ async function downloadFromReply(item, saveAs, { tap = false } = {}) {
 	onTab.catch(() => {});
 	await download.saveAs(`/results/${saveAs}`);
 	console.log(JSON.stringify({ saved: saveAs, href, suggested: download.suggestedFilename() }));
+	await page.keyboard.press('Escape');
 	return href;
 }
 
-// Ask for the Excel file in a new chat until a reply links it (at most three
-// chats). A reply without a link is the model not calling the download tool
-// at its official sampling; it is recorded, not judged.
-async function askForLink(label) {
+// Ask for the Excel file in a new chat until a reply delivers it (at most
+// three chats). A reply that delivers no file is the model not calling the
+// download tool at its official sampling; it is recorded, not judged.
+async function askForFile(label) {
 	for (let attempt = 1; attempt <= 3; attempt += 1) {
 		await newChat();
 		const { item, text } = await ask(downloadRequest);
 		console.log(JSON.stringify({ [`${label}_answer`]: text.slice(0, 500), attempt }));
-		if ((await item.locator('a[href*="/api/v1/files/"]').count()) > 0) return item;
+		if (await deliversFile(item)) return item;
 		console.log(JSON.stringify({ model_miss: label, attempt }));
 	}
-	throw new Error(`${label}: three replies offered no download link`);
+	throw new Error(`${label}: three replies delivered no file`);
 }
 
 // The last assistant message of the open chat.
@@ -271,7 +296,7 @@ async function officeMain() {
 			const { item: reply, text } = await sendAndRead();
 			console.log(JSON.stringify({ format, edit_answer: text.slice(0, 400) }));
 			invariant(/execute_code/.test(text), `${format}: the code interpreter did not run: ${text.slice(0, 400)}`);
-			if ((await reply.locator('a[href*="/api/v1/files/"]').count()) === 0) {
+			if (!(await deliversFile(reply))) {
 				misses.push(format);
 				console.log(JSON.stringify({ model_miss: format }));
 				return;
@@ -279,7 +304,7 @@ async function officeMain() {
 			await downloadFromReply(reply, item.result);
 		});
 	}
-	invariant(misses.length < Object.keys(officeCases).length, 'no format offered a download link');
+	invariant(misses.length < Object.keys(officeCases).length, 'no format delivered its file');
 	// The last chat used the code interpreter; an image there now travels
 	// beside that tool history (Kairyu used to refuse the turn). Any colour
 	// word shows the image reached the model; which one is the model's
@@ -308,7 +333,7 @@ async function downloadMain() {
 	page = await desktop.newPage();
 	let href;
 	await step('desktop: the owner\'s request gets a download link that saves the file', async () => {
-		href = await downloadFromReply(await askForLink('desktop'), 'desktop.xlsx');
+		href = await downloadFromReply(await askForFile('desktop'), 'desktop.xlsx');
 	});
 	await step('desktop: after a reload the same link saves the same file', async () => {
 		await page.reload({ waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
@@ -327,7 +352,7 @@ async function downloadMain() {
 	});
 	page = await phone.newPage();
 	await step('phone: tapping the reply\'s link saves the file', async () => {
-		await downloadFromReply(await askForLink('phone'), 'phone.xlsx', { tap: true });
+		await downloadFromReply(await askForFile('phone'), 'phone.xlsx', { tap: true });
 	});
 	console.log('WEBUI DOWNLOAD SMOKE PASS');
 }
