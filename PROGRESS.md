@@ -109,10 +109,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Messages thinking round trip and thinking off (m11 D4 amendment and review amendment 2026-10-19, PR #660): owner review passed; GPU smokes (dsh effort max and off) pass on `0513750a`; DeepSWE with DeepSeek Harness recorded in the kairyu-bench wiki (1017 six-GPU 76/113, eight-GPU 83/113); remaining: merge after CI. Open (recorded only): `count_tokens` 404 on tool-call history (#659 item 5)
 - DeepSeek-V4.1-Flash-1017 examples (FN-D9 1017 amendment, PR #658): `deepseek-v4.1-flash-1017-6gpu` (DP6/EP6) and `-8gpu` (TP8/EP8) on vLLM v0.32.0 + own overlay (1017 encoder rule, top_p 1.0) pass every GPU gate (2026-10-19); DeepSWE v1.1 on the six-GPU one (113 tasks, 8 workers, max, 2026-10-19): 79/113 (69.9 %; 0909 six-GPU max 85/113), 6 h 04 min, 10,062 API calls, 89 per task (0909: 194.5); on the eight-GPU one (mini-swe-agent, 2026-10-20): 81/113, 3 h 59 min; kairyu-bench wiki DeepSWE-Comparison updated; the eight-GPU one's Chat UI also serves Japanese knowledge bases (Docling OCR, bge-m3, multilingual reranker; GPU-verified 2026-10-21, PR #661) and Word / Excel / PowerPoint read and edit through its default-on browser code interpreter (GPU-verified 2026-10-22, PR #662), delivered as download links in the reply (PR #664)
 
+- Gemma 4 31B + EmbeddingGemma 2 example `gemma-4-31b-8gpu` (FN-D9 Gemma amendment, 2026-11-03): CPU implementation and the upstream embedding replica pools (m5 D4 / m11 D4 A20 / m7 D4) done; replica search and GPU gates pending (after review). Open decision: Kairyu's `/v1/responses` rejects `reasoning.effort: none`, so the Chat UI's thinking-off choice fails until decided
+
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-11-03 — [design] Gemma 4 31B + EmbeddingGemma 2 example; upstream embedding replica pools
+- What: `/v1/embeddings` forwards to OpenAI-compatible embedding servers (`embeddings.<name>.backend: openai`, replicas with `health_url`); the replicas form one `ReplicaPool` (least-outstanding, ejection, probe restore, placement log), `/readyz` and pool metrics include it. New example `gemma-4-31b-8gpu` (fifth family): Gemma 4 31B chat and EmbeddingGemma 2 embedding replicas on stock vLLM, the 1017 Chat UI features in the example itself, knowledge bases embedded through Kairyu with EmbeddingGemma's prefixes, sign-in Chat UI; layout provisional until the replica search.
+- Why: owner request (L2 balances chat and embedding replicas, L3 uses the new embedding automatically, best replica counts by measurement); L3 could only serve in-process CPU embeddings. Main only (old PRs closed, L4 not used).
+- Refs: m5 D4 / m11 D4 A20 / m7 D4 amendments; FN-D9 Gemma amendment; plan `docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`
 
 ### 2026-10-22 — [progress] Download links for files the 1017 eight-GPU Chat UI makes
 - What: a `file_download` Open WebUI tool (installed by `run.sh up`, on by default) reads a file the browser code interpreter wrote, stores it in Open WebUI's file store, attaches it to the reply and returns a link; its description also has the model import the bundled Office libraries directly. GPU: `file-download` (owner's Excel request: link saves the file on desktop, after a reload and on an emulated phone), `office` (edits saved from the link), `chat-ui`, `knowledge` pass.

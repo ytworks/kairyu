@@ -641,3 +641,28 @@ example-owned Open WebUI tool (`file_download`, on by default) reads a file
 from that workspace through the code interpreter's own browser event,
 stores it in Open WebUI's file store, attaches it to the reply and returns
 a link that works on a phone, after a reload and from another device.
+
+### Gemma 4 31B with EmbeddingGemma 2 amendment (2026-11-03)
+
+Status: accepted by the owner (plan
+`docs/superpowers/plans/2026-11-03-gemma-4-31b-8gpu-example.md`, including the
+verification plan); CPU implementation done; GPU verification pending.
+
+`examples/gemma-4-31b-8gpu` adds a fifth model family at the owner's request:
+`google/gemma-4-31B-it` (31B dense, official BF16, the owner's choice of size)
+chat replicas and `google/embeddinggemma-2` embedding replicas, both on stock
+vLLM (v0.33.0, v0.32.0 as the pinned fallback), with every Chat UI feature of the
+1017 eight-GPU example written in the example itself. L2 balances both: the chat
+replicas in one `ReplicaPool` (the `qwen3.8-27b-dp8-8gpu` policy), the embedding
+replicas in another (m5 D4 embedding amendment). L3 publishes the embedding model
+on `/v1/embeddings` (m11 D4 upstream-embeddings amendment, A20), and the Chat
+UI's knowledge bases embed through it with EmbeddingGemma 2's query and document
+instructions; `run.sh up` fails closed on any other retrieval configuration. The
+replica counts are not assumed: a measured search (`tune.py`) fixes them, under
+the conditions that every chat replica holds one 262,144-token request and that
+at least two embedding replicas exist. The committed layout (seven TP1 chat
+replicas, two embedding replicas on GPU 7) is provisional until that search.
+L1 uses the checkpoint's own chat template (Google's canonical Gemma 4 template)
+with thinking on by default; FP8 KV and third-party quantized checkpoints are
+excluded because they trade quality.
+
