@@ -984,14 +984,24 @@ def long_context(run_dir: Path) -> int:
     ``long_context_answer_tokens``: at ~250K, Gemma 4's reasoning at its
     official sampling sometimes copies the one-word haystack until the output
     cap (MEASUREMENTS.md), which is the model's accuracy, not serving behavior.
+    With an edited checkpoint served the key is recorded at every length but
+    not judged.
     """
     import secrets
 
     from tokenizers import Tokenizer
 
-    tokenizer = Tokenizer.from_file(
-        str(ENVIRONMENT_STORAGE / "models" / SPEC["model"]["slug"] / "tokenizer.json")
-    )
+    # The served checkpoint's tokenizer (pinned or CHAT_CHECKPOINT_DIR), as
+    # recorded by `run.sh up` once the replicas served it.
+    record = ENVIRONMENT_STORAGE / control.CHAT_CHECKPOINT_RECORD
+    if not record.is_file():
+        raise ValueError(f"{record} is missing; start the example with ./run.sh up first")
+    served_record = json.loads(record.read_text(encoding="utf-8"))
+    served = Path(served_record["path"])
+    tokenizer = Tokenizer.from_file(str(served / "tokenizer.json"))
+    # An edited checkpoint's answers are what is being measured elsewhere:
+    # every length is judged on acceptance and token count only.
+    edited = served_record.get("source") != "pinned"
     filler = " filler"
     if len(tokenizer.encode(filler * 100, add_special_tokens=False).ids) != 100:
         raise ValueError("long-context filler is not one token per repetition")
@@ -1024,7 +1034,7 @@ def long_context(run_dir: Path) -> int:
         usage = body.get("usage", {}) if isinstance(body, dict) else {}
         content = (choice.get("message") or {}).get("content")
         prompt_tokens = usage.get("prompt_tokens") or 0
-        answer_judged = int(target) in answer_targets
+        answer_judged = int(target) in answer_targets and not edited
         passed = (
             status == 200
             and int(target) <= prompt_tokens <= int(target) + template_tokens

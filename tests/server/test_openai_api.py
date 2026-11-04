@@ -4519,6 +4519,93 @@ async def test_client_disconnect_cancels_orchestration_run():
     assert result == "done"
     assert response is None
 
+    # The request task itself cancelled (e.g. graceful shutdown): the work
+    # it started is cancelled with it and the cancellation propagates.
+    cancelled.clear()
+    started = asyncio.Event()
+
+    async def started_hanging_run():
+        started.set()
+        await hanging_run()
+
+    request_task = asyncio.ensure_future(
+        _run_until_client_disconnect(
+            _DisconnectingRequest(disconnect=False), started_hanging_run()
+        )
+    )
+    await started.wait()
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    assert cancelled.is_set()
+
+
+class _HangingBackend(MockBackend):
+    """Generation that runs until it is cancelled, recording the cancellation."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def generate(self, request):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}]}),
+        ("/v1/messages", {"max_tokens": 16, "messages": [{"role": "user", "content": "hello"}]}),
+        ("/v1/responses", {"input": "hello"}),
+    ],
+    ids=["chat", "messages", "responses"],
+)
+async def test_client_disconnect_cancels_direct_engine_generation(path, body):
+    # Issue #670: a direct-engine unary route must cancel the upstream
+    # generation when the client leaves, as the orchestration path does
+    # (#495), instead of holding a replica until the reply is complete.
+    backend = _HangingBackend()
+    app = create_legacy_app({"m": backend})
+    requested = False
+    statuses = []
+
+    async def receive():
+        nonlocal requested
+        if not requested:
+            requested = True
+            return {"type": "http.request", "body": json.dumps({"model": "m", **body}).encode()}
+        await backend.started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"test"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    # The bound only reports a server that never cancels the generation.
+    await asyncio.wait_for(app(scope, receive, send), timeout=10.0)
+    assert backend.cancelled.is_set()
+    assert statuses == [499]
+
 
 async def test_models_advertise_context_length():
     # Issue #495: LiteLLM-style clients read the model card for the context

@@ -692,3 +692,21 @@ save it as a user does, and record a reply that delivers nothing as a model
 miss; `file-download` asks again in a new chat, at most three times per
 device. With these, all 17 gates pass.
 
+Edited-checkpoint amendment (2026-11-04, owner decision; plan
+`docs/superpowers/plans/2026-11-04-gemma-edited-checkpoint.md`): the example
+is the time reference of the owner's weight-space programming benchmark
+(kairyu-bench `wsp`), so `CHAT_CHECKPOINT_DIR` lets its four chat replicas
+load an edited Gemma 4 31B checkpoint below `/mnt/nvme` instead of the pinned
+one, with the layout, flags, served name, MTP assistant and embedding model
+unchanged. That directory's tree hash is computed with the attestation's
+algorithm and set as a label on every chat replica, so new weights in the
+same directory make Compose recreate the replicas; it is recorded in
+`chat-checkpoint.json` only after the replicas serve and each carries the
+hash. The long-context gate tokenizes with the recorded checkpoint. An
+edited checkpoint is started to be measured, so its readiness is serving only
+(every chat replica answers, whatever the answer; embeddings as usual) and the
+long-context gate does not judge its retrieved key; the official checkpoint
+keeps every answer check (GPU finding 2026-11-04: Quyet-1.0-Large weights
+reached the 8,192-token cap on the arithmetic readiness probe). The setting
+is example-owned; `kairyu/` is unchanged.
+

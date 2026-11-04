@@ -46,6 +46,7 @@ from kairyu.entrypoints.server.chat_service import (
     validate_chat_request_async,
     validate_orchestration_chat_input_async,
 )
+from kairyu.entrypoints.server.client_disconnect import _run_until_client_disconnect
 from kairyu.entrypoints.server.messages_protocol import (
     ANTHROPIC_VERSION,
     MessagesCountTokensRequest,
@@ -2197,9 +2198,14 @@ def add_messages_route(
             return blocks, stop_reason, usage
 
         try:
-            blocks, stop_reason, usage = await produce()
+            produced, disconnect_response = await _run_until_client_disconnect(
+                http_request, produce()
+            )
         except _MessagesFailure as failure:
             return failure.json_response(request_id)
+        if disconnect_response is not None:
+            return disconnect_response
+        blocks, stop_reason, usage = produced
         return JSONResponse(
             content=_message_envelope(
                 request,

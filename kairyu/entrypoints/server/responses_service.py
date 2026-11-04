@@ -33,6 +33,7 @@ from kairyu.entrypoints.server.chat_service import (
     chat_error_from_upstream_client_error,
     validate_chat_request_async,
 )
+from kairyu.entrypoints.server.client_disconnect import _run_until_client_disconnect
 from kairyu.entrypoints.server.errors import (
     openai_error_payload,
     sanitize_backend_error,
@@ -481,9 +482,14 @@ def add_responses_route(
             if request.stream:
                 return sse_response(buffered_stream(emitter, produce, saver))
             try:
-                output, usage, status, incomplete_details = await produce()
+                produced, disconnect_response = await _run_until_client_disconnect(
+                    http_request, produce()
+                )
             except _BufferedFailure as failure:
                 return failure.json_response()
+            if disconnect_response is not None:
+                return disconnect_response
+            output, usage, status, incomplete_details = produced
             for item in output:
                 emitter.add_item(item)
             response, _frames = emitter.complete(status, usage, incomplete_details)
@@ -503,15 +509,20 @@ def add_responses_route(
                 )
             )
         try:
-            response = await engine_unary(
-                request,
-                validated,
-                emitter=emitter,
-                http_request=http_request,
-                trace_started_at=trace_started_at,
+            response, disconnect_response = await _run_until_client_disconnect(
+                http_request,
+                engine_unary(
+                    request,
+                    validated,
+                    emitter=emitter,
+                    http_request=http_request,
+                    trace_started_at=trace_started_at,
+                ),
             )
         except _BufferedFailure as failure:
             return failure.json_response()
+        if disconnect_response is not None:
+            return disconnect_response
         saver.commit(response)
         return JSONResponse(content=response)
 

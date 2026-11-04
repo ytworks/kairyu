@@ -42,6 +42,40 @@ assistant (used only if the search selects it) and EmbeddingGemma 2.
 API: `http://127.0.0.1:8020/v1`, chat model `gemma-4-31b`, embedding model
 `embeddinggemma-2`.
 
+## Serving an edited checkpoint
+
+The weight-space programming benchmark (kairyu-bench `wsp`) uses this layout
+as its time reference, so an edited Gemma 4 31B checkpoint starts in exactly
+the same replicas, flags and sampling:
+
+```sh
+CHAT_CHECKPOINT_DIR=/mnt/nvme/<edited checkpoint> ./run.sh up
+```
+
+The directory must be below `/mnt/nvme` and hold a complete checkpoint
+(`config.json`, safetensors, tokenizer, chat template and
+`generation_config.json`, whose sampling the replicas serve). Every chat
+replica mounts it read-only at `/checkpoint`; the MTP assistant,
+EmbeddingGemma 2, the served name `gemma-4-31b` and every L1 flag stay as
+they are (speculative decoding verifies each drafted token, so the assistant
+changes only speed). The pinned hash check is skipped for that directory:
+`run.sh up` hashes it with the attestation's algorithm and labels every chat
+replica with that tree hash, so new weights in the same directory change the
+replicas' configuration and Compose recreates them. Once the replicas serve
+and each carries the hash, it writes
+`model-volumes/gemma-4-31b-8gpu/chat-checkpoint.json` (path, tree hash, files)
+and prints the hash. Without the setting the record names the pinned
+checkpoint. `verify.sh long-context` tokenizes with the recorded checkpoint's
+tokenizer.
+
+An edited checkpoint is started to be measured, so `run.sh up` checks only
+that it serves: every chat replica accepts a request and returns a reply,
+whatever its content or how it ends, and the embedding replicas pass their
+usual check. The official checkpoint keeps the exact-answer, tool-call and
+image checks. With an edited checkpoint served, `verify.sh long-context`
+judges every length on acceptance and token count and records the key it
+returned without judging it.
+
 ## Replicas and load balancing (L2)
 
 Kairyu holds two replica pools (`kairyu.yaml`):
