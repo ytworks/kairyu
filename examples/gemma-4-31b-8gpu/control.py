@@ -1151,13 +1151,41 @@ def validate_embeddings(api_url: str) -> None:
         raise SystemExit(f"embedding probe: {error}")
 
 
+def _validate_replicas_answer(api_url: str) -> None:
+    # One request per chat replica at once (least-outstanding placement gives
+    # every replica one): each must accept it and return a reply, whatever
+    # its content or how it ends.
+    requests = [arithmetic_probe(logprobs=False, max_tokens=64) for _ in CHAT_SERVICES]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(CHAT_SERVICES)) as pool:
+        bodies = list(
+            pool.map(lambda payload: post_responses(api_url, payload, timeout_s=900), requests)
+        )
+    for body in bodies:
+        try:
+            choice = body["choices"][0]
+            tokens = int(body["usage"]["completion_tokens"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise SystemExit(f"chat replica returned no reply: {str(body)[:200]}") from None
+        if choice.get("finish_reason") not in ("stop", "length") or tokens < 1:
+            raise SystemExit(f"chat replica did not generate: {str(body)[:200]}")
+
+
 def validate_serving(api_url: str) -> None:
-    """Readiness: both pools, exact answers on every chat replica, tools, image, embeddings."""
+    """Readiness: both pools, exact answers on every chat replica, tools, image, embeddings.
+
+    An edited checkpoint (CHAT_CHECKPOINT_DIR) is started to be measured, so
+    its readiness is serving only: every chat replica answers, whatever the
+    answer; the official checkpoint keeps the exact-answer, tool and image
+    checks. The embedding model is the official one either way.
+    """
 
     validate_ready(api_url)
-    _validate_arithmetic(api_url)
-    validate_tool_calling(api_url)
-    validate_vision(api_url)
+    if chat_checkpoint_override() is None:
+        _validate_arithmetic(api_url)
+        validate_tool_calling(api_url)
+        validate_vision(api_url)
+    else:
+        _validate_replicas_answer(api_url)
     validate_embeddings(api_url)
 
 
