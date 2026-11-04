@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -74,6 +74,7 @@ from kairyu.entrypoints.server.chat_service import (
 from kairyu.entrypoints.server.chat_service import (
     render_prompt as render_prompt,
 )
+from kairyu.entrypoints.server.client_disconnect import _run_until_client_disconnect
 from kairyu.entrypoints.server.direct_trace import (
     _direct_stage_trace,
     _direct_trace_lines,
@@ -563,48 +564,6 @@ def _conductor_stage_metrics_observer(metrics, model: str):
         )
 
     return observe
-
-
-async def _watch_client_disconnect(http_request: Request) -> None:
-    """Resolve when the HTTP client drops the connection."""
-
-    while True:
-        message = await http_request.receive()
-        if message["type"] == "http.disconnect":
-            return
-
-
-async def _run_until_client_disconnect(
-    http_request: Request,
-    work: Awaitable[Any],
-) -> tuple[Any, Response | None]:
-    """Await ``work`` unless the client disconnects first (issue #495).
-
-    A dropped client can no longer read the response, so the in-flight
-    orchestration is cancelled to release replicas, the admission slot, and
-    the tenant reservation immediately instead of running to completion.
-    Returns ``(result, None)`` normally, or ``(None, response)`` after a
-    disconnect-triggered cancellation; ``work``'s exceptions propagate.
-    """
-
-    work_task = asyncio.ensure_future(work)
-    disconnect_task = asyncio.ensure_future(_watch_client_disconnect(http_request))
-    try:
-        done, _ = await asyncio.wait(
-            (work_task, disconnect_task),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if work_task not in done:
-            work_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await work_task
-            logger.info("client disconnected; cancelled in-flight orchestration")
-            return None, Response(status_code=499)
-    finally:
-        disconnect_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await disconnect_task
-    return work_task.result(), None
 
 
 def _tenant_reservation(http_request: Request):
@@ -2800,7 +2759,9 @@ def create_app(
             )
         try:
             _mark_tenant_dispatched(http_request)
-            executed = await execute_chat(validated)
+            executed, disconnect_response = await _run_until_client_disconnect(
+                http_request, execute_chat(validated)
+            )
         except ChatRequestError as error:
             if error.execution is not None:
                 _record_usage(
@@ -2813,6 +2774,8 @@ def create_app(
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
         except Exception as error:
             return upstream_error(error)
+        if disconnect_response is not None:
+            return disconnect_response
         response = executed.response
         _record_usage(
             http_request,
