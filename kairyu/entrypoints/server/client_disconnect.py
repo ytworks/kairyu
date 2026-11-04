@@ -56,7 +56,12 @@ async def _run_until_client_disconnect(
             logger.info("client disconnected; cancelled in-flight work")
             return None, Response(status_code=499)
     finally:
-        disconnect_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await disconnect_task
+        # The request task itself can be cancelled (e.g. a graceful shutdown
+        # that stops waiting): the work it started must not outlive it, and
+        # the original exception still propagates.
+        for task in (disconnect_task, work_task):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
     return work_task.result(), None

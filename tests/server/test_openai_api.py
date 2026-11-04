@@ -4519,6 +4519,26 @@ async def test_client_disconnect_cancels_orchestration_run():
     assert result == "done"
     assert response is None
 
+    # The request task itself cancelled (e.g. graceful shutdown): the work
+    # it started is cancelled with it and the cancellation propagates.
+    cancelled.clear()
+    started = asyncio.Event()
+
+    async def started_hanging_run():
+        started.set()
+        await hanging_run()
+
+    request_task = asyncio.ensure_future(
+        _run_until_client_disconnect(
+            _DisconnectingRequest(disconnect=False), started_hanging_run()
+        )
+    )
+    await started.wait()
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    assert cancelled.is_set()
+
 
 class _HangingBackend(MockBackend):
     """Generation that runs until it is cancelled, recording the cancellation."""
