@@ -57,6 +57,17 @@ benchmark; the benchmark itself is built in kairyu-bench (plan
   (absolute NVMe path, directory with `config.json` and safetensors); the
   end-to-end check is the GPU step below.
 
+GPU-stage amendment (2026-11-04, owner-approved): with Quyet-1.0-Large's
+weights the replicas started and carried the new label, but `run.sh up` failed
+its readiness check: the arithmetic probe (exact `323`, normal end, 8 requests)
+hit the 8,192-token cap on at least one request; a manual request answered
+`323` after garbled reasoning. Readiness checked the model's answers, which is
+what the benchmark measures for an edited checkpoint. With
+`CHAT_CHECKPOINT_DIR` set, readiness is now serving only (every chat replica
+returns a reply, any content or finish; embeddings as usual), and
+`verify.sh long-context` judges acceptance and token counts at every length,
+recording the returned key. The official checkpoint keeps every check.
+
 ## Verification (GPU, after review)
 
 1. `run.sh up` with `CHAT_CHECKPOINT_DIR` pointing at a directory that holds the
@@ -68,7 +79,8 @@ benchmark; the benchmark itself is built in kairyu-bench (plan
 2. With the setting, replace the safetensors in that directory and run
    `run.sh up` again: the four chat replicas are recreated, and their labels
    and the record carry the new tree hash. `verify.sh long-context` passes
-   with the edited checkpoint served.
+   with the edited checkpoint served: every length is accepted with the
+   server's token count at its target (the returned keys are recorded).
 3. `run.sh up` without the setting: the pinned checkpoint is checked and served
    again (the official record), `serving` gate passes. The first `up` after
    this change recreates the chat replicas once (their configuration gains

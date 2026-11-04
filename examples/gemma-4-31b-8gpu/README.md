@@ -68,6 +68,14 @@ and prints the hash. Without the setting the record names the pinned
 checkpoint. `verify.sh long-context` tokenizes with the recorded checkpoint's
 tokenizer.
 
+An edited checkpoint is started to be measured, so `run.sh up` checks only
+that it serves: every chat replica accepts a request and returns a reply,
+whatever its content or how it ends, and the embedding replicas pass their
+usual check. The official checkpoint keeps the exact-answer, tool-call and
+image checks. With an edited checkpoint served, `verify.sh long-context`
+judges every length on acceptance and token count and records the key it
+returned without judging it.
+
 ## Replicas and load balancing (L2)
 
 Kairyu holds two replica pools (`kairyu.yaml`):
