@@ -44,6 +44,14 @@ benchmark; the benchmark itself is built in kairyu-bench (plan
   and prints the hash. Unset, the example behaves exactly as today.
 - Mechanics: every chat replica mounts its checkpoint read-only at
   `/checkpoint`; the source defaults to the pinned directory.
+- Review amendment (2026-11-04, owner-approved): Compose does not recreate a
+  replica whose mount, command and image are unchanged, so new weights in the
+  same directory kept the old ones on the GPUs while the record named the new
+  hash. Every chat replica now carries the tree hash as the label
+  `kairyu.chat-checkpoint-tree` (Compose recreates it when the hash changes),
+  and `run.sh up` writes the record only after each running replica carries
+  that hash. `verify.sh long-context` reads `tokenizer.json` from the recorded
+  served checkpoint instead of the pinned download, which may be absent.
 - Docs: README section; FN-D9 Gemma amendment; PROGRESS entry.
 - Tests: none added. The mount and the record are validated by `run.sh up`
   (absolute NVMe path, directory with `config.json` and safetensors); the
@@ -57,5 +65,11 @@ benchmark; the benchmark itself is built in kairyu-bench (plan
    for the two safetensors equal Quyet's attestation, and one chat request is
    answered. The WSP benchmark's KL diagnostic against the official run is
    non-zero (the edited weights are served).
-2. `run.sh up` without the setting: the pinned checkpoint is checked and served
-   again (the official record), `serving` gate passes.
+2. With the setting, replace the safetensors in that directory and run
+   `run.sh up` again: the four chat replicas are recreated, and their labels
+   and the record carry the new tree hash. `verify.sh long-context` passes
+   with the edited checkpoint served.
+3. `run.sh up` without the setting: the pinned checkpoint is checked and served
+   again (the official record), `serving` gate passes. The first `up` after
+   this change recreates the chat replicas once (their configuration gains
+   the label).

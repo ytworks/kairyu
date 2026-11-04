@@ -989,9 +989,13 @@ def long_context(run_dir: Path) -> int:
 
     from tokenizers import Tokenizer
 
-    tokenizer = Tokenizer.from_file(
-        str(ENVIRONMENT_STORAGE / "models" / SPEC["model"]["slug"] / "tokenizer.json")
-    )
+    # The served checkpoint's tokenizer (pinned or CHAT_CHECKPOINT_DIR), as
+    # recorded by `run.sh up` once the replicas served it.
+    record = ENVIRONMENT_STORAGE / control.CHAT_CHECKPOINT_RECORD
+    if not record.is_file():
+        raise ValueError(f"{record} is missing; start the example with ./run.sh up first")
+    served = Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    tokenizer = Tokenizer.from_file(str(served / "tokenizer.json"))
     filler = " filler"
     if len(tokenizer.encode(filler * 100, add_special_tokens=False).ids) != 100:
         raise ValueError("long-context filler is not one token per repetition")

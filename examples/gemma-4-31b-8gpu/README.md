@@ -59,10 +59,14 @@ replica mounts it read-only at `/checkpoint`; the MTP assistant,
 EmbeddingGemma 2, the served name `gemma-4-31b` and every L1 flag stay as
 they are (speculative decoding verifies each drafted token, so the assistant
 changes only speed). The pinned hash check is skipped for that directory:
-`run.sh up` hashes it with the attestation's algorithm and, once the replicas
-serve, writes `model-volumes/gemma-4-31b-8gpu/chat-checkpoint.json` (path,
-tree hash, files) and prints the hash. Without the setting the record names
-the pinned checkpoint.
+`run.sh up` hashes it with the attestation's algorithm and labels every chat
+replica with that tree hash, so new weights in the same directory change the
+replicas' configuration and Compose recreates them. Once the replicas serve
+and each carries the hash, it writes
+`model-volumes/gemma-4-31b-8gpu/chat-checkpoint.json` (path, tree hash, files)
+and prints the hash. Without the setting the record names the pinned
+checkpoint. `verify.sh long-context` tokenizes with the recorded checkpoint's
+tokenizer.
 
 ## Replicas and load balancing (L2)
 

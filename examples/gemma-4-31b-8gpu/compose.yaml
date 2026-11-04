@@ -36,6 +36,10 @@ x-gemma: &gemma
   image: ${VLLM_IMAGE}
   ipc: host
   environment: *vllm-env
+  # The served weights' tree hash: new weights in the same directory change
+  # it, so Compose recreates the replicas instead of keeping the old ones.
+  labels:
+    kairyu.chat-checkpoint-tree: ${CHAT_CHECKPOINT_TREE}
   command:
     - /checkpoint
     - --served-model-name

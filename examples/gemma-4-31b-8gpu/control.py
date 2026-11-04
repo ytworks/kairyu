@@ -176,6 +176,10 @@ def _compose_env() -> dict[str, str]:
             "CHAT_CHECKPOINT_PATH": str(
                 chat_checkpoint_override() or paths["models"] / SPEC["model"]["slug"]
             ),
+            # `up` replaces this with an edited checkpoint's computed hash.
+            "CHAT_CHECKPOINT_TREE": (
+                SPEC["model"]["tree_sha256"] if chat_checkpoint_override() is None else "not-hashed"
+            ),
             "CACHE_PATH": str(paths["cache"]),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "PLACEMENT_LOG_PATH": str(paths["placement_log"]),
@@ -594,6 +598,27 @@ def chat_checkpoint_record(env: dict[str, str]) -> dict:
         "tree_sha256": tree,
         "files": rows,
     }
+
+
+def _check_served_checkpoint(env: dict[str, str], tree: str) -> None:
+    """Every running chat replica must have been created for ``tree``."""
+
+    for service in CHAT_SERVICES:
+        container = _run(
+            _compose_command(["ps", "--quiet", service]), env=env, capture=True
+        ).stdout.strip()
+        label = _run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                '{{index .Config.Labels "kairyu.chat-checkpoint-tree"}}',
+                container,
+            ],
+            capture=True,
+        ).stdout.strip()
+        if label != tree:
+            raise SystemExit(f"{service} serves checkpoint tree {label!r}, expected {tree}")
 
 
 def _ensure_reranker(env: dict[str, str]) -> None:
@@ -1434,12 +1459,14 @@ def up() -> None:
     record_path = environment_storage() / CHAT_CHECKPOINT_RECORD
     record_path.unlink(missing_ok=True)
     record = chat_checkpoint_record(env)
+    env["CHAT_CHECKPOINT_TREE"] = record["tree_sha256"]
     _run(
         _compose_command(["up", "--build", "--detach", "--wait", "--wait-timeout", "7200"]),
         env=env,
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     validate_serving(api_url)
+    _check_served_checkpoint(env, record["tree_sha256"])
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     provision_chat_ui(chat_ui_local_url(env))
     print("\nEnvironment is ready.")

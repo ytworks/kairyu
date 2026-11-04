@@ -699,6 +699,9 @@ is the time reference of the owner's weight-space programming benchmark
 load an edited Gemma 4 31B checkpoint below `/mnt/nvme` instead of the pinned
 one, with the layout, flags, served name, MTP assistant and embedding model
 unchanged. That directory's tree hash is computed with the attestation's
-algorithm and recorded in `chat-checkpoint.json` once the replicas serve.
-The setting is example-owned; `kairyu/` is unchanged.
+algorithm and set as a label on every chat replica, so new weights in the
+same directory make Compose recreate the replicas; it is recorded in
+`chat-checkpoint.json` only after the replicas serve and each carries the
+hash. The long-context gate tokenizes with the recorded checkpoint. The
+setting is example-owned; `kairyu/` is unchanged.
 
