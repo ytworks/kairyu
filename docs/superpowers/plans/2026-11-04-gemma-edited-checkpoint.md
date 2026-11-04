@@ -85,3 +85,16 @@ recording the returned key. The official checkpoint keeps every check.
    again (the official record), `serving` gate passes. The first `up` after
    this change recreates the chat replicas once (their configuration gains
    the label).
+
+Verification amendment (2026-11-04, owner): only what was fixed is checked.
+Steps 2 and 3 and the KL diagnostic are dropped.
+
+- Edited checkpoint (the serving-only readiness fixed after the GPU-stage
+  failure): `run.sh up` with `CHAT_CHECKPOINT_DIR` holding Quyet-1.0-Large's
+  safetensors finished in 189 s with every chat replica healthy and
+  answering; the record's safetensors hashes (`7e06d4a9…`, `f06a5e11…`) equal
+  Quyet's attestation, and the replicas' labels carry the record's tree hash.
+- Client disconnect (#670, fixed in this PR): with the fixed server, a
+  request to `/v1/chat/completions`, `/v1/messages` and `/v1/responses`
+  dropped by the client after 15 s left no generation running on any replica
+  10 s later (before the fix it ran until the reply was complete).
